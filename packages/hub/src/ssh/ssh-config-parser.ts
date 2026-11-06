@@ -68,6 +68,38 @@ function makeBlock(name: string): HostBlock {
 	};
 }
 
+/**
+ * A line's keyword, lower-cased, and its value, or null for a blank line, a
+ * comment or a malformed line. Supports both "Key Value" and "Key=Value".
+ */
+function splitDirective(rawLine: string): { key: string; value: string } | null {
+	const line = rawLine.trim();
+
+	// Skip empty lines and comments
+	if (line === "" || line.startsWith("#")) {
+		return null;
+	}
+
+	const eqIdx = line.indexOf("=");
+	const spaceIdx = line.indexOf(" ");
+	const tabIdx = line.indexOf("\t");
+
+	if (eqIdx === -1 && spaceIdx === -1 && tabIdx === -1) {
+		// No separator — skip malformed line
+		return null;
+	}
+
+	// Find the first separator (space, tab, or =)
+	const candidates = [eqIdx, spaceIdx, tabIdx].filter((i) => i > 0);
+	if (candidates.length === 0) return null;
+	const separatorIdx = Math.min(...candidates);
+
+	return {
+		key: line.slice(0, separatorIdx).toLowerCase(),
+		value: line.slice(separatorIdx + 1).trim(),
+	};
+}
+
 export function parseSshConfig(content: string): ParseResult {
 	const entries: SshConfigEntry[] = [];
 	let hasInclude = false;
@@ -79,30 +111,9 @@ export function parseSshConfig(content: string): ParseResult {
 	let currentBlocks: HostBlock[] = [];
 
 	for (const rawLine of lines) {
-		const line = rawLine.trim();
-
-		// Skip empty lines and comments
-		if (line === "" || line.startsWith("#")) {
-			continue;
-		}
-
-		// Split into key and value. Supports both "Key Value" and "Key=Value".
-		const eqIdx = line.indexOf("=");
-		const spaceIdx = line.indexOf(" ");
-		const tabIdx = line.indexOf("\t");
-
-		if (eqIdx === -1 && spaceIdx === -1 && tabIdx === -1) {
-			// No separator — skip malformed line
-			continue;
-		}
-
-		// Find the first separator (space, tab, or =)
-		const candidates = [eqIdx, spaceIdx, tabIdx].filter((i) => i > 0);
-		if (candidates.length === 0) continue;
-		const separatorIdx = Math.min(...candidates);
-
-		const key = line.slice(0, separatorIdx).toLowerCase();
-		const value = line.slice(separatorIdx + 1).trim();
+		const directive = splitDirective(rawLine);
+		if (directive === null) continue;
+		const { key, value } = directive;
 
 		if (key === "include") {
 			hasInclude = true;
@@ -176,4 +187,80 @@ export function readSshConfig(): ParseResult {
 	const configPath = resolve(homedir(), ".ssh", "config");
 	const content = readFileSync(configPath, "utf-8");
 	return parseSshConfig(content);
+}
+
+/** Whether one `Host` pattern, `*` and `?` included, takes `name`; case aside, as ssh(1) lowers the name. */
+function hostPatternMatches(pattern: string, name: string): boolean {
+	const expression = pattern
+		.split("")
+		.map((character) => {
+			if (character === "*") return ".*";
+			if (character === "?") return ".";
+			return character.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+		})
+		.join("");
+	return new RegExp(`^${expression}$`, "i").test(name);
+}
+
+/**
+ * Whether a `Host` line applies to `name`: one of its patterns takes it, and
+ * none of its negated ones (`!pattern`) does.
+ */
+function hostLineApplies(patterns: string, name: string): boolean {
+	let applies = false;
+	for (const raw of patterns.split(/\s+/)) {
+		if (raw === "") continue;
+		const negated = raw.startsWith("!");
+		if (!hostPatternMatches(negated ? raw.slice(1) : raw, name)) continue;
+		if (negated) return false;
+		applies = true;
+	}
+	return applies;
+}
+
+/**
+ * The `IdentityAgent` this configuration gives the host `alias`, as ssh(1)
+ * resolves it: the first value found in a part that applies to it, the lines
+ * before any `Host` included. Null when it gives none.
+ *
+ * A `Match` block is not evaluated and counts as not applying, and an
+ * `Include` is not followed, as `parseSshConfig` follows none either.
+ */
+export function resolveIdentityAgent(content: string, alias: string): string | null {
+	// Before any Host or Match line, a directive applies to every host.
+	let applies = true;
+	for (const rawLine of content.split("\n")) {
+		const directive = splitDirective(rawLine);
+		if (directive === null) continue;
+		const { key, value } = directive;
+		if (key === "host") {
+			applies = hostLineApplies(value, alias);
+			continue;
+		}
+		if (key === "match") {
+			applies = false;
+			continue;
+		}
+		if (applies && key === "identityagent") {
+			return value.length >= 2 && value.startsWith('"') && value.endsWith('"')
+				? value.slice(1, -1)
+				: value;
+		}
+	}
+	return null;
+}
+
+/**
+ * Whether `~/.ssh/config` keeps the SSH agent out of the host `alias`
+ * (`IdentityAgent none`). A file that is missing or cannot be read says
+ * nothing, and keeps nothing out.
+ */
+export function identityAgentIsNone(alias: string, home: string = homedir()): boolean {
+	let content: string;
+	try {
+		content = readFileSync(resolve(home, ".ssh", "config"), "utf-8");
+	} catch {
+		return false;
+	}
+	return resolveIdentityAgent(content, alias)?.toLowerCase() === "none";
 }

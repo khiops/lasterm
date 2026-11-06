@@ -211,7 +211,7 @@ nothing, so the one minute is all there is to protect.
 | Method | How | Security level |
 |--------|-----|---------------|
 | **ssh-agent** (recommended) | Hub uses running ssh-agent via `SSH_AUTH_SOCK` | HIGH — keys never touch disk via lasterm |
-| Key file | Hub reads private key path | MEDIUM — key on disk. The hub reads it at each connection and does not copy it; a key uploaded through the key browser is written into `~/.ssh` (§ 3.2) |
+| Key file | Hub reads private key path | MEDIUM — key on disk. The hub reads it at each connection and does not copy it; a key uploaded through the key browser is written into `~/.ssh` (§ 3.2). A key that needs a passphrase is signed by the running ssh-agent instead when the agent holds that same key, and no passphrase is asked (§ 3.2) |
 | Password | Hub sends password over SSH | LOW — password in memory (not stored) |
 
 **MVP:** Support all three. Recommend ssh-agent in UI. Never store passwords in meta.db.
@@ -238,6 +238,30 @@ nothing, so the one minute is all there is to protect.
   kept in the hub's memory, per host, for 60 s, or 15 min when the person asks to remember it, so
   that a reconnect needs no prompt (§ 4.3). One that does not decrypt the key is dropped from there
   at once and asked for again, until one does or the person cancels (#812)
+- Key auth signed by the agent (#876): when a host's key file needs a passphrase and the running
+  ssh-agent holds the same key, the agent signs and no passphrase is asked, as OpenSSH uses the
+  agent's copy of an `IdentityFile` key. On by default, with no setting
+  (`session/key-agent-signer.ts`):
+  - **The identity does not change.** Only the configured key is offered to the server, as
+    `IdentitiesOnly yes` would: the agent's other keys would log in as someone else, and spend the
+    server's `MaxAuthTries`. A sign request for another key is refused before it reaches the agent.
+  - **Matched without the passphrase**, before anything is dialled: the key's public half is the
+    public section an `openssh-key-v1` file keeps in clear, or else `<key>.pub`, compared with the
+    identities the agent lists, which it has 3 s to do. A legacy PEM key without `.pub` cannot be
+    matched and keeps its prompt; so does a key that needs no passphrase, which is signed from its
+    file as before.
+  - **Nothing is written to the agent.** The hub asks it for its identities and for signatures,
+    never to add or remove a key, and never forwards it. A key added with `ssh-add -c`, or a
+    hardware key behind the agent, shows the agent's own confirmation or touch request instead of
+    the passphrase prompt.
+  - **`IdentityAgent none`** in the block a host's `~/.ssh/config` alias (`ssh_config_host`)
+    resolves to keeps the agent out of it: the first value found in a `Host` part that applies, the
+    lines before any `Host` included, as ssh(1) resolves it. `Match` blocks are not evaluated and
+    `Include` is not followed. Other values change nothing: the agent is the one of § 3.1.
+  - **An agent that does not sign** (gone, no longer holding the key, or refusing) ends that
+    connection. It is closed, the passphrase asked for, and the host dialled again with the file
+    (§ 3.3c).
+  - The security log says which signed (`signer`, § 7.1), never which key.
 - ssh-agent: preferred — lasterm just requests signing, never sees key material
 
 ### 3.3 Known Hosts
@@ -273,7 +297,7 @@ A deadline on a human decision throws away the answer that arrives a second late
 
 That is only safe because none of them holds anything open while it waits:
 
-- A password or passphrase is asked **before anything is dialled** (`buildSshConnectConfig` prompts, then connects). A password the server refused is asked for again only once that connection is closed, and the host is dialled again with the new one (`password-auth.ts`, #815).
+- A password or passphrase is asked **before anything is dialled** (`buildSshConnectConfig` prompts, then connects). A password the server refused is asked for again only once that connection is closed, and the host is dialled again with the new one (`password-auth.ts`, #815). Likewise, a key's passphrase that the SSH agent was to make unnecessary is asked only once the connection the agent did not sign for is closed, and the host is dialled again with the file (`key-agent-signer.ts`, #876). Not within that connection: ssh2 bounds a handshake (`readyTimeout`), and a person's answer is not.
 - A host key is asked **after the verifier refused it** and the client was destroyed.
 - The remote agent binary is found over a live connection — so that connection is **closed before the question is asked**. The deploy hands back what it saw (`AgentBinaryDecisionNeeded`) instead of asking from inside itself; the caller closes, asks, and connects again with the answer.
 
@@ -471,7 +495,8 @@ again, which is now roughly every two and a quarter years rather than every rest
   has expired is removed the next time the hub looks for that host's passphrase, and stays in
   memory until then (`ssh-connection-manager.ts`). One that does not decrypt the key is removed
   before it is asked for again, or, on a reconnect, before it gives up (#812). Each is kept under
-  the host its prompt named, a jump's under the jump
+  the host its prompt named, a jump's under the jump. A key the SSH agent signs for is never asked
+  for, so nothing is kept, and a reconnect signs through the agent as well (§ 3.2, #876)
 - Elevation passwords: kept per host and per client, the one that typed it, and sent to the agent
   in each SPAWN that needs one. How long depends on where it was typed: 5 min when opening an
   elevated terminal (`spawnOnHost`, `session-manager.ts`), 15 min when restarting one
@@ -646,7 +671,7 @@ names that client in a later `write_lock.force`. `tokenId` is the credential's r
 | Auth failure | `auth.failure` | `via` (`ws`, `rest`, `pair`), `sourceIp`, `reason`, `clientId` (WebSocket), `tokenStatus` (with `invalid_token`) | REST: `missing_header`, `malformed_header`, `invalid_token`, `database_unavailable`. WebSocket: `auth_timeout`, `not_auth_first`, `invalid_token`, `database_unavailable`, `token_no_longer_valid`. Pairing verification: `rate_limited`, `invalid_format`, `unknown_code`, `code_used`, `code_expired`. `invalid_token` is refused the same way whatever its cause, and `tokenStatus` says which: `unknown` (no credential has that value), `revoked`, `swept` (by a restart) or `expired`. A revoked or swept token still being offered is a device that kept a credential it was meant to lose. `token_no_longer_valid` is a WebSocket the hub had accepted and then closed because its token stopped validating, on its next frame or at once when the token was revoked; `tokenStatus` says why, and `clientId` matches the `auth.success` that opened it. `database_unavailable` is a hub built with no token store at all; a store that exists but cannot be read is not an authentication failure (below) |
 | Pairing code generated | `pairing.generated` | `pairingId`, `expiresAt`, `sourceIp` of the request | `POST /api/pair` issues a code |
 | Pairing code verified | `pairing.verified` | `pairingId`, `tokenId` of the token issued, `sourceIp` | `POST /api/pair/verify` redeems a code |
-| SSH connect | `ssh.connect` | `hostId`, `hostLabel`, `authMethod` (`agent`, `key`, `password`) | A host session takes up an authenticated connection: its first connect and every reconnect. A Test connection is not recorded |
+| SSH connect | `ssh.connect` | `hostId`, `hostLabel`, `authMethod` (`agent`, `key`, `password`), `signer` (key auth only: `agent`, the SSH agent held the key and signed; `file`, the key file did, § 3.2) | A host session takes up an authenticated connection: its first connect and every reconnect. A Test connection is not recorded |
 | SSH disconnect | `ssh.disconnect` | `hostId`, `reason` (`closed_by_hub`; `connection_lost`, ended by the network, the server, the remote agent, or a host that stopped answering its keepalives, SPEC.md § 5.5) | That connection ends |
 | Write-lock force | `write_lock.force` | `channelId`, `byClientId`, `fromClientId` | A force takes the lock from another client. Forcing a free lock, or one already held, takes nothing and is not recorded |
 | Token rotated | `token.rotate` | `tokenId` (`primary`) | The hub starts with a token in `auth.json` other than the one it last recorded: the replacement of § 2.1, or a substitution nobody asked for |

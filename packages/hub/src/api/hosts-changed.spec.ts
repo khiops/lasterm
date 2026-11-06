@@ -33,6 +33,8 @@ vi.mock("../session/ssh-agent-address.js", () => ({
 }));
 
 vi.mock("ssh2", () => ({
+	// Extended as the key-auth agent signer loads (#876).
+	BaseAgent: class {},
 	Client: vi.fn().mockImplementation(() => ({
 		connect: vi.fn(),
 		end: vi.fn(),

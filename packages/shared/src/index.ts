@@ -9,6 +9,7 @@ export * from "./entities.js";
 export * from "./file-transfer.js";
 export * from "./framing.js";
 export * from "./host-rail.js";
+export * from "./powershell.js";
 export * from "./profile-write.js";
 export * from "./protocol.js";
 export * from "./sanitize.js";

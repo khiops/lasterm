@@ -288,6 +288,12 @@ export interface LaunchProfile {
 	iconValue?: string;
 	color?: string;
 	profileOverrides?: Partial<TerminalProfile>;
+	/**
+	 * Start a PowerShell with a prompt that reports its directory (#839): on a
+	 * Windows agent, a `pwsh` or `powershell` whose arguments run nothing of
+	 * their own. The hub reads it from storage as true or false; absent, off.
+	 */
+	reportDirectory?: boolean;
 	sortOrder: number;
 	createdAt: string;
 	updatedAt: string;

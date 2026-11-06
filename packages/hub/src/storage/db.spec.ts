@@ -59,12 +59,12 @@ describe("openTestDatabases", () => {
 		expect(fk).toBe(1);
 	});
 
-	it("meta.db: schema_version is 24 after migration", () => {
+	it("meta.db: schema_version is 25 after migration", () => {
 		dbs = openTestDatabases();
 		const row = dbs.meta.prepare("SELECT MAX(version) as v FROM schema_version").get() as {
 			v: number;
 		};
-		expect(row.v).toBe(24);
+		expect(row.v).toBe(25);
 	});
 
 	it("spool.db: schema_version is 1 after migration", () => {
@@ -103,7 +103,7 @@ describe("openTestDatabases", () => {
 		expect(table?.name).toBe("chunks");
 	});
 
-	it("migration runner is idempotent (running twice produces same schema_version = 24)", () => {
+	it("migration runner is idempotent (running twice produces same schema_version = 25)", () => {
 		// First open
 		const dbs1 = openTestDatabases();
 		const v1 = (
@@ -118,8 +118,8 @@ describe("openTestDatabases", () => {
 		).v;
 		dbs2.close();
 
-		expect(v1).toBe(24);
-		expect(v2).toBe(24);
+		expect(v1).toBe(25);
+		expect(v2).toBe(25);
 	});
 
 	it("close() does not throw", () => {
@@ -256,7 +256,7 @@ describe("meta.db and its baseline", () => {
 			(column) => column.name,
 		);
 
-	it("comes out new at version 24, with the final schema", () => {
+	it("comes out new at version 25, with the final schema", () => {
 		dbs = openDatabases(dir);
 
 		expect(versions(dbs.meta)).toEqual([
@@ -264,6 +264,7 @@ describe("meta.db and its baseline", () => {
 			{ version: 22 },
 			{ version: 23 },
 			{ version: 24 },
+			{ version: 25 },
 		]);
 		expect(tables(dbs.meta)).toEqual([
 			"auth_tokens",
@@ -321,6 +322,7 @@ describe("meta.db and its baseline", () => {
 			"sort_order",
 			"set_by_user",
 		]);
+		expect(columns(dbs.meta, "launch_profiles").at(-1)).toBe("report_directory");
 		expect(columns(dbs.meta, "channels")).toContain("end_reason");
 		expect(columns(dbs.meta, "auth_tokens")).toContain("swept_at");
 		expect(columns(dbs.meta, "pairing_codes")).toContain("code_hash");
@@ -343,6 +345,7 @@ describe("meta.db and its baseline", () => {
 			CREATE TABLE host_launch_profiles (
 				host_id TEXT NOT NULL, profile_id TEXT NOT NULL, override_type TEXT NOT NULL
 			);
+			CREATE TABLE launch_profiles (id TEXT PRIMARY KEY, name TEXT);
 			CREATE TABLE workspaces (id TEXT PRIMARY KEY);
 		`);
 		before.close();
@@ -354,13 +357,16 @@ describe("meta.db and its baseline", () => {
 			{ version: 22 },
 			{ version: 23 },
 			{ version: 24 },
+			{ version: 25 },
 		]);
 		expect(tables(dbs.meta)).toEqual([
 			"host_launch_profiles",
 			"hosts",
+			"launch_profiles",
 			"schema_version",
 			"workspaces",
 		]);
+		expect(columns(dbs.meta, "launch_profiles")).toEqual(["id", "name", "report_directory"]);
 		expect(columns(dbs.meta, "hosts")).toEqual([
 			"id",
 			"label",
@@ -472,6 +478,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 22 },
 			{ version: 23 },
 			{ version: 24 },
+			{ version: 25 },
 		]);
 		// What a connection reads, and compares with fingerprintOf(key) as it is.
 		expect(dal.getHostFingerprint("T", routeOf("T"))).toBe(fingerprintOf(target));
@@ -496,7 +503,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 		]);
 	});
 
-	it("comes out new at version 24", () => {
+	it("comes out new at version 25", () => {
 		dbs = openDatabases(dir);
 
 		expect(versions(dbs.meta)).toEqual([
@@ -504,6 +511,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 22 },
 			{ version: 23 },
 			{ version: 24 },
+			{ version: 25 },
 		]);
 		expect(pins(dbs.meta)).toEqual([]);
 	});
@@ -521,6 +529,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 22 },
 			{ version: 23 },
 			{ version: 24 },
+			{ version: 25 },
 		]);
 		expect(pins(dbs.meta)).toEqual(migrated);
 
@@ -603,6 +612,7 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 			{ version: 22 },
 			{ version: 23 },
 			{ version: 24 },
+			{ version: 25 },
 		]);
 		const row = (
 			id: string,
@@ -648,6 +658,7 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 			{ version: 22 },
 			{ version: 23 },
 			{ version: 24 },
+			{ version: 25 },
 		]);
 		expect(shells(dbs.meta)).toEqual(chosen);
 	});
@@ -723,6 +734,7 @@ describe("meta.db migration 024: a launch profile override says whether the user
 			{ version: 22 },
 			{ version: 23 },
 			{ version: 24 },
+			{ version: 25 },
 		]);
 		expect(overrides(dbs.meta)).toEqual([
 			{
@@ -751,5 +763,91 @@ describe("meta.db migration 024: a launch profile override says whether the user
 		quiet.mockRestore();
 
 		expect(dal.getHostDefaultOverride("H")).toMatchObject({ profileId: "P2", setByUser: false });
+	});
+});
+
+// ─── Migration 025: a launch profile's PowerShell reports its directory (#839) ─
+//
+// The switch changes the command line a shell starts with: no profile already
+// there turns it on by being migrated.
+
+describe("meta.db migration 025: a launch profile can have its PowerShell report its directory", () => {
+	let dir: string;
+	let dbs: DatabaseManager | undefined;
+
+	beforeEach(() => {
+		dir = makeTempDir("lasterm-db-025-");
+	});
+
+	afterEach(async () => {
+		dbs?.close();
+		dbs = undefined;
+		await removeTempDir(dir);
+	});
+
+	const migration = (name: string) =>
+		readFileSync(fileURLToPath(new URL(`./migrations/meta/${name}`, import.meta.url)), "utf-8");
+	const at = "2026-11-01T00:00:00.000Z";
+
+	/** A database as #800 left it: version 24, with a PowerShell profile. */
+	function databaseAt24(): void {
+		const before = new Database(join(dir, "meta.db"));
+		for (const file of [
+			"021-baseline.sql",
+			"022-unpadded-ssh-pins.sql",
+			"023-discovered-default-shell.sql",
+			"024-launch-profile-set-by-user.sql",
+		]) {
+			before.exec(migration(file));
+		}
+		before
+			.prepare(
+				`INSERT INTO launch_profiles (id, name, shell, supported_os, sort_order, created_at, updated_at)
+				VALUES ('P1', 'PowerShell', 'pwsh.exe', 'windows', 0, '${at}', '${at}')`,
+			)
+			.run();
+		before.close();
+	}
+
+	it("reads every profile already there as off, and changes nothing else", () => {
+		databaseAt24();
+
+		dbs = openDatabases(dir);
+
+		expect(dbs.meta.prepare("SELECT version FROM schema_version ORDER BY rowid").all()).toEqual([
+			{ version: 21 },
+			{ version: 22 },
+			{ version: 23 },
+			{ version: 24 },
+			{ version: 25 },
+		]);
+		expect(
+			dbs.meta.prepare("SELECT id, report_directory, updated_at FROM launch_profiles").all(),
+		).toEqual([{ id: "P1", report_directory: 0, updated_at: at }]);
+		expect(new MetaDAL(dbs.meta).getLaunchProfile("P1")).toMatchObject({
+			name: "PowerShell",
+			reportDirectory: false,
+		});
+	});
+
+	it("stores the switch a profile is created or updated with", () => {
+		databaseAt24();
+		dbs = openDatabases(dir);
+		const dal = new MetaDAL(dbs.meta);
+
+		const created = dal.createLaunchProfile({
+			name: "PowerShell, reporting",
+			shell: "pwsh.exe",
+			mode: "shell",
+			elevated: false,
+			supportedOs: "windows",
+			iconType: "auto",
+			sortOrder: 1,
+			reportDirectory: true,
+		});
+		expect(dal.getLaunchProfile(created.id)?.reportDirectory).toBe(true);
+		expect(dal.updateLaunchProfile("P1", { reportDirectory: true })?.reportDirectory).toBe(true);
+		expect(dal.updateLaunchProfile("P1", { name: "PS" })?.reportDirectory).toBe(true);
+		expect(dal.updateLaunchProfile("P1", { reportDirectory: false })?.reportDirectory).toBe(false);
 	});
 });

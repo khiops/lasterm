@@ -1,0 +1,4 @@
+# The script a Windows agent passes PowerShell for a launch profile's
+# report_directory, which the README also gives for $PROFILE (#839): the same
+# bytes on every checkout, so that every agent build embeds the same command.
+crates/lasterm-agent/src/report-directory.ps1 text eol=lf

@@ -1,4 +1,4 @@
-import type { AgentSpawnMessage, EnvMode, Host } from "@lasterm/shared";
+import type { AgentSpawnMessage, EnvMode, Host, LaunchProfile } from "@lasterm/shared";
 
 /**
  * What a SPAWN says about the environment its terminal starts with (#576).
@@ -100,6 +100,20 @@ export function wantsLoginShell(
 	if (args !== undefined && args.length > 0) return false;
 	if (shell === undefined) return true;
 	return shell === defaultProfileShell || shell === host.discoveredDefaultShell;
+}
+
+/**
+ * What a SPAWN says about the directory its PowerShell reports (#839): the
+ * launch profile's switch, when it is on, sent on the first start and on every
+ * restart alike, so that a restart keeps its effect. The agent decides whether
+ * it applies, from the shell's file name and its arguments, as it decides
+ * `-l` for `loginShell`: a request that names another shell or arguments of
+ * its own gets what those say.
+ */
+export function reportDirectoryField(
+	launchProfile: Pick<LaunchProfile, "reportDirectory"> | undefined,
+): Pick<AgentSpawnMessage, "reportDirectory"> {
+	return launchProfile?.reportDirectory === true ? { reportDirectory: true } : {};
 }
 
 /** The mode a profile names, read as the agent reads it: anything else is `inherit`. */

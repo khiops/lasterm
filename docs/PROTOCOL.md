@@ -236,6 +236,8 @@ hub, `DISPLACED` means a newer connection of its own took over, and the stale on
                         // Required: a SPAWN without it does not decode (INVALID_MESSAGE)
   env_unset?: string[], // removed before env is applied: what a scope set to null
   login_shell?: boolean, // start the shell as a login shell (Unix agents, known shells)
+  report_directory?: boolean, // the launch profile's switch: a PowerShell that reports its
+                        // directory (Windows agents; #839). Absent when off
   direct_process?: boolean,   // a launch profile's `process` mode; the agent ignores it
   elevated?: boolean,         // run the shell elevated; the hub asks it of a local agent only
   elevation_method?: string,  // "sudo", "doas", "pkexec", "gsudo" or "custom"
@@ -295,8 +297,26 @@ for one only on an SSH host, for the shell the host's agent reported as its defa
 with no arguments, as a shell rather than a direct process: `ssh host` gives a login shell, and a
 remote terminal takes its place. Local terminals are unchanged.
 
-The agent logs the mode, `login_shell` and the counts of `env` and `env_unset`, never a name or a
-value.
+`report_directory` has a PowerShell report its directory at every prompt (#839), which the agent
+cannot read from its process: `Set-Location` moves PowerShell's location, not its process directory
+(§ 3.20). A Windows agent acts on it for a shell whose file name is `pwsh` or `powershell` (with or
+without `.exe`, in any case), when every argument is one PowerShell takes without running anything
+of its own: `-NoLogo`, `-NoProfile`, `-NoProfileLoadTime`, `-NonInteractive`, `-Interactive`,
+`-Login`, `-STA`, `-MTA`, `-NoExit`, and `-ExecutionPolicy`, `-WindowStyle`, `-WorkingDirectory`,
+`-InputFormat`, `-OutputFormat` or `-SettingsFile` with their value, spelt with `-`, `--` or `/`, in
+full or as PowerShell abbreviates them. It then adds `-NoExit` (unless given) and
+`-EncodedCommand <script>`, after the `${VAR}` expansion of `args`. The script is the README's
+snippet ("Following PowerShell's directory"): it runs after the user's `$PROFILE`, keeps the
+`prompt` that profile defined, and has it write OSC 7 (`file://<host>/<path>`) first, which the
+agent reads as a shell report. Any other arguments are passed as they are: `-Command`, `-File`,
+`-EncodedCommand`, `-CommandWithArgs`, `-Version`, `-Help`, a session configuration, a script named
+on its own, a parameter the agent does not know. A Unix agent ignores it, and so does an agent
+before #839. The hub sends it whenever the terminal's launch profile has it on: on the first start,
+on a restart, on a new agent, and when a window brings back an ended terminal, from the profile it
+was started from, as the profile says now.
+
+The agent logs the mode, `login_shell`, `report_directory` and the counts of `env` and `env_unset`,
+never a name or a value.
 
 ### 3.3 ATTACH / ATTACH_OK
 
@@ -668,10 +688,11 @@ agent keeps it and where it came from:
    escapes) or OSC 1337;CurrentDir=, read across chunk boundaries. An OSC 7 whose host is neither
    empty, `localhost`, this host's name nor one whose first label is its name reports
    `cwd: null, other_host: <host>`: a session nested in the terminal, over ssh most often. On a
-   Windows agent an OSC 7 path `/C:/x` is `C:\x`. A report wins while the shell keeps reporting:
-   until a process read finds the process directory moved since the first read after the report,
-   or finds the shell back at its prompt when that read found a program holding the terminal (the
-   program that made the report has ended).
+   Windows agent an OSC 7 path `/C:/x` is `C:\x`, and `//server/share/x`, a share as the
+   PowerShell prompt of § 3.2 writes it after the host, is `\\server\share\x`. A report wins
+   while the shell keeps reporting: until a process read finds the process directory moved since
+   the first read after the report, or finds the shell back at its prompt when that read found a
+   program holding the terminal (the program that made the report has ended).
 2. **`process`**: read from the shell's process, without its help, every 2 s:
    - Linux: `/proc/<pid>/cwd` (a ` (deleted)` target is gone: `null`), and from `/proc/<pid>/stat`
      the process group and the terminal's foreground group. When they differ a program holds the
@@ -682,7 +703,8 @@ agent keeps it and where it came from:
      `at_prompt` and `foreground` are not read.
    - PowerShell (`pwsh`, `powershell`, on either system) is never read: `Set-Location` leaves its
      process directory where it started, so the read would be wrong, not missing. Without a shell
-     report it is `null`, never its start directory; its prompt can report it (#839).
+     report it is `null`, never its start directory; its prompt can report it, with the README's
+     snippet in `$PROFILE` or the launch profile's `report_directory` (§ 3.2, #839).
    - `null` when the process cannot tell: its directory deleted, a process the agent may not read
      (an elevated shell), a terminal that has ended.
 3. **`start`**: the directory the agent started the terminal in, before any read, for a program
@@ -2312,7 +2334,8 @@ A host group answers `{ id, name, sort_order, color, created_at, updated_at }`.
   icon_value?: string | null,   // at most 256 chars
   color?: string | null,        // hex "#rrggbb"
   profile_overrides?: Partial<TerminalProfile> | null, // stored as sent, camelCase inside
-  sort_order?: number
+  sort_order?: number,
+  report_directory?: boolean    // default false: its PowerShell reports its directory (§ 3.2, #839)
 }
 ```
 
@@ -2320,6 +2343,9 @@ A host group answers `{ id, name, sort_order, color, created_at, updated_at }`.
 its stored value. `null` clears a field that may be empty (`args`, `cwd`, `env`, `icon_value`,
 `color`, `profile_overrides`), and is refused on the others (#665). In `env`, the mask
 `"********"` keeps the stored value of that variable.
+
+A launch profile answers with every field it has, `report_directory` always among them, `true` or
+`false`.
 
 **AgentTarget:**
 ```typescript

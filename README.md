@@ -333,6 +333,76 @@ The chosen endpoint and its SPKI are written to `runtime.json` in the state dire
 
 ---
 
+## Following PowerShell's directory
+
+Lasterm keeps track of the directory each terminal is in, so that what it does with a terminal's
+files, such as uploads, starts where you are. It learns it from what the shell writes at its prompt
+(OSC 7, OSC 9;9 and the like), or by reading the shell's process. PowerShell cannot be read that
+way: `Set-Location` moves its location, not its process directory. So PowerShell has to say where
+it is, at every prompt. There are two ways, for PowerShell 7 (`pwsh`) and Windows PowerShell 5.1
+(`powershell.exe`) alike.
+
+**The switch: Report its directory.** In Settings › Profiles, a profile whose shell is `pwsh` or
+`powershell` has a **Report its directory** box, off by default. When it is on, a Windows host
+starts that PowerShell with `-NoExit -EncodedCommand` and the snippet below. The snippet runs after
+your `$PROFILE`, keeps the prompt it set (a prompt theme's included), and has it write the directory
+first. It also applies when the terminal restarts, and on remote Windows hosts, whose agent must be
+as recent as the hub. It changes nothing when the profile's arguments run a command or a file
+(`-Command`, `-File`, `-EncodedCommand`, a script's path) or hold one it does not know, and it does
+nothing for other shells or on Linux hosts.
+
+**The snippet, in `$PROFILE`.** This needs no switch, and it works in every terminal that loads the
+profile, PowerShell 7 on Linux included. Open the profile with `notepad $PROFILE` (create it first
+with `New-Item -Force $PROFILE` if it does not exist), and paste this at the end, after anything that
+sets your prompt:
+
+```powershell
+# lasterm: report the current directory at every prompt.
+# Windows PowerShell 5.1 and PowerShell 7. Keep it at the end of $PROFILE, after
+# anything that sets your prompt: it keeps that prompt, and writes OSC 7 before it.
+& {
+    $inner = $function:prompt
+    if ("$inner" -like '*lasterm-report-directory*') { return } # wrapped already
+    if (-not $inner) { $inner = {} }
+    $esc = [char]27
+    $hostName = [System.Net.Dns]::GetHostName()
+    $function:global:prompt = {
+        # lasterm-report-directory: your prompt, after OSC 7 file://<host>/<path>
+        $shown = @(& $inner)
+        $location = $executionContext.SessionState.Path.CurrentLocation
+        if ($location.Provider.Name -eq 'FileSystem') {
+            $path = $location.ProviderPath.Replace([IO.Path]::DirectorySeparatorChar, '/')
+            $uri = @(foreach ($part in $path.Split('/')) { [Uri]::EscapeDataString($part) }) -join '/'
+            if (-not $uri.StartsWith('/')) { $uri = '/' + $uri }
+            $Host.UI.Write("$esc]7;file://$hostName$uri$esc\")
+        }
+        $shown
+    }.GetNewClosure()
+}
+```
+
+Windows PowerShell and PowerShell 7 have a profile each: paste it into both if you use both. Run
+`. $PROFILE` to load it into the shell you are in. It wraps the prompt once, even when the profile
+runs again or the switch is on as well. A prompt set later, after the snippet has run, reports
+nothing (a theme switched in the shell, for example): run `. $PROFILE` once more.
+
+**Remote hosts, over SSH.** Put the snippet in the profile of the account you log in with, on that
+host. This covers both a host that Lasterm reaches over SSH and an `ssh` session you start inside a
+terminal. The snippet prints nothing, so it is safe in the profile of an account the hub reaches
+over SSH, which runs before each of the hub's commands there (see
+[Configuring an SSH server](docs/SSH_SERVER.md#windows-the-default-shell)). On a host that Lasterm
+reaches, the switch works too.
+
+**What it writes, and why OSC 7.** Before each prompt, the snippet writes
+`ESC ] 7 ; file://<host>/<path> ESC \`, with the path percent-encoded, for example
+`file://PC/C%3A/Users/me/My%20Files`. Lasterm also reads ConEmu's OSC 9;9, which Windows Terminal
+documents for PowerShell, but OSC 9;9 carries a path and no host. OSC 7 names the host, so a
+PowerShell reached by `ssh` inside a terminal says that it is on another machine, and Lasterm does
+not take its directory for one on this host. A location that is not on the file system, such as
+`HKCU:` or `Env:`, reports nothing, and Lasterm keeps the last directory it was told.
+
+---
+
 ## License
 
 lasterm is licensed per component:

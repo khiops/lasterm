@@ -48,6 +48,7 @@ import type {
 import type { WsClient } from "./session-manager.js";
 import {
 	envNamesIgnoreCase,
+	reportDirectoryField,
 	resolveEnvironmentChanges,
 	type SpawnEnvironmentFields,
 	spawnEnvironmentFields,
@@ -121,9 +122,14 @@ export class ChannelLifecycleManager {
 	 *
 	 * It is the whole of what a SPAWN says about the environment (#576): the
 	 * scopes' removals, the mode, and whether the shell logs in, decided as for
-	 * a new terminal from what the channel was started with.
+	 * a new terminal from what the channel was started with. With it goes
+	 * whether its PowerShell reports its directory, as its launch profile says
+	 * now (#839).
 	 */
-	private restartEnv(channelId: string, hostId: string): SpawnEnvironmentFields {
+	private restartEnv(
+		channelId: string,
+		hostId: string,
+	): SpawnEnvironmentFields & Pick<AgentSpawnMessage, "reportDirectory"> {
 		const profile = this.ctx.configResolver?.resolve(hostId, channelId) ?? null;
 		const channel = this.ctx.metaDal.getChannel(channelId);
 		const host = this.ctx.metaDal.getHost(hostId);
@@ -146,7 +152,10 @@ export class ChannelLifecycleManager {
 				channel?.args,
 				channel?.directProcess,
 			);
-		return spawnEnvironmentFields(environment, spawnEnvMode(profile?.envMode), loginShell);
+		return {
+			...spawnEnvironmentFields(environment, spawnEnvMode(profile?.envMode), loginShell),
+			...reportDirectoryField(launchProfile),
+		};
 	}
 
 	/** The only primitive allowed to emit a SPAWN frame. */

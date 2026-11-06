@@ -79,6 +79,12 @@ export interface AgentSpawnMessage {
 	envUnset?: string[];
 	/** A login shell: a Unix agent adds `-l` for a shell known to take it. */
 	loginShell?: boolean;
+	/**
+	 * The launch profile's `reportDirectory` (#839): a Windows agent starts a
+	 * PowerShell whose `args` run nothing of their own with a prompt that
+	 * reports its directory. Left out when off.
+	 */
+	reportDirectory?: boolean;
 }
 
 /**

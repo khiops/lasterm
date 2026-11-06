@@ -295,6 +295,12 @@ Local daemon, single process, binds to 127.0.0.1.
 - **The desktop's hub** also ends with the desktop, through `--exit-with-stdin` (#188).
 - **Once a client can drive a hub it did not launch (#193):** its close gesture for that hub is **Disconnect**, which ends nothing on the hub. **Quit** stays for the hub it owns, and the close dialog names which of the two applies.
 
+**The desktop leaves once its hub took the quit (#872).** Its hub exiting, whatever the code, ends
+the quit at once; a teardown it cannot confirm is said in a dialog, then the app leaves; a quit
+gesture after the hub died leaves without asking it. Once leaving is decided, the process ends
+within 5 s even when the window's main thread, which carries out the exit and shows the dialogs,
+no longer runs: a dialog is shown only after that thread answered.
+
 **Quitting the desktop while uploads run (#837, decisions.md UPLOADS-DESKTOP).** The page tells the
 shell, on every change, the uploads this window sends: `set_uploads_in_progress({ seq, inProgress,
 waiting, failed, percent })`, an async command (#824); `seq` counts up from 1 per document, and a

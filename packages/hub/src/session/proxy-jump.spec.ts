@@ -165,7 +165,9 @@ describe("resolveJump", () => {
 			jump: {
 				jump: { host: "bastion.example.com", port: 2222, username: "jumper" },
 				knownHostsNames: ["bastion.example.com", "alias"],
-				auth: { method: "key", keyPath: "/keys/bastion" },
+				// The alias goes with its authentication: its `IdentityAgent none`
+				// keeps the agent from signing the bastion's key (#876).
+				auth: { method: "key", keyPath: "/keys/bastion", sshConfigHost: "alias" },
 				promptHostId: "bastion",
 				pinnedFingerprint: "SHA256:pinned",
 				trustKnownHosts: true,

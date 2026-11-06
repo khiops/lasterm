@@ -649,15 +649,17 @@ impl StopFixture {
     async fn live_record(&self) -> std::path::PathBuf {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let found = std::fs::read_dir(self.record_dir()).ok().and_then(|entries| {
-                entries.flatten().map(|entry| entry.path()).find(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| {
-                            name.starts_with("agent.identity-") && name.ends_with(".json")
-                        })
-                })
-            });
+            let found = std::fs::read_dir(self.record_dir())
+                .ok()
+                .and_then(|entries| {
+                    entries.flatten().map(|entry| entry.path()).find(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| {
+                                name.starts_with("agent.identity-") && name.ends_with(".json")
+                            })
+                    })
+                });
             if let Some(record) = found {
                 return record;
             }
@@ -692,7 +694,10 @@ async fn stop_mode_reports_a_killed_daemon_not_running_and_clears_its_record() {
     assert!(record.exists(), "a kill leaves the live record behind");
 
     assert_eq!(fixture.stop().await, (true, "not running".to_owned()));
-    assert!(!record.exists(), "the record of a process that is gone goes");
+    assert!(
+        !record.exists(),
+        "the record of a process that is gone goes"
+    );
     assert_eq!(fixture.stop().await, (true, "not running".to_owned()));
 
     fixture.remove();

@@ -18,7 +18,6 @@ import type {
 	WriteReleaseMessage,
 } from "@lasterm/shared";
 import { decodeMessage, encodeMessage, generateId, isValidUlid } from "@lasterm/shared";
-import type { Database } from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
 import {
 	type InvalidTokenReason,
@@ -29,6 +28,7 @@ import {
 } from "../auth.js";
 import type { SessionManager, WsClient } from "../session/session-manager.js";
 import { WriteLockManager } from "../session/write-lock.js";
+import type { Database } from "../storage/sqlite.js";
 import {
 	handleAgentBinaryVerifyResponse,
 	handleAttach,

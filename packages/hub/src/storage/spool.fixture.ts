@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { Database } from "./sqlite.js";
 
 export type ChunkKind = "output" | "snapshot" | "resize";
 
@@ -11,7 +11,7 @@ export interface ChunkSeed {
 
 /** Write chunks for a channel in one transaction, with consecutive seqs from `firstSeq`. */
 export function seedChunks(
-	spool: Database.Database,
+	spool: Database,
 	channelId: string,
 	chunks: ChunkSeed[],
 	firstSeq = 1,
@@ -32,7 +32,7 @@ export function seedChunks(
 }
 
 /** How many chunks a channel holds in the spool. */
-export function countChunks(spool: Database.Database, channelId: string): number {
+export function countChunks(spool: Database, channelId: string): number {
 	return (
 		spool.prepare("SELECT COUNT(*) AS n FROM chunks WHERE channel_id = ?").get(channelId) as {
 			n: number;
@@ -44,7 +44,7 @@ export function countChunks(spool: Database.Database, channelId: string): number
  * Watch the event loop: the longest stretch between two turns, and the most
  * rows SQLite changed in the spool within one stretch.
  */
-export function watchEventLoop(spool: Database.Database) {
+export function watchEventLoop(spool: Database) {
 	const changes = () => (spool.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
 	let last = performance.now();
 	let lastChanges = changes();

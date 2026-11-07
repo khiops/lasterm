@@ -1,7 +1,6 @@
 import type { Session, SessionStatus } from "@lasterm/shared";
-import type Database from "better-sqlite3";
-
 import type { CreateSessionInput } from "./meta-types.js";
+import type { Database } from "./sqlite.js";
 
 // ─── Row types ───────────────────────────────────────────────────────────────
 
@@ -28,7 +27,7 @@ function rowToSession(row: SessionRow): Session {
 // ─── SessionsDAL ─────────────────────────────────────────────────────────────
 
 export class SessionsDAL {
-	constructor(private db: Database.Database) {}
+	constructor(private db: Database) {}
 
 	// ─── Sessions ───────────────────────────────────────────────────────────
 

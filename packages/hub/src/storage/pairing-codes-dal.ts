@@ -1,6 +1,5 @@
-import type Database from "better-sqlite3";
-
 import type { PairingCodeRow } from "./meta-types.js";
+import type { Database } from "./sqlite.js";
 
 // ─── PairingCodesDAL ─────────────────────────────────────────────────────────
 
@@ -10,7 +9,7 @@ import type { PairingCodeRow } from "./meta-types.js";
  * route computes the hash and hands it in.
  */
 export class PairingCodesDAL {
-	constructor(private db: Database.Database) {}
+	constructor(private db: Database) {}
 
 	// ─── Pairing Codes ───────────────────────────────────────────────────────
 

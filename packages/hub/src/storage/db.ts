@@ -1,7 +1,7 @@
 import { closeSync, constants, fchmodSync, fstatSync, openSync } from "node:fs";
 import { join } from "node:path";
-import Database from "better-sqlite3";
 import { type MigrationFile, readMigrationFiles } from "./migration-files.js";
+import { Database } from "./sqlite.js";
 
 /** The files SQLite keeps beside a database in WAL mode. */
 const WAL_FILE_SUFFIXES = ["-wal", "-shm"] as const;
@@ -74,12 +74,12 @@ function restrictToOwner(
 }
 
 export interface DatabaseManager {
-	meta: Database.Database;
-	spool: Database.Database;
+	meta: Database;
+	spool: Database;
 	close(): void;
 }
 
-function checkpointAndClose(db: Database.Database): void {
+function checkpointAndClose(db: Database): void {
 	if (!db.open) return;
 	try {
 		db.pragma("wal_checkpoint(TRUNCATE)");
@@ -88,7 +88,7 @@ function checkpointAndClose(db: Database.Database): void {
 	}
 }
 
-function applyCommonPragmas(db: Database.Database): void {
+function applyCommonPragmas(db: Database): void {
 	db.pragma("journal_mode = WAL");
 	db.pragma("synchronous = NORMAL");
 	db.pragma("foreign_keys = ON");
@@ -96,14 +96,14 @@ function applyCommonPragmas(db: Database.Database): void {
 	db.pragma("cache_size = -8000");
 }
 
-function applySpoolPragmas(db: Database.Database): void {
+function applySpoolPragmas(db: Database): void {
 	const currentAutoVacuum = db.pragma("auto_vacuum", { simple: true }) as number;
 	if (currentAutoVacuum !== 2) {
 		db.pragma("auto_vacuum = INCREMENTAL");
 	}
 }
 
-function runMigrations(db: Database.Database, migrations: readonly MigrationFile[]): void {
+function runMigrations(db: Database, migrations: readonly MigrationFile[]): void {
 	const hasSchemaVersion =
 		db
 			.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'")
@@ -167,7 +167,7 @@ function runMigrations(db: Database.Database, migrations: readonly MigrationFile
  */
 function openBoth(metaFile: string, spoolFile: string): DatabaseManager {
 	const metaDb = new Database(metaFile);
-	let spoolDb: Database.Database | undefined;
+	let spoolDb: Database | undefined;
 	try {
 		applyCommonPragmas(metaDb);
 		metaDb.pragma("wal_autocheckpoint = 1000");

@@ -1,7 +1,6 @@
 import type { Channel, ChannelEndReason, ChannelStatus } from "@lasterm/shared";
-import type Database from "better-sqlite3";
-
 import type { CreateChannelInput } from "./meta-types.js";
+import type { Database } from "./sqlite.js";
 
 // ─── Row types ───────────────────────────────────────────────────────────────
 
@@ -85,7 +84,7 @@ function rowToChannel(row: ChannelRow): Channel {
 // ─── ChannelsDAL ─────────────────────────────────────────────────────────────
 
 export class ChannelsDAL {
-	constructor(private db: Database.Database) {}
+	constructor(private db: Database) {}
 
 	// ─── Channels ───────────────────────────────────────────────────────────
 

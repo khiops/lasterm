@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { Database } from "./sqlite.js";
 
 // ─── PairRateLimitsDAL ───────────────────────────────────────────────────────
 
@@ -9,7 +9,7 @@ interface RateLimitRow {
 }
 
 export class PairRateLimitsDAL {
-	constructor(private db: Database.Database) {}
+	constructor(private db: Database) {}
 
 	/**
 	 * Atomically increments the attempt counter for the given IP within the

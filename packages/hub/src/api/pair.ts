@@ -1,10 +1,10 @@
 import { createHmac, randomBytes, randomInt } from "node:crypto";
 import { generateId } from "@lasterm/shared";
-import type Database from "better-sqlite3";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { createToken } from "../auth.js";
 import type { AuthConfig } from "../config.js";
 import type { MetaDAL } from "../storage/meta.js";
+import type { Database } from "../storage/sqlite.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────────────────────
 
@@ -12,7 +12,7 @@ export interface PairRouteOptions {
 	/** The auth config (for token TTL). */
 	authConfig: AuthConfig;
 	/** The meta DB — used to create a token record on successful pairing. */
-	db: Database.Database;
+	db: Database;
 	metaDal: MetaDAL;
 }
 

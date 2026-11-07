@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { seedShellProfiles } from "../session/shell-profile-seed.js";
 import { fingerprintOf } from "../ssh/fingerprint.js";
@@ -12,6 +11,7 @@ import type { DatabaseManager } from "./db.js";
 import { openDatabases, openTestDatabases, restrictDatabaseFiles } from "./db.js";
 import { MetaDAL } from "./meta.js";
 import { describeOpenDatabases } from "./open-databases.fixture.js";
+import { Database } from "./sqlite.js";
 import { TransfersDAL } from "./transfers-dal.js";
 
 describe("openTestDatabases", () => {
@@ -242,9 +242,9 @@ describe("meta.db and its baseline", () => {
 		await removeTempDir(dir);
 	});
 
-	const versions = (db: Database.Database) =>
+	const versions = (db: Database) =>
 		db.prepare("SELECT version FROM schema_version ORDER BY rowid").all();
-	const tables = (db: Database.Database) =>
+	const tables = (db: Database) =>
 		(
 			db
 				.prepare(
@@ -252,7 +252,7 @@ describe("meta.db and its baseline", () => {
 				)
 				.all() as Array<{ name: string }>
 		).map((table) => table.name);
-	const columns = (db: Database.Database, table: string) =>
+	const columns = (db: Database, table: string) =>
 		(db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(
 			(column) => column.name,
 		);
@@ -425,9 +425,9 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 	/** A key's fingerprint as 0.14.3 wrote it, padding and all. */
 	const padded = (keyBlob: Buffer) =>
 		`SHA256:${createHash("sha256").update(keyBlob).digest("base64")}`;
-	const versions = (db: Database.Database) =>
+	const versions = (db: Database) =>
 		db.prepare("SELECT version FROM schema_version ORDER BY rowid").all();
-	const pins = (db: Database.Database) =>
+	const pins = (db: Database) =>
 		db
 			.prepare(
 				"SELECT id, ssh_fingerprint, ssh_proxy_fingerprint, agent_sha256, updated_at FROM hosts ORDER BY id",
@@ -548,10 +548,10 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			/INSERT INTO schema_version[^;]*;/,
 			"",
 		);
-		const changes = dbs.meta.prepare("SELECT total_changes()").pluck();
+		const changes = dbs.meta.prepare("SELECT total_changes() AS n");
 		const before = changes.get();
 		dbs.meta.exec(updates);
-		expect(changes.get()).toBe(before);
+		expect(changes.get()).toEqual(before);
 		expect(pins(dbs.meta)).toEqual(migrated);
 	});
 });
@@ -579,9 +579,9 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 
 	const migration = (name: string) =>
 		readFileSync(fileURLToPath(new URL(`./migrations/meta/${name}`, import.meta.url)), "utf-8");
-	const versions = (db: Database.Database) =>
+	const versions = (db: Database) =>
 		db.prepare("SELECT version FROM schema_version ORDER BY rowid").all();
-	const shells = (db: Database.Database) =>
+	const shells = (db: Database) =>
 		db
 			.prepare(
 				"SELECT id, default_shell, discovered_default_shell, discovered_shells, updated_at FROM hosts ORDER BY id",
@@ -698,9 +698,9 @@ describe("meta.db migration 024: a launch profile override says whether the user
 
 	const migration = (name: string) =>
 		readFileSync(fileURLToPath(new URL(`./migrations/meta/${name}`, import.meta.url)), "utf-8");
-	const versions = (db: Database.Database) =>
+	const versions = (db: Database) =>
 		db.prepare("SELECT version FROM schema_version ORDER BY rowid").all();
-	const overrides = (db: Database.Database) =>
+	const overrides = (db: Database) =>
 		db.prepare("SELECT * FROM host_launch_profiles ORDER BY profile_id").all();
 
 	const at = "2026-10-01T00:00:00.000Z";
@@ -890,9 +890,9 @@ describe("meta.db migration 026: the uploads' tables", () => {
 
 	const migration = (name: string) =>
 		readFileSync(fileURLToPath(new URL(`./migrations/meta/${name}`, import.meta.url)), "utf-8");
-	const versions = (db: Database.Database) =>
+	const versions = (db: Database) =>
 		db.prepare("SELECT version FROM schema_version ORDER BY rowid").all();
-	const tables = (db: Database.Database) =>
+	const tables = (db: Database) =>
 		(
 			db
 				.prepare(
@@ -900,12 +900,12 @@ describe("meta.db migration 026: the uploads' tables", () => {
 				)
 				.all() as Array<{ name: string }>
 		).map((table) => table.name);
-	const columns = (db: Database.Database, table: string) =>
+	const columns = (db: Database, table: string) =>
 		(db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(
 			(column) => column.name,
 		);
 	/** Every table but the version's, with its columns and its rows. */
-	const contents = (db: Database.Database) =>
+	const contents = (db: Database) =>
 		Object.fromEntries(
 			tables(db)
 				.filter((table) => table !== "schema_version")
@@ -914,7 +914,7 @@ describe("meta.db migration 026: the uploads' tables", () => {
 					{ columns: columns(db, table), rows: db.prepare(`SELECT * FROM ${table}`).all() },
 				]),
 		);
-	const count = (db: Database.Database, table: string) =>
+	const count = (db: Database, table: string) =>
 		(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 	const upTo25 = [
 		{ version: 21 },
@@ -963,7 +963,7 @@ describe("meta.db migration 026: the uploads' tables", () => {
 	}
 
 	/** An upload to `hostId`, with one file. */
-	function uploadTo(db: Database.Database, id: string, hostId: string): void {
+	function uploadTo(db: Database, id: string, hostId: string): void {
 		new TransfersDAL(db).insert(
 			{
 				id,

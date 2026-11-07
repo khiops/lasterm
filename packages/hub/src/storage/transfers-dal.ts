@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { Database, Statement } from "./sqlite.js";
 
 /**
  * Uploads as meta.db keeps them (#860, STORAGE.md § 3.9): one `transfers` row
@@ -201,12 +201,12 @@ const ITEM_CHANGING = ITEM_COLUMNS.filter(
 );
 
 export class TransfersDAL {
-	private readonly insertTransfer: Database.Statement;
-	private readonly insertItem: Database.Statement;
-	private readonly updateItem: Database.Statement;
-	private readonly updateTransfer: Database.Statement;
+	private readonly insertTransfer: Statement;
+	private readonly insertItem: Statement;
+	private readonly updateItem: Statement;
+	private readonly updateTransfer: Statement;
 
-	constructor(private readonly db: Database.Database) {
+	constructor(private readonly db: Database) {
 		this.insertTransfer = db.prepare(
 			`INSERT INTO transfers (id, host_id, channel_id, token_id, dest_dir, path_style, direction,
 				state, on_conflict, verify, signature, reason, created_at, updated_at)

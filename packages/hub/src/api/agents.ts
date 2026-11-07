@@ -6,7 +6,6 @@ import type {
 	AgentFetchProgressMessage,
 } from "@lasterm/shared";
 import { generateId } from "@lasterm/shared";
-import type Database from "better-sqlite3";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
 	reportTokenStore,
@@ -40,10 +39,11 @@ import {
 	computeTargetStatus,
 	getHubPlatform,
 } from "../session/agent-status.js";
+import type { Database } from "../storage/sqlite.js";
 
 export interface AgentRoutesDeps extends AgentMutationOriginGuardOptions {
 	readonly authToken?: string | null;
-	readonly db?: Database.Database | null;
+	readonly db?: Database | null;
 	readonly tokenTtlDays?: number;
 	readonly getBinaryCacheDir?: () => string | Promise<string>;
 	readonly hubVersion?: string;

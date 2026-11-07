@@ -7,10 +7,9 @@ import type {
 	SshAuthMethod,
 } from "@lasterm/shared";
 import { generateId } from "@lasterm/shared";
-import type Database from "better-sqlite3";
 import { sshAddress, targetRoute } from "../ssh-route.js";
-
 import type { CreateHostInput } from "./meta-types.js";
+import type { Database } from "./sqlite.js";
 
 // ─── Row types ───────────────────────────────────────────────────────────────
 
@@ -129,7 +128,7 @@ export class HostsDAL {
 	/** Told once a write here changed a host: nobody, unless `onHostChanged` named someone. */
 	private hostChanged: () => void = () => {};
 
-	constructor(private db: Database.Database) {}
+	constructor(private db: Database) {}
 
 	/**
 	 * Name who is told once a write here changed a host: created, edited, or

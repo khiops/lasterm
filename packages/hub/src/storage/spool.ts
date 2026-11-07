@@ -1,5 +1,5 @@
 import { generateId } from "@lasterm/shared";
-import type Database from "better-sqlite3";
+import type { Database, Statement } from "./sqlite.js";
 
 export interface InsertChunkInput {
 	channelId: string;
@@ -72,9 +72,9 @@ function rowToChunk(row: ChunkRow): Chunk {
 
 export class SpoolDAL {
 	/** The statements the GC runs in a loop, prepared once. */
-	private readonly statements = new Map<string, Database.Statement>();
+	private readonly statements = new Map<string, Statement>();
 
-	constructor(private db: Database.Database) {}
+	constructor(private db: Database) {}
 
 	insertChunk(input: InsertChunkInput): string {
 		const id = generateId();
@@ -274,7 +274,7 @@ export class SpoolDAL {
 		return this.db.pragma("freelist_count", { simple: true }) as number;
 	}
 
-	private statement(sql: string): Database.Statement {
+	private statement(sql: string): Statement {
 		let statement = this.statements.get(sql);
 		if (statement === undefined) {
 			statement = this.db.prepare(sql);

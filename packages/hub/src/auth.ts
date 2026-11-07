@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { generateId } from "@lasterm/shared";
-import type Database from "better-sqlite3";
+import type { Database } from "./storage/sqlite.js";
 
 const AUTH_FILE = "auth.json";
 
@@ -234,7 +234,7 @@ function rowToRecord(row: Record<string, unknown>): AuthTokenRecord {
  * The row follows auth.json, which is where the primary token is retired
  * (SECURITY.md § 2.1): `revokeToken` refuses it (#515).
  */
-export function upsertPrimaryToken(db: Database.Database, plaintextToken: string): void {
+export function upsertPrimaryToken(db: Database, plaintextToken: string): void {
 	const hash = hashToken(plaintextToken);
 	const now = new Date().toISOString();
 	db.prepare(
@@ -250,7 +250,7 @@ export function upsertPrimaryToken(db: Database.Database, plaintextToken: string
  * discard it; only the hash is stored.
  */
 export function createToken(
-	db: Database.Database,
+	db: Database,
 	opts: { label: string; expiresAt: string | null },
 ): { id: string; token: string } {
 	const id = generateId();
@@ -274,7 +274,7 @@ export function createToken(
  * deliberately the entire allowlist: rows from an unknown future issuer are
  * invalidated too, rather than being accidentally allowed to survive a restart.
  */
-export function sweepNonPrimaryTokens(db: Database.Database): void {
+export function sweepNonPrimaryTokens(db: Database): void {
 	try {
 		db.prepare("UPDATE auth_tokens SET swept_at = ? WHERE id <> ? AND swept_at IS NULL").run(
 			new Date().toISOString(),
@@ -289,14 +289,11 @@ export function sweepNonPrimaryTokens(db: Database.Database): void {
  * Look up a token record by plaintext value.
  * Returns null when not found.
  */
-export function getTokenByValue(
-	db: Database.Database,
-	plaintextToken: string,
-): AuthTokenRecord | null {
+export function getTokenByValue(db: Database, plaintextToken: string): AuthTokenRecord | null {
 	return getTokenByHash(db, hashToken(plaintextToken));
 }
 
-function getTokenByHash(db: Database.Database, tokenHash: string): AuthTokenRecord | null {
+function getTokenByHash(db: Database, tokenHash: string): AuthTokenRecord | null {
 	const row = db.prepare("SELECT * FROM auth_tokens WHERE token_hash = ?").get(tokenHash) as
 		| Record<string, unknown>
 		| undefined;
@@ -307,7 +304,7 @@ function getTokenByHash(db: Database.Database, tokenHash: string): AuthTokenReco
  * List all tokens (active and revoked).
  * Returns newest-first.
  */
-export function listTokens(db: Database.Database): AuthTokenRecord[] {
+export function listTokens(db: Database): AuthTokenRecord[] {
 	const rows = db.prepare("SELECT * FROM auth_tokens ORDER BY created_at DESC").all() as Array<
 		Record<string, unknown>
 	>;
@@ -323,7 +320,7 @@ export function listTokens(db: Database.Database): AuthTokenRecord[] {
  * revoked primary row locked the desktop out of its own hub. It is retired by
  * replacing auth.json instead (SECURITY.md § 2.1).
  */
-export function revokeToken(db: Database.Database, id: string): boolean {
+export function revokeToken(db: Database, id: string): boolean {
 	const now = new Date().toISOString();
 	const result = db
 		.prepare(
@@ -338,7 +335,7 @@ export function revokeToken(db: Database.Database, id: string): boolean {
  * Called on each successful authenticated request.
  * If ttlDays is 0 or expires_at is NULL, expiry is not changed.
  */
-export function touchToken(db: Database.Database, id: string, ttlDays: number): void {
+export function touchToken(db: Database, id: string, ttlDays: number): void {
 	const now = new Date().toISOString();
 	if (ttlDays > 0) {
 		const newExpiry = new Date(Date.now() + ttlDays * 86_400_000).toISOString();
@@ -379,10 +376,7 @@ export type InvalidTokenReason = "unknown" | "revoked" | "swept" | "expired";
  * Only a record that passes all three is `valid`. A store that cannot be read
  * is `unavailable`, which every caller must still refuse.
  */
-export function validateTokenRecord(
-	db: Database.Database,
-	plaintextToken: string,
-): TokenValidation {
+export function validateTokenRecord(db: Database, plaintextToken: string): TokenValidation {
 	return validateTokenHash(db, hashToken(plaintextToken));
 }
 
@@ -391,7 +385,7 @@ export function validateTokenRecord(
  * WebSocket re-checks the token it authenticated with before acting on each
  * frame, and keeps the hash to do so rather than the token itself.
  */
-export function validateTokenHash(db: Database.Database, tokenHash: string): TokenValidation {
+export function validateTokenHash(db: Database, tokenHash: string): TokenValidation {
 	let record: AuthTokenRecord | null;
 	try {
 		record = getTokenByHash(db, tokenHash);
@@ -417,7 +411,7 @@ export interface TokenStoreLog {
 }
 
 /** Credentials refused since the store last answered, per database. */
-const tokenStoreOutages = new WeakMap<Database.Database, number>();
+const tokenStoreOutages = new WeakMap<Database, number>();
 
 /**
  * Report a token store that cannot answer once per outage, not once per
@@ -430,7 +424,7 @@ const tokenStoreOutages = new WeakMap<Database.Database, number>();
  * the WebSocket handshake and the agent routes report one outage between them.
  */
 export function reportTokenStore(
-	db: Database.Database,
+	db: Database,
 	validation: TokenValidation,
 	log: TokenStoreLog,
 ): void {
@@ -452,7 +446,7 @@ export function reportTokenStore(
 }
 
 /** Uses of a credential the store failed to record since it last recorded one, per database. */
-const tokenTouchFailures = new WeakMap<Database.Database, number>();
+const tokenTouchFailures = new WeakMap<Database, number>();
 
 /**
  * Record a credential's use, best effort, and report a store that cannot once
@@ -466,7 +460,7 @@ const tokenTouchFailures = new WeakMap<Database.Database, number>();
  * the WebSocket and the agent routes report one between them.
  */
 export function touchTokenBestEffort(
-	db: Database.Database,
+	db: Database,
 	id: string,
 	ttlDays: number,
 	log: TokenStoreLog,

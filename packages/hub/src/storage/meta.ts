@@ -12,8 +12,6 @@ import type {
 	Session,
 	SessionStatus,
 } from "@lasterm/shared";
-import type Database from "better-sqlite3";
-
 import { ChannelGroupsDAL } from "./channel-groups-dal.js";
 import { ChannelsDAL } from "./channels-dal.js";
 import { HostsDAL } from "./hosts-dal.js";
@@ -31,6 +29,7 @@ import type {
 import { PairRateLimitsDAL } from "./pair-rate-limits-dal.js";
 import { PairingCodesDAL } from "./pairing-codes-dal.js";
 import { SessionsDAL } from "./sessions-dal.js";
+import type { Database } from "./sqlite.js";
 
 // Re-export input types so existing callers can continue importing from meta.ts
 export type { CreateChannelInput, CreateHostInput, CreateSessionInput, PairingCodeRow };
@@ -57,7 +56,7 @@ export class MetaDAL {
 	readonly pairingCodes: PairingCodesDAL;
 	readonly pairRateLimits: PairRateLimitsDAL;
 
-	constructor(private db: Database.Database) {
+	constructor(private db: Database) {
 		this.hosts = new HostsDAL(db);
 		this.channelGroups = new ChannelGroupsDAL(db);
 		this.sessions = new SessionsDAL(db);

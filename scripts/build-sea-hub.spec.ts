@@ -5,15 +5,7 @@
  * native addon loader (sea-addon-loader.ts for the hub).
  */
 
-import {
-	closeSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -80,7 +72,11 @@ describe("SQLite comes from node:sqlite", () => {
 		expect(content).not.toContain('require("better-sqlite3")');
 		expect(content).not.toContain("PREBUILD_PLATFORMS");
 		expect(content).not.toContain("getPrebuildPath");
-		expect(content).not.toContain("better_sqlite3.node");
+		// The addon's name appears once: in the list of what earlier executables
+		// extracted, which retired-addon-cache.ts removes from the cache (#889).
+		// Another mention is the addon coming back.
+		expect(content.split("better_sqlite3.node").length - 1).toBe(1);
+		expect(content).toContain("retireAddonCacheOfEarlierVersions");
 		expect(content).not.toContain("__seaSqliteExports");
 	});
 });
@@ -238,7 +234,7 @@ describe("the executable's database module is storage/db.ts (#745)", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test 8: hub sea-addon-loader is a no-op when not in SEA mode
+// Test 8: hub sea-addon-loader tells a run from source from the executable
 // ────────────────────────────────────────────────────────────────────────────
 
 describe("hub sea-addon-loader in non-SEA mode", () => {
@@ -249,106 +245,5 @@ describe("hub sea-addon-loader in non-SEA mode", () => {
 	it("detectSea() returns false in normal Node.js", async () => {
 		const { detectSea } = await import("../packages/hub/src/sea-addon-loader.js");
 		expect(detectSea()).toBe(false);
-	});
-
-	it("initSeaAddons() does not call dlopen in normal Node.js", async () => {
-		const { initSeaAddons } = await import("../packages/hub/src/sea-addon-loader.js");
-		const dlopenSpy = vi.spyOn(process, "dlopen");
-		expect(() => initSeaAddons()).not.toThrow();
-		expect(dlopenSpy).not.toHaveBeenCalled();
-	});
-});
-
-// ────────────────────────────────────────────────────────────────────────────
-// Test 9: hub sea-addon-loader extraction logic
-// ────────────────────────────────────────────────────────────────────────────
-
-describe("hub sea-addon-loader extraction logic", () => {
-	const TEMP_CACHE_BASE = join(ROOT, "dist", "test-sea-hub-cache");
-
-	afterEach(() => {
-		vi.restoreAllMocks();
-		rmSync(TEMP_CACHE_BASE, { recursive: true, force: true });
-	});
-
-	it("openCachedAddon writes the blob to cacheDir/name", async () => {
-		const { openCachedAddon } = await import("../packages/hub/src/sea-addon-loader.js");
-
-		const fakeData = Buffer.from("fake-addon-bytes");
-		const cacheDir = join(TEMP_CACHE_BASE, "v0.1.0");
-		const file = openCachedAddon("lasterm_tls_identity.node", cacheDir, fakeData);
-		closeSync(file.fd);
-
-		expect(existsSync(file.path)).toBe(true);
-		expect(readFileSync(file.path).equals(fakeData)).toBe(true);
-		expect(file.path).toBe(join(cacheDir, "lasterm_tls_identity.node"));
-	});
-
-	it("openCachedAddon skips the write when the file already holds the embedded bytes", async () => {
-		const { openCachedAddon } = await import("../packages/hub/src/sea-addon-loader.js");
-
-		const fakeData = Buffer.from("fake-addon-bytes");
-		const cacheDir = join(TEMP_CACHE_BASE, "v0.1.0");
-		mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
-		const destPath = join(cacheDir, "lasterm_tls_identity.node");
-
-		writeFileSync(destPath, fakeData, { mode: 0o755 });
-		const mtimeBefore = statSync(destPath).mtimeMs;
-
-		await new Promise((r) => setTimeout(r, 10));
-		closeSync(openCachedAddon("lasterm_tls_identity.node", cacheDir, fakeData).fd);
-
-		expect(statSync(destPath).mtimeMs).toBe(mtimeBefore);
-	});
-
-	it("openCachedAddon re-writes when file has different size", async () => {
-		const { openCachedAddon } = await import("../packages/hub/src/sea-addon-loader.js");
-
-		const cacheDir = join(TEMP_CACHE_BASE, "v0.1.0");
-		mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
-		const destPath = join(cacheDir, "lasterm_tls_identity.node");
-
-		writeFileSync(destPath, Buffer.from("old-data"), { mode: 0o755 });
-
-		const newData = Buffer.from("new-data-with-different-length-xxxx");
-		closeSync(openCachedAddon("lasterm_tls_identity.node", cacheDir, newData).fd);
-
-		expect(readFileSync(destPath).equals(newData)).toBe(true);
-	});
-
-	it("getAddonCacheDir returns path containing version and lasterm", async () => {
-		const { getAddonCacheDir } = await import("../packages/hub/src/sea-addon-loader.js");
-		const dir = getAddonCacheDir("2.0.0");
-		expect(dir).toContain("2.0.0");
-		expect(dir).toContain("lasterm");
-		expect(dir).toContain("addons");
-	});
-
-	it("loadNativeAddon calls dlopen on the extracted file", async () => {
-		const { loadNativeAddon } = await import("../packages/hub/src/sea-addon-loader.js");
-
-		const fakeData = Buffer.from("fake-addon-for-dlopen");
-		const cacheDir = join(TEMP_CACHE_BASE, "dlopen-test");
-
-		const dlopenSpy = vi.spyOn(process, "dlopen").mockImplementation(() => {});
-
-		const fakeSeaModule = {
-			getRawAsset: (_name: string): ArrayBuffer =>
-				fakeData.buffer.slice(
-					fakeData.byteOffset,
-					fakeData.byteOffset + fakeData.byteLength,
-				) as ArrayBuffer,
-		};
-
-		loadNativeAddon("lasterm_tls_identity.node", cacheDir, fakeSeaModule);
-
-		expect(dlopenSpy).toHaveBeenCalledTimes(1);
-		expect(dlopenSpy.mock.calls[0]?.[0]).toHaveProperty("exports");
-		// Linux loads through the descriptor the bytes were verified on; elsewhere
-		// the name is all dlopen accepts.
-		const loadedFrom = dlopenSpy.mock.calls[0]?.[1];
-		if (process.platform === "linux") expect(loadedFrom).toMatch(/^\/proc\/self\/fd\/\d+$/);
-		else expect(loadedFrom).toMatch(/lasterm_tls_identity\.node$/);
-		expect(readFileSync(loadedFrom as string).equals(fakeData)).toBe(true);
 	});
 });

@@ -1,12 +1,29 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	closeSync,
+	copyFileSync,
+	existsSync,
+	fstatSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { loadCachedAddon } from "@lasterm/shared/dist/sea-addon-loader.js";
+import { addonDigest, loadInstalledAddon } from "@lasterm/shared/dist/installed-addon.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { acquireHubLock, getHubLockPath, HubLockInitializationError } from "./hub-lock.js";
+import {
+	acquireHubLock,
+	getHubLockPath,
+	HUB_LOCK_ADDON,
+	HubLockInitializationError,
+} from "./hub-lock.js";
 import { startHub } from "./hub-startup.js";
 
 const tempDirs: string[] = [];
@@ -293,23 +310,29 @@ describe.sequential("hub startup lock", () => {
 		).toThrow(HubLockInitializationError);
 	});
 
-	it("takes the lock with the addon loaded from the authenticated addon cache", () => {
-		// The single executable's path: the embedded bytes go through the cache
-		// and are loaded from there — on Linux through the descriptor they were
-		// verified on — rather than from the build output.
-		const cacheDir = mkdtempSync(path.join(os.tmpdir(), "lasterm-addon-cache-"));
+	it("takes the lock with the addon installed beside an executable, once authenticated", () => {
+		// The single executable's path (#889): the addon is copied beside it
+		// under its Node addon name, the executable records its digest, and it
+		// is loaded from there — on Linux through the descriptor it was verified
+		// on — rather than from the build output.
+		const installDir = mkdtempSync(path.join(os.tmpdir(), "lasterm-installed-addon-"));
 		try {
-			const exports = loadCachedAddon(
-				"lasterm_hub_lock.node",
-				path.join(cacheDir, "addons"),
-				readFileSync(builtHubLockAddon()),
-			);
+			const installed = path.join(installDir, HUB_LOCK_ADDON);
+			copyFileSync(builtHubLockAddon(), installed);
+			if (process.platform !== "win32") chmodSync(installed, 0o644);
+			const fd = openSync(installed, "r");
+			const digest = addonDigest(fd, fstatSync(fd).size);
+			closeSync(fd);
+			const exports = loadInstalledAddon(HUB_LOCK_ADDON, {
+				directory: installDir,
+				manifest: { [HUB_LOCK_ADDON]: digest! },
+			});
 			const stateDir = path.join(makeStateDir(), "lasterm");
 			const lock = acquireHubLock(stateDir, { loadAddon: () => exports as never });
 			expect(lock.path).toBe(path.resolve(getHubLockPath(stateDir)));
 		} finally {
 			try {
-				rmSync(cacheDir, { recursive: true, force: true });
+				rmSync(installDir, { recursive: true, force: true });
 			} catch {
 				// Windows keeps a loaded library until the process exits.
 			}

@@ -484,8 +484,10 @@ jobs:
         env:
           LASTERM_SEA_EXPECTED: "1"
         run: pnpm exec vitest run --project scripts scripts/sea-hub-e2e.spec.ts
-      # The executable only. dist/sea also holds lasterm-hub.cjs, the SEA input,
-      # which is not a deliverable. Same tar rules as the agent above.
+      # The executable and the addons it loads from its own directory (#889),
+      # which it does not start without; release-assets.ts publishes the three
+      # as one zip. dist/sea also holds lasterm-hub.cjs and addons.json, the SEA
+      # inputs, which are not deliverables. Same tar rules as the agent above.
       - name: Pack hub
         shell: bash
         env:
@@ -493,7 +495,7 @@ jobs:
           EXE: ${{ matrix.os == 'windows' && 'lasterm-hub.exe' || 'lasterm-hub' }}
         run: |
           mkdir -p _release
-          tar -cf "_release/$ARTIFACT.tar" -C dist/sea "$EXE"
+          tar -cf "_release/$ARTIFACT.tar" -C dist/sea "$EXE" lasterm_hub_lock.node lasterm_tls_identity.node
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: hub-${{ matrix.triple }}
@@ -579,6 +581,8 @@ jobs:
           TRIPLE="${{ matrix.triple }}"
           cp dist/sea/lasterm-agent "packages/clients/desktop/src-tauri/lasterm-agent-${TRIPLE}"
           cp dist/sea/lasterm-hub "packages/clients/desktop/src-tauri/lasterm-hub-${TRIPLE}"
+          # Bundled as resources, which Tauri installs beside the hub (#889).
+          cp dist/sea/lasterm_hub_lock.node dist/sea/lasterm_tls_identity.node packages/clients/desktop/src-tauri/
           if [ -n "$BUNDLES" ]; then
             pnpm -F @lasterm/desktop tauri build --bundles "$BUNDLES" --config '{"build":{"beforeBuildCommand":""}}'
           else
@@ -591,6 +595,11 @@ jobs:
           $triple = "${{ matrix.triple }}"
           Copy-Item dist\sea\lasterm-agent.exe "packages\clients\desktop\src-tauri\lasterm-agent-$triple.exe"
           Copy-Item dist\sea\lasterm-hub.exe "packages\clients\desktop\src-tauri\lasterm-hub-$triple.exe"
+          # Bundled as resources, which Tauri installs beside the hub, and staged
+          # beside it in the MSIX by pack-msix.ps1 (#889).
+          foreach ($addon in "lasterm_hub_lock.node", "lasterm_tls_identity.node") {
+            Copy-Item "dist\sea\$addon" "packages\clients\desktop\src-tauri\$addon"
+          }
       # The pull-request gate lives in ci.yml. Keep this release/manual path as
       # defense in depth, and lint before the expensive Tauri package build.
       - name: Clippy (desktop crate)

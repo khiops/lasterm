@@ -17,16 +17,19 @@ The package is built with the GA Windows SDK tool `MakeAppx.exe`, discovered at 
 - The staging layout under `msix/out/stage` uses `AppxManifest.xml`, which is the manifest filename expected by `MakeAppx.exe`.
 - The script resolves the desktop executable from `packages/clients/desktop/src-tauri/Cargo.toml` (`[package] name`) and stages it next to the sidecars.
 - The Windows target is x64-only: `x86_64-pc-windows-msvc`.
-- The staged package contains the desktop executable, `lasterm-hub.exe`, `lasterm-agent.exe`, required DLLs, and the logos from `msix/Assets`: one file per scale and, for `Square44x44Logo`, per target size, plated and unplated. `pnpm icons` renders them from `packaging/brand` (see its README).
+- The staged package contains the desktop executable, `lasterm-hub.exe`, `lasterm-agent.exe`, the hub's native addons `lasterm_hub_lock.node` and `lasterm_tls_identity.node` beside it at the package root (the hub loads them from its own directory and refuses any whose bytes differ from its build's, #889), required DLLs, and the logos from `msix/Assets`: one file per scale and, for `Square44x44Logo`, per target size, plated and unplated. `pnpm icons` renders them from `packaging/brand` (see its README).
 - `MakePri.exe` indexes those logos into `resources.pri`, so the manifest can name each one without its qualifiers. The default resource-pack split is removed from its config: every candidate stays in the one package.
 - Before packing, the script fails closed if any staged executable is not a 64-bit PE file.
 - Before packing, the script also fails closed if `lasterm-hub.exe` or `lasterm-agent.exe` reports a strict `x.y.z` version that does not match the first three components of the MSIX package version.
 
-The source sidecars must exist before packaging:
+The source sidecars and the hub's addons must exist before packaging, the addons from the same hub
+build as the hub (an empty placeholder is refused):
 
 ```text
 packages\clients\desktop\src-tauri\lasterm-hub-x86_64-pc-windows-msvc.exe
 packages\clients\desktop\src-tauri\lasterm-agent-x86_64-pc-windows-msvc.exe
+packages\clients\desktop\src-tauri\lasterm_hub_lock.node
+packages\clients\desktop\src-tauri\lasterm_tls_identity.node
 ```
 
 The CI desktop job places those files from the Windows hub and agent artifacts before it invokes the MSIX script.
@@ -45,6 +48,7 @@ Build and place the Windows sidecars first:
 
 Copy-Item .\dist\sea\lasterm-agent.exe .\packages\clients\desktop\src-tauri\lasterm-agent-x86_64-pc-windows-msvc.exe -Force
 Copy-Item .\dist\sea\lasterm-hub.exe .\packages\clients\desktop\src-tauri\lasterm-hub-x86_64-pc-windows-msvc.exe -Force
+Copy-Item .\dist\sea\lasterm_hub_lock.node, .\dist\sea\lasterm_tls_identity.node .\packages\clients\desktop\src-tauri\ -Force
 ```
 
 Then package:
@@ -69,6 +73,7 @@ Validate these points on the next Windows CI dispatch or release run:
 2. `msix/out/stage/AppxManifest.xml` exists and names the resolved desktop executable.
 3. The staged desktop executable, hub sidecar, and agent sidecar all pass the x64 PE check.
 4. The sidecar version gate passes for `lasterm-hub.exe` and `lasterm-agent.exe`.
+4a. `msix/out/stage` holds `lasterm_hub_lock.node` and `lasterm_tls_identity.node` beside `lasterm-hub.exe`.
 5. `MakeAppx.exe pack /d ... /p ... /o` writes `Lasterm_<version>.0_x64.msix`.
 6. Manual `ci.yml` dispatch exposes the `msix-x86_64-pc-windows-msvc` artifact when MSIX packaging is enabled.
 7. Release runs keep the `.msix` as that run artifact; it is not uploaded to the release.

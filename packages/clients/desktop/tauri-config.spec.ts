@@ -43,6 +43,22 @@ describe("tauri.conf.json", () => {
 		expect(externalBin).toContain("lasterm-hub");
 	});
 
+	// The hub loads them from its own directory and refuses to start without
+	// them (#889). Tauri copies a resource to its target path under the
+	// executable's directory, in the build output as in an installer, so these
+	// land beside the hub; the MSIX stages the same files at its root.
+	it("installs the hub's addons beside it, as resources at the root", () => {
+		const addons = ["lasterm_hub_lock.node", "lasterm_tls_identity.node"];
+		const bundle = conf.bundle as Record<string, unknown>;
+		expect(bundle.resources).toEqual(Object.fromEntries(addons.map((name) => [name, name])));
+		const ignored = readText("src-tauri/.gitignore").split(/\r?\n/);
+		const msix = readText("msix/pack-msix.ps1");
+		for (const name of addons) {
+			expect(ignored).toContain(`/${name}`);
+			expect(msix).toContain(`"${name}"`);
+		}
+	});
+
 	it("frontendDist points to web dist", () => {
 		const build = conf.build as Record<string, unknown>;
 		expect(build).toBeDefined();

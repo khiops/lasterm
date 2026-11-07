@@ -8,17 +8,38 @@
  *   2. Embed web UI (scripts/embed-web.js) if static/ doesn't exist
  *   3. esbuild bundle (build-sea-hub.ts → lasterm-hub.cjs)
  *   4. Create static-files manifest (JSON of all web UI files → static-manifest.json)
- *   5. SEA binary packaging (build-sea-binary.ts → lasterm-hub binary)
+ *   5. SEA binary packaging (build-sea-binary.ts → lasterm-hub binary). The
+ *      hub lock and TLS identity addons are copied beside the binary, which
+ *      embeds what each must hold (addons.json) instead of the addons (#889)
  *
  * Usage:
  *   pnpm run package:sea-hub
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	copyFileSync,
+	existsSync,
+	fstatSync,
+	mkdirSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { HUB_LOCK_ADDON } from "../packages/hub/src/hub-lock.js";
+import { TLS_IDENTITY_ADDON } from "../packages/hub/src/tls-identity.js";
+import {
+	ADDON_MANIFEST_ASSET,
+	type AddonDigest,
+	type AddonManifest,
+	addonDigest,
+	parseAddonManifest,
+} from "../packages/shared/src/installed-addon.js";
 import type { SeaBuildConfig } from "./build-sea-binary.js";
 import { buildSeaBinary } from "./build-sea-binary.js";
 import { buildOptions } from "./build-sea-hub.js";
@@ -218,6 +239,68 @@ export function checkHubLockExports(exports: Record<string, unknown>, addonPath:
 	}
 }
 
+/**
+ * The native addons installed beside the executable rather than embedded in
+ * it (#889), by the name the hub loads each one under, from their builds.
+ */
+export function installedAddonSources(): Record<string, string> {
+	return {
+		[HUB_LOCK_ADDON]: locateHubLockAddon(),
+		[TLS_IDENTITY_ADDON]: locateTlsIdentityAddon(),
+	};
+}
+
+/**
+ * Copy each addon into `distDir`, beside the executable, under the name the
+ * hub loads it by, and return the manifest the executable embeds: what each
+ * copy holds, read back from the copy, so the record is of the file shipped.
+ */
+export function installAddons(
+	distDir: string,
+	sources: Readonly<Record<string, string>>,
+): AddonManifest {
+	const manifest: Record<string, AddonDigest> = {};
+	for (const name of Object.keys(sources).sort()) {
+		const destination = join(distDir, name);
+		try {
+			copyFileSync(sources[name] as string, destination);
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			throw new Error(
+				`[package-sea-hub] cannot write ${destination}: ${detail}. A hub running from ${distDir} keeps its addons open: stop it first.`,
+			);
+		}
+		manifest[name] = digestAddonFile(destination);
+	}
+	return manifest;
+}
+
+/** What the hub will check a file against, computed as the hub computes it. */
+export function digestAddonFile(file: string): AddonDigest {
+	const fd = openSync(file, "r");
+	try {
+		const digest = addonDigest(fd, fstatSync(fd).size);
+		if (digest === undefined || digest.size === 0) {
+			throw new Error(
+				`[package-sea-hub] ${file} is empty or carries a certificate table that does not end the file: not an addon to ship.`,
+			);
+		}
+		return digest;
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * Write the manifest as the executable embeds it, and read it back the way the
+ * hub reads it, so a manifest the hub would refuse fails the build instead.
+ */
+export function writeAddonManifest(file: string, manifest: AddonManifest): void {
+	const text = `${JSON.stringify(manifest, null, 2)}\n`;
+	parseAddonManifest(text);
+	writeFileSync(file, text, "utf8");
+}
+
 /** Read the hub package version from its package.json. */
 function readHubVersion(): string {
 	const pkgPath = join(ROOT, "packages", "hub", "package.json");
@@ -362,13 +445,13 @@ async function main(): Promise<void> {
 	// ------------------------------------------------------------------
 	console.log("[package-sea-hub] step 5/5: SEA binary packaging");
 
-	const hubLockAddonPath = locateHubLockAddon();
-	const tlsIdentityAddonPath = locateTlsIdentityAddon();
+	const addonSources = installedAddonSources();
 	const tomlWasmPath = locateTomlWasm();
 	const version = readHubVersion();
 
-	console.log(`[package-sea-hub] hub lock addon:      ${hubLockAddonPath}`);
-	console.log(`[package-sea-hub] TLS identity addon:  ${tlsIdentityAddonPath}`);
+	for (const [name, source] of Object.entries(addonSources)) {
+		console.log(`[package-sea-hub] ${name}: ${source}`);
+	}
 	console.log(`[package-sea-hub] toml-edit WASM:        ${tomlWasmPath}`);
 	console.log(`[package-sea-hub] hub version: ${version}`);
 
@@ -378,18 +461,28 @@ async function main(): Promise<void> {
 	const versionFilePath = join(distDir, "VERSION");
 	writeFileSync(versionFilePath, version, "utf8");
 
+	// The hub lock and the TLS identity go beside the executable, which embeds
+	// only what each must hold (#889).
+	const addonManifest = installAddons(distDir, addonSources);
+	const addonManifestPath = join(distDir, ADDON_MANIFEST_ASSET);
+	writeAddonManifest(addonManifestPath, addonManifest);
+	for (const [name, digest] of Object.entries(addonManifest)) {
+		console.log(
+			`[package-sea-hub] installed ${join(distDir, name)} (${digest.size} bytes, sha256 ${digest.sha256})`,
+		);
+	}
+
 	const seaCfg: SeaBuildConfig = {
 		entryScript: join(ROOT, "dist", "sea", "lasterm-hub.cjs"),
 		outputBinary,
 		name: "lasterm-hub",
-		nativeAddons: {
-			"lasterm_hub_lock.node": hubLockAddonPath,
-			"lasterm_tls_identity.node": tlsIdentityAddonPath,
-		},
+		// None: SQLite is node:sqlite (#893), and the addons are beside it (#889).
+		nativeAddons: {},
 		extraAssets: {
 			VERSION: versionFilePath,
 			"static-manifest.json": staticManifestPath,
 			"toml_edit.wasm": tomlWasmPath,
+			[ADDON_MANIFEST_ASSET]: addonManifestPath,
 		},
 		useCodeCache: true,
 		disableExperimentalSEAWarning: true,

@@ -33,8 +33,9 @@ echo "🔨 Building hub SEA (triple: $LASTERM_TARGET_TRIPLE)..."
 cd "$ROOT"
 pnpm -F @lasterm/shared build
 
-# The hub's single-instance authority is a napi cdylib. Build it on the same
-# host that packages this hub, then give the SEA asset its Node addon name.
+# The hub lock and the TLS identity are napi cdylibs. Build them on the host
+# that packages this hub; packaging copies them beside the executable under
+# their Node addon names, and the executable embeds what each must hold (#889).
 cargo build --locked -p lasterm-hub-lock -p lasterm-tls-identity --release --target-dir "$LASTERM_CARGO_TARGET_DIR"
 LOCK_LIBRARY="$LASTERM_CARGO_TARGET_DIR/release/$LOCK_LIBRARY_NAME"
 TLS_LIBRARY="$LASTERM_CARGO_TARGET_DIR/release/$TLS_LIBRARY_NAME"
@@ -58,3 +59,5 @@ pnpm run package:sea-hub
 
 SIZE=$(du -h "$LASTERM_DIST_DIR/lasterm-hub" 2>/dev/null | cut -f1 || echo "?")
 echo "✅ Hub SEA built → $LASTERM_DIST_DIR/lasterm-hub ($SIZE)"
+# The executable refuses to start without them, unchanged, in its directory.
+echo "   with its addons beside it: lasterm_hub_lock.node, lasterm_tls_identity.node"

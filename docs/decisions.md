@@ -7,6 +7,53 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## HUB-ADDONS-BESIDE — the hub's native addons are installed beside its executable, checked against digests it embeds (#889, 2026-11-07)
+
+- **Beside the executable, never extracted.** The single executable embedded `lasterm_hub_lock.node`
+  and `lasterm_tls_identity.node` and wrote them to a per-version cache directory at startup, because
+  an OS loader maps a library only from a file. Each version thus wrote new executables at runtime,
+  which antivirus software inspects, outside the package the Store signs, into a directory that had to
+  be checked, versioned and cleaned. They now ship in the executable's directory and are loaded from
+  there (SPEC.md § 3.5).
+- **The digests are embedded, the addons are not.** The build copies each addon beside the executable
+  and records its size and SHA-256 in `addons.json`, a SEA asset: changing that record means changing
+  the executable. A missing or different addon stops the start, naming the file. Loading follows the
+  cache's rules: one open, the digest read through that descriptor, and on Linux the load through
+  `/proc/self/fd/N`, so there is no check-then-load race (SECURITY.md § 4.5).
+- **The install directory is trusted as far as the executable, not walked.** The cache's chain walk
+  existed because the hub wrote into a directory others might share. Whoever can change the
+  executable's directory can replace the executable, so that walk would add nothing. On POSIX the file
+  itself must be writable by nobody who cannot write the executable. On Windows the race between the
+  check and LoadLibrary remains, narrowed as before: it is open only to an account able to change the
+  install directory, which under `Program Files\WindowsApps` no user account can.
+- **The digest survives an Authenticode signature, and only that.** The Store signs the executables of
+  a package it ingests (#718); if it signs the addons, their bytes change. A PE file's digest reads the
+  CheckSum and the certificate directory entry as zeros, and the file may carry, past its recorded
+  size, only a certificate table that ends it, after at most 7 zero bytes of padding. Rejected: plain
+  SHA-256 of the whole file, which a Store signature would turn into a hub that never starts.
+- **Desktop: Tauri resources, and the MSIX root.** `bundle.resources` maps each addon to its own name,
+  so Tauri copies it beside the executables in the build output and the installers; `pack-msix.ps1`
+  stages it at the package root beside `lasterm-hub.exe`, where the sidecar's `process.execPath`
+  points. Tauri resolves resources at compile time, so every desktop crate build needs the files, or
+  empty placeholders for clippy and the tests, as for the sidecars.
+- **Standalone hub: a zip.** The release published `lasterm-hub-x86_64-pc-windows-msvc.exe` alone; it
+  now publishes `lasterm-hub-x86_64-pc-windows-msvc.zip`, the executable and its two addons, which
+  `release-assets.ts` writes with Node's zlib in the job that may not install anything. Nothing reads the
+  single file: the hub fetches agents only, `SHA256SUMS` lists agents only, the desktop bundles its own
+  hub, and a standalone hub already needs the agent beside it for local terminals. A remote hub paired
+  from another machine (#193) does not exist yet; when it does, it runs from the zip as well.
+  Rejected: the addons as separate release assets, which must keep exact names beside the executable
+  and would collide across platforms.
+- **The old cache goes.** A start of the single executable, after the hub lock, removes what earlier
+  versions extracted: only regular files with an addon's name or its temporary's, in directories reached
+  without a link and named like a version and a platform, and directories only when empty, up to
+  `addons`.
+- **The extraction code goes too.** With better-sqlite3 gone (NODE-SQLITE), nothing is extracted
+  any more. The cache extractor, its directory-chain walk and runtime-directory fallback, and their
+  specs are removed; `@lasterm/shared`'s `sea-addon-loader.ts` keeps `detectSea` alone.
+
+---
+
 ## NODE-SQLITE — the hub's SQLite is node:sqlite, behind one adapter (#893, #146, 2026-11-07)
 
 - **node:sqlite, rather than better-sqlite3 13 or a crate of our own.** It is compiled into the
@@ -37,6 +84,8 @@ heading, with a pointer to the section that replaced it. A section without one i
   addon is left for it to test), and its `allowBuilds` entry.
 - **The fallback was better-sqlite3 13**, had the adapter met a behaviour it could not keep. It met
   none.
+
+---
 
 ## KEY-AGENT-SIGNER — on key auth, the SSH agent signs when it holds the configured key (#876, 2026-11-06)
 
@@ -340,6 +389,9 @@ NODE-SQLITE (#893).
 ---
 
 ## STORE-ONLY-DESKTOP — the desktop app ships through the Microsoft Store only (2026-10-02)
+
+**Status:** the Windows hub is published as a zip of the executable and its native addons since
+HUB-ADDONS-BESIDE (#889); the rest holds.
 
 - The only desktop package distributed is the one the Microsoft Store signs. The Store signs it at no cost; the GitHub installers were unsigned, so Windows warned about an unknown publisher, and Authenticode signing is a recurring cost not taken.
 - The release workflow publishes the agents, the Windows hub executable and `SHA256SUMS-<version>.txt`, and no desktop package: no NSIS `setup.exe`, no MSI, no unsigned MSIX. It still packages the unsigned MSIX when the three `MSIX_*` variables are set, as the workflow-run artifact `msix-x86_64-pc-windows-msvc` (kept 30 days), for the Store submission (#619); that package is never uploaded to the release.

@@ -56,9 +56,10 @@ ordinary tab. [SPEC.md § 3.4](docs/SPEC.md) lists which setups are installable.
 
 There is no `npx lasterm`: the hub ships as a single executable that embeds its own
 Node, so npm would add a runtime requirement it exists to remove. Each
-[release](../../releases) carries the Windows hub executable and the agents for Linux
-(x86_64, aarch64) and Windows. No release carries a Linux or macOS hub yet (#565); on
-Linux, build it from source as above.
+[release](../../releases) carries the Windows hub and the agents for Linux (x86_64, aarch64)
+and Windows. The hub is a zip: the executable and the two native addons it loads from its own
+directory, to unpack together. No release carries a Linux or macOS hub yet (#565); on Linux,
+build it from source as above.
 
 The only desktop package distributed is the one the Microsoft Store signs: the Store
 installs and updates it, and the release workflow publishes no desktop installer
@@ -226,11 +227,13 @@ not a supported target: nothing builds or tests it (#224).
 ```sh
 ./scripts/build-agent.sh   # Rust agent → dist/sea/lasterm-agent  (cargo --release)
 ./scripts/build-hub.sh     # Hub SEA    → dist/sea/lasterm-hub
-                           #   builds the web UI, embeds it, bundles the hub and its addons,
-                           #   and produces a Node Single Executable Application
+                           #   builds the web UI, embeds it, bundles the hub, produces a Node
+                           #   Single Executable Application, and puts its two addons beside it
 ```
 
-Both binaries land co-located in `dist/sea/`; the hub resolves the agent next to its own executable. Run it:
+Both binaries land co-located in `dist/sea/`; the hub resolves the agent next to its own executable,
+and loads its two native addons (`lasterm_hub_lock.node`, `lasterm_tls_identity.node`) from there too.
+Run it:
 
 ```sh
 cd dist/sea

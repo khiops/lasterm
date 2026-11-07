@@ -1,5 +1,8 @@
 /lasterm-hub-*
 /lasterm-agent-*
+# The hub's addons, placed by the build beside the sidecars (#889).
+/lasterm_hub_lock.node
+/lasterm_tls_identity.node
 /gen/
 /target/
 # cargo-mutants writes its per-run output and the previous run's copy here.

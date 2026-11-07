@@ -37,8 +37,13 @@ Write-Host "━━━ [4/4] Tauri Desktop ━━━" -ForegroundColor Yellow
 $triple = $env:LASTERM_TARGET_TRIPLE
 Copy-Item "$env:LASTERM_DIST_DIR\lasterm-agent.exe" "$tauriDir\lasterm-agent-$triple.exe" -Force
 Copy-Item "$env:LASTERM_DIST_DIR\lasterm-hub.exe" "$tauriDir\lasterm-hub-$triple.exe" -Force
+# The hub's addons: Tauri resources, which it puts beside the hub in the build
+# output and the installers; pack-msix.ps1 stages them beside it too (#889).
+foreach ($addon in "lasterm_hub_lock.node", "lasterm_tls_identity.node") {
+    Copy-Item "$env:LASTERM_DIST_DIR\$addon" "$tauriDir\$addon" -Force
+}
 
-Write-Host "  → Sidecars placed in src-tauri/" -ForegroundColor DarkGray
+Write-Host "  → Sidecars and the hub's addons placed in src-tauri/" -ForegroundColor DarkGray
 
 Set-Location $Root
 # The override travels as a file, relative to the package pnpm runs in. As an

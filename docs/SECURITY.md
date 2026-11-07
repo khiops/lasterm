@@ -74,7 +74,7 @@
 | Pairing code disclosure | Read `meta.db`, its WAL or a copy of it while a code is live, without reading the hub's memory | HIGH — the code is redeemed for a token | LOW | `meta.db` holds a keyed hash of the code, never the code, under a key that exists only in the hub's memory for one run (§ 2.3) |
 | Hub TLS key disclosure | Read `hub-tls-key.pem` | HIGH — the holder can impersonate the hub to every pinning client | LOW (requires same user) | chmod 600. **No supported rotation exists yet (#193)**, and clearing a client's pin revokes nothing. **The invariant: never clear a pin while the compromised key can still be served** — do that and the client pins the compromised identity again. Until then, stop the hub first, then replace the key at its source: delete `hub-tls-key.pem` and `hub-tls-generated-cert.pem` for a generated identity, or replace the configured pair for an operator-supplied one — deleting the generated files does nothing when a certificate is configured, since the hub reloads the same key. Start the hub, confirm the recorded fingerprint changed, and only then clear each client's pin and let it re-pin on a first contact you are watching. Every browser exception must be accepted again |
 | Protected file substitution | Any process able to rewrite a directory on the path to `auth.json`, `runtime.json`, the pinned-key store or the TLS key | HIGH — a substituted `runtime.json` or pin store points a client at a stranger's hub; a substituted `auth.json` supplies a token of the attacker's choosing | LOW | On Unix, every directory component is opened relative to the one above it, from the filesystem root, without following links, and the file is judged on the descriptor it is then read through. On Windows, ancestors and pathname-based publication remain unprotected — see § 4.4. |
-| Native addon substitution | Another account able to write a directory on the path to the addon cache leaves a library where the single executable extracts its native addons | HIGH — the library runs inside the hub, which holds the token and terminal authority | LOW | Every addon is authenticated against the SHA-256 of the copy embedded in the executable, read through the descriptor it is opened with. On Linux the cache is used only when every directory on its path is private to this account or root — otherwise the addons are extracted under `XDG_RUNTIME_DIR`, checked the same way, or the hub does not start — and the addon is loaded through that descriptor. On Windows neither holds: the chain is not examined and LoadLibrary resolves the name again — see § 4.5 |
+| Native addon substitution | Another account replaces or rewrites the hub lock or TLS identity addon in the directory of the hub executable | HIGH — the library runs inside the hub, which holds the token and terminal authority | LOW | Every addon is authenticated against the size and SHA-256 the executable recorded when it was built, read through the descriptor it is opened with, and a missing or different one stops the start. On POSIX the file must be owned by this account, root or the executable's owner, and writable by nobody who cannot write the executable. On Linux it is loaded through that descriptor. On Windows LoadLibrary resolves the name again, so an account able to change the install directory can race the load — one that could replace the executable just as well; under `Program Files\WindowsApps`, where the Store installs it, no user account can — see § 4.5 |
 
 ## 2. Authentication
 
@@ -147,7 +147,7 @@ runs everywhere.
      to a directory this account owns
    - If this account owns it and group or others have any permission on it: tightened,
      every group and other permission removed and the owner's left as they are, as the
-     addon cache is (§ 4.5). That is a directory an earlier version made under a loose
+     addon cache was before #889. That is a directory an earlier version made under a loose
      umask, or one made by hand. If the mode does not change — a filesystem that
      ignores chmod: HARD FAIL
    - Expected: 0700 (drwx------), owned by the user running the hub. The hub creates it
@@ -557,45 +557,61 @@ have been observable here: no test executes these paths on Windows.
 
 ### 4.5 How a native addon is loaded
 
-The single executable embeds its native addons, the hub lock and the TLS identity (SQLite is
-`node:sqlite`, built into its Node, since #893), and extracts them to
-`addons/<version>/<platform>-<arch>` under the cache directory before loading them. What must hold is that only the embedded addon is executed from there. The actor is another
-account able to write a directory on that path; a process running as the same user already has
+What must hold is that only the addon the executable was built with runs in the hub. The actor is
+another account able to change a file the hub loads; a process running as the same user already has
 everything a substituted addon would give it, and root is trusted.
 
-**Everywhere**, a file in the cache is loaded only when the descriptor opened on it reads the
-SHA-256 of the embedded copy. Anything else is replaced by a fresh extraction, written beside it and
-renamed into place, and the result is opened and checked the same way.
+The hub has two native addons, `lasterm_hub_lock.node` and `lasterm_tls_identity.node` (SQLite is
+`node:sqlite`, built into its Node, since #893). The single executable does not embed them: they are
+installed in the executable's own directory, and loaded from there (#889). When the executable is built, `package-sea-hub.ts` copies
+each one there and records its size and SHA-256 in `addons.json`, which the executable embeds. At
+startup each addon is opened once, judged on that descriptor, and loaded through it where the system
+allows (`installed-addon.ts` in `@lasterm/shared`). One that is missing, or does not match, stops the
+start with a message that names the file.
 
-**On Linux** the directory chain is examined from `/` down before the cache is used: every directory
-a name is looked up in must be owned by this account or root and writable by neither group nor
-others unless it is sticky, and every directory and link passed through must be owned by this
-account or root. Links are followed and their targets examined the same way. Inside lasterm's own
-cache directory, a loose directory this account owns is tightened. A directory that fails anywhere
-else is most often a umask of 002 rather than an attack — Debian and Ubuntu use it for a user with a
-private group, so a `~/.cache` that pip, npm or `mkdir -p` creates there is 0775 although nobody else
-is in the group — and nothing here can tell those apart, since group membership may come from NSS or
-LDAP. The cache is then not used: the addons are extracted to
-`$XDG_RUNTIME_DIR/lasterm/addons/<version>/<platform>-<arch>`, walked by the same rules, and one
-line on stderr names the refused directory, its mode and the fix (tighten it, or set
-`XDG_CACHE_HOME`). On systemd that directory is a tmpfs, 0700 and owned by the user, so the fallback
-costs one extraction per boot — or per login, where the directory goes with the user's last session
-because lingering is off. The hub refuses to start only when the fallback is refused too, or
-`XDG_RUNTIME_DIR` is not set, and the message names both places; it also refuses outright when the
-failure is inside lasterm's own directory, where it cannot be a umask.
+**The directory is the executable's.** Whoever can replace a file in it can replace the executable
+itself, and Windows already looks there first for the executable's own libraries. So the install
+directory is trusted exactly as far as the executable is, and its chain is not walked. Under
+`Program Files\WindowsApps`, where the Store installs the desktop and its hub, no user account can
+change anything. A standalone hub unpacked in the user's profile has the profile's ACL: this user,
+administrators and SYSTEM, as the extraction cache before it had. Unpacked in a directory other
+accounts may write, the executable is as exposed as its addons.
 
-The file must be a regular file, reached without following a link, owned by this account or root
-and not writable by group or others. It is then loaded through `/proc/self/fd/N`, so what `dlopen`
-maps is the file that was hashed. A POSIX ACL granting write to another account shows in the group
-bits and is refused; ACLs the mode bits do not reflect are not read.
+**Everywhere**, the digest read through the descriptor must be the recorded one, and the size too. A
+PE file's digest reads the CheckSum and the certificate table's directory entry as zeros, and stops
+where the file stood when it was built. Past that point, a file may carry one thing only: an
+Authenticode certificate table that ends the file, after at most 7 zero bytes of padding. That is what a
+signature added after the build looks like: the Microsoft Store signs the executables of a package it
+ingests (#718), and a library it signed is still the one built. Those fields and the table are not
+mapped as code, and every other byte is covered. A table anywhere else is refused, as are any other
+trailing bytes. An ELF file is hashed whole and must have the recorded size.
 
-**On Windows** neither the chain nor the file's ACL is examined: Node reports no owner and no DACL
-there, so the cache relies on the profile's default ACL, as `auth.json` does (#200). A cache
-redirected into a directory other accounts may write — as folders made at the root of a drive
-usually are — is not detected. `LoadLibrary` takes a name and resolves it again, so the check and
-the load cannot be made one operation. The verified handle is held across the load, and while it is
-open NTFS refuses to rename any directory above the file: what remains is a change to the cache
-directory's own entries or a write to the file, by whoever its ACL lets do that.
+**On POSIX** the file must be a regular file reached without following a link (`O_NOFOLLOW`), owned by
+this account, root or the executable's owner, and writable by group or others only where the
+executable is too, by the same group. That accepts a hub unpacked under a umask of 002, whose
+executable is group-writable as well, and refuses an addon nobody else should have been able to
+change.
+
+**On Linux** it is then loaded through `/proc/self/fd/N`, so what `dlopen` maps is the file that was
+hashed.
+
+**On Windows** the entry is inspected without following a link, then opened, and the handle must
+name the same file. No owner or DACL is read: Node reports neither, as for `auth.json` (#200).
+`LoadLibrary` takes a name and resolves it again, so the check and the load cannot be made one
+operation. The verified handle is held across the load, and while it is open NTFS refuses to rename
+any directory above the file. What remains is a change to the install directory's own entries, or a
+write to the file, by an account its ACL allows to make it: one that could replace the executable.
+
+**What earlier versions left.** Before #889 and #893 the single executable embedded its addons, the
+hub lock, the TLS identity and better-sqlite3, and extracted them at every start to
+`addons/<version>/<platform>-<arch>` under the cache directory, or under `$XDG_RUNTIME_DIR/lasterm`
+when that cache was refused. Nothing removed a version's directory. A start of the single executable,
+once it holds the hub lock, removes them (`retired-addon-cache.ts`): only a regular file named after
+one of those addons or one of their temporaries, in a directory reached without a link, owned by this
+account on POSIX, whose name is a version and then a platform. Directories go only when empty, up to
+`addons`; the root above stays, since under `XDG_RUNTIME_DIR` it also holds the local agent's socket.
+A file another process has loaded, an earlier hub still running on Windows, is left for a later
+start.
 
 ## 5. Input Validation
 

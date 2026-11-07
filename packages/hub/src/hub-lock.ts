@@ -1,17 +1,13 @@
 import { mkdirSync } from "node:fs";
-import { createRequire } from "node:module";
 import { platform } from "node:os";
 import { join, resolve } from "node:path";
-import {
-	detectSea,
-	getAddonCacheDir,
-	loadCachedAddon,
-	readSeaVersion,
-} from "@lasterm/shared/dist/sea-addon-loader.js";
+import { installedAddonPath, loadInstalledAddon } from "@lasterm/shared/dist/installed-addon.js";
+import { detectSea } from "@lasterm/shared/dist/sea-addon-loader.js";
 import { cargoTargetDir } from "./cargo-target-dir.js";
 
 const LOCK_FILE_NAME = "hub.lock";
-const SEA_ASSET_NAME = "lasterm_hub_lock.node";
+/** The addon's name beside the single executable (#889). */
+export const HUB_LOCK_ADDON = "lasterm_hub_lock.node";
 
 interface NativeHubLock {
 	readonly path: string;
@@ -107,26 +103,17 @@ export function hubNativeAddon(): HubNativeAddon {
 }
 
 function loadHubNativeAddon(): HubNativeAddon {
-	if (detectSea()) return { exports: loadSeaAddon(), source: SEA_ASSET_NAME };
+	if (detectSea()) {
+		// The single executable loads the addon installed beside it, once its
+		// descriptor shows the bytes the executable's manifest records.
+		return {
+			exports: loadInstalledAddon(HUB_LOCK_ADDON),
+			source: installedAddonPath(HUB_LOCK_ADDON),
+		};
+	}
 	const override = process.env.LASTERM_HUB_LOCK_ADDON;
 	const addonPath = override && override.length > 0 ? override : localAddonPath();
 	return { exports: dlopenAddon(addonPath), source: addonPath };
-}
-
-function loadSeaAddon(): Record<string, unknown> {
-	const req = createRequire(import.meta.url);
-	const sea = req("node:sea") as {
-		getRawAsset: (name: string) => ArrayBuffer;
-		getAsset?: (name: string, encoding: BufferEncoding) => string;
-	};
-	// Loaded through the authenticated cache, never by a path handed back from
-	// it: the path is only a name, and a name can change between the check and
-	// the load.
-	return loadCachedAddon(
-		SEA_ASSET_NAME,
-		getAddonCacheDir(readSeaVersion(sea)),
-		Buffer.from(sea.getRawAsset(SEA_ASSET_NAME)),
-	);
 }
 
 function localAddonPath(): string {

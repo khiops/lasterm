@@ -1,18 +1,14 @@
 import { X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { platform } from "node:os";
 import { join } from "node:path";
 import type { TlsConfig } from "@lasterm/shared";
-import {
-	detectSea,
-	getAddonCacheDir,
-	loadCachedAddon,
-	readSeaVersion,
-} from "@lasterm/shared/dist/sea-addon-loader.js";
+import { installedAddonPath, loadInstalledAddon } from "@lasterm/shared/dist/installed-addon.js";
+import { detectSea } from "@lasterm/shared/dist/sea-addon-loader.js";
 import { cargoTargetDir } from "./cargo-target-dir.js";
 
-const SEA_ASSET_NAME = "lasterm_tls_identity.node";
+/** The addon's name beside the single executable (#889). */
+export const TLS_IDENTITY_ADDON = "lasterm_tls_identity.node";
 
 interface GeneratedTlsIdentity {
 	readonly certificatePem?: string;
@@ -61,27 +57,15 @@ export function certificateSpki(certificate: string): string {
 }
 
 function loadTlsIdentityAddon(): TlsIdentityAddon {
-	if (detectSea()) return loadSeaAddon();
+	if (detectSea()) {
+		// The single executable loads the addon installed beside it, once its
+		// descriptor shows the bytes the executable's manifest records.
+		const exports = loadInstalledAddon(TLS_IDENTITY_ADDON);
+		return asTlsIdentityAddon(exports, installedAddonPath(TLS_IDENTITY_ADDON));
+	}
 	const override = process.env.LASTERM_TLS_IDENTITY_ADDON;
 	const addonPath = override && override.length > 0 ? override : localAddonPath();
 	return dlopenAddon(addonPath);
-}
-
-function loadSeaAddon(): TlsIdentityAddon {
-	const req = createRequire(import.meta.url);
-	const sea = req("node:sea") as {
-		getRawAsset: (name: string) => ArrayBuffer;
-		getAsset?: (name: string, encoding: BufferEncoding) => string;
-	};
-	// Loaded through the authenticated cache, never by a path handed back from
-	// it: the path is only a name, and a name can change between the check and
-	// the load.
-	const exports = loadCachedAddon(
-		SEA_ASSET_NAME,
-		getAddonCacheDir(readSeaVersion(sea)),
-		Buffer.from(sea.getRawAsset(SEA_ASSET_NAME)),
-	);
-	return asTlsIdentityAddon(exports, SEA_ASSET_NAME);
 }
 
 function localAddonPath(): string {

@@ -152,12 +152,20 @@ desktop_fmt() {
 	(cd "$desktop_crate" && rustfmt --check --edition "${edition:-2021}" "${roots[@]}")
 }
 
-# Tauri resolves the sidecars while compiling; clippy and the tests neither run
-# nor package them, so empty files do, as in ci.yml. A real one is kept.
+# Tauri resolves the sidecars and the hub's addons, its resources, while
+# compiling; clippy and the tests neither run nor package them, so empty files
+# do, as in ci.yml. A real one is kept.
 desktop_clippy() {
 	local name file
 	for name in lasterm-agent lasterm-hub; do
 		file="$desktop_crate/$name-$sidecar_triple$sidecar_ext"
+		if [ ! -e "$file" ]; then
+			: >"$file"
+			echo "placed an empty $file for tauri to resolve"
+		fi
+	done
+	for name in lasterm_hub_lock.node lasterm_tls_identity.node; do
+		file="$desktop_crate/$name"
 		if [ ! -e "$file" ]; then
 			: >"$file"
 			echo "placed an empty $file for tauri to resolve"

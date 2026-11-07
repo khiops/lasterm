@@ -34,7 +34,7 @@
 			"hub": true,
 			"desktop": true,
 			"artifacts": {
-				"hub": ["lasterm-hub-x86_64-pc-windows-msvc.exe"],
+				"hub": ["lasterm-hub-x86_64-pc-windows-msvc.zip"],
 				"msix": ["Lasterm_{version}.*_x64.msix"]
 			},
 			"enabled": true

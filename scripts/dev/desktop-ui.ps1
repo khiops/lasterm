@@ -109,6 +109,14 @@ foreach ($exe in "lasterm-desktop.exe", "lasterm-hub.exe", "lasterm-agent.exe") 
 		Write-Host "kept the running $exe"
 	}
 }
+# The hub's addons, which it loads from its own directory and checks against
+# the digests it was built with (#889): they go with the hub just copied. The
+# hub that held them was stopped above.
+foreach ($addon in "lasterm_hub_lock.node", "lasterm_tls_identity.node") {
+	$from = Join-Path $Release $addon
+	if (-not (Test-Path $from)) { throw "$from is missing; run with -Build" }
+	Copy-Item $from $RunDir -Force
+}
 
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$Port"
 Start-Process (Join-Path $RunDir "lasterm-desktop.exe")

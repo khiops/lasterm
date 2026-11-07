@@ -6,6 +6,7 @@ import {
 	isValidUlid,
 	MAX_ENV_COUNT,
 	MAX_INPUT_SIZE,
+	sshPortFromText,
 	validateCustomCommand,
 	validateShell,
 } from "./validation.js";
@@ -516,5 +517,40 @@ describe("validateShell", () => {
 
 	it("rejects Windows path ending with \\..", () => {
 		expect(validateShell("C:\\Windows\\..")).toBe("shell must not contain path traversal");
+	});
+});
+
+describe("sshPortFromText (#901)", () => {
+	it.each([
+		["1", 1],
+		["22", 22],
+		["2222", 2222],
+		["65535", 65535],
+		["02222", 2222],
+	])("reads %j as %i", (text, port) => {
+		expect(sshPortFromText(text)).toBe(port);
+	});
+
+	// Mutation: parse with parseInt or Number() and a range check, and `1.5`,
+	// `2222abc` or `65535.0000000000000001` pass.
+	it.each([
+		"",
+		"0",
+		"-1",
+		"+22",
+		"1.5",
+		"1e",
+		"1e3",
+		"0x16",
+		" 22",
+		"22 ",
+		"2222abc",
+		"70000",
+		"65536",
+		"65535.0000000000000001",
+		"1.0000000000000001",
+		"99999999999999999999",
+	])("refuses %j", (text) => {
+		expect(sshPortFromText(text)).toBeNull();
 	});
 });

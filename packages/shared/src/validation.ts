@@ -19,6 +19,17 @@ export function isValidDimensions(cols: unknown, rows: unknown): boolean {
 	);
 }
 
+/**
+ * The SSH port a text names: a whole number from 1 to 65535, written in digits
+ * only. Anything else is null (#901), where parseInt read `1.5` as 1 and
+ * `2222abc` as 2222, and Number() rounds `65535.0000000000000001` into range.
+ */
+export function sshPortFromText(text: string): number | null {
+	if (!/^[0-9]+$/.test(text)) return null;
+	const port = Number(text);
+	return port >= 1 && port <= 65535 ? port : null;
+}
+
 export const MAX_INPUT_SIZE = 65_536; // 64 KB
 
 export function isValidInputData(data: unknown): data is Uint8Array {

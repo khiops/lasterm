@@ -1174,3 +1174,172 @@ describe("the hub's SSH config, read or refused (#734, #757)", () => {
 		expect(sshConfigEntries.value).toEqual([]);
 	});
 });
+
+// ─── The Port field (#901) ───────────────────────────────────────────────────
+//
+// A port that is not a whole number from 1 to 65535 was taken as an emptied
+// field: `0` became no port and `-1` was left out, and a save then sent the
+// stored port as null, which the hub clears. The field's text is now what the
+// form reads; an invalid one refuses the save and the test.
+
+describe("the Port field (#901)", () => {
+	const PORT_ERROR = "Port must be a number from 1 to 65535, in digits only";
+	const STORED_ON_2222: Host = {
+		id: "h2222",
+		label: "pi",
+		type: "ssh",
+		sshHost: "pi.test",
+		sshPort: 2222,
+		sshAuth: "agent",
+		iconType: "auto",
+		trustRemoteHints: "apply",
+		sortOrder: 0,
+		os: "linux",
+		arch: null,
+		createdAt: "",
+		updatedAt: "",
+	};
+
+	beforeEach(() => {
+		knownHosts.length = 0;
+		daemonConnection.connected = false;
+		updateHostSpy.mockClear();
+		createHostSpy.mockClear();
+		createHostGroupSpy.mockReset();
+		testWsClient.on.mockReset();
+		testWsClient.send.mockReset();
+	});
+
+	it("shows the stored port as the field's text, and nothing for none", () => {
+		expect(useHostForm(STORED_ON_2222).portText.value).toBe("2222");
+		expect(useHostForm().portText.value).toBe("");
+	});
+
+	// Mutation: drop the port from canSave, and each of these is saved.
+	it.each([
+		"1e",
+		"0",
+		"-1",
+		"1.5",
+		"70000",
+		"2222abc",
+		"65535.0000000000000001",
+		"1.0000000000000001",
+	])("refuses %j: the reason is given and nothing is sent", async (text) => {
+		const { setPortText, portError, canSave, save, form } = useHostForm(STORED_ON_2222);
+		setPortText(text);
+
+		expect(portError.value).toBe(PORT_ERROR);
+		expect(canSave.value).toBe(false);
+		expect(form.value.sshPort).toBe(2222);
+		expect(await save()).toBeNull();
+		expect(updateHostSpy).not.toHaveBeenCalled();
+	});
+
+	it("still clears the stored port once the field is emptied, after an invalid entry (#792)", async () => {
+		const { setPortText, portError, save } = useHostForm(STORED_ON_2222);
+		setPortText("1e");
+		setPortText("");
+
+		expect(portError.value).toBeNull();
+		await save();
+		expect(updateHostSpy).toHaveBeenCalledOnce();
+		expect(updateHostSpy.mock.calls[0]?.[1]).toEqual({ ssh_port: null });
+	});
+
+	it("takes a whole number from 1 to 65535 as the port", async () => {
+		const { form, setPortText, portError, save } = useHostForm();
+		form.value.label = "web";
+		form.value.sshHost = "10.0.0.5";
+		form.value.sshAuth = "agent";
+		for (const text of ["1", "65535", "2222"]) {
+			setPortText(text);
+			expect(portError.value).toBeNull();
+			expect(form.value.sshPort).toBe(Number(text));
+		}
+
+		await save();
+		expect(createHostSpy.mock.calls[0]?.[0]).toHaveProperty("ssh_port", 2222);
+	});
+
+	// Mutation: read the form after the group's await without checking it
+	// again, and the port typed meanwhile is saved.
+	it("stops a save whose port turned invalid while its new group was being created", async () => {
+		let groupCreated: (answer: unknown) => void = () => {};
+		createHostGroupSpy.mockReturnValueOnce(
+			new Promise((resolve) => {
+				groupCreated = resolve;
+			}),
+		);
+		const { save, saveError, showNewGroup, newGroupName, setPortText } =
+			useHostForm(STORED_ON_2222);
+		showNewGroup.value = true;
+		newGroupName.value = "Prod";
+
+		const saving = save();
+		setPortText("0");
+		groupCreated({ ok: true, group: { id: "g1", name: "Prod" } });
+
+		expect(await saving).toBeNull();
+		expect(updateHostSpy).not.toHaveBeenCalled();
+		expect(saveError.value).not.toBeNull();
+	});
+
+	// Mutation: drop the guard from testConnectionInline, and the test is sent.
+	it("tests no connection on an invalid port", async () => {
+		const { setPortText, testConnectionInline, testing } = useHostForm(STORED_ON_2222);
+		setPortText("0");
+
+		await testConnectionInline();
+		expect(testWsClient.send).not.toHaveBeenCalled();
+		expect(testing.value).toBe(false);
+	});
+
+	it("tests no connection once the port turned invalid while the test was starting", async () => {
+		const { setPortText, testConnectionInline, testing } = useHostForm(STORED_ON_2222);
+
+		const pending = testConnectionInline();
+		setPortText("0");
+		await pending;
+
+		expect(testWsClient.send).not.toHaveBeenCalled();
+		expect(testing.value).toBe(false);
+	});
+
+	// A writer setting the port the form already had still rewrites the text,
+	// so the error the invalid entry left goes.
+	it("takes the port Quick Connect gives, even the one already there, and the error goes", async () => {
+		const { setPortText, quickConnect, portText, portError, form } = useHostForm(STORED_ON_2222);
+		setPortText("0");
+
+		quickConnect.value = "server:2222";
+		await nextTick();
+
+		expect(portText.value).toBe("2222");
+		expect(portError.value).toBeNull();
+		expect(form.value.sshPort).toBe(2222);
+	});
+
+	it("takes the port of an SSH config entry, even the one already there, and the error goes", () => {
+		const { setPortText, sshConfigEntries, applySshConfigEntry, portText, portError, form } =
+			useHostForm(STORED_ON_2222);
+		setPortText("0");
+		sshConfigEntries.value = [
+			{
+				name: "pi",
+				hostname: "pi.test",
+				port: 2222,
+				user: null,
+				identityFile: null,
+				proxyJump: null,
+				isGitHost: false,
+			},
+		];
+
+		applySshConfigEntry("pi");
+
+		expect(portText.value).toBe("2222");
+		expect(portError.value).toBeNull();
+		expect(form.value.sshPort).toBe(2222);
+	});
+});

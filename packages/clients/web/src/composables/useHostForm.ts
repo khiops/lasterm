@@ -1,6 +1,6 @@
 import type { Host, SshConfigEntry, TestConnectPlatform } from "@lasterm/shared";
-import { ErrorCode, generateId } from "@lasterm/shared";
-import { computed, ref, shallowRef, watch } from "vue";
+import { ErrorCode, generateId, sshPortFromText } from "@lasterm/shared";
+import { computed, readonly, ref, shallowRef, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { type HostVisibleProfile, useProfilesStore } from "../stores/profiles.js";
@@ -102,6 +102,14 @@ function formOf(host?: Host): HostFormData {
 	};
 }
 
+/** Why the Port field's text cannot be saved (#901). */
+export const PORT_ERROR = "Port must be a number from 1 to 65535, in digits only";
+
+/** A port as the Port field shows it: nothing for none, which is 22. */
+function portTextOf(port: number | undefined): string {
+	return port === undefined ? "" : String(port);
+}
+
 function setField<K extends keyof HostFormData>(
 	form: HostFormData,
 	key: K,
@@ -151,6 +159,33 @@ export function useHostForm(editHost?: Host) {
 	const form = ref<HostFormData>(formOf(editHost));
 
 	/**
+	 * The Port field's text, as typed: the form reads the port from it (#901).
+	 * `form.sshPort` follows it while it names a port, and an empty field is no
+	 * port. Any other text keeps the port as it was and refuses the save: read
+	 * as a number, `0` became an emptied field and the stored port was cleared.
+	 */
+	const portText = ref(portTextOf(form.value.sshPort));
+
+	const portError = computed(() =>
+		portText.value === "" || sshPortFromText(portText.value) !== null ? null : PORT_ERROR,
+	);
+
+	/**
+	 * Write the port, as text. Every writer goes through here, the field and
+	 * what fills it alike, so the text is always the last one written: one that
+	 * sets the port already there still clears the error an invalid entry left.
+	 */
+	function setPortText(text: string): void {
+		portText.value = text;
+		if (text === "") {
+			form.value.sshPort = undefined;
+			return;
+		}
+		const port = sshPortFromText(text);
+		if (port !== null) form.value.sshPort = port;
+	}
+
+	/**
 	 * The host being edited as the hub last said it: as the dialog opened on
 	 * it, then as this window reads the hosts again (#789). A save sends only
 	 * what the user changed from it.
@@ -159,7 +194,9 @@ export function useHostForm(editHost?: Host) {
 
 	// The hub changed this host while the dialog is open: another window saved
 	// it, or the hub detected its OS. A field the user has not touched shows
-	// what the hub has now; one they changed keeps what they chose.
+	// what the hub has now; one they changed keeps what they chose. The port is
+	// left alone when its text names the stored port, `02222` as well as `2222`;
+	// an invalid entry names none, and is kept (#901).
 	if (editHost) {
 		watch(
 			() => hostsStore.hosts.find((host) => host.id === editHost.id),
@@ -168,8 +205,14 @@ export function useHostForm(editHost?: Host) {
 				const before = formOf(storedHost.value);
 				const now = formOf(current);
 				for (const key of Object.keys(now) as Array<keyof HostFormData>) {
+					if (key === "sshPort") continue;
 					if (form.value[key] === before[key]) setField(form.value, key, now[key]);
 				}
+				const portUntouched =
+					portText.value === ""
+						? before.sshPort === undefined
+						: sshPortFromText(portText.value) === before.sshPort;
+				if (portUntouched) setPortText(portTextOf(now.sshPort));
 				storedHost.value = current;
 			},
 		);
@@ -303,6 +346,7 @@ export function useHostForm(editHost?: Host) {
 		if (form.value.type === "ssh") {
 			if (!form.value.sshHost) return false;
 			if (form.value.sshAuth === "key" && !form.value.sshKeyPath) return false;
+			if (portError.value) return false;
 		}
 		return true;
 	});
@@ -344,7 +388,7 @@ export function useHostForm(editHost?: Host) {
 		if (!entry) return;
 		selectedSshConfigHost.value = name;
 		if (entry.hostname) form.value.sshHost = entry.hostname;
-		form.value.sshPort = entry.port;
+		setPortText(portTextOf(entry.port));
 		if (entry.user) form.value.sshUser = entry.user;
 		if (entry.identityFile) {
 			form.value.sshKeyPath = entry.identityFile;
@@ -366,6 +410,9 @@ export function useHostForm(editHost?: Host) {
 		testResult.value = null;
 		try {
 			const { useSessionStore } = await import("../stores/session.js");
+			// The port may have turned invalid while the store loaded: the button
+			// is disabled for one, and nothing is tested on it (#901).
+			if (portError.value) return;
 			const sessionStore = useSessionStore();
 			const wsClient = sessionStore.wsClient;
 
@@ -459,7 +506,8 @@ export function useHostForm(editHost?: Host) {
 			type: f.type,
 			...(f.type === "ssh" && {
 				ssh_host: f.sshHost,
-				...(f.sshPort !== undefined && f.sshPort > 0 && { ssh_port: f.sshPort }),
+				// Only a valid port reaches here: canSave refuses an invalid one (#901).
+				...(f.sshPort !== undefined && { ssh_port: f.sshPort }),
 				...(f.sshUser && { ssh_user: f.sshUser }),
 				ssh_auth: f.sshAuth,
 				...(f.sshAuth === "key" && {
@@ -509,6 +557,16 @@ export function useHostForm(editHost?: Host) {
 				form.value.hostGroup = created.group.id;
 				showNewGroup.value = false;
 				newGroupName.value = "";
+			}
+
+			// Checked again as it is now: the form may have changed while the
+			// group was being created, and what is sent is what was checked (#901).
+			if (!canSave.value) {
+				saveError.value =
+					portError.value ??
+					labelError.value ??
+					"Not saved: a required field was emptied meanwhile";
+				return null;
 			}
 
 			const body = bodyOf(form.value);
@@ -606,7 +664,7 @@ export function useHostForm(editHost?: Host) {
 		const parsed = parseConnectionString(val);
 		if (parsed.host !== undefined) form.value.sshHost = parsed.host;
 		if (parsed.user !== undefined) form.value.sshUser = parsed.user;
-		if (parsed.port !== undefined) form.value.sshPort = parsed.port;
+		if (parsed.port !== undefined) setPortText(String(parsed.port));
 	});
 
 	return {
@@ -626,6 +684,10 @@ export function useHostForm(editHost?: Host) {
 		sshRemoteDaemonUnavailable,
 		connectedThroughRemoteDaemon,
 		labelError,
+		// Read-only: setPortText is the one way to write it, which keeps form.sshPort with it.
+		portText: readonly(portText),
+		portError,
+		setPortText,
 		canSave,
 		previewInitials,
 		newGroupName,

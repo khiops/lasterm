@@ -634,11 +634,11 @@ function seaWith(asset: Buffer): { getRawAsset: (name: string) => ArrayBuffer } 
 	};
 }
 
-/** A real native addon: the better-sqlite3 binding the hub depends on. */
+/** A real native addon: the better-sqlite3 prebuild for this platform, which the hub loads. */
 function realAddon(): Buffer {
 	const hubRequire = createRequire(new URL("../../hub/package.json", import.meta.url));
 	const packageDir = dirname(hubRequire.resolve("better-sqlite3/package.json"));
-	return readFileSync(join(packageDir, "build", "Release", "better_sqlite3.node"));
+	return readFileSync(join(packageDir, "prebuilds", `${process.platform}-${process.arch}.node`));
 }
 
 function catchError(action: () => void): unknown {

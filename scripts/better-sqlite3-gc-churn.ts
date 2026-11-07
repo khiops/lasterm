@@ -6,6 +6,7 @@
 
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 
 /** better-sqlite3's entry point, resolved from the hub's package as the hub resolves it. */
 const BETTER_SQLITE3 = createRequire(
@@ -13,12 +14,24 @@ const BETTER_SQLITE3 = createRequire(
 ).resolve("better-sqlite3");
 
 /**
+ * The addon better-sqlite3 loads on this platform: since 13.0, a prebuild shipped inside its
+ * package, prebuilds/<platform>-<arch>.node, named as its own lib/binding.js names it. Nothing
+ * builds it at install (pnpm-workspace.yaml, allowBuilds).
+ */
+export function betterSqlite3Prebuild(): string {
+	const report = process.report.getReport() as { header?: { glibcVersionRuntime?: string } };
+	const musl = process.platform === "linux" && !report.header?.glibcVersionRuntime;
+	const target = `${musl ? "linuxmusl" : process.platform}-${process.arch}`;
+	return join(dirname(BETTER_SQLITE3), "..", "prebuilds", `${target}.node`);
+}
+
+/**
  * Opens in-memory databases and prepares, runs and drops statements on them by the ten
  * thousand, amid other garbage. Half the databases are closed before they are dropped, half
  * are dropped open. The garbage collector reclaims the statements and the databases on its
  * own, as it does in a hub that runs for days.
  *
- * What aborts, with an addon built from source on Node 24.21, is a collection that an
+ * What aborts, with a 12.11.1 addon built from source on Node 24.21, is a collection that an
  * allocation in JavaScript triggers. A collection run by `gc()` reclaimed statements without
  * harm, and an earlier churn that turned the event loop between rounds survived 8 runs in 20. So this one makes its garbage in JavaScript, several objects per statement, and never
  * yields: it then aborted 60 runs in 60, on Node 24.21 and 24.14.

@@ -129,109 +129,38 @@ function plainRow(row: Record<string, SQLOutputValue>): Record<string, unknown> 
 	return plain;
 }
 
-const PRIMARY_RESULT_CODES = [
-	"OK",
-	"ERROR",
-	"INTERNAL",
-	"PERM",
-	"ABORT",
-	"BUSY",
-	"LOCKED",
-	"NOMEM",
-	"READONLY",
-	"INTERRUPT",
-	"IOERR",
-	"CORRUPT",
-	"NOTFOUND",
-	"FULL",
-	"CANTOPEN",
-	"PROTOCOL",
-	"EMPTY",
-	"SCHEMA",
-	"TOOBIG",
-	"CONSTRAINT",
-	"MISMATCH",
-	"MISUSE",
-	"NOLFS",
-	"AUTH",
-	"FORMAT",
-	"RANGE",
-	"NOTADB",
-	"NOTICE",
-	"WARNING",
-] as const;
+/** SQLite's primary result codes, by number, as sqlite3.h names them. */
+const PRIMARY_RESULT_CODES = (
+	"OK ERROR INTERNAL PERM ABORT BUSY LOCKED NOMEM READONLY INTERRUPT IOERR CORRUPT NOTFOUND " +
+	"FULL CANTOPEN PROTOCOL EMPTY SCHEMA TOOBIG CONSTRAINT MISMATCH MISUSE NOLFS AUTH FORMAT " +
+	"RANGE NOTADB NOTICE WARNING"
+).split(" ");
 
 /**
- * SQLite's extended result codes, as sqlite3.h defines them: under each
- * primary code, the n-th name (from 1) is the code `primary | n << 8`, and an
- * empty name is a number SQLite does not use.
+ * SQLite's extended result codes, as sqlite3.h defines them: under a primary
+ * code, the n-th name (from 1) is the code `primary | n << 8`, and `-` is a
+ * number SQLite does not use.
  */
-const EXTENDED_RESULT_CODES: Partial<
-	Record<(typeof PRIMARY_RESULT_CODES)[number], readonly string[]>
-> = {
-	OK: ["LOAD_PERMANENTLY", "SYMLINK"],
-	ERROR: ["MISSING_COLLSEQ", "RETRY", "SNAPSHOT", "RESERVESIZE", "KEY", "UNABLE"],
-	ABORT: ["", "ROLLBACK"],
-	BUSY: ["RECOVERY", "SNAPSHOT", "TIMEOUT"],
-	LOCKED: ["SHAREDCACHE", "VTAB"],
-	READONLY: ["RECOVERY", "CANTLOCK", "ROLLBACK", "DBMOVED", "CANTINIT", "DIRECTORY"],
-	IOERR: [
-		"READ",
-		"SHORT_READ",
-		"WRITE",
-		"FSYNC",
-		"DIR_FSYNC",
-		"TRUNCATE",
-		"FSTAT",
-		"UNLOCK",
-		"RDLOCK",
-		"DELETE",
-		"BLOCKED",
-		"NOMEM",
-		"ACCESS",
-		"CHECKRESERVEDLOCK",
-		"LOCK",
-		"CLOSE",
-		"DIR_CLOSE",
-		"SHMOPEN",
-		"SHMSIZE",
-		"SHMLOCK",
-		"SHMMAP",
-		"SEEK",
-		"DELETE_NOENT",
-		"MMAP",
-		"GETTEMPPATH",
-		"CONVPATH",
-		"VNODE",
-		"AUTH",
-		"BEGIN_ATOMIC",
-		"COMMIT_ATOMIC",
-		"ROLLBACK_ATOMIC",
-		"DATA",
-		"CORRUPTFS",
-		"IN_PAGE",
-		"BADKEY",
-		"CODEC",
-	],
-	CORRUPT: ["VTAB", "SEQUENCE", "INDEX"],
-	CANTOPEN: ["NOTEMPDIR", "ISDIR", "FULLPATH", "CONVPATH", "DIRTYWAL", "SYMLINK"],
-	CONSTRAINT: [
-		"CHECK",
-		"COMMITHOOK",
-		"FOREIGNKEY",
-		"FUNCTION",
-		"NOTNULL",
-		"PRIMARYKEY",
-		"TRIGGER",
-		"UNIQUE",
-		"VTAB",
-		"ROWID",
-		"PINNED",
+const EXTENDED_RESULT_CODES: Readonly<Record<string, string>> = {
+	OK: "LOAD_PERMANENTLY SYMLINK",
+	ERROR: "MISSING_COLLSEQ RETRY SNAPSHOT RESERVESIZE KEY UNABLE",
+	ABORT: "- ROLLBACK",
+	BUSY: "RECOVERY SNAPSHOT TIMEOUT",
+	LOCKED: "SHAREDCACHE VTAB",
+	READONLY: "RECOVERY CANTLOCK ROLLBACK DBMOVED CANTINIT DIRECTORY",
+	IOERR:
+		"READ SHORT_READ WRITE FSYNC DIR_FSYNC TRUNCATE FSTAT UNLOCK RDLOCK DELETE BLOCKED NOMEM " +
+		"ACCESS CHECKRESERVEDLOCK LOCK CLOSE DIR_CLOSE SHMOPEN SHMSIZE SHMLOCK SHMMAP SEEK " +
+		"DELETE_NOENT MMAP GETTEMPPATH CONVPATH VNODE AUTH BEGIN_ATOMIC COMMIT_ATOMIC " +
+		"ROLLBACK_ATOMIC DATA CORRUPTFS IN_PAGE BADKEY CODEC",
+	CORRUPT: "VTAB SEQUENCE INDEX",
+	CANTOPEN: "NOTEMPDIR ISDIR FULLPATH CONVPATH DIRTYWAL SYMLINK",
+	CONSTRAINT:
+		"CHECK COMMITHOOK FOREIGNKEY FUNCTION NOTNULL PRIMARYKEY TRIGGER UNIQUE VTAB ROWID PINNED " +
 		"DATATYPE",
-	],
-	NOTICE: ["RECOVER_WAL", "RECOVER_ROLLBACK", "RBU"],
-	WARNING: ["AUTOINDEX"],
-	AUTH: ["USER"],
+	NOTICE: "RECOVER_WAL RECOVER_ROLLBACK RBU",
+	WARNING: "AUTOINDEX",
+	AUTH: "USER",
 };
 
 /**
@@ -243,8 +172,11 @@ export function resultCodeName(errcode: number): string {
 	const primary = PRIMARY_RESULT_CODES[errcode & 0xff];
 	if (primary === undefined) return `SQLITE_UNKNOWN_${errcode}`;
 	const extended = errcode >> 8;
-	const suffix = extended > 0 ? EXTENDED_RESULT_CODES[primary]?.[extended - 1] : undefined;
-	return suffix ? `SQLITE_${primary}_${suffix}` : `SQLITE_${primary}`;
+	const suffix =
+		extended > 0 ? EXTENDED_RESULT_CODES[primary]?.split(" ")[extended - 1] : undefined;
+	return suffix !== undefined && suffix !== "-"
+		? `SQLITE_${primary}_${suffix}`
+		: `SQLITE_${primary}`;
 }
 
 /** An error `node:sqlite` threw for SQLite, given its result code's name in `code`. */

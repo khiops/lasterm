@@ -301,7 +301,9 @@ describe("Database", () => {
 			expect(resultCodeName(787)).toBe("SQLITE_CONSTRAINT_FOREIGNKEY");
 			expect(resultCodeName(2067)).toBe("SQLITE_CONSTRAINT_UNIQUE");
 			expect(resultCodeName(3091)).toBe("SQLITE_CONSTRAINT_DATATYPE");
+			expect(resultCodeName(266)).toBe("SQLITE_IOERR_READ");
 			expect(resultCodeName(8970)).toBe("SQLITE_IOERR_BADKEY");
+			expect(resultCodeName(9226)).toBe("SQLITE_IOERR_CODEC");
 			expect(resultCodeName(1544)).toBe("SQLITE_READONLY_DIRECTORY");
 			// An extended code it does not know goes by its primary code.
 			expect(resultCodeName(260)).toBe("SQLITE_ABORT");

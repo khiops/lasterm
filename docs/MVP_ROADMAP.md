@@ -286,7 +286,7 @@ M5: [5.1] → [5.2] → [5.3] → [5.4]  (UI progressive)
 | Layer | Tool | Coverage Target |
 |-------|------|----------------|
 | Unit | vitest | Shared types, protocol encode/decode, config merge |
-| Integration | vitest + better-sqlite3 in-memory | Storage CRUD, migration runner, GC |
+| Integration | vitest + SQLite in memory (node:sqlite) | Storage CRUD, migration runner, GC |
 | E2E (local) | vitest + actual PTY | Hub spawns PTY, UI WS client sends INPUT, receives OUTPUT |
 | E2E (remote) | vitest + mock SSH server | Hub connects to mock agent, full protocol flow |
 | UI | vitest + @vue/test-utils | Component rendering, WS mock, state management |

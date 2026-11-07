@@ -18,9 +18,10 @@ import {
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
-import { createRequire } from "node:module";
+
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	ensurePrivateCacheDir,
@@ -307,8 +308,8 @@ describe("openCachedAddon", () => {
 describe("loadNativeAddon", () => {
 	it("loads the embedded addon through the cache", () => {
 		const cacheDir = makeTempDir();
-		const exports = loadNativeAddon("better_sqlite3.node", cacheDir, seaWith(realAddon()));
-		expect(typeof exports.Database).toBe("function");
+		const exports = loadNativeAddon("lasterm_tls_identity.node", cacheDir, seaWith(realAddon()));
+		expect(typeof exports.generateTlsIdentity).toBe("function");
 	});
 
 	it.runIf(linux)("hands dlopen the file it verified, not the name", () => {
@@ -479,9 +480,14 @@ describe.skipIf(windows)("the runtime-directory fallback", () => {
 		const { cacheHome, cacheDir, fallback, options } = layout();
 		chmodSync(cacheHome, 0o775);
 		vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-		const exports = loadNativeAddon("better_sqlite3.node", cacheDir, seaWith(realAddon()), options);
-		expect(typeof exports.Database).toBe("function");
-		expect(existsSync(join(fallback, "better_sqlite3.node"))).toBe(true);
+		const exports = loadNativeAddon(
+			"lasterm_tls_identity.node",
+			cacheDir,
+			seaWith(realAddon()),
+			options,
+		);
+		expect(typeof exports.generateTlsIdentity).toBe("function");
+		expect(existsSync(join(fallback, "lasterm_tls_identity.node"))).toBe(true);
 	});
 
 	// Root owns what a root test creates, and root is trusted.
@@ -634,11 +640,24 @@ function seaWith(asset: Buffer): { getRawAsset: (name: string) => ArrayBuffer } 
 	};
 }
 
-/** A real native addon: the better-sqlite3 prebuild for this platform, which the hub loads. */
+/**
+ * A real native addon: the hub's TLS identity addon, from the cargo target
+ * directory `pnpm build:test-tls-material` builds it into, or the file
+ * LASTERM_TLS_IDENTITY_ADDON names, as the hub run from source finds it.
+ */
 function realAddon(): Buffer {
-	const hubRequire = createRequire(new URL("../../hub/package.json", import.meta.url));
-	const packageDir = dirname(hubRequire.resolve("better-sqlite3/package.json"));
-	return readFileSync(join(packageDir, "prebuilds", `${process.platform}-${process.arch}.node`));
+	const override = process.env.LASTERM_TLS_IDENTITY_ADDON;
+	if (override) return readFileSync(override);
+	const root = fileURLToPath(new URL("../../..", import.meta.url));
+	const configured = process.env.CARGO_TARGET_DIR;
+	const target = configured ? resolve(root, configured) : join(root, "target");
+	const file =
+		process.platform === "win32"
+			? "lasterm_tls_identity.dll"
+			: process.platform === "darwin"
+				? "liblasterm_tls_identity.dylib"
+				: "liblasterm_tls_identity.so";
+	return readFileSync(join(target, "release", file));
 }
 
 function catchError(action: () => void): unknown {

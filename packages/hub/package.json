@@ -37,14 +37,12 @@
 		"@msgpack/msgpack": "catalog:",
 		"@lasterm/shared": "workspace:*",
 		"@rainbowatcher/toml-edit-js": "catalog:",
-		"better-sqlite3": "catalog:",
 		"fastify": "catalog:",
 		"file-type": "catalog:",
 		"pino": "catalog:",
 		"ssh2": "catalog:"
 	},
 	"devDependencies": {
-		"@types/better-sqlite3": "catalog:",
 		"@types/node": "catalog:",
 		"@types/ssh2": "catalog:",
 		"tsx": "catalog:",

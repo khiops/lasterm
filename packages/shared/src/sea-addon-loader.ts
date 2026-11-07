@@ -173,7 +173,7 @@ interface ExpectedAddon {
  * then opened and authenticated like a cached one, and that descriptor is what
  * the caller loads.
  *
- * @param assetName  - The asset key used in the SEA config (e.g. "better_sqlite3.node").
+ * @param assetName  - The asset key used in the SEA config (e.g. "lasterm_tls_identity.node").
  * @param cacheDir   - Target directory (created if absent, examined before use).
  * @param assetData  - Raw bytes of the addon, as embedded in the executable.
  * @param options    - Substitutes for the environment, for tests.
@@ -275,7 +275,7 @@ export function dlopenAddon(addonPath: string): Record<string, unknown> {
 /**
  * Load a native addon: extract from SEA assets to cache dir, then dlopen.
  *
- * @param name      - Asset name (e.g. "better_sqlite3.node").
+ * @param name      - Asset name (e.g. "lasterm_tls_identity.node").
  * @param cacheDir  - Pre-computed cache directory path.
  * @param seaModule - Injected SEA module interface (for testability).
  */
@@ -375,16 +375,15 @@ function escapes(relative: string): boolean {
 	return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
 }
 
+/** The lines warnOnce has written. */
+const warned = new Set<string>();
+
 /**
- * Write `line` to stderr once per process. The flag lives on globalThis because
- * the single executable bundles this module twice — once in the better-sqlite3
- * prelude and once in the hub — and both load from the same cache.
+ * Write `line` to stderr once per process. The single executable bundles this
+ * module once: the SQLite prelude that bundled it a second time went with
+ * better-sqlite3 (#893).
  */
 function warnOnce(line: string): void {
-	const key = Symbol.for("lasterm.addonCache.warned");
-	const globals = globalThis as typeof globalThis & { [key: symbol]: Set<string> | undefined };
-	const warned = globals[key] ?? new Set<string>();
-	globals[key] = warned;
 	if (warned.has(line)) return;
 	warned.add(line);
 	process.stderr.write(`${line}\n`);

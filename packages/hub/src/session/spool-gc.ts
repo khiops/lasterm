@@ -8,7 +8,7 @@ const GC_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const GC_MAX_AGE_HOURS = 168; // 7 days
 
 /**
- * The longest a pass holds the event loop before it yields (#726). better-sqlite3
+ * The longest a pass holds the event loop before it yields (#726). node:sqlite
  * is synchronous, so whatever the GC does in one go, every terminal and request
  * of the hub waits for.
  */

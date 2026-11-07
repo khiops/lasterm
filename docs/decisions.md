@@ -7,6 +7,37 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## NODE-SQLITE — the hub's SQLite is node:sqlite, behind one adapter (#893, #146, 2026-11-07)
+
+- **node:sqlite, rather than better-sqlite3 13 or a crate of our own.** It is compiled into the
+  Node the executable embeds: no addon, no prebuild, nothing to extract, no ABI to match.
+  better-sqlite3 13 moved to Node-API and closed the abort of #883 as well, but kept an embedded
+  addon, its extraction and a binding shim in the executable's bundle. A napi-rs and rusqlite crate
+  would have been a fifth crate to build, still an extracted addon, and a SQLite of our own to keep
+  up to date. #146 framed the same choice before the abort was known; this settles it.
+- **Behind one adapter that keeps better-sqlite3's contract** (`storage/sqlite.ts`, STORAGE.md
+  § 2). The DAL was not rewritten: its 149 `prepare` sites run as they did. The adapter refuses a
+  parameter left out, which `node:sqlite` would bind as NULL, maps `undefined` to NULL, refuses
+  booleans and objects, returns plain rows and Buffer BLOBs, and names the result code of an SQLite
+  error in `code`. Nothing else imports `node:sqlite`.
+- **A release candidate, held by the Node pin.** `node:sqlite` is at Stability 1.2, and changes
+  still land in minor releases: booleans bind since 24.21, `undefined` binds NULL from 26.10,
+  `DatabaseSync` is renamed `Database` in 26.11. The hub runs one exact Node, so a change arrives
+  only with a bump, and `storage/sqlite.spec.ts` pins each behaviour the adapter relies on. A Node
+  bump runs that spec first.
+- **The same files, no migration.** Both are stock SQLite on the same default VFS. While both were
+  in the repository a spec checked it both ways, each library in its own process, a crash that left
+  the WAL behind included (#898): every profile an earlier hub wrote opens unchanged, and reverting
+  the switch would have kept every profile too.
+- **What it costs.** Writes, the spool's hot path, are on par; wide multi-row reads take about
+  0.05 ms more (the study's measurements, #893). A SQLite fix now arrives with a Node release, which
+  the executable needs for its own fixes anyway.
+- **What went with better-sqlite3:** the executable's SQLite prelude and binding shim, the embedded
+  `better_sqlite3.node` and its extraction at every start, the garbage-collector churn of #887 (no
+  addon is left for it to test), and its `allowBuilds` entry.
+- **The fallback was better-sqlite3 13**, had the adapter met a behaviour it could not keep. It met
+  none.
+
 ## KEY-AGENT-SIGNER — on key auth, the SSH agent signs when it holds the configured key (#876, 2026-11-06)
 
 - **On by default, with no setting.** OpenSSH uses the agent's copy of an `IdentityFile` key and
@@ -44,6 +75,9 @@ heading, with a pointer to the section that replaced it. A section without one i
   run a fake agent of their own.
 
 ## HUB-NODE-ORCHESTRATOR — the hub stays in Node and orchestrates; what is critical moves to Rust behind Node-API, as the need arises (2026-11-06)
+
+**Status:** holds. Its SQLite candidate was settled without a crate: SQLite is node:sqlite, see
+NODE-SQLITE (#893).
 
 - **No rewrite of the hub in Rust now.** The hub is large: Fastify REST and WebSocket, the ssh2
   client with SFTP and its Win32-OpenSSH particulars, transfers, the config cascade, migrations,
@@ -618,6 +652,7 @@ table (APP-SHORTCUTS), which the window and the terminals still both read. The r
 ## PKG — Full Packaging Pipeline: SEA Binaries + CI + Auto-Deploy + Tauri (2026-03-13)
 
 **Status:** superseded in part. The desktop's auto-updater was removed: see DESKTOP-UPDATES (#645).
+The hub embeds no SQLite addon any more: see NODE-SQLITE (#893).
 
 - Two separate SEA binaries: lasterm-agent (node-pty) + lasterm-hub (better-sqlite3)
 - Hub finds agent binary in same directory or PATH (sea-agent-resolver.ts)
@@ -1121,6 +1156,8 @@ replaced it (e65e3fa), and the config store fetches it in `loadProfile()`, after
 ---
 
 ## [backfill] Foundational architecture — Stack & design decisions (2026-03-03)
+
+**Status:** superseded in part. SQLite is node:sqlite, not better-sqlite3: see NODE-SQLITE (#893).
 
 - HTTP server: Fastify (perf + TS-first + plugin ecosystem)
 - Database: SQLite via better-sqlite3 with WAL mode — meta.db (state) + spool.db (output chunks/snapshots)

@@ -31,6 +31,7 @@ import {
 	openSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	unlinkSync,
@@ -180,8 +181,10 @@ function hubVersion(): string {
  * case can change them without touching the build.
  */
 function installCopy(sandbox: Sandbox): string {
-	const dir = join(sandbox.root, "install");
-	mkdirSync(dir);
+	// Its long form: the temp directory can be an 8.3 path on Windows, and the
+	// executable names its directory as the system resolved it.
+	mkdirSync(join(sandbox.root, "install"));
+	const dir = realpathSync.native(join(sandbox.root, "install"));
 	const executable = join(dir, basename(SEA_BINARY));
 	try {
 		linkSync(SEA_BINARY, executable);

@@ -1023,3 +1023,145 @@ describe("live daemon edit guard", () => {
 		},
 	);
 });
+
+describe("HostModal Port field (#901)", () => {
+	const PORT_ERROR = "Port must be a number from 1 to 65535, in digits only";
+	const ON_2222: Host = { ...SSH, sshPort: 2222 };
+
+	function input(selector: string): HTMLInputElement {
+		const found = el<HTMLInputElement>(selector);
+		if (!found) throw new Error(`no ${selector}`);
+		return found;
+	}
+
+	function portInput(): HTMLInputElement {
+		return input("#panel-connection input[placeholder='22']");
+	}
+
+	function type(target: HTMLInputElement, value: string): void {
+		target.value = value;
+		target.dispatchEvent(new Event("input"));
+	}
+
+	function saveButton(): HTMLButtonElement | null {
+		return el<HTMLButtonElement>(".dialog-actions .btn-primary");
+	}
+
+	function testButton(): HTMLButtonElement | null {
+		return el<HTMLButtonElement>("#panel-connection .btn-test");
+	}
+
+	async function open(dialog: "Edit Host on 2222" | "New Host"): Promise<void> {
+		if (dialog === "Edit Host on 2222") {
+			mountModal(ON_2222);
+			useHostsStore().hosts = [{ ...LOCAL }, { ...ON_2222 }];
+		} else {
+			mountModal(null);
+			type(input("input[placeholder='prod-server']"), "web");
+			type(input("#panel-connection input[placeholder='192.168.1.100']"), "10.0.0.5");
+			const auth = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select")).find(
+				(candidate) => Array.from(candidate.options).some((option) => option.value === "password"),
+			);
+			if (!auth) throw new Error("no auth select");
+			auth.value = "agent";
+			auth.dispatchEvent(new Event("change"));
+		}
+		await nextTick();
+	}
+
+	// Mutation: bind the field to the port number again, and Vue writes the
+	// stored port (or nothing, on New Host) back over what was typed.
+	it.each([
+		["Edit Host on 2222", "0"],
+		["Edit Host on 2222", "1e"],
+		["New Host", "0"],
+		["New Host", "1e"],
+	] as const)(
+		"on %s, keeps %j as typed, says why, and allows neither Save nor Test Connection",
+		async (dialog, text) => {
+			await open(dialog);
+			expect(saveButton()?.disabled).toBe(false);
+			expect(testButton()?.disabled).toBe(false);
+			expect(el("#tab-connection .tab-error-dot")).toBeNull();
+
+			type(portInput(), text);
+			await nextTick();
+
+			expect(portInput().value).toBe(text);
+			expect(el("#panel-connection")?.textContent).toContain(PORT_ERROR);
+			expect(el("#tab-connection .tab-error-dot")).not.toBeNull();
+			expect(saveButton()?.disabled).toBe(true);
+			expect(testButton()?.disabled).toBe(true);
+		},
+	);
+
+	/** The hub: every save it is sent, answered with the host as saved. */
+	function hubRecordingSaves(): Array<Record<string, unknown>> {
+		const saves: Array<Record<string, unknown>> = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			const sent = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+			saves.push(sent);
+			return new Response(
+				JSON.stringify({ ...(toSnakeCase(ON_2222) as Record<string, unknown>), ...sent }),
+				{ headers: { "Content-Type": "application/json" } },
+			);
+		});
+		return saves;
+	}
+
+	// Mutation: let the field write its text alone, and the port saved stays
+	// 2222 whatever was typed (round 4 of the spec's review).
+	it.each([
+		["2200", { ssh_port: 2200 }],
+		["", { ssh_port: null }],
+	] as const)("saves the port typed, %j, as %j", async (text, body) => {
+		const saves = hubRecordingSaves();
+		useAuthStore().setToken("token");
+		await open("Edit Host on 2222");
+
+		type(portInput(), text);
+		await nextTick();
+		expect(saveButton()?.disabled).toBe(false);
+		saveButton()?.click();
+		await settle();
+
+		expect(saves).toEqual([body]);
+	});
+
+	it("shows the port the hub changed meanwhile, in a field left alone", async () => {
+		await open("Edit Host on 2222");
+
+		useHostsStore().hosts = [{ ...LOCAL }, { ...ON_2222, sshPort: 2200 }];
+		await nextTick();
+
+		expect(portInput().value).toBe("2200");
+	});
+
+	// Mutation: compare the field's text with the stored port's, and `02222`
+	// counts as a change: a save then writes 2222 back over the hub's 2200.
+	it("shows the port the hub changed meanwhile, in a field naming the stored one in other digits", async () => {
+		await open("Edit Host on 2222");
+		type(portInput(), "02222");
+		await nextTick();
+
+		useHostsStore().hosts = [{ ...LOCAL }, { ...ON_2222, sshPort: 2200 }];
+		await nextTick();
+
+		expect(portInput().value).toBe("2200");
+	});
+
+	// Mutation: compare the port number, which an invalid entry leaves as it
+	// was, and the hub's port replaces what was typed.
+	it("keeps an invalid entry, and its error, when the hub changes the port meanwhile", async () => {
+		await open("Edit Host on 2222");
+		type(portInput(), "0");
+		await nextTick();
+
+		useHostsStore().hosts = [{ ...LOCAL }, { ...ON_2222, sshPort: 2200 }];
+		await nextTick();
+
+		expect(portInput().value).toBe("0");
+		expect(el("#panel-connection")?.textContent).toContain(PORT_ERROR);
+		expect(saveButton()?.disabled).toBe(true);
+	});
+});

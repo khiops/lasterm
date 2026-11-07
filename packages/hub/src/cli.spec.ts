@@ -2327,3 +2327,125 @@ function builtAgentTargetIds(): string[] {
 	}
 	return ids;
 }
+
+// ─── host add --ssh-port (#901) ──────────────────────────────────────────────
+//
+// A port the CLI did not read as a whole number from 1 to 65535 never reaches
+// the hub. `1.5` and `2222abc` went as 1 and 2222, `abc` as null, which stores
+// no port, and `--ssh-port` given last was taken as absent.
+
+describe("host add --ssh-port (#901)", () => {
+	const USAGE =
+		"Usage: lasterm host add --label <label> --host <user@hostname> [--ssh-port 22] [--auth agent|key] [--key-path ~/.ssh/id_ed25519]";
+	let servers: HttpsServer[] = [];
+
+	afterEach(async () => {
+		const closing = servers;
+		servers = [];
+		await Promise.all(
+			closing.map(
+				(server) =>
+					new Promise<void>((resolve) => {
+						server.closeAllConnections();
+						server.close(() => resolve());
+					}),
+			),
+		);
+	});
+
+	/** A TLS peer holding the pinned key that answers every request as a host created, and records it. */
+	async function listenRecordingHub() {
+		const tls = getTestTlsMaterial();
+		const requests: Array<{ method: string; url: string; body: unknown }> = [];
+		const server = createHttpsServer(
+			{ cert: tls.pinned.cert, key: tls.pinned.key },
+			(request, response) => {
+				let text = "";
+				request.setEncoding("utf8");
+				request.on("data", (chunk: string) => {
+					text += chunk;
+				});
+				request.on("end", () => {
+					requests.push({
+						method: request.method ?? "",
+						url: request.url ?? "",
+						body: text === "" ? undefined : JSON.parse(text),
+					});
+					response.writeHead(201, { "content-type": "application/json" });
+					response.end(JSON.stringify({ id: "01HOSTADDED000000000000000", label: "prod" }));
+				});
+			},
+		);
+		servers.push(server);
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(0, "127.0.0.1", resolve);
+		});
+		const address = server.address();
+		if (typeof address !== "object" || address === null) throw new Error("expected TCP address");
+		const runtime: RuntimeInfo = {
+			pid: process.pid,
+			port: address.port,
+			started_at: "2026-11-07T00:00:00.000Z",
+			instanceId: "test",
+			ownerToken: "test",
+			spki: tls.pinned.spki,
+		};
+		return { runtime, requests };
+	}
+
+	async function hostAdd(extra: string[]) {
+		const { runtime, requests } = await listenRecordingHub();
+		const restoreDirs = usePlatformDirs({ state: makeTempDir(), config: makeTempDir() });
+		const errors: string[] = [];
+		const exits: unknown[] = [];
+		const error = vi.spyOn(console, "error").mockImplementation((line: string) => {
+			errors.push(line);
+		});
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exits.push(code);
+		}) as typeof process.exit);
+		try {
+			persistRuntime(runtime);
+			await main(["host", "add", "--label", "prod", "--host", "example.org", ...extra]);
+		} finally {
+			error.mockRestore();
+			log.mockRestore();
+			exit.mockRestore();
+			restoreDirs();
+		}
+		return { requests, errors, exits };
+	}
+
+	// Mutation: parse the port with parseInt again, or let a missing value pass
+	// as absent, and the request reaches the hub.
+	it.each([
+		{ name: "abc", extra: ["--ssh-port", "abc"] },
+		{ name: "0", extra: ["--ssh-port", "0"] },
+		{ name: "-1", extra: ["--ssh-port", "-1"] },
+		{ name: "70000", extra: ["--ssh-port", "70000"] },
+		{ name: "1.5", extra: ["--ssh-port", "1.5"] },
+		{ name: "2222abc", extra: ["--ssh-port", "2222abc"] },
+		{ name: "given last, with no value", extra: ["--ssh-port"] },
+		{ name: "followed by another flag", extra: ["--ssh-port", "--auth", "agent"] },
+	])("refuses --ssh-port $name before any request", async ({ extra }) => {
+		const { requests, errors, exits } = await hostAdd(extra);
+		expect(requests).toEqual([]);
+		expect(errors).toEqual(["--ssh-port must be a number from 1 to 65535, in digits only", USAGE]);
+		expect(exits).toEqual([1]);
+	});
+
+	it("sends a port it read as a whole number from 1 to 65535", async () => {
+		const { requests, errors, exits } = await hostAdd(["--ssh-port", "2222"]);
+		expect(requests).toEqual([
+			{
+				method: "POST",
+				url: "/api/hosts",
+				body: { type: "ssh", label: "prod", ssh_host: "example.org", ssh_port: 2222 },
+			},
+		]);
+		expect(errors).toEqual([]);
+		expect(exits).toEqual([]);
+	});
+});

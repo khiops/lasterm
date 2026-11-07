@@ -226,15 +226,18 @@
 								</div>
 								<div class="field flex-1">
 									<label class="field-label">Port</label>
+									<!-- Text, not a number field: its value is what was typed, where
+									     a number field gives "" for both empty and "1e" (#901). -->
 									<input
-										:value="form.sshPort ?? ''"
-										type="number"
+										:value="portText"
+										type="text"
+										inputmode="numeric"
 										class="field-input"
-										min="1"
-										max="65535"
 										placeholder="22"
+										:aria-invalid="portError !== null"
 										@input="onPortInput($event)"
 									/>
+									<span v-if="portError" class="field-error">{{ portError }}</span>
 								</div>
 							</div>
 
@@ -395,7 +398,7 @@
 							<div class="field field-test">
 								<button
 									class="btn btn-test"
-									:disabled="!form.sshHost || testing"
+									:disabled="!form.sshHost || testing || portError !== null"
 									@click="testConnectionInline"
 								>
 									{{ testing ? "Testing..." : "Test Connection" }}
@@ -755,6 +758,9 @@ const {
 	sshRemoteDaemonUnavailable,
 	connectedThroughRemoteDaemon,
 	labelError,
+	portText,
+	portError,
+	setPortText,
 	canSave,
 	previewInitials,
 	newGroupName,
@@ -865,6 +871,7 @@ const connectionTabHasError = computed(() => {
 	if (form.value.type === "ssh") {
 		if (!form.value.sshHost) return true;
 		if (form.value.sshAuth === "key" && !form.value.sshKeyPath) return true;
+		if (portError.value) return true;
 	}
 	return false;
 });
@@ -892,8 +899,7 @@ function onSelectSshConfig(): void {
 }
 
 function onPortInput(e: Event): void {
-	const val = (e.target as HTMLInputElement).value;
-	form.value.sshPort = val ? Number.parseInt(val, 10) || undefined : undefined;
+	setPortText((e.target as HTMLInputElement).value);
 }
 
 async function onSave(): Promise<void> {

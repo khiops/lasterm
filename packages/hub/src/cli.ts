@@ -21,6 +21,7 @@ import {
 import { request as httpsRequest } from "node:https";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { sshPortFromText } from "@lasterm/shared";
 import { lastermDir } from "@lasterm/shared/dist/platform-dirs.js";
 import { replaceFileSync } from "@lasterm/shared/dist/replace-file.js";
 import { createOwnerOnlyDirectory } from "./auth.js";
@@ -486,6 +487,11 @@ export interface ParsedArgs {
 	label?: string;
 	host?: string;
 	sshPort?: number;
+	/**
+	 * `--ssh-port` was given with no value, or one that is not a whole number
+	 * from 1 to 65535: host add refuses it rather than send it (#901).
+	 */
+	sshPortRefused?: boolean;
 	user?: string;
 	authMethod?: string;
 	keyPath?: string;
@@ -545,8 +551,13 @@ export function parseArgs(argv: string[]): ParsedArgs | null {
 	const hostVal = flagValue("--host");
 	if (hostVal !== undefined) result.host = hostVal;
 
-	const sshPortStr = flagValue("--ssh-port");
-	if (sshPortStr !== undefined) result.sshPort = Number.parseInt(sshPortStr, 10);
+	// Read as digits only: parseInt took `1.5` for 1 and `2222abc` for 2222,
+	// and the flag given last, with no value, as no flag at all (#901).
+	if (args.includes("--ssh-port")) {
+		const sshPort = sshPortFromText(flagValue("--ssh-port") ?? "");
+		if (sshPort === null) result.sshPortRefused = true;
+		else result.sshPort = sshPort;
+	}
 
 	const userVal = flagValue("--user");
 	if (userVal !== undefined) result.user = userVal;
@@ -1579,12 +1590,14 @@ function statusExitCode(probe: HubProbe): number {
 	return probe.kind === "refused" || probe.kind === "not-answering" ? 1 : 0;
 }
 
-async function cmdHostAdd(args: ParsedArgs): Promise<void> {
-	if (!args.label || !args.host) {
+async function cmdHostAdd(args: ParsedArgs): Promise<number> {
+	if (args.sshPortRefused)
+		console.error("--ssh-port must be a number from 1 to 65535, in digits only");
+	if (!args.label || !args.host || args.sshPortRefused) {
 		console.error(
 			"Usage: lasterm host add --label <label> --host <user@hostname> [--ssh-port 22] [--auth agent|key] [--key-path ~/.ssh/id_ed25519]",
 		);
-		process.exit(1);
+		return 1;
 	}
 
 	const body: Record<string, unknown> = {
@@ -1603,6 +1616,7 @@ async function cmdHostAdd(args: ParsedArgs): Promise<void> {
 		const r = result as Record<string, unknown>;
 		console.log(`Host added: ${String(r.label ?? args.label)} (id: ${String(r.id ?? "?")})`);
 	}
+	return 0;
 }
 
 async function cmdHostList(args: ParsedArgs): Promise<void> {
@@ -1771,9 +1785,11 @@ export async function main(argv: string[]): Promise<void> {
 				if (code !== 0) process.exit(code);
 				break;
 			}
-			case "host-add":
-				await cmdHostAdd(parsed);
+			case "host-add": {
+				const code = await cmdHostAdd(parsed);
+				if (code !== 0) process.exit(code);
 				break;
+			}
 			case "host-list":
 				await cmdHostList(parsed);
 				break;

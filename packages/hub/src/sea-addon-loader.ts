@@ -1,84 +1,12 @@
 /**
  * sea-addon-loader.ts — hub
  *
- * Native addon bootstrap for Node Single Executable Applications (SEA).
- * Hub-specific entry point: lists the addons embedded in the hub SEA binary
- * and calls initSeaAddons() once at startup.
+ * Whether the hub runs as its Node Single Executable Application (SEA).
  *
- * Shared helpers (detectSea, getAddonCacheDir, openCachedAddon, loadCachedAddon,
- * loadNativeAddon) live in @lasterm/shared.
- *
- * Must be called via initSeaAddons() BEFORE any module that imports
- * better-sqlite3.
+ * The executable embeds no native addon any more. SQLite is node:sqlite, built
+ * into the Node the executable embeds (#893), and the hub lock and the TLS
+ * identity are installed beside the executable and loaded from there, checked
+ * against the digests it embeds (@lasterm/shared's installed-addon, #889).
  */
 
-import { createRequire } from "node:module";
-import {
-	detectSea,
-	getAddonCacheDir,
-	loadNativeAddon,
-	readSeaVersion,
-} from "@lasterm/shared/dist/sea-addon-loader.js";
-
-// Re-export shared helpers so existing callers/tests that import from this
-// file continue to work unchanged.
-export {
-	detectSea,
-	dlopenAddon,
-	getAddonCacheDir,
-	loadCachedAddon,
-	loadNativeAddon,
-	openCachedAddon,
-	readSeaVersion,
-} from "@lasterm/shared/dist/sea-addon-loader.js";
-
-/**
- * Names of .node assets embedded in the hub SEA binary. The hub lock and the
- * TLS identity are not among them: they are installed beside the executable
- * and loaded from there (@lasterm/shared's installed-addon, #889).
- */
-const SEA_ADDON_ASSETS: readonly string[] = ["better_sqlite3.node"] as const;
-
-/**
- * Called once at hub startup (before any better-sqlite3 imports).
- *
- * In SEA mode: extracts all embedded .node addons to the cache dir and
- * pre-loads them so subsequent require('better-sqlite3') calls resolve.
- *
- * In normal Node.js mode: complete no-op.
- */
-export function initSeaAddons(): void {
-	if (!detectSea()) {
-		// Normal Node.js execution — native addons load via standard require().
-		return;
-	}
-
-	const req = createRequire(import.meta.url);
-	const seaMod = req("node:sea") as {
-		getRawAsset: (name: string) => ArrayBuffer;
-		getAsset?: (name: string, encoding: BufferEncoding) => string;
-	};
-
-	let cacheDir: string;
-	try {
-		cacheDir = getAddonCacheDir(readSeaVersion(seaMod));
-	} catch (err) {
-		const msg = err instanceof Error ? err.message : String(err);
-		process.stderr.write(`[lasterm-hub] fatal: ${msg}\n`);
-		process.exit(1);
-	}
-
-	for (const assetName of SEA_ADDON_ASSETS) {
-		try {
-			loadNativeAddon(assetName, cacheDir, seaMod);
-		} catch (err) {
-			// Extraction or dlopen failure is fatal — the hub cannot function
-			// without SQLite support. Let the process crash with a clear message.
-			const msg = err instanceof Error ? err.message : String(err);
-			process.stderr.write(
-				`[lasterm-hub] fatal: failed to load SEA addon '${assetName}': ${msg}\n`,
-			);
-			process.exit(1);
-		}
-	}
-}
+export { detectSea } from "@lasterm/shared/dist/sea-addon-loader.js";

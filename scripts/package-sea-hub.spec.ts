@@ -2,7 +2,7 @@
  * package-sea-hub.spec.ts
  *
  * Tests for:
- *   - scripts/package-sea-hub.ts (manifest generation, addon location, content-type,
+ *   - scripts/package-sea-hub.ts (manifest generation, addon checks, content-type,
  *     the addons installed beside the executable and their manifest)
  *   - packages/hub/src/sea-static-server.ts (in-memory manifest loading and serving)
  *   - packages/hub/src/sea-agent-resolver.ts (agent binary resolution)
@@ -23,8 +23,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Where cargo builds from this repository, resolved as cargo resolves
 // CARGO_TARGET_DIR (#531). A git worktree that shares one target directory has
@@ -36,66 +35,9 @@ import {
 	readAddonManifest,
 } from "../packages/shared/src/installed-addon.js";
 
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const ROOT = resolve(__dirname, "..");
-
 // ────────────────────────────────────────────────────────────────────────────
-// Test 1: locates better-sqlite3 .node addon
+// Test 1: the native addons the executable embeds
 // ────────────────────────────────────────────────────────────────────────────
-
-describe("locateBetterSqlite3", () => {
-	it("locates the better-sqlite3 addon and it has a valid native binary header", async () => {
-		const { locateBetterSqlite3 } = await import("./package-sea-hub.js");
-		const addonPath = locateBetterSqlite3();
-
-		expect(existsSync(addonPath)).toBe(true);
-		// The prebuild better-sqlite3 ships for this platform (13.0 and later), not a build/
-		// directory: nothing compiles it at install.
-		expect(addonPath.replaceAll("\\", "/")).toMatch(
-			new RegExp(`/better-sqlite3/prebuilds/${process.platform}-${process.arch}\\.node$`),
-		);
-
-		// Verify ELF (Linux) or Mach-O (macOS) or PE (Windows) header
-		const buf = readFileSync(addonPath);
-		expect(buf.byteLength).toBeGreaterThan(4);
-
-		const magic = buf.subarray(0, 4);
-		const isELF = magic[0] === 0x7f && magic[1] === 0x45 && magic[2] === 0x4c && magic[3] === 0x46;
-		const isMachO32 =
-			magic[0] === 0xce && magic[1] === 0xfa && magic[2] === 0xed && magic[3] === 0xfe;
-		const isMachO64 =
-			magic[0] === 0xcf && magic[1] === 0xfa && magic[2] === 0xed && magic[3] === 0xfe;
-		const isMachOFat =
-			magic[0] === 0xca && magic[1] === 0xfe && magic[2] === 0xba && magic[3] === 0xbe;
-		const isPE = magic[0] === 0x4d && magic[1] === 0x5a; // MZ header
-
-		expect(isELF || isMachO32 || isMachO64 || isMachOFat || isPE).toBe(true);
-	});
-
-	it("throws a descriptive error message when addon paths are missing", async () => {
-		// We cannot spy on ESM built-in node:fs exports in vitest.
-		// Instead verify the error message format by checking the function's
-		// throw message contains the expected guidance text (white-box test via source).
-		// This verifies the error message is well-formed.
-		const src = readFileSync(join(ROOT, "scripts", "package-sea-hub.ts"), "utf8");
-		expect(src).toContain("better-sqlite3 addon not found");
-		expect(src).toContain("pnpm install");
-		expect(src).toContain("Checked:");
-	});
-});
-
-describe("checkBetterSqlite3Gc", () => {
-	it("accepts the addon the executable embeds", async () => {
-		const { checkBetterSqlite3Gc, locateBetterSqlite3 } = await import("./package-sea-hub.js");
-		await expect(checkBetterSqlite3Gc(locateBetterSqlite3())).resolves.toBeUndefined();
-	});
-
-	it("refuses a file the churn did not load", async () => {
-		const { checkBetterSqlite3Gc } = await import("./package-sea-hub.js");
-		const missing = join(tmpdir(), `lasterm-missing-${process.pid}`, "better_sqlite3.node");
-		await expect(checkBetterSqlite3Gc(missing)).rejects.toThrow(/churn did not load/);
-	});
-});
 
 describe("loadHubLockAddon", () => {
 	let tempDir: string;

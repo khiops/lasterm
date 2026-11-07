@@ -371,10 +371,10 @@ describe("lasterm-hub executable", () => {
 	describe.skipIf(!PRESENT)(
 		PRESENT ? SEA_NAME : `${SEA_NAME} not built: skipped (LASTERM_SEA_EXPECTED=1 fails instead)`,
 		() => {
-			// Mutations caught: an SQLite bootstrap that fails, loudly (exit 1) or
-			// silently (nothing extracted); a bundle that never reaches its entry
-			// point (exit 0, nothing printed).
-			it("runs its SQLite bootstrap and reports its version (agent status --json)", () => {
+			// Mutations caught: a bundle that fails as it loads (exit 1), or never
+			// reaches its entry point (exit 0, nothing printed); an SQLite addon
+			// extracted again, as before #893.
+			it("reports its version (agent status --json), with no SQLite addon to extract", () => {
 				const sandbox = createSandbox();
 				try {
 					const result = spawnSync(SEA_BINARY, ["agent", "status", "--json"], {
@@ -396,17 +396,14 @@ describe("lasterm-hub executable", () => {
 						hub_version: expect.stringMatching(VERSION_SHAPE),
 						targets: expect.any(Array),
 					});
-					// The bootstrap extracted the SQLite addon, and into the cache it was
-					// given rather than the user's. A bootstrap that failed without saying
-					// so still exits 0 here, since this command opens no database.
+					// SQLite is node:sqlite, inside the executable's own Node: no addon of
+					// its own is extracted any more, here or at any start. The cases below
+					// that start the hub open both databases through it.
 					const addons = join(sandbox.cacheDir, "addons");
 					const extracted = existsSync(addons)
 						? readdirSync(addons, { recursive: true, encoding: "utf8" })
 						: [];
-					expect(
-						extracted.some((entry) => entry.endsWith("better_sqlite3.node")),
-						`better_sqlite3.node was not extracted under ${addons}`,
-					).toBe(true);
+					expect(extracted.filter((entry) => entry.endsWith("better_sqlite3.node"))).toEqual([]);
 				} finally {
 					removeSandbox(sandbox);
 				}

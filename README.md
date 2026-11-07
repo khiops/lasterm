@@ -227,8 +227,8 @@ not a supported target: nothing builds or tests it (#224).
 ```sh
 ./scripts/build-agent.sh   # Rust agent → dist/sea/lasterm-agent  (cargo --release)
 ./scripts/build-hub.sh     # Hub SEA    → dist/sea/lasterm-hub
-                           #   builds the web UI, embeds it, bundles better-sqlite3,
-                           #   and produces a Node Single Executable Application
+                           #   builds the web UI, embeds it, bundles the hub, produces a Node
+                           #   Single Executable Application, and puts its two addons beside it
 ```
 
 Both binaries land co-located in `dist/sea/`; the hub resolves the agent next to its own executable,

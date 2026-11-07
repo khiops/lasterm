@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-11-06
+> Last updated: 2026-11-07
 
 ## 1. Vision
 
@@ -690,9 +690,9 @@ holds other bytes (SECURITY.md § 4.5). Nothing is extracted or written to disk 
 - **From source** (`pnpm dev`, the specs) nothing changes: the hub loads the addons cargo built, from the
   cargo target directory.
 
-better-sqlite3's addon is still embedded and extracted to the cache directory at startup (§ 7) until
-SQLite moves to `node:sqlite` (#893). A start of the single executable removes what earlier versions
-extracted there.
+The executable embeds no native addon at all: SQLite is `node:sqlite`, built into its Node (#893).
+Earlier versions extracted their addons to the cache directory (§ 7) at every start; a start of the
+single executable removes what they left there.
 
 **Remote agents (other OS/arch, for SSH hosts) — fetched on demand.**
 The hub does **not** bundle agents for platforms other than its own. When deploying to a remote host whose
@@ -1471,7 +1471,7 @@ Every hub writes the security events of SECURITY.md § 7.1 through `HubLogger`, 
 |---------|---------------------|---------|
 | **Config** | `$XDG_CONFIG_HOME/lasterm/` → `~/.config/lasterm/` | `%APPDATA%\lasterm\` |
 | **State** (DBs, runtime, logs) | `$XDG_STATE_HOME/lasterm/` → `~/.local/state/lasterm/` | `%LOCALAPPDATA%\lasterm\` |
-| **Cache** (better-sqlite3's addon, which the single executable extracts until #893; § 3.5) | `$XDG_CACHE_HOME/lasterm/` → `~/.cache/lasterm/` | `%LOCALAPPDATA%\lasterm\cache\` |
+| **Cache** (nothing written today; a start removes the addons earlier executables extracted there, § 3.5) | `$XDG_CACHE_HOME/lasterm/` → `~/.cache/lasterm/` | `%LOCALAPPDATA%\lasterm\cache\` |
 | **Agent socket** | `$XDG_RUNTIME_DIR/lasterm/agent.sock`, else `/tmp/lasterm-<uid>/agent.sock` | `\\.\pipe\lasterm-agent-<user>` |
 
 An XDG variable is used when it holds an absolute path; otherwise the default shown above. On
@@ -1671,7 +1671,7 @@ lasterm (root CLI)
   └── @lasterm/hub
         ├── @lasterm/shared
         ├── @lasterm/web (build output embedded as static files)
-        ├── better-sqlite3
+        ├── node:sqlite (built into Node, through storage/sqlite.ts)
         ├── ssh2
         └── fastify + @fastify/websocket
 
@@ -1706,7 +1706,7 @@ detached daemon, or deploys and runs it over SSH.
 | Terminal (UI) | xterm.js + addon-fit + addon-search + addon-unicode11 | Rendering; the agent's snapshot is written to it as it comes |
 | Terminal (Agent) | the `vt100` crate (Rust) | Screen model |
 | Codec | @msgpack/msgpack | Binary protocol framing |
-| Storage | better-sqlite3 | SQLite WAL persistence |
+| Storage | `node:sqlite`, built into Node, behind `storage/sqlite.ts` | SQLite WAL persistence |
 | HTTP/WS | Fastify + @fastify/websocket | REST + WS server |
 | UI Framework | Vue 3 (Composition API) | Reactive UI |
 | UI Build | Vite | Dev + production build |

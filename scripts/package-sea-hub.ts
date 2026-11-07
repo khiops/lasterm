@@ -26,7 +26,6 @@ import {
 	openSync,
 	readdirSync,
 	readFileSync,
-	realpathSync,
 	writeFileSync,
 } from "node:fs";
 import { extname, join, relative, resolve } from "node:path";
@@ -41,7 +40,6 @@ import {
 	addonDigest,
 	parseAddonManifest,
 } from "../packages/shared/src/installed-addon.js";
-import { betterSqlite3Prebuild, churnBetterSqlite3 } from "./better-sqlite3-gc-churn.js";
 import type { SeaBuildConfig } from "./build-sea-binary.js";
 import { buildSeaBinary } from "./build-sea-binary.js";
 import { buildOptions } from "./build-sea-hub.js";
@@ -171,46 +169,6 @@ export function locateTomlWasm(): string {
 			`    ${rootNodeModules}\n` +
 			`  Run \`pnpm install\` first.`,
 	);
-}
-
-/**
- * Locate the better-sqlite3 native addon the hub loads, from the hub's dependencies: the
- * prebuild its package ships for the platform building the executable, which is the platform
- * the executable runs on (#148).
- */
-export function locateBetterSqlite3(): string {
-	const addon = betterSqlite3Prebuild();
-	if (existsSync(addon)) {
-		return addon;
-	}
-
-	throw new Error(
-		`[package-sea-hub] better-sqlite3 addon not found.\n` +
-			`  Checked:\n` +
-			`    ${addon}\n` +
-			`  better-sqlite3 ships no prebuild for ${process.platform}-${process.arch}, or \`pnpm install\` has not run.`,
-	);
-}
-
-/**
- * Refuse a better-sqlite3 addon that aborts when the garbage collector reclaims its statements
- * (#883, docs/STORAGE.md § 2). The test suite churns the addon of its own install, and the one
- * here is the install building the executable, so this runs the same churn on the file the
- * executable embeds, under the Node it embeds: the one running this build.
- */
-export async function checkBetterSqlite3Gc(addonPath: string): Promise<void> {
-	const { code, signal, stdout, stderr } = await churnBetterSqlite3(addonPath);
-	const loaded = /^addon (.+)$/m.exec(stdout)?.[1];
-	if (loaded === undefined || realpathSync(loaded) !== realpathSync(addonPath)) {
-		throw new Error(
-			`[package-sea-hub] the garbage-collector churn did not load ${addonPath} (it loaded ${loaded ?? "nothing"}).\n${stderr}`,
-		);
-	}
-	if (code !== 0 || signal !== null || !stdout.endsWith("survived\n")) {
-		throw new Error(
-			`[package-sea-hub] better-sqlite3 addon ${addonPath} aborts when the garbage collector reclaims a statement (exit ${code}, signal ${signal}); see docs/STORAGE.md § 2.\n${stderr}`,
-		);
-	}
 }
 
 /** The build script passes the target-qualified N-API artefact directly to packaging. */
@@ -487,15 +445,10 @@ async function main(): Promise<void> {
 	// ------------------------------------------------------------------
 	console.log("[package-sea-hub] step 5/5: SEA binary packaging");
 
-	const betterSqlite3Path = locateBetterSqlite3();
-	await checkBetterSqlite3Gc(betterSqlite3Path);
 	const addonSources = installedAddonSources();
 	const tomlWasmPath = locateTomlWasm();
 	const version = readHubVersion();
 
-	console.log(
-		`[package-sea-hub] better-sqlite3 addon: ${betterSqlite3Path} (survives the garbage collector)`,
-	);
 	for (const [name, source] of Object.entries(addonSources)) {
 		console.log(`[package-sea-hub] ${name}: ${source}`);
 	}
@@ -523,9 +476,8 @@ async function main(): Promise<void> {
 		entryScript: join(ROOT, "dist", "sea", "lasterm-hub.cjs"),
 		outputBinary,
 		name: "lasterm-hub",
-		nativeAddons: {
-			"better_sqlite3.node": betterSqlite3Path,
-		},
+		// None: SQLite is node:sqlite (#893), and the addons are beside it (#889).
+		nativeAddons: {},
 		extraAssets: {
 			VERSION: versionFilePath,
 			"static-manifest.json": staticManifestPath,

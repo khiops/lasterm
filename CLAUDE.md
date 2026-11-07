@@ -34,7 +34,7 @@ Sessions survive client disconnects and device switches; local sessions also sur
 | Terminal (UI) | xterm.js + addon-fit + addon-search + addon-unicode11 |
 | Terminal (Agent) | the `vt100` crate — Rust screen model in `headless.rs` |
 | Codec | @msgpack/msgpack |
-| Storage | better-sqlite3 (WAL mode) |
+| Storage | `node:sqlite`, built into Node (WAL mode), only through `packages/hub/src/storage/sqlite.ts` |
 | HTTP/WS | Fastify + @fastify/websocket |
 | UI framework | Vue 3 (Composition API) |
 | UI build | Vite |
@@ -124,7 +124,7 @@ of `ci.yml`: change them together.
 
 The hub TypeScript specs load the `lasterm-hub-lock` and `lasterm-tls-identity`
 Rust addons, and run the `lasterm-tls-test-material` generator, from the cargo target
-directory. Build them before a root test run, and again after editing a crate, with
+directory; the shared addon-loader spec loads `lasterm-tls-identity` as its real addon. Build them before a root test run, and again after editing a crate, with
 the same `CARGO_TARGET_DIR` as the tests (`pnpm -F @lasterm/hub test` builds them
 itself):
 
@@ -153,7 +153,7 @@ macOS is not a supported target: nothing builds or tests it (#224). On Windows, 
 
 ```bash
 ./scripts/build-agent.sh   # Rust agent → dist/sea/lasterm-agent (cargo --release)
-./scripts/build-hub.sh     # Hub SEA (builds+embeds web, bundles better-sqlite3) → dist/sea/lasterm-hub
+./scripts/build-hub.sh     # Hub SEA (builds+embeds web, embeds the Rust addons) → dist/sea/lasterm-hub
 cd dist/sea && ./lasterm-hub start --port 4100   # serve PWA at https://127.0.0.1:4100 (--daemon/--open)
 ./lasterm-hub pair         # 8-digit code to authorise a browser client; also: status | stop
 ```
@@ -253,7 +253,7 @@ A terminal sees everything its user types, so its logs must never turn into a ke
 ### Testing
 
 - Unit: vitest, colocated `*.spec.ts`
-- Integration: better-sqlite3 in-memory (`:memory:`)
+- Integration: SQLite in memory (`:memory:`, `openTestDatabases`), through `storage/sqlite.ts`
 - E2E (remote): mock SSH server (never real SSH in CI)
 - PTY: exercised by the agent's Rust tests (`cargo test`), Linux and Windows
 - WS: mock for UI tests, real for E2E
@@ -353,6 +353,7 @@ port refused on POSIX does not move: the start fails and says why.
 
 - never store SSH passwords (prompt at connect, clear after auth)
 - spool.db writes are continuous/heavy — use INCREMENTAL auto_vacuum, not full VACUUM
+- SQLite goes through `storage/sqlite.ts`, never `node:sqlite` directly: `node:sqlite` binds NULL for a parameter left out, without a word, and is still a release candidate that changes between Node minors. Before a Node bump, run `storage/sqlite.spec.ts` first (STORAGE.md § 2)
 - MessagePack Uint8Array: use `@msgpack/msgpack` with `useBigInt64: false`
 - SQLite cross-DB: no FK between meta.db and spool.db — use cache_index for consistency
 - Auth token comparison: always `crypto.timingSafeEqual` (constant-time)

@@ -73,14 +73,15 @@ describe("SQLite comes from node:sqlite", () => {
 		expect(content).toContain('require("node:sqlite")');
 	});
 
-	it("bundles none of better-sqlite3", () => {
+	it("bundles no SQLite addon, nor a prelude to extract one", () => {
 		const content = readFileSync(OUT_FILE, "utf8");
 		// Mutation caught: a hub module importing better-sqlite3 again, which
-		// bundles its lib/ and the shim that stands in for its addon finder.
+		// bundles its lib/ and its addon finder, or the SQLite prelude coming back.
 		expect(content).not.toContain('require("better-sqlite3")');
-		expect(content).not.toContain("better-sqlite3 binding shim");
 		expect(content).not.toContain("PREBUILD_PLATFORMS");
 		expect(content).not.toContain("getPrebuildPath");
+		expect(content).not.toContain("better_sqlite3.node");
+		expect(content).not.toContain("__seaSqliteExports");
 	});
 });
 
@@ -174,14 +175,6 @@ describe("migrations are embedded inline", () => {
 		// must NOT be referencing the migrations directory.
 		expect(content).not.toContain("/migrations/meta");
 		expect(content).not.toContain("/migrations/spool");
-	});
-
-	it("SEA bootstrap banner is generated from the shared addon loader", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		expect(content).toContain("__seaSqliteExports");
-		// Mutation caught: restoring a string-built bootstrap removes this normal
-		// prelude entry and reintroduces a second extraction implementation.
-		expect(content).toContain("bootstrapSeaSqlite");
 	});
 });
 
@@ -281,29 +274,29 @@ describe("hub sea-addon-loader extraction logic", () => {
 	it("openCachedAddon writes the blob to cacheDir/name", async () => {
 		const { openCachedAddon } = await import("../packages/hub/src/sea-addon-loader.js");
 
-		const fakeData = Buffer.from("fake-sqlite-addon-bytes");
+		const fakeData = Buffer.from("fake-addon-bytes");
 		const cacheDir = join(TEMP_CACHE_BASE, "v0.1.0");
-		const file = openCachedAddon("better_sqlite3.node", cacheDir, fakeData);
+		const file = openCachedAddon("lasterm_tls_identity.node", cacheDir, fakeData);
 		closeSync(file.fd);
 
 		expect(existsSync(file.path)).toBe(true);
 		expect(readFileSync(file.path).equals(fakeData)).toBe(true);
-		expect(file.path).toBe(join(cacheDir, "better_sqlite3.node"));
+		expect(file.path).toBe(join(cacheDir, "lasterm_tls_identity.node"));
 	});
 
 	it("openCachedAddon skips the write when the file already holds the embedded bytes", async () => {
 		const { openCachedAddon } = await import("../packages/hub/src/sea-addon-loader.js");
 
-		const fakeData = Buffer.from("fake-sqlite-addon-bytes");
+		const fakeData = Buffer.from("fake-addon-bytes");
 		const cacheDir = join(TEMP_CACHE_BASE, "v0.1.0");
 		mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
-		const destPath = join(cacheDir, "better_sqlite3.node");
+		const destPath = join(cacheDir, "lasterm_tls_identity.node");
 
 		writeFileSync(destPath, fakeData, { mode: 0o755 });
 		const mtimeBefore = statSync(destPath).mtimeMs;
 
 		await new Promise((r) => setTimeout(r, 10));
-		closeSync(openCachedAddon("better_sqlite3.node", cacheDir, fakeData).fd);
+		closeSync(openCachedAddon("lasterm_tls_identity.node", cacheDir, fakeData).fd);
 
 		expect(statSync(destPath).mtimeMs).toBe(mtimeBefore);
 	});
@@ -313,12 +306,12 @@ describe("hub sea-addon-loader extraction logic", () => {
 
 		const cacheDir = join(TEMP_CACHE_BASE, "v0.1.0");
 		mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
-		const destPath = join(cacheDir, "better_sqlite3.node");
+		const destPath = join(cacheDir, "lasterm_tls_identity.node");
 
 		writeFileSync(destPath, Buffer.from("old-data"), { mode: 0o755 });
 
 		const newData = Buffer.from("new-data-with-different-length-xxxx");
-		closeSync(openCachedAddon("better_sqlite3.node", cacheDir, newData).fd);
+		closeSync(openCachedAddon("lasterm_tls_identity.node", cacheDir, newData).fd);
 
 		expect(readFileSync(destPath).equals(newData)).toBe(true);
 	});
@@ -334,7 +327,7 @@ describe("hub sea-addon-loader extraction logic", () => {
 	it("loadNativeAddon calls dlopen on the extracted file", async () => {
 		const { loadNativeAddon } = await import("../packages/hub/src/sea-addon-loader.js");
 
-		const fakeData = Buffer.from("fake-sqlite-addon-for-dlopen");
+		const fakeData = Buffer.from("fake-addon-for-dlopen");
 		const cacheDir = join(TEMP_CACHE_BASE, "dlopen-test");
 
 		const dlopenSpy = vi.spyOn(process, "dlopen").mockImplementation(() => {});
@@ -347,7 +340,7 @@ describe("hub sea-addon-loader extraction logic", () => {
 				) as ArrayBuffer,
 		};
 
-		loadNativeAddon("better_sqlite3.node", cacheDir, fakeSeaModule);
+		loadNativeAddon("lasterm_tls_identity.node", cacheDir, fakeSeaModule);
 
 		expect(dlopenSpy).toHaveBeenCalledTimes(1);
 		expect(dlopenSpy.mock.calls[0]?.[0]).toHaveProperty("exports");
@@ -355,7 +348,7 @@ describe("hub sea-addon-loader extraction logic", () => {
 		// the name is all dlopen accepts.
 		const loadedFrom = dlopenSpy.mock.calls[0]?.[1];
 		if (process.platform === "linux") expect(loadedFrom).toMatch(/^\/proc\/self\/fd\/\d+$/);
-		else expect(loadedFrom).toMatch(/better_sqlite3\.node$/);
+		else expect(loadedFrom).toMatch(/lasterm_tls_identity\.node$/);
 		expect(readFileSync(loadedFrom as string).equals(fakeData)).toBe(true);
 	});
 });

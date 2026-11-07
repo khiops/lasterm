@@ -2058,6 +2058,139 @@ describe("a large answer through requestHub", () => {
 	});
 });
 
+// ─── host list (#903) ────────────────────────────────────────────────────────
+//
+// GET /api/hosts names a host's address, port and user `ssh_host`, `ssh_port`
+// and `ssh_user`. The table read `hostname`, `port` and `username`, which the
+// hub never sends, so every host showed no address, port 22 and no user.
+
+describe("host list (#903)", () => {
+	/**
+	 * Hosts as GET /api/hosts answers them, which leaves out a field the host has
+	 * none of rather than sending null (`rowToHost`): a local host, one made local
+	 * by an edit that kept its SSH fields, and two over SSH, one on its default port.
+	 */
+	const HOSTS = [
+		{ id: "01HOSTLOCAL000000000000000", type: "local", label: "local" },
+		{
+			id: "01HOSTWASSSH00000000000000",
+			type: "local",
+			label: "was-ssh",
+			ssh_host: "old.test",
+			ssh_port: 2200,
+			ssh_user: "old",
+		},
+		{
+			id: "01HOSTPI000000000000000000",
+			type: "ssh",
+			label: "pi2222",
+			ssh_host: "pi.test",
+			ssh_port: 2222,
+			ssh_user: "pi",
+		},
+		{ id: "01HOSTDEFAULTPORT000000000", type: "ssh", label: "nas", ssh_host: "nas.test" },
+	];
+	let servers: HttpsServer[] = [];
+
+	afterEach(async () => {
+		const closing = servers;
+		servers = [];
+		await Promise.all(
+			closing.map(
+				(server) =>
+					new Promise<void>((resolve) => {
+						server.closeAllConnections();
+						server.close(() => resolve());
+					}),
+			),
+		);
+	});
+
+	/** A TLS peer holding the pinned key that answers every request with HOSTS, and records it. */
+	async function listenHostsHub() {
+		const tls = getTestTlsMaterial();
+		const requests: Array<{ method: string; url: string }> = [];
+		const server = createHttpsServer(
+			{ cert: tls.pinned.cert, key: tls.pinned.key },
+			(request, response) => {
+				requests.push({ method: request.method ?? "", url: request.url ?? "" });
+				response.writeHead(200, { "content-type": "application/json" });
+				response.end(JSON.stringify(HOSTS));
+			},
+		);
+		servers.push(server);
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(0, "127.0.0.1", resolve);
+		});
+		const address = server.address();
+		if (typeof address !== "object" || address === null) throw new Error("expected TCP address");
+		const runtime: RuntimeInfo = {
+			pid: process.pid,
+			port: address.port,
+			started_at: "2026-11-07T00:00:00.000Z",
+			instanceId: "test",
+			ownerToken: "test",
+			spki: tls.pinned.spki,
+		};
+		return { runtime, requests };
+	}
+
+	async function hostList(extra: string[] = []) {
+		const { runtime, requests } = await listenHostsHub();
+		const restoreDirs = usePlatformDirs({ state: makeTempDir(), config: makeTempDir() });
+		const output: string[] = [];
+		const errors: string[] = [];
+		const log = vi.spyOn(console, "log").mockImplementation((line: string) => {
+			output.push(line);
+		});
+		const error = vi.spyOn(console, "error").mockImplementation((line: string) => {
+			errors.push(line);
+		});
+		const exits: unknown[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exits.push(code);
+		}) as typeof process.exit);
+		try {
+			persistRuntime(runtime);
+			await main(["host", "list", ...extra]);
+		} finally {
+			log.mockRestore();
+			error.mockRestore();
+			exit.mockRestore();
+			restoreDirs();
+		}
+		expect(errors).toEqual([]);
+		expect(exits).toEqual([]);
+		expect(requests).toEqual([{ method: "GET", url: "/api/hosts" }]);
+		return output;
+	}
+
+	const row = (label: string, host: string, port: string, user: string) =>
+		`${label.padEnd(20)}  ${host.padEnd(30)}  ${port.padEnd(6)}  ${user}`;
+
+	// Mutation: read `hostname`, `port` and `username` again, and every SSH host
+	// shows no address, port 22 and no user. Default every host's port to 22, and
+	// a local host shows an SSH port it does not have; print a local host's SSH
+	// fields, and `was-ssh` shows an address the hub never dials.
+	it("shows each host's address, port and user as the hub names them", async () => {
+		expect(await hostList()).toEqual([
+			row("LABEL", "HOST", "PORT", "USER"),
+			`${"-".repeat(20)}  ${"-".repeat(30)}  ${"-".repeat(6)}  ----`,
+			row("local", "", "", ""),
+			row("was-ssh", "", "", ""),
+			row("pi2222", "pi.test", "2222", "pi"),
+			row("nas", "nas.test", "22", ""),
+		]);
+	});
+
+	// Mutation: map the hosts before printing them, and --json no longer prints
+	// what the hub answered.
+	it("prints the hub's answer unchanged with --json", async () => {
+		expect(await hostList(["--json"])).toEqual([JSON.stringify(HOSTS)]);
+	});
+});
+
 function parsed(argv: string[]): ParsedArgs {
 	const result = parseArgs(argv);
 	expect(result).not.toBeNull();

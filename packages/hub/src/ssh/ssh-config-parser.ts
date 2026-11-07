@@ -102,10 +102,12 @@ function splitDirective(rawLine: string): { key: string; value: string } | null 
 
 /**
  * The port a `Port` line's value names, or null for a malformed one, which
- * keeps 22. Read as OpenSSH reads it: the arguments end at a word starting
- * with `#`, so `Port 2222 # office` is 2222, and there must be exactly one, a
- * whole number from 1 to 65535 in digits. parseInt took `2222abc` for 2222 and
- * `1.5` for 1, lines OpenSSH refuses (#902).
+ * keeps 22. The arguments end at a word starting with `#`, as OpenSSH's do, so
+ * `Port 2222 # office` is 2222; exactly one must remain, a whole number from 1
+ * to 65535 in digits. parseInt took `2222abc` for 2222 and `1.5` for 1, lines
+ * OpenSSH refuses (#902). Two forms OpenSSH reads as 2222 still keep 22 here,
+ * as they did before: `Port "2222"`, and `Port = 2222`, which `splitDirective`
+ * leaves as the value `= 2222`.
  */
 function portOfDirective(value: string): number | null {
 	const words = value.split(/[ \t]+/);

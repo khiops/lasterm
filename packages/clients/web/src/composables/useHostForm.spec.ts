@@ -855,6 +855,21 @@ describe("useHostForm", () => {
 			expect(parseConnectionString(text)).toEqual(parsed);
 		});
 
+		// Mutation: read the port of an ssh URL up to its end, and the path makes
+		// it malformed: the URL names 2222 and no port is filled, so 22 is used.
+		it.each([
+			["ssh://admin@server:2222/", { host: "server", user: "admin", port: 2222 }],
+			[
+				"ssh://git@gitea.example:2222/org/repo.git",
+				{ host: "gitea.example", user: "git", port: 2222 },
+			],
+			["ssh://[fd00::1]:2222/srv", { host: "fd00::1", port: 2222 }],
+			["ssh://server/srv", { host: "server" }],
+		])("reads the port of the ssh URL %j, path and all (#902)", (text, parsed) => {
+			const { parseConnectionString } = useHostForm();
+			expect(parseConnectionString(text)).toEqual(parsed);
+		});
+
 		it("parses host:port without user", () => {
 			const { parseConnectionString } = useHostForm();
 			expect(parseConnectionString("db.local:5432")).toEqual({ host: "db.local", port: 5432 });

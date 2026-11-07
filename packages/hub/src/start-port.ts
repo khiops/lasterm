@@ -8,9 +8,10 @@ import { sshPortFromText } from "@lasterm/shared";
  * unset, as shells commonly write it.
  *
  * The variable reads as the flag does, in digits only (#902): Number() took
- * `0x1004` or ` 4100` for 4100, and rounded `4100.0000000000001` to it. The
- * value is quoted in the error, so a trailing space left by cmd.exe's
- * `set LASTERM_PORT=4100 && …` shows.
+ * `0x1004` or `1e3` for a port, and rounded `4100.0000000000001` to 4100.
+ * Whitespace around the digits is dropped first: a shell leaves it, as cmd.exe's
+ * `set LASTERM_PORT=4100 && …` leaves a trailing space, and it names no other
+ * port. The value is quoted in the error, so what was read shows.
  */
 export function resolveStartPort(
 	flag: number | undefined,
@@ -18,7 +19,7 @@ export function resolveStartPort(
 ): number | undefined {
 	if (flag !== undefined) return validPort(flag, "--port", String(flag));
 	if (env === undefined || env === "") return undefined;
-	const port = sshPortFromText(env);
+	const port = sshPortFromText(env.trim());
 	if (port === null) {
 		throw new Error(
 			`Invalid LASTERM_PORT: ${JSON.stringify(env)} — must be a number from 1 to 65535, in digits only`,

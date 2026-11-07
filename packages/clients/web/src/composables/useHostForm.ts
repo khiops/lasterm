@@ -611,9 +611,13 @@ export function useHostForm(editHost?: Host) {
 		let str = input.trim();
 		if (!str) return {};
 
-		// Strip ssh:// prefix (INV-14)
+		// Strip ssh:// prefix (INV-14), and the path an ssh URL may carry, as a
+		// git remote does: `ssh://git@host:2222/org/repo.git` names port 2222.
+		// parseInt stopped at the `/`; the port is now read whole (#902).
 		if (str.startsWith("ssh://")) {
 			str = str.slice(6);
+			const slash = str.indexOf("/");
+			if (slash !== -1) str = str.slice(0, slash);
 		}
 
 		let user: string | undefined;

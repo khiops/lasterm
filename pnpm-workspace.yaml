@@ -17,7 +17,7 @@ catalog:
   vitest: "^4.1.11"
   "@msgpack/msgpack": "^3.1.3"
   ulid: "^3.0.2"
-  better-sqlite3: "^12.11.1"
+  better-sqlite3: "13.0.3"
   fastify: "^5.12.5"
   "@fastify/cors": "^11.3.0"
   "@fastify/helmet": "^13.1.1"
@@ -71,9 +71,18 @@ catalog:
 # This map decides what a build may run; it does not re-run a build already
 # recorded as skipped. A node_modules populated by a pnpm 11 that never read
 # this policy stays that way through `pnpm install`, which reports it up to
-# date, and better-sqlite3 keeps failing on its missing binding. Repair such a
-# tree once with `pnpm rebuild better-sqlite3 cpu-features esbuild`, or
-# delete node_modules and install again.
+# date, and a package whose build was skipped stays unbuilt. Repair such a
+# tree once with `pnpm rebuild cpu-features esbuild`, or delete node_modules
+# and install again.
+#
+# better-sqlite3 is denied too: since 13.0 it needs no build. Its addon is
+# compiled against Node-API and published inside the package, one prebuild per
+# platform under prebuilds/, and it has no install script. pnpm would still run
+# node-gyp on its binding.gyp, ignoring the package's "gypfile": false; that
+# run compiles nothing when a prebuild for the host exists, yet needs Python, a
+# C++ toolchain and Node's headers. Denied, the hub loads the prebuild exactly
+# as published (docs/STORAGE.md § 2). A host better-sqlite3 has no prebuild for
+# would need this set to true; every platform the hub is built on has one.
 #
 # ssh2 is denied as well (#868). Its build compiles an optional native cipher
 # binding, sshcrypto.node, that the shipped hub never loads: its bundle stubs it
@@ -86,7 +95,7 @@ catalog:
 # keeps its binding through `pnpm install`: delete node_modules/.pnpm/ssh2@*
 # and install again.
 allowBuilds:
-  better-sqlite3: true
+  better-sqlite3: false
   cpu-features: true
   edgedriver: false
   esbuild: true

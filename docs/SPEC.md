@@ -1206,6 +1206,15 @@ delayed-ACK timer fires, so each SFTP request and each keystroke paid tens of mi
 host behind a jump host is reached in a channel of the jump host's connection, whose socket
 carries it (`packages/hub/src/session/ssh-nodelay.ts`).
 
+With Nagle off, each of those pieces could leave as a TCP segment of its own, so the same sockets
+also send what is written to them in one turn of the event loop as one write (#896): the first
+write of a turn corks the socket, and a `process.nextTick` uncorks it before Node polls for I/O
+again, so nothing waits past the turn that wrote it. A keystroke or an SFTP request then takes one
+segment rather than three; behind a jump host, where the host's packet rides three of the jump
+host's, one rather than nine. `end()` uncorks the socket itself, and `destroy()` is preceded by the
+uncork, so what was written before either still leaves. A channel stream, the inner connection of
+a jump, sends no segments of its own and is left as it is.
+
 ### 5.5b Connect, Reconnect and Disconnect, on request (#648)
 
 A remote host's menu in the rail (right-click its badge) acts on its connection, and never on
@@ -1611,7 +1620,7 @@ lasterm/
 │   │       │   ├── ssh-agent.ts      # SshAgent: the agent over SSH, on stdio or a daemon's socket
 │   │       │   ├── remote-daemon.ts  # Whether and how a remote host keeps a daemon (#79, #600, #765)
 │   │       │   ├── ssh-keepalive.ts  # The SSH keepalive every connection carries (#607)
-│   │       │   ├── ssh-nodelay.ts    # Every connection sends each packet at once, Nagle off (#873)
+│   │       │   ├── ssh-nodelay.ts    # Each packet sent at once (Nagle off, #873), in one write (#896)
 │   │       │   ├── ssh-file-transport.ts # SFTP session, mkdir walk, stdin exec, Windows reply marker (#832)
 │   │       │   └── spool-gc.ts       # Spool garbage collection (STORAGE.md § 7)
 │   │       ├── files/       # A terminal's host files: local fs, SFTP, SSH commands (§ 3.3, #832)

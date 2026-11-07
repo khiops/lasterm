@@ -62,10 +62,12 @@ On Windows no mode is set or checked. The files, like the state directory, rely 
 profile's default ACL, as `auth.json` does (SECURITY.md § 2.1, #200).
 
 **The addon and the garbage collector (#883).** An addon that wraps its objects in Node's C++
-`node::ObjectWrap`, compiled against Node 24.19 headers or later, aborts the process when the
-garbage collector reclaims one of them: `Assertion failed: (env) != nullptr` (nodejs/node#65446),
-as ssh2's cipher binding did in the tests (#868). better-sqlite3 12 wrapped its databases and
-statements that way, and was safe only while its prebuild predated those headers.
+`node::ObjectWrap`, compiled against Node 24.19 headers or later, aborts any Node 24 before
+24.22.0 when the garbage collector reclaims one of them: `Assertion failed: (env) != nullptr`
+(nodejs/node#65446), as ssh2's cipher binding did in the tests (#868). Node 24.22.0, the version
+`.nvmrc` pins, keeps the cleanup hooks of addons in a registry of its own (nodejs/node commits
+`abe1b673e9` and `5570a84048`), and such an addon survives it. better-sqlite3 12 wrapped its
+databases and statements that way, and was safe only while its prebuild predated those headers.
 
 better-sqlite3 13 wraps them in `Napi::ObjectWrap`, over Node-API, so the abort no longer applies
 to it, whatever headers built it:

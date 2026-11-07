@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import type { SshConfigEntry } from "@lasterm/shared";
+import { type SshConfigEntry, sshPortFromText } from "@lasterm/shared";
 
 const GIT_HOSTS = new Set([
 	"github.com",
@@ -100,6 +100,22 @@ function splitDirective(rawLine: string): { key: string; value: string } | null 
 	};
 }
 
+/**
+ * The port a `Port` line's value names, or null for a malformed one, which
+ * keeps 22. The arguments end at a word starting with `#`, as OpenSSH's do, so
+ * `Port 2222 # office` is 2222; exactly one must remain, a whole number from 1
+ * to 65535 in digits. parseInt took `2222abc` for 2222 and `1.5` for 1, lines
+ * OpenSSH refuses (#902). Two forms OpenSSH reads as 2222 still keep 22 here,
+ * as they did before: `Port "2222"`, and `Port = 2222`, which `splitDirective`
+ * leaves as the value `= 2222`.
+ */
+function portOfDirective(value: string): number | null {
+	const words = value.split(/[ \t]+/);
+	const comment = words.findIndex((word) => word.startsWith("#"));
+	const [port, ...extra] = comment === -1 ? words : words.slice(0, comment);
+	return port !== undefined && extra.length === 0 ? sshPortFromText(port) : null;
+}
+
 export function parseSshConfig(content: string): ParseResult {
 	const entries: SshConfigEntry[] = [];
 	let hasInclude = false;
@@ -147,8 +163,8 @@ export function parseSshConfig(content: string): ParseResult {
 				}
 				break;
 			case "port": {
-				const port = Number.parseInt(value, 10);
-				if (!Number.isNaN(port) && port > 0 && port <= 65535) {
+				const port = portOfDirective(value);
+				if (port !== null) {
 					for (const block of currentBlocks) {
 						block.port = port;
 					}

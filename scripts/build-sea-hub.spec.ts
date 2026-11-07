@@ -72,7 +72,11 @@ describe("SQLite comes from node:sqlite", () => {
 		expect(content).not.toContain('require("better-sqlite3")');
 		expect(content).not.toContain("PREBUILD_PLATFORMS");
 		expect(content).not.toContain("getPrebuildPath");
-		expect(content).not.toContain("better_sqlite3.node");
+		// The addon's name appears once: in the list of what earlier executables
+		// extracted, which retired-addon-cache.ts removes from the cache (#889).
+		// Another mention is the addon coming back.
+		expect(content.split("better_sqlite3.node").length - 1).toBe(1);
+		expect(content).toContain("retireAddonCacheOfEarlierVersions");
 		expect(content).not.toContain("__seaSqliteExports");
 	});
 });

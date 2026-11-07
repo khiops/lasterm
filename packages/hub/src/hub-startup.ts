@@ -23,6 +23,7 @@ import { runLogGc } from "./logging/log-gc.js";
 import { SecurityLog } from "./logging/security-log.js";
 import { openBrowser } from "./open-browser.js";
 import { shutdownWhenStdinCloses } from "./parent-stdin.js";
+import { retireAddonCacheOfEarlierVersions } from "./retired-addon-cache.js";
 import { addStartupCorsOrigins, createServer, startServer } from "./server.js";
 import { createOwnerToken, createQuitLifecycle } from "./shutdown.js";
 import { forgetStartEnvironment } from "./start-port.js";
@@ -67,6 +68,8 @@ export interface HubStartupDependencies {
 	readonly getStateDir: typeof getStateDir;
 	readonly getConfigDir: typeof getConfigDir;
 	readonly acquireHubLock: typeof acquireHubLock;
+	/** Removes what executables before #889 extracted into the cache; a no-op from source. */
+	readonly retireAddonCache: () => void;
 	/** Returns whether the process's output is now checked against the daemon log's limit. */
 	readonly boundDaemonLog: () => boolean;
 	readonly initAuth: typeof initAuth;
@@ -89,6 +92,7 @@ const defaultDependencies: HubStartupDependencies = {
 	getStateDir,
 	getConfigDir,
 	acquireHubLock,
+	retireAddonCache: retireAddonCacheOfEarlierVersions,
 	boundDaemonLog: () => boundDaemonLog() !== undefined,
 	initAuth,
 	loadHubKey,
@@ -145,6 +149,9 @@ export async function startHub(
 	// 3). One an earlier version made is tightened; another account's is refused.
 	createOwnerOnlyDirectory(stateDir);
 	ensurePrivateStateDirectory(stateDir);
+	// The addons an earlier executable extracted, now loaded from beside this
+	// one (#889). After the lock, so a start that loses changes nothing.
+	dependencies.retireAddonCache();
 	// A daemon's log is the running hub's evidence: a start that loses the lock
 	// only appends to it (#133). The hub that holds the lock is the only one that
 	// moves it aside at its size limit (#525).

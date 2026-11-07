@@ -32,6 +32,9 @@ Set-Location $Root
 pnpm -F @lasterm/shared build
 if ($LASTEXITCODE -ne 0) { throw "shared build failed" }
 
+# The hub lock and the TLS identity are napi cdylibs. Packaging copies them
+# beside the executable under their Node addon names, and the executable embeds
+# what each must hold (#889).
 cargo build --locked -p lasterm-hub-lock -p lasterm-tls-identity --release --target $env:LASTERM_TARGET_TRIPLE --target-dir $cargoTargetDir
 if ($LASTEXITCODE -ne 0) { throw "native hub addons build failed" }
 $lockLibrary = Join-Path $cargoTargetDir "$env:LASTERM_TARGET_TRIPLE\release\lasterm_hub_lock.dll"
@@ -54,4 +57,6 @@ $binary = "$env:LASTERM_DIST_DIR\lasterm-hub.exe"
 if (Test-Path $binary) {
     $size = [math]::Round((Get-Item $binary).Length / 1MB, 1)
     Write-Host "✅ Hub SEA built → $binary (${size}MB)" -ForegroundColor Green
+    # The executable refuses to start without them, unchanged, in its directory.
+    Write-Host "   with its addons beside it: lasterm_hub_lock.node, lasterm_tls_identity.node" -ForegroundColor Green
 }

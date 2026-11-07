@@ -2,14 +2,26 @@
  * package-sea-hub.spec.ts
  *
  * Tests for:
- *   - scripts/package-sea-hub.ts (manifest generation, addon location, content-type)
+ *   - scripts/package-sea-hub.ts (manifest generation, addon location, content-type,
+ *     the addons installed beside the executable and their manifest)
  *   - packages/hub/src/sea-static-server.ts (in-memory manifest loading and serving)
  *   - packages/hub/src/sea-agent-resolver.ts (agent binary resolution)
  *
  * The built executable itself is run by sea-hub-e2e.spec.ts.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	closeSync,
+	existsSync,
+	fstatSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +30,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // CARGO_TARGET_DIR (#531). A git worktree that shares one target directory has
 // no `target` of its own.
 import { cargoTargetDir } from "../packages/hub/src/cargo-target-dir.js";
+import {
+	ADDON_MANIFEST_ASSET,
+	addonDigest,
+	readAddonManifest,
+} from "../packages/shared/src/installed-addon.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -144,6 +161,105 @@ describe("checkHubLockExports", () => {
 		expect(() =>
 			checkHubLockExports({ ...lock, connectLocalAgent: local.connectLocalAgent }, "addon"),
 		).toThrow("no connectLocalAgent/verifyLocalAgentPeer export");
+	});
+});
+
+describe("installAddons", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "lasterm-install-addons-"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("copies each addon beside the executable, and records what each copy holds", async () => {
+		const { installAddons } = await import("./package-sea-hub.js");
+		const sources = join(tempDir, "build");
+		const dist = join(tempDir, "dist");
+		mkdirSync(sources);
+		mkdirSync(dist);
+		writeFileSync(join(sources, "liblasterm_hub_lock.so"), "\x7fELF the hub lock");
+		writeFileSync(join(sources, "liblasterm_tls_identity.so"), "\x7fELF the TLS identity");
+		const manifest = installAddons(dist, {
+			"lasterm_tls_identity.node": join(sources, "liblasterm_tls_identity.so"),
+			"lasterm_hub_lock.node": join(sources, "liblasterm_hub_lock.so"),
+		});
+		// Sorted by name, so the embedded manifest is the same from one build to the next.
+		expect(Object.keys(manifest)).toEqual(["lasterm_hub_lock.node", "lasterm_tls_identity.node"]);
+		for (const [name, digest] of Object.entries(manifest)) {
+			const shipped = readFileSync(join(dist, name));
+			expect(digest).toEqual({
+				size: shipped.length,
+				sha256: createHash("sha256").update(shipped).digest("hex"),
+			});
+		}
+	});
+
+	it("records the real addons as the hub checks them", async () => {
+		const { digestAddonFile, installAddons } = await import("./package-sea-hub.js");
+		const built = (name: string) =>
+			join(
+				cargoTargetDir(),
+				"release",
+				process.platform === "win32" ? `${name}.dll` : `lib${name}.so`,
+			);
+		const manifest = installAddons(tempDir, {
+			"lasterm_hub_lock.node": built("lasterm_hub_lock"),
+		});
+		const fd = openSync(join(tempDir, "lasterm_hub_lock.node"), "r");
+		try {
+			// The hub's own function, given the size the build recorded.
+			expect(addonDigest(fd, fstatSync(fd).size, manifest["lasterm_hub_lock.node"]?.size)).toEqual(
+				manifest["lasterm_hub_lock.node"],
+			);
+		} finally {
+			closeSync(fd);
+		}
+		expect(digestAddonFile(join(tempDir, "lasterm_hub_lock.node"))).toEqual(
+			manifest["lasterm_hub_lock.node"],
+		);
+	});
+
+	it("refuses an empty file, as a placeholder left in place of an addon", async () => {
+		const { installAddons } = await import("./package-sea-hub.js");
+		writeFileSync(join(tempDir, "empty"), "");
+		const dist = join(tempDir, "dist");
+		mkdirSync(dist);
+		expect(() => installAddons(dist, { "lasterm_hub_lock.node": join(tempDir, "empty") })).toThrow(
+			"is empty",
+		);
+	});
+});
+
+describe("writeAddonManifest", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "lasterm-addon-manifest-"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("writes the manifest the hub reads back unchanged", async () => {
+		const { writeAddonManifest } = await import("./package-sea-hub.js");
+		const manifest = { "lasterm_hub_lock.node": { size: 7, sha256: "c".repeat(64) } };
+		const file = join(tempDir, ADDON_MANIFEST_ASSET);
+		writeAddonManifest(file, manifest);
+		expect(readAddonManifest({ getAsset: () => readFileSync(file, "utf8") })).toEqual(manifest);
+	});
+
+	it("refuses to write one the hub would refuse", async () => {
+		const { writeAddonManifest } = await import("./package-sea-hub.js");
+		const file = join(tempDir, ADDON_MANIFEST_ASSET);
+		expect(() =>
+			writeAddonManifest(file, { "../lasterm_hub_lock.node": { size: 7, sha256: "c".repeat(64) } }),
+		).toThrow();
+		expect(existsSync(file)).toBe(false);
 	});
 });
 

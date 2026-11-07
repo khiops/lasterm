@@ -365,6 +365,7 @@ $mainExe = Resolve-DesktopExecutablePath `
 
 $hubSidecar = Join-Path $srcTauriDir "lasterm-hub-$windowsX64RustTarget.exe"
 $agentSidecar = Join-Path $srcTauriDir "lasterm-agent-$windowsX64RustTarget.exe"
+$hubAddons = @("lasterm_hub_lock.node", "lasterm_tls_identity.node")
 
 Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $stageDir, $assetsDir -Force | Out-Null
@@ -374,6 +375,17 @@ Copy-RequiredFile $mainExe (Join-Path $stageDir $desktopBinaryName)
 Copy-RequiredFile $hubSidecar (Join-Path $stageDir "lasterm-hub.exe")
 Copy-RequiredFile $agentSidecar (Join-Path $stageDir "lasterm-agent.exe")
 Copy-RequiredFile $manifestPath (Join-Path $stageDir "AppxManifest.xml")
+# The hub's native addons, beside it at the package root: the hub loads them
+# from its own directory and refuses any whose bytes differ from what it was
+# built with (#889). Installed under WindowsApps, they are part of the signed
+# package and read-only to every user account.
+foreach ($addon in $hubAddons) {
+  $source = Join-Path $srcTauriDir $addon
+  Copy-RequiredFile $source (Join-Path $stageDir $addon)
+  if ((Get-Item -LiteralPath $source).Length -eq 0) {
+    throw "$source is empty, a placeholder rather than the hub's addon. Place the files the hub was built with (dist\sea) in src-tauri, as scripts\build-desktop.ps1 does."
+  }
+}
 
 foreach ($exe in @($desktopBinaryName, "lasterm-hub.exe", "lasterm-agent.exe")) {
   Assert-PeMachineX64 (Join-Path $stageDir $exe)

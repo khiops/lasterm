@@ -21,24 +21,38 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import {
+	closeSync,
+	copyFileSync,
 	existsSync,
+	fstatSync,
+	linkSync,
 	mkdirSync,
 	mkdtempSync,
+	openSync,
 	readdirSync,
 	readFileSync,
 	rmSync,
 	statSync,
+	unlinkSync,
+	writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type RuntimeInfo, requestHub } from "../packages/hub/src/cli.js";
+import { HUB_LOCK_ADDON } from "../packages/hub/src/hub-lock.js";
 import { platformDirEnv } from "../packages/hub/src/platform-dirs.fixture.js";
 import {
 	beforeBaselineRefusal,
 	createMetaDbBeforeBaseline,
 } from "../packages/hub/src/storage/open-databases.fixture.js";
+import { TLS_IDENTITY_ADDON } from "../packages/hub/src/tls-identity.js";
+import {
+	ADDON_MANIFEST_ASSET,
+	addonDigest,
+	parseAddonManifest,
+} from "../packages/shared/src/installed-addon.js";
 import { lastermDir } from "../packages/shared/src/platform-dirs.js";
 
 // ─── The artefact ─────────────────────────────────────────────────────────────
@@ -143,6 +157,51 @@ function removeSandbox(sandbox: Sandbox): void {
 		// Windows can hold a handle on a file of a process that just exited; a
 		// leftover directory in the system temp folder is not a test failure.
 	}
+}
+
+// ─── Its addons ───────────────────────────────────────────────────────────────
+
+/** The addons the executable loads from its own directory, checked against its manifest (#889). */
+const ADDONS = [HUB_LOCK_ADDON, TLS_IDENTITY_ADDON] as const;
+const SEA_DIR = dirname(SEA_BINARY);
+const PLATFORM = `${process.platform}-${process.arch}`;
+
+/** The version the executable carries, which names its directory in the old addon cache. */
+function hubVersion(): string {
+	const pkg = JSON.parse(readFileSync(join(ROOT, "packages", "hub", "package.json"), "utf8")) as {
+		version: string;
+	};
+	return pkg.version;
+}
+
+/**
+ * The executable and its addons in a directory of the sandbox: the executable
+ * linked where the volume allows, else copied, and the addons copied, so a
+ * case can change them without touching the build.
+ */
+function installCopy(sandbox: Sandbox): string {
+	const dir = join(sandbox.root, "install");
+	mkdirSync(dir);
+	const executable = join(dir, basename(SEA_BINARY));
+	try {
+		linkSync(SEA_BINARY, executable);
+	} catch {
+		copyFileSync(SEA_BINARY, executable);
+	}
+	for (const addon of ADDONS) copyFileSync(join(SEA_DIR, addon), join(dir, addon));
+	return dir;
+}
+
+/** `start --exit-with-stdin` with its stdin closed at once: a hub that starts anyway stops, exit 0. */
+function startClosed(executable: string, sandbox: Sandbox) {
+	const result = spawnSync(executable, ["start", "--exit-with-stdin"], {
+		env: sandbox.env,
+		input: "",
+		encoding: "utf8",
+		timeout: READY_TIMEOUT_MS,
+		windowsHide: true,
+	});
+	return { ...result, said: `stdout:\n${result.stdout}\nstderr:\n${result.stderr}` };
 }
 
 // ─── A started hub ────────────────────────────────────────────────────────────
@@ -350,6 +409,77 @@ describe("lasterm-hub executable", () => {
 				}
 			});
 
+			// Mutation caught: a build that ships other files than it recorded, or
+			// records them other than the hub checks them (#889).
+			it(`carries the digests of the addons installed beside it (${ADDON_MANIFEST_ASSET})`, () => {
+				// The file the build embedded, left beside the executable it built.
+				const manifest = parseAddonManifest(
+					readFileSync(join(SEA_DIR, ADDON_MANIFEST_ASSET), "utf8"),
+				);
+				expect(Object.keys(manifest).sort()).toEqual([...ADDONS].sort());
+				for (const addon of ADDONS) {
+					const fd = openSync(join(SEA_DIR, addon), "r");
+					try {
+						expect([addon, addonDigest(fd, fstatSync(fd).size, manifest[addon]?.size)]).toEqual([
+							addon,
+							manifest[addon],
+						]);
+					} finally {
+						closeSync(fd);
+					}
+				}
+			});
+
+			// Mutations caught: an executable that loads its addons unchecked, from
+			// anywhere but its own directory, or still from the cache (#889).
+			describe("refuses to start with an addon beside it that is not the one it was built with", () => {
+				it(
+					"an addon missing",
+					() => {
+						const sandbox = createSandbox();
+						try {
+							const dir = installCopy(sandbox);
+							unlinkSync(join(dir, HUB_LOCK_ADDON));
+							const result = startClosed(join(dir, basename(SEA_BINARY)), sandbox);
+							expect(result.error, result.said).toBeUndefined();
+							expect(result.status, result.said).toBe(1);
+							expect(result.stderr, result.said).toContain(
+								`refusing the native addon ${join(dir, HUB_LOCK_ADDON)}: it is missing`,
+							);
+							expect(existsSync(join(sandbox.stateDir, "runtime.json"))).toBe(false);
+						} finally {
+							removeSandbox(sandbox);
+						}
+					},
+					READY_TIMEOUT_MS + 10_000,
+				);
+
+				it(
+					"an addon whose bytes changed",
+					() => {
+						const sandbox = createSandbox();
+						try {
+							const dir = installCopy(sandbox);
+							const addon = join(dir, TLS_IDENTITY_ADDON);
+							const bytes = readFileSync(addon);
+							const middle = Math.floor(bytes.length / 2);
+							bytes[middle] = (bytes[middle] ?? 0) ^ 0xff;
+							writeFileSync(addon, bytes);
+							const result = startClosed(join(dir, basename(SEA_BINARY)), sandbox);
+							expect(result.error, result.said).toBeUndefined();
+							expect(result.status, result.said).toBe(1);
+							expect(result.stderr, result.said).toContain(
+								`refusing the native addon ${addon}: it does not hold the bytes this executable was built with`,
+							);
+							expect(existsSync(join(sandbox.stateDir, "runtime.json"))).toBe(false);
+						} finally {
+							removeSandbox(sandbox);
+						}
+					},
+					READY_TIMEOUT_MS + 10_000,
+				);
+			});
+
 			// Mutation caught: an executable that applies the migration baseline over
 			// such a database, and stops on "table already exists" instead (#747).
 			it(
@@ -386,9 +516,22 @@ describe("lasterm-hub executable", () => {
 			describe("started with start --exit-with-stdin", () => {
 				let sandbox: Sandbox | undefined;
 				let hub: StartedHub | undefined;
+				// What an executable before #889 left in the cache, which the start
+				// removes, and a file lasterm never wrote there, which it keeps.
+				const retired = [
+					`addons/0.0.1/${PLATFORM}/${HUB_LOCK_ADDON}`,
+					`addons/0.0.1/${PLATFORM}/better_sqlite3.node`,
+					`addons/${hubVersion()}/${PLATFORM}/${TLS_IDENTITY_ADDON}`,
+				];
+				const foreign = `addons/0.0.1/${PLATFORM}/notes.txt`;
 
 				beforeAll(async () => {
 					sandbox = createSandbox();
+					for (const file of [...retired, foreign]) {
+						const path = join(sandbox.cacheDir, ...file.split("/"));
+						mkdirSync(dirname(path), { recursive: true });
+						writeFileSync(path, "left by an earlier version");
+					}
 					// Started under the usual umask, which the child inherits: under it,
 					// SQLite alone creates a database 0644, and the mode check below
 					// would pass for a hub that leaves the mode to SQLite.
@@ -500,6 +643,20 @@ describe("lasterm-hub executable", () => {
 					const missing = await hubRequest(hub!, "/assets/index-00000000.js");
 					expect(missing.status).toBe(404);
 					expect(missing.headers.get("content-type") ?? "").not.toContain("text/html");
+				});
+
+				it("loads its addons from beside it, and clears what earlier versions extracted", () => {
+					for (const file of retired) {
+						expect([file, existsSync(join(sandbox!.cacheDir, ...file.split("/")))]).toEqual([
+							file,
+							false,
+						]);
+					}
+					expect(existsSync(join(sandbox!.cacheDir, ...foreign.split("/")))).toBe(true);
+					const cached = readdirSync(sandbox!.cacheDir, { recursive: true, encoding: "utf8" });
+					for (const addon of ADDONS) {
+						expect(cached.filter((entry) => entry.endsWith(addon))).toEqual([]);
+					}
 				});
 
 				it("keeps its databases in the state directory it was given", () => {

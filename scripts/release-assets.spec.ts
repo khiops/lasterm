@@ -6,17 +6,21 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { crc32, inflateRawSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	checksumsName,
 	extractArtifacts,
 	globToRegExp,
+	HUB_ADDONS,
 	type Matrix,
 	resolveReleaseAssets,
+	zipArchive,
 } from "./release-assets.js";
 
 const ROOT = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
@@ -30,7 +34,10 @@ function releaseContents(): Map<string, string[]> {
 		["agent-x86_64-unknown-linux-gnu", ["lasterm-agent"]],
 		["agent-aarch64-unknown-linux-gnu", ["lasterm-agent"]],
 		["agent-x86_64-pc-windows-msvc", ["lasterm-agent.exe"]],
-		["hub-x86_64-pc-windows-msvc", ["lasterm-hub.exe"]],
+		[
+			"hub-x86_64-pc-windows-msvc",
+			["lasterm-hub.exe", "lasterm_hub_lock.node", "lasterm_tls_identity.node"],
+		],
 	]);
 }
 
@@ -66,9 +73,38 @@ describe("resolveReleaseAssets", () => {
 				"lasterm-agent-aarch64-unknown-linux-gnu-0.10.1",
 				"lasterm-agent-x86_64-pc-windows-msvc-0.10.1.exe",
 				"lasterm-agent-x86_64-unknown-linux-gnu-0.10.1",
-				"lasterm-hub-x86_64-pc-windows-msvc.exe",
+				"lasterm-hub-x86_64-pc-windows-msvc.zip",
 			].sort(),
 		);
+	});
+
+	it("publishes the hub as one zip of the executable and its addons, executable first", () => {
+		const { assets, errors } = resolveReleaseAssets(MATRIX, "0.10.1", releaseContents());
+		expect(errors).toEqual([]);
+		expect(assets.find((a) => a.kind === "hub")).toEqual({
+			kind: "hub",
+			triple: "x86_64-pc-windows-msvc",
+			artifact: "hub-x86_64-pc-windows-msvc",
+			file: "lasterm-hub-x86_64-pc-windows-msvc.zip",
+			asset: "lasterm-hub-x86_64-pc-windows-msvc.zip",
+			members: ["lasterm-hub.exe", ...HUB_ADDONS],
+		});
+	});
+
+	it("refuses a hub artifact missing an addon, or carrying anything more", () => {
+		const missing = releaseContents();
+		missing.set("hub-x86_64-pc-windows-msvc", ["lasterm-hub.exe", "lasterm_hub_lock.node"]);
+		expect(resolveReleaseAssets(MATRIX, "0.10.1", missing).errors).toEqual([
+			'hub-x86_64-pc-windows-msvc: expected exactly "lasterm-hub.exe", "lasterm_hub_lock.node", "lasterm_tls_identity.node", found "lasterm-hub.exe", "lasterm_hub_lock.node"',
+		]);
+		const more = releaseContents();
+		more.set("hub-x86_64-pc-windows-msvc", [
+			"addons.json",
+			"lasterm-hub.exe",
+			"lasterm_hub_lock.node",
+			"lasterm_tls_identity.node",
+		]);
+		expect(resolveReleaseAssets(MATRIX, "0.10.1", more).errors).toHaveLength(1);
 	});
 
 	it("refuses an MSIX workflow artifact so it cannot reach a release", () => {
@@ -96,12 +132,17 @@ describe("resolveReleaseAssets", () => {
 	it("requires the executable's own name, so a bare name on Windows is refused", () => {
 		const contents = releaseContents();
 		// The shape MSYS fabricated for 0.10.0: `lasterm-hub` next to `lasterm-hub.exe`.
-		contents.set("hub-x86_64-pc-windows-msvc", ["lasterm-hub", "lasterm-hub.exe"]);
+		contents.set("hub-x86_64-pc-windows-msvc", [
+			"lasterm-hub",
+			"lasterm-hub.exe",
+			"lasterm_hub_lock.node",
+			"lasterm_tls_identity.node",
+		]);
 		contents.set("agent-x86_64-pc-windows-msvc", ["lasterm-agent"]);
 		const { errors } = resolveReleaseAssets(MATRIX, "0.10.1", contents);
 		expect(errors).toEqual([
 			'agent-x86_64-pc-windows-msvc: expected exactly "lasterm-agent.exe", found "lasterm-agent"',
-			'hub-x86_64-pc-windows-msvc: expected exactly "lasterm-hub.exe", found "lasterm-hub", "lasterm-hub.exe"',
+			'hub-x86_64-pc-windows-msvc: expected exactly "lasterm-hub.exe", "lasterm_hub_lock.node", "lasterm_tls_identity.node", found "lasterm-hub", "lasterm-hub.exe", "lasterm_hub_lock.node", "lasterm_tls_identity.node"',
 		]);
 	});
 
@@ -151,9 +192,9 @@ describe("resolveReleaseAssets", () => {
 		const matrix = structuredClone(MATRIX);
 		const windows = matrix.targets.find((t) => t.triple === "x86_64-pc-windows-msvc");
 		if (!windows?.artifacts) throw new Error("the matrix has no Windows artifacts");
-		windows.artifacts.hub = ["lasterm-hub-x86_64-pc-windows-msvc.exe\r"];
+		windows.artifacts.hub = ["lasterm-hub-x86_64-pc-windows-msvc.zip\r"];
 		const { errors } = resolveReleaseAssets(matrix, "0.10.1", releaseContents());
-		expect(errors[0]).toContain('"lasterm-hub-x86_64-pc-windows-msvc.exe\\r" matched no file');
+		expect(errors[0]).toContain('"lasterm-hub-x86_64-pc-windows-msvc.zip\\r" matched no file');
 	});
 
 	it("refuses bracket expressions rather than giving them a meaning", () => {
@@ -210,6 +251,83 @@ describe("globToRegExp", () => {
 		expect(globToRegExp("1.0.0").test("1x0y0")).toBe(false);
 		expect(globToRegExp("(x)|y").test("(x)|y")).toBe(true);
 		expect(globToRegExp("x").test("xx")).toBe(false);
+	});
+});
+
+/** A zip read back by the format alone: every entry, from its central directory. */
+function readZip(zip: Buffer): { name: string; data: Buffer; mode: number }[] {
+	const end = zip.length - 22;
+	expect(zip.readUInt32LE(end)).toBe(0x06054b50);
+	const count = zip.readUInt16LE(end + 10);
+	let at = zip.readUInt32LE(end + 16);
+	const entries: { name: string; data: Buffer; mode: number }[] = [];
+	for (let i = 0; i < count; i++) {
+		expect(zip.readUInt32LE(at)).toBe(0x02014b50);
+		const crc = zip.readUInt32LE(at + 16);
+		const compressedSize = zip.readUInt32LE(at + 20);
+		const size = zip.readUInt32LE(at + 24);
+		const nameLength = zip.readUInt16LE(at + 28);
+		const skip = zip.readUInt16LE(at + 30) + zip.readUInt16LE(at + 32);
+		const mode = (zip.readUInt32LE(at + 38) >>> 16) & 0o777;
+		const local = zip.readUInt32LE(at + 42);
+		const name = zip.subarray(at + 46, at + 46 + nameLength).toString("utf8");
+		expect(zip.readUInt32LE(local)).toBe(0x04034b50);
+		const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+		const data = inflateRawSync(zip.subarray(start, start + compressedSize));
+		expect([name, data.length, crc32(data)]).toEqual([name, size, crc]);
+		entries.push({ name, data, mode });
+		at += 46 + nameLength + skip;
+	}
+	return entries;
+}
+
+describe("zipArchive", () => {
+	const entries = [
+		{ name: "lasterm-hub.exe", data: Buffer.from("MZ the executable ".repeat(4096)), mode: 0o755 },
+		{ name: "lasterm_hub_lock.node", data: randomBytes(70_000), mode: 0o644 },
+		{ name: "lasterm_tls_identity.node", data: Buffer.alloc(0), mode: 0o644 },
+	];
+
+	let work: string;
+
+	beforeEach(() => {
+		work = mkdtempSync(join(tmpdir(), "lasterm-release-zip-"));
+	});
+
+	afterEach(() => {
+		rmSync(work, { recursive: true, force: true });
+	});
+
+	it("holds each file, in order, with its bytes and its mode", () => {
+		expect(readZip(zipArchive(entries))).toEqual(entries);
+	});
+
+	it("gives the same bytes for the same files", () => {
+		expect(zipArchive(entries).equals(zipArchive(entries))).toBe(true);
+	});
+
+	it("is read by the system's own tools", (context) => {
+		writeFileSync(join(work, "hub.zip"), zipArchive(entries));
+		mkdirSync(join(work, "out"));
+		// Windows' own tar is libarchive's, which reads zip; Git's GNU tar on PATH does not.
+		const tool =
+			process.platform === "win32"
+				? {
+						cmd: join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe"),
+						args: ["-xf", "hub.zip", "-C", "out"],
+					}
+				: { cmd: "unzip", args: ["-q", "hub.zip", "-d", "out"] };
+		const run = spawnSync(tool.cmd, tool.args, { cwd: work, encoding: "utf8" });
+		if (run.error && (run.error as NodeJS.ErrnoException).code === "ENOENT") {
+			context.skip(`${tool.cmd} is not installed`);
+		}
+		expect(run.status, run.stderr).toBe(0);
+		for (const entry of entries) {
+			expect(readFileSync(join(work, "out", entry.name))).toEqual(entry.data);
+			if (process.platform !== "win32") {
+				expect(statSync(join(work, "out", entry.name)).mode & 0o777).toBe(entry.mode);
+			}
+		}
 	});
 });
 
@@ -333,6 +451,70 @@ describe("release-assets CLI", () => {
 				asset: "lasterm-agent-x86_64-unknown-linux-gnu-1.2.3",
 				path: join("extracted", "agent-x86_64-unknown-linux-gnu", "lasterm-agent"),
 			},
+		]);
+	});
+
+	it("writes the hub's zip from its artifact, and points the manifest at it", () => {
+		const triple = "x86_64-pc-windows-msvc";
+		const matrix: Matrix = {
+			targets: [
+				{
+					triple,
+					os: "windows",
+					enabled: true,
+					hub: true,
+					artifacts: { hub: [`lasterm-hub-${triple}.zip`] },
+				},
+			],
+		};
+		writeFileSync(join(work, "matrix.json"), JSON.stringify(matrix));
+		const files: Record<string, string> = {
+			"lasterm-hub.exe": "the executable",
+			"lasterm_hub_lock.node": "the hub lock",
+			"lasterm_tls_identity.node": "the TLS identity",
+		};
+		mkdirSync(join(work, "staging"), { recursive: true });
+		for (const [name, body] of Object.entries(files)) {
+			writeFileSync(join(work, "staging", name), body);
+		}
+		const dir = join(work, "downloads", `hub-${triple}`);
+		mkdirSync(dir, { recursive: true });
+		const packed = spawnSync("tar", ["-cf", `hub-${triple}.tar`, "-C", "../../staging", "."], {
+			cwd: dir,
+			encoding: "utf8",
+		});
+		expect(packed.status, packed.stderr).toBe(0);
+
+		const run = spawnSync(
+			process.execPath,
+			[
+				join(ROOT, "scripts", "release-assets.ts"),
+				"--matrix",
+				"matrix.json",
+				"--version",
+				"1.2.3",
+				"--downloads",
+				"downloads",
+				"--extract-to",
+				"extracted",
+				"--out",
+				"manifest.json",
+			],
+			{ cwd: work, encoding: "utf8" },
+		);
+		expect(run.status, run.stderr).toBe(0);
+		const [asset, ...others] = JSON.parse(readFileSync(join(work, "manifest.json"), "utf8"));
+		expect(others).toEqual([]);
+		expect(asset).toMatchObject({
+			kind: "hub",
+			asset: `lasterm-hub-${triple}.zip`,
+			path: join("extracted", `hub-${triple}`, `lasterm-hub-${triple}.zip`),
+		});
+		const zipped = readZip(readFileSync(join(work, asset.path)));
+		expect(zipped.map((e) => [e.name, e.data.toString("utf8"), e.mode])).toEqual([
+			["lasterm-hub.exe", "the executable", 0o755],
+			["lasterm_hub_lock.node", "the hub lock", 0o644],
+			["lasterm_tls_identity.node", "the TLS identity", 0o644],
 		]);
 	});
 

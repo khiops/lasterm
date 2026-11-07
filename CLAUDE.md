@@ -154,11 +154,13 @@ macOS is not a supported target: nothing builds or tests it (#224). On Windows, 
 ```bash
 ./scripts/build-agent.sh   # Rust agent → dist/sea/lasterm-agent (cargo --release)
 ./scripts/build-hub.sh     # Hub SEA (builds+embeds web, bundles better-sqlite3) → dist/sea/lasterm-hub
+                           #   + its addons beside it: lasterm_hub_lock.node, lasterm_tls_identity.node
 cd dist/sea && ./lasterm-hub start --port 4100   # serve PWA at https://127.0.0.1:4100 (--daemon/--open)
 ./lasterm-hub pair         # 8-digit code to authorise a browser client; also: status | stop
 ```
 
 - Hub SEA resolves the agent **co-located** in the same dir (`dist/sea/`) via `sea-agent-resolver.ts`; the agent spawns lazily on first local session.
+- Its native addons are **installed beside it** too, never extracted (#889): it loads `lasterm_hub_lock.node` and `lasterm_tls_identity.node` from its own directory and refuses to start unless each holds the bytes recorded in the `addons.json` it embeds (SECURITY.md § 4.5). Move or copy the executable with them. The desktop bundles them as Tauri resources, and the release publishes the Windows hub as a zip of the three. better-sqlite3's addon is still embedded and extracted to the cache until #893.
 - Native SEA embeds the host Node — build cross-platform binaries on their target OS (Windows hub on Windows). Rust agent verify must include `cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings` (cfg(windows) lints invisible to Linux clippy).
 - Config: `~/.config/lasterm` · State: `~/.local/state/lasterm`.
 

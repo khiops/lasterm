@@ -11,8 +11,11 @@
  *
  *   - the artifacts present are exactly the expected ones, no more, no less;
  *   - each tar holds regular files at its top level and nothing else;
- *   - agent and hub artifacts hold the one executable their producer writes,
- *     published under the name the hub fetches (agent) or the matrix declares (hub);
+ *   - an agent artifact holds the one executable its producer writes, published
+ *     under the name the hub fetches;
+ *   - a hub artifact holds the executable and the native addons it loads from
+ *     its own directory (#889), and nothing else. They are published together,
+ *     as one zip this script writes, under the name the matrix declares;
  *   - each desktop declaration matches exactly one file, and every file
  *     matches a declaration;
  *   - no two deliverables share a public name.
@@ -31,6 +34,13 @@ import { spawnSync } from "node:child_process";
 import { lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { crc32, deflateRawSync } from "node:zlib";
+
+/**
+ * The native addons the hub executable loads from its own directory, which it
+ * refuses to start without (#889): its artifact carries them beside it.
+ */
+export const HUB_ADDONS: readonly string[] = ["lasterm_hub_lock.node", "lasterm_tls_identity.node"];
 
 export interface MatrixTarget {
 	triple: string;
@@ -57,10 +67,18 @@ export interface ReleaseAsset {
 	triple: string;
 	/** Workflow artifact the file came from. */
 	artifact: string;
-	/** File name inside that artifact's tar. */
+	/** File name inside that artifact's tar; for a zip, the archive written beside them. */
 	file: string;
 	/** Name the file is published under. */
 	asset: string;
+	/** For a zip: the artifact's files it holds, in this order, at its top level. */
+	members?: string[];
+}
+
+interface Candidate {
+	file: string;
+	asset: string;
+	members?: string[];
 }
 
 export interface Resolution {
@@ -142,7 +160,7 @@ function resolveDeclared(
 	artifact: string,
 	kind: Kind,
 	target: MatrixTarget,
-	candidates: readonly { file: string; asset: string }[],
+	candidates: readonly Candidate[],
 	declared: readonly string[],
 	version: string,
 	out: Resolution,
@@ -190,6 +208,7 @@ function resolveDeclared(
 			artifact,
 			file: match.file,
 			asset: match.asset,
+			...(match.members === undefined ? {} : { members: match.members }),
 		});
 	});
 	for (const candidate of candidates) {
@@ -211,6 +230,28 @@ function resolveExecutable(
 	const expected = executableName(base, target);
 	if (files.length !== 1 || files[0] !== expected) {
 		out.errors.push(`${artifact}: expected exactly ${show(expected)}, found ${showList(files)}`);
+		return undefined;
+	}
+	return expected;
+}
+
+/**
+ * The hub's files, executable first: exactly the executable and its addons.
+ * Without an addon the executable does not start, and anything else would be
+ * published unexamined.
+ */
+function resolveHubFiles(
+	artifact: string,
+	target: MatrixTarget,
+	files: readonly string[],
+	out: Resolution,
+): string[] | undefined {
+	const expected = [executableName("lasterm-hub", target), ...HUB_ADDONS];
+	const found = [...files].sort();
+	if (found.length !== expected.length || [...expected].sort().some((f, i) => f !== found[i])) {
+		out.errors.push(
+			`${artifact}: expected exactly ${showList(expected)}, found ${showList(files)}`,
+		);
 		return undefined;
 	}
 	return expected;
@@ -252,9 +293,10 @@ export function resolveReleaseAssets(
 				});
 			}
 		} else if (kind === "hub") {
-			const file = resolveExecutable(name, "lasterm-hub", target, files, out);
-			if (file !== undefined) {
-				const candidates = [{ file, asset: `lasterm-hub-${target.triple}${extension(target)}` }];
+			const members = resolveHubFiles(name, target, files, out);
+			if (members !== undefined) {
+				const zip = `lasterm-hub-${target.triple}.zip`;
+				const candidates = [{ file: zip, asset: zip, members }];
 				resolveDeclared(name, kind, target, candidates, target.artifacts?.hub ?? [], version, out);
 			}
 		} else {
@@ -350,6 +392,93 @@ export function extractArtifacts(
 	return { contents, errors };
 }
 
+export interface ZipEntry {
+	readonly name: string;
+	readonly data: Buffer;
+	/** Unix permission bits, which unzip restores and Windows ignores. */
+	readonly mode: number;
+}
+
+/** 1980-01-01 00:00, the earliest time a zip records, as an MS-DOS date. */
+const ZIP_EPOCH_DATE = (0 << 9) | (1 << 5) | 1;
+const ZIP_LIMIT = 0xffffffff;
+
+/**
+ * A zip archive of `entries`, deflated, in the given order, every time at the
+ * format's epoch: the same files give the same bytes. Built from Node's zlib
+ * alone, for the job that may not install anything. No ZIP64: an entry or an
+ * archive of 4 GiB or more is refused, which no executable here approaches.
+ */
+export function zipArchive(entries: readonly ZipEntry[]): Buffer {
+	if (entries.length > 0xffff) throw new Error("a zip holds at most 65535 entries without ZIP64");
+	const parts: Buffer[] = [];
+	const directory: Buffer[] = [];
+	let offset = 0;
+	for (const entry of entries) {
+		const name = Buffer.from(entry.name, "utf8");
+		const compressed = deflateRawSync(entry.data, { level: 9 });
+		const crc = crc32(entry.data);
+		if (entry.data.length >= ZIP_LIMIT || compressed.length >= ZIP_LIMIT || offset >= ZIP_LIMIT) {
+			throw new Error(`${entry.name} is too large for a zip without ZIP64`);
+		}
+		const local = Buffer.alloc(30);
+		local.writeUInt32LE(0x04034b50, 0);
+		local.writeUInt16LE(20, 4); // version needed: 2.0, for deflate
+		local.writeUInt16LE(0x0800, 6); // the name is UTF-8
+		local.writeUInt16LE(8, 8); // deflate
+		local.writeUInt16LE(0, 10);
+		local.writeUInt16LE(ZIP_EPOCH_DATE, 12);
+		local.writeUInt32LE(crc, 14);
+		local.writeUInt32LE(compressed.length, 18);
+		local.writeUInt32LE(entry.data.length, 22);
+		local.writeUInt16LE(name.length, 26);
+		local.writeUInt16LE(0, 28);
+		const central = Buffer.alloc(46);
+		central.writeUInt32LE(0x02014b50, 0);
+		central.writeUInt16LE((3 << 8) | 20, 4); // made by Unix, so the mode below is read
+		central.writeUInt16LE(20, 6);
+		central.writeUInt16LE(0x0800, 8);
+		central.writeUInt16LE(8, 10);
+		central.writeUInt16LE(0, 12);
+		central.writeUInt16LE(ZIP_EPOCH_DATE, 14);
+		central.writeUInt32LE(crc, 16);
+		central.writeUInt32LE(compressed.length, 20);
+		central.writeUInt32LE(entry.data.length, 24);
+		central.writeUInt16LE(name.length, 28);
+		// Extra field, comment, disk and internal attributes: none.
+		central.writeUInt32LE(((0o100000 | (entry.mode & 0o777)) << 16) >>> 0, 38);
+		central.writeUInt32LE(offset, 42);
+		parts.push(local, name, compressed);
+		directory.push(central, name);
+		offset += local.length + name.length + compressed.length;
+	}
+	const centralDirectory = Buffer.concat(directory);
+	const end = Buffer.alloc(22);
+	end.writeUInt32LE(0x06054b50, 0);
+	end.writeUInt16LE(entries.length, 8);
+	end.writeUInt16LE(entries.length, 10);
+	end.writeUInt32LE(centralDirectory.length, 12);
+	end.writeUInt32LE(offset, 16);
+	return Buffer.concat([...parts, centralDirectory, end]);
+}
+
+/**
+ * Write each zip the resolution names, beside the artifact files it holds: the
+ * executable 0755, an addon 0644.
+ */
+export function writeZipAssets(assets: readonly ReleaseAsset[], extractDir: string): void {
+	for (const asset of assets) {
+		if (asset.members === undefined) continue;
+		const dir = join(extractDir, asset.artifact);
+		const entries = asset.members.map((name) => ({
+			name,
+			data: readFileSync(join(dir, name)),
+			mode: name.endsWith(".node") ? 0o644 : 0o755,
+		}));
+		writeFileSync(join(dir, asset.file), zipArchive(entries));
+	}
+}
+
 function argument(argv: readonly string[], flag: string): string {
 	const i = argv.indexOf(flag);
 	const value = i >= 0 ? argv[i + 1] : undefined;
@@ -380,12 +509,16 @@ function main(argv: readonly string[]): number {
 		for (const error of errors) console.error(`::error::${error}`);
 		return 1;
 	}
+	writeZipAssets(resolution.assets, extractDir);
 	const manifest = resolution.assets.map((a) => ({
 		...a,
 		path: join(extractDir, a.artifact, a.file),
 	}));
 	writeFileSync(argument(argv, "--out"), `${JSON.stringify(manifest, null, 2)}\n`);
-	for (const a of manifest) console.log(`${a.asset}\t<- ${a.artifact}/${a.file}`);
+	for (const a of manifest) {
+		const from = a.members === undefined ? a.file : `{${a.members.join(",")}}`;
+		console.log(`${a.asset}\t<- ${a.artifact}/${from}`);
+	}
 	return 0;
 }
 

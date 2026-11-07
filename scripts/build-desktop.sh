@@ -40,8 +40,10 @@ echo "━━━ [4/4] Tauri Desktop ━━━"
 # .sh = Linux/macOS only — no .exe extension needed
 cp "$LASTERM_DIST_DIR/lasterm-agent" "$TAURI_DIR/lasterm-agent-${LASTERM_TARGET_TRIPLE}"
 cp "$LASTERM_DIST_DIR/lasterm-hub" "$TAURI_DIR/lasterm-hub-${LASTERM_TARGET_TRIPLE}"
+# The hub's addons: Tauri resources, which it puts beside the hub (#889).
+cp "$LASTERM_DIST_DIR/lasterm_hub_lock.node" "$LASTERM_DIST_DIR/lasterm_tls_identity.node" "$TAURI_DIR/"
 
-echo "  → Sidecars placed in src-tauri/"
+echo "  → Sidecars and the hub's addons placed in src-tauri/"
 
 cd "$ROOT"
 pnpm -F @lasterm/desktop tauri build \

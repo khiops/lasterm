@@ -15,6 +15,10 @@
  * Each package (hub, agent) imports these helpers and supplies its own
  * SEA_ADDON_ASSETS list + initSeaAddons() entry point.
  *
+ * Only better-sqlite3's addon still goes through this cache. The hub lock and
+ * the TLS identity are installed beside the executable and loaded from there
+ * (installed-addon.ts, #889).
+ *
  * What the cache guarantees is that only the embedded addon is executed from
  * it (#216). The actor that matters is a different local account able to write
  * a directory on the path to the cache. A process running as the same user is

@@ -89,7 +89,10 @@
 			"lasterm-hub",
 			"lasterm-agent"
 		],
-		"resources": {},
+		"resources": {
+			"lasterm_hub_lock.node": "lasterm_hub_lock.node",
+			"lasterm_tls_identity.node": "lasterm_tls_identity.node"
+		},
 		"shortDescription": "Local-first session terminal platform",
 		"category": "DeveloperTool",
 		"copyright": "© 2026 Lasterm contributors",

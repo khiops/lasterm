@@ -674,6 +674,26 @@ matches the hub by construction. A terminal app must open a local shell without 
 this is never fetched. A daemon an older hub started outlives an update, though, and keeps its terminals:
 the hub replaces it with its own as soon as it holds none of this hub's terminals (#805, § 3.3).
 
+**The hub's native addons — installed beside it.** `lasterm_hub_lock.node` and
+`lasterm_tls_identity.node` sit in the hub executable's own directory, and the single executable loads
+them from there (`installed-addon.ts` in `@lasterm/shared`, #889). It embeds a manifest written when it
+was built, `addons.json`, with the size and SHA-256 of each, and refuses to start when one is missing or
+holds other bytes (SECURITY.md § 4.5). Nothing is extracted or written to disk to load them.
+
+- **Desktop.** They are Tauri resources (`bundle.resources` in `tauri.conf.json`), which Tauri copies
+  beside the executables in its build output and installers. The MSIX that `pack-msix.ps1` stages puts
+  them at the package root, beside `lasterm-hub.exe`, where the sidecar's `process.execPath` points: they
+  are part of the package the Store signs, installed read-only under `Program Files\WindowsApps`.
+- **Standalone hub.** A release publishes the Windows hub as `lasterm-hub-<triple>.zip`: the executable
+  and its two addons, which must stay together in one directory. The agent is published separately, as
+  above.
+- **From source** (`pnpm dev`, the specs) nothing changes: the hub loads the addons cargo built, from the
+  cargo target directory.
+
+better-sqlite3's addon is still embedded and extracted to the cache directory at startup (§ 7) until
+SQLite moves to `node:sqlite` (#893). A start of the single executable removes what earlier versions
+extracted there.
+
 **Remote agents (other OS/arch, for SSH hosts) — fetched on demand.**
 The hub does **not** bundle agents for platforms other than its own. When deploying to a remote host whose
 `os/arch` is not yet cached, the hub downloads the matching release asset
@@ -1451,7 +1471,7 @@ Every hub writes the security events of SECURITY.md § 7.1 through `HubLogger`, 
 |---------|---------------------|---------|
 | **Config** | `$XDG_CONFIG_HOME/lasterm/` → `~/.config/lasterm/` | `%APPDATA%\lasterm\` |
 | **State** (DBs, runtime, logs) | `$XDG_STATE_HOME/lasterm/` → `~/.local/state/lasterm/` | `%LOCALAPPDATA%\lasterm\` |
-| **Cache** (the native addons a single executable extracts) | `$XDG_CACHE_HOME/lasterm/` → `~/.cache/lasterm/` | `%LOCALAPPDATA%\lasterm\cache\` |
+| **Cache** (better-sqlite3's addon, which the single executable extracts until #893; § 3.5) | `$XDG_CACHE_HOME/lasterm/` → `~/.cache/lasterm/` | `%LOCALAPPDATA%\lasterm\cache\` |
 | **Agent socket** | `$XDG_RUNTIME_DIR/lasterm/agent.sock`, else `/tmp/lasterm-<uid>/agent.sock` | `\\.\pipe\lasterm-agent-<user>` |
 
 An XDG variable is used when it holds an absolute path; otherwise the default shown above. On
@@ -1594,6 +1614,7 @@ lasterm/
 │   │       ├── entities.ts  # Host, Session, Channel, ChannelGroup
 │   │       ├── constants.ts # Protocol version, defaults, error codes
 │   │       ├── platform-dirs.ts # Where state, config and cache live (§ 7)
+│   │       ├── installed-addon.ts # The single executable's addons, checked and loaded from beside it (§ 3.5)
 │   │       ├── socket-path.ts # getSocketPath(override?) + probeSocket(path) for UDS
 │   │       └── agent-config.ts # AgentConfig interface (daemon settings)
 │   ├── hub/                 # @lasterm/hub — local daemon
@@ -1721,7 +1742,7 @@ detached daemon, or deploys and runs it over SSH.
 |----------|-----|-------|-------------|
 | Linux x64 | Not released; built from source (`scripts/build-hub.sh`) | Release asset | Not released |
 | Linux arm64 | Not released | Release asset, for a remote host such as a Raspberry Pi | Not released |
-| Windows x64 | Release asset | Release asset | Microsoft Store (the MSIX the Store signs); the release workflow publishes no desktop installer |
+| Windows x64 | Release asset: a zip of the executable and its native addons (§ 3.5) | Release asset | Microsoft Store (the MSIX the Store signs); the release workflow publishes no desktop installer |
 | macOS | Not supported: nothing builds or tests it (#224) | Not supported | Not supported |
 
 What a release builds is declared in `.github/build-matrix.json`. The web UI runs in any browser

@@ -32,7 +32,11 @@ describe("locateBetterSqlite3", () => {
 		const addonPath = locateBetterSqlite3();
 
 		expect(existsSync(addonPath)).toBe(true);
-		expect(addonPath).toMatch(/better_sqlite3\.node$/);
+		// The prebuild better-sqlite3 ships for this platform (13.0 and later), not a build/
+		// directory: nothing compiles it at install.
+		expect(addonPath.replaceAll("\\", "/")).toMatch(
+			new RegExp(`/better-sqlite3/prebuilds/${process.platform}-${process.arch}\\.node$`),
+		);
 
 		// Verify ELF (Linux) or Mach-O (macOS) or PE (Windows) header
 		const buf = readFileSync(addonPath);

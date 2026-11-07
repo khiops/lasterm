@@ -13,9 +13,9 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	ADDON_MANIFEST_ASSET,
@@ -240,13 +240,13 @@ describe("openInstalledAddon", () => {
 describe("loadInstalledAddon", () => {
 	it("loads a real addon installed beside it", () => {
 		const dir = makeTempDir();
-		const file = writeTemp("better_sqlite3.node", realAddon(), dir);
-		const exports = loadInstalledAddon("better_sqlite3.node", {
+		const file = writeTemp("lasterm_tls_identity.node", realAddon(), dir);
+		const exports = loadInstalledAddon("lasterm_tls_identity.node", {
 			directory: dir,
-			manifest: { "better_sqlite3.node": digestOf(file)! },
+			manifest: { "lasterm_tls_identity.node": digestOf(file)! },
 			trust: trust(),
 		});
-		expect(typeof exports.Database).toBe("function");
+		expect(typeof exports.generateTlsIdentity).toBe("function");
 	});
 
 	it("refuses a name its manifest does not list, without opening anything", () => {
@@ -371,11 +371,20 @@ function expectRefusal(action: () => unknown, expected: { path: string; reason: 
 	expect(refusal.message).toContain(expected.path);
 }
 
-/** A real native addon: the better-sqlite3 prebuild for this platform, which the hub loads. */
+/**
+ * A real native addon: the hub's TLS identity addon, from the cargo target
+ * directory `pnpm build:test-tls-material` builds it into, or the file
+ * LASTERM_TLS_IDENTITY_ADDON names, as the hub run from source finds it. Read,
+ * never loaded in place: the copy is what loads.
+ */
 function realAddon(): Buffer {
-	const hubRequire = createRequire(new URL("../../hub/package.json", import.meta.url));
-	const packageDir = dirname(hubRequire.resolve("better-sqlite3/package.json"));
-	return readFileSync(join(packageDir, "prebuilds", `${process.platform}-${process.arch}.node`));
+	const override = process.env.LASTERM_TLS_IDENTITY_ADDON;
+	if (override) return readFileSync(override);
+	const root = fileURLToPath(new URL("../../..", import.meta.url));
+	const configured = process.env.CARGO_TARGET_DIR;
+	const target = configured ? resolve(root, configured) : join(root, "target");
+	const file = windows ? "lasterm_tls_identity.dll" : "liblasterm_tls_identity.so";
+	return readFileSync(join(target, "release", file));
 }
 
 // A PE32+ file reduced to what signing reads: the DOS header, the PE header,

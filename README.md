@@ -226,7 +226,7 @@ not a supported target: nothing builds or tests it (#224).
 ```sh
 ./scripts/build-agent.sh   # Rust agent → dist/sea/lasterm-agent  (cargo --release)
 ./scripts/build-hub.sh     # Hub SEA    → dist/sea/lasterm-hub
-                           #   builds the web UI, embeds it, bundles better-sqlite3,
+                           #   builds the web UI, embeds it, bundles the hub and its addons,
                            #   and produces a Node Single Executable Application
 ```
 

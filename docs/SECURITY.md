@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-09-29
+> Last updated: 2026-11-07
 
 ## 1. Threat Model
 
@@ -557,9 +557,9 @@ have been observable here: no test executes these paths on Windows.
 
 ### 4.5 How a native addon is loaded
 
-The single executable embeds its native addons (better-sqlite3, the hub lock, the TLS identity) and
-extracts them to `addons/<version>/<platform>-<arch>` under the cache directory before loading
-them. What must hold is that only the embedded addon is executed from there. The actor is another
+The single executable embeds its native addons, the hub lock and the TLS identity (SQLite is
+`node:sqlite`, built into its Node, since #893), and extracts them to
+`addons/<version>/<platform>-<arch>` under the cache directory before loading them. What must hold is that only the embedded addon is executed from there. The actor is another
 account able to write a directory on that path; a process running as the same user already has
 everything a substituted addon would give it, and root is trusted.
 
@@ -627,7 +627,8 @@ All incoming messages (from agent or UI) must be validated:
 
 ### 5.3 SQL Injection Prevention
 
-- Use parameterized queries exclusively (better-sqlite3 `prepare().run()`)
+- Use parameterized queries exclusively (`prepare().run()` through `storage/sqlite.ts`, which
+  refuses a statement given fewer parameters than it has rather than bind NULL)
 - Never interpolate user input into SQL strings
 - JSON columns: validate JSON structure before storing
 

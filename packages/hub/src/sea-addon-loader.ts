@@ -8,8 +8,8 @@
  * Shared helpers (detectSea, getAddonCacheDir, openCachedAddon, loadCachedAddon,
  * loadNativeAddon) live in @lasterm/shared.
  *
- * Must be called via initSeaAddons() BEFORE any module that imports
- * better-sqlite3.
+ * SQLite is not among these addons: the hub uses node:sqlite, built into the
+ * Node the executable embeds (#893).
  */
 
 import { createRequire } from "node:module";
@@ -33,16 +33,11 @@ export {
 } from "@lasterm/shared/dist/sea-addon-loader.js";
 
 /** Names of .node assets embedded in the hub SEA binary. */
-const SEA_ADDON_ASSETS: readonly string[] = [
-	"better_sqlite3.node",
-	"lasterm_tls_identity.node",
-] as const;
+const SEA_ADDON_ASSETS: readonly string[] = ["lasterm_tls_identity.node"] as const;
 
 /**
- * Called once at hub startup (before any better-sqlite3 imports).
- *
  * In SEA mode: extracts all embedded .node addons to the cache dir and
- * pre-loads them so subsequent require('better-sqlite3') calls resolve.
+ * pre-loads them.
  *
  * In normal Node.js mode: complete no-op.
  */
@@ -72,7 +67,7 @@ export function initSeaAddons(): void {
 			loadNativeAddon(assetName, cacheDir, seaMod);
 		} catch (err) {
 			// Extraction or dlopen failure is fatal — the hub cannot function
-			// without SQLite support. Let the process crash with a clear message.
+			// without its addons. Let the process crash with a clear message.
 			const msg = err instanceof Error ? err.message : String(err);
 			process.stderr.write(
 				`[lasterm-hub] fatal: failed to load SEA addon '${assetName}': ${msg}\n`,

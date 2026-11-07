@@ -2,7 +2,7 @@
 
 > Version: 0.1.0 (MVP)
 > Status: draft
-> Last updated: 2026-11-06
+> Last updated: 2026-11-07
 
 ## 1. Overview
 
@@ -61,34 +61,32 @@ when another account does (SECURITY.md § 2.2, item 3).
 On Windows no mode is set or checked. The files, like the state directory, rely on the
 profile's default ACL, as `auth.json` does (SECURITY.md § 2.1, #200).
 
-**The addon and the garbage collector (#883).** An addon that wraps its objects in Node's C++
-`node::ObjectWrap`, compiled against Node 24.19 headers or later, aborts any Node 24 before
-24.22.0 when the garbage collector reclaims one of them: `Assertion failed: (env) != nullptr`
-(nodejs/node#65446), as ssh2's cipher binding did in the tests (#868). Node 24.22.0, the version
-`.nvmrc` pins, keeps the cleanup hooks of addons in a registry of its own (nodejs/node commits
-`abe1b673e9` and `5570a84048`), and such an addon survives it. better-sqlite3 12 wrapped its
-databases and statements that way, and was safe only while its prebuild predated those headers.
+**The binding: `node:sqlite` (#893).** The hub opens both databases with `node:sqlite`, which is
+compiled into Node itself. The single executable embeds no SQLite addon and extracts none, and
+nothing is downloaded or built at install. The Node `.nvmrc` pins, 24.22.0, carries SQLite 3.53.4.
 
-better-sqlite3 13 wraps them in `Napi::ObjectWrap`, over Node-API, so the abort no longer applies
-to it, whatever headers built it:
-
-- Its prebuilds ship inside the package, one per platform: `prebuilds/<platform>-<arch>.node`.
-  Nothing downloads or compiles one at install. `allowBuilds` in `pnpm-workspace.yaml` denies the
-  node-gyp run pnpm would otherwise start, which needs a C++ toolchain and builds nothing.
-- The 13.0.3 prebuilds for Windows x64, Linux x64 and Linux arm64 each import 60 `napi_*`
-  functions, and no V8 or `node::` symbol. 12.11.1's Windows addon imported 74 V8 and `node::`
-  symbols, `node::AddEnvironmentCleanupHook` among them, and no `napi_*`.
-- The Linux prebuilds are built on Ubuntu 22.04: they need glibc 2.34 and the libstdc++ of GCC 11
-  (`GLIBCXX_3.4.29`).
-
-The churn stays, as a cheap tripwire against a regression back to an `ObjectWrap` build:
-
-- `packages/hub/src/storage/better-sqlite3-gc.spec.ts` prepares and drops statements by the ten
-  thousand in a child process, and expects it to survive.
-- `scripts/package-sea-hub.ts` runs the same churn on the addon the executable embeds, under the
-  Node it embeds, and refuses to package one that aborts.
-- **Before bumping better-sqlite3 or Node, run that spec first.** If it aborts, the bump waits
-  until a better-sqlite3 or a Node release no longer does.
+- **One module talks to it:** `packages/hub/src/storage/sqlite.ts`, and nothing else imports
+  `node:sqlite`. It gives the DAL the calls the DAL uses, and keeps the rules the DAL was written
+  for, better-sqlite3's until #893:
+  - a parameter left out throws, where `node:sqlite` would bind NULL in its place, silently;
+  - `undefined` binds NULL, and booleans and other objects are refused;
+  - a row is a plain object, and a BLOB a Buffer;
+  - an SQLite error names its result code in `code` (`SQLITE_CONSTRAINT_UNIQUE`).
+- **A release candidate.** `node:sqlite` is at Stability 1.2 and still changes between minor
+  versions: booleans bind since 24.21, `undefined` binds NULL from 26.10, and 26.11 renames
+  `DatabaseSync` to `Database`. The hub runs one exact Node, so a change arrives with a bump.
+  `packages/hub/src/storage/sqlite.spec.ts` pins each behaviour the adapter relies on or works
+  around, and says what to change when one moves. **Before bumping Node, run that spec first.**
+- **Its defaults are not these.** Left alone, `node:sqlite` waits for no lock, keeps a 2 MB cache
+  and syncs every commit in WAL mode (`synchronous = FULL`). So every pragma above is set
+  explicitly, and the open-databases cases read them back from a file.
+- **The same files.** better-sqlite3 and `node:sqlite` are both SQLite, on the same default VFS. A
+  profile an earlier hub wrote opens unchanged, a WAL a crash left behind included, and an earlier
+  hub opens what this one writes. A spec checked both ways while both libraries were in the
+  repository (#898), each in its own process: two copies of SQLite in one process must never open
+  the same file, since on POSIX closing one copy's descriptor drops the other's locks.
+- An integer past 2^53 throws on read rather than being rounded. Nothing the hub stores comes near:
+  rowids, byte sizes, times in milliseconds.
 
 ## 3. Schema — meta.db
 
@@ -494,7 +492,7 @@ Every 10 minutes, unless the previous pass is still running:
    time, until the free list is empty
 ```
 
-**Bounded steps.** better-sqlite3 is synchronous: whatever SQLite does, the hub's event loop waits
+**Bounded steps.** node:sqlite is synchronous: whatever SQLite does, the hub's event loop waits
 for, every terminal and request with it. So every step of a pass is bounded, and the pass yields
 (`setImmediate`) once the next step could take its slice past the budget:
 
@@ -676,11 +674,9 @@ cp ~/.config/lasterm/config.toml backup/config.toml
 # history and snapshots, and nothing else
 ```
 
-**Online backup (while hub running):**
-```sql
--- Using SQLite backup API (via better-sqlite3)
-db.backup('backup/meta.db');
-```
+**Online backup (while hub running):** not built. `node:sqlite` offers SQLite's backup API as an
+asynchronous function of the module, `backup(database, destination)`, which copies a live
+database a few pages at a time; nothing in the hub calls it yet.
 
 ### 10.2 Workspace Export/Import
 

@@ -26,9 +26,11 @@ import { findHostKeyRevocation } from "../ssh/known-hosts.js";
 import type { AgentConnectionManager } from "./agent-connection-manager.js";
 import { type BinaryVerifyPromptFn, getBinaryCacheDir } from "./agent-deployer.js";
 import { computeTargetStatus } from "./agent-status.js";
+import { AskAgainError } from "./ask-again.js";
 import { AuthCancelledError } from "./auth-cancelled.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
-import { PasswordRefusedError, passwordRefusal } from "./password-auth.js";
+import { agentSignerFailure } from "./key-agent-signer.js";
+import { passwordRefusal } from "./password-auth.js";
 import {
 	clearContext,
 	isReconnectContextId,
@@ -803,19 +805,20 @@ export class SshConnectionManager {
 		};
 		// A password the target or its jump refused is asked for again, saying so,
 		// and the test dialled again under the same trust, until one is taken or
-		// the person cancels (#815).
+		// the person cancels (#815). So is a key's passphrase, once the agent that
+		// was to sign with it did not (#876).
 		const attempt = async (trusted: ReadonlySet<string>) => {
 			for (;;) {
-				let refusal: PasswordRefusedError;
+				let retry: AskAgainError;
 				try {
 					const outcome = await attemptOnce(trusted);
-					if (outcome.passwordRefused === undefined) return outcome;
-					refusal = outcome.passwordRefused;
+					if (outcome.askAgain === undefined) return outcome;
+					retry = outcome.askAgain;
 				} catch (err) {
-					if (!(err instanceof PasswordRefusedError)) throw err;
-					refusal = err;
+					if (!(err instanceof AskAgainError)) throw err;
+					retry = err;
 				}
-				await refusal.askAgain();
+				await retry.askAgain();
 			}
 		};
 		const finish = (result: TestConnectResult): TestConnectResult => {
@@ -835,7 +838,11 @@ export class SshConnectionManager {
 		let connectConfig: SshConnectConfig;
 		try {
 			connectConfig = await buildSshConnectConfig(
-				{ method: msg.sshAuth ?? "key", keyPath: msg.sshKeyPath },
+				{
+					method: msg.sshAuth ?? "key",
+					keyPath: msg.sshKeyPath,
+					sshConfigHost: savedRoute ? saved.sshConfigHost : undefined,
+				},
 				parsed.hostname,
 				msg.port,
 				username,
@@ -918,7 +925,9 @@ const SSH_TEST_TIMEOUT_MS = 10_000;
 /**
  * One bounded connection attempt. A server key outside `trusted` ends it with
  * that key's fingerprint, before any authentication is sent. A password the
- * server refused ends it with that refusal, for the caller to ask again (#815).
+ * server refused ends it with that refusal, for the caller to ask again (#815),
+ * and so does an agent that did not sign with the key, for the caller to ask
+ * for the key's passphrase (#876).
  */
 export function attemptSshTest(
 	connectConfig: SshConnectConfig,
@@ -929,11 +938,11 @@ export function attemptSshTest(
 ): Promise<{
 	result: TestConnectResult;
 	unverifiedFingerprint?: string;
-	passwordRefused?: PasswordRefusedError;
+	askAgain?: AskAgainError;
 }> {
 	const sshClient = createClient();
 	let unverifiedFingerprint: string | undefined;
-	let passwordRefused: PasswordRefusedError | undefined;
+	let askAgain: AskAgainError | undefined;
 	let revoked: { file: string; line: number } | undefined;
 	const config: SshConnectConfig = {
 		...connectConfig,
@@ -959,7 +968,7 @@ export function attemptSshTest(
 			resolve({
 				result,
 				...(unverifiedFingerprint !== undefined && { unverifiedFingerprint }),
-				...(passwordRefused !== undefined && { passwordRefused }),
+				...(askAgain !== undefined && { askAgain }),
 			});
 		};
 		const timer = setTimeout(() => {
@@ -992,7 +1001,8 @@ export function attemptSshTest(
 				finish({ ok: false, message: "SSH host key not trusted" });
 				return;
 			}
-			passwordRefused = passwordRefusal(connectConfig, err) ?? undefined;
+			askAgain =
+				passwordRefusal(connectConfig, err) ?? agentSignerFailure(connectConfig) ?? undefined;
 			const errMsg = err.message ?? "Unknown error";
 			const lower = errMsg.toLowerCase();
 			if (

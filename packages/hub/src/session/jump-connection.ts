@@ -22,6 +22,7 @@ import {
 	judgeAgainstKnownHosts,
 	readUserKnownHosts,
 } from "../ssh/known-hosts.js";
+import { agentSignerFailure } from "./key-agent-signer.js";
 import { passwordRefusal } from "./password-auth.js";
 import { describeConnectionLoss, SSH_KEEPALIVE } from "./ssh-keepalive.js";
 import { connectWithoutDelay } from "./ssh-nodelay.js";
@@ -113,9 +114,11 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 				return;
 			}
 			fail(
-				// The jump refused its password: whoever opens the route asks for it
-				// again, and opens it again (#815).
+				// The jump refused its password, or the agent did not sign with the
+				// jump's key: whoever opens the route asks for the password or the
+				// key's passphrase, and opens it again (#815, #876).
 				passwordRefusal(options.auth, error) ??
+					agentSignerFailure(options.auth) ??
 					(presented === "" || error.message.includes("verification")
 						? error
 						: new Error(`Cannot reach the jump host ${options.jump.host}: ${error.message}`)),

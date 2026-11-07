@@ -7,6 +7,74 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## KEY-AGENT-SIGNER — on key auth, the SSH agent signs when it holds the configured key (#876, 2026-11-06)
+
+- **On by default, with no setting.** OpenSSH uses the agent's copy of an `IdentityFile` key and
+  has no switch for it beyond `IdentityAgent none` or an empty `SSH_AUTH_SOCK`. The identity the
+  server sees does not change, and the agent is already the user's own. A setting can come later if
+  someone needs one.
+- **Only a key that needs a passphrase.** The point is the passphrase asked after every hub
+  restart. A key that needs none is signed from its file as before: nothing would be spared, and
+  falling back to the file after an agent refused (an `ssh-add -c` confirmation declined) would
+  override the agent's answer.
+- **The matching key alone, as `IdentitiesOnly yes`.** A wrapper around ssh2's agent
+  (`ConfiguredKeyAgent`, a `BaseAgent`) lists only the configured key and signs with nothing else.
+  Agent auth's way of offering every key would change who logs in and spend `MaxAuthTries`.
+- **The public half without the passphrase:** an `openssh-key-v1` file's own public section first,
+  which is in clear and cannot disagree with the private key beside it, then `<key>.pub`, which can
+  be stale. A legacy PEM key without `.pub` cannot be matched and keeps its prompt.
+- **Asked before dialling, bounded at 3 s.** Whether the passphrase is needed must be known before
+  the connection, since it is asked before anything is dialled (SECURITY.md § 3.3c). An agent that
+  does not list its keys in time is left out.
+- **The fallback is a new connection, not an authentication method after the agent's.** An agent
+  that is gone, no longer holds the key or refuses to sign ends that connection
+  (`AgentSignerFailedError`); it is closed, the passphrase asked for, and the host dialled again
+  with the file, as a refused password is (#815). Within the same connection the person's answer
+  would race ssh2's handshake bound (`readyTimeout`, 20 s, 10 s for a connection test) while the
+  server waits. `AskAgainError` is now the base of both retries, so every dialler (session, jump,
+  connection test) handles them in one place.
+- **`IdentityAgent none` is honoured** for the host's `ssh_config_host`: the first value of a part
+  of `~/.ssh/config` that applies, as ssh(1) resolves it. `Match` blocks are not evaluated and
+  `Include` is not followed, as the import follows none. Any other value changes nothing: the agent
+  is still the one `SSH_AUTH_SOCK` or the Windows pipe names.
+- **Nothing is written to the agent**, and the security log's `ssh.connect` says `signer: "agent"`
+  or `"file"` on key auth, without key material or fingerprint.
+- **Specs never reach the developer's agent.** The hub setup file points `SSH_AUTH_SOCK` at an agent
+  that does not exist, which on Windows also keeps the OpenSSH pipe out; the specs of this change
+  run a fake agent of their own.
+
+## HUB-NODE-ORCHESTRATOR — the hub stays in Node and orchestrates; what is critical moves to Rust behind Node-API, as the need arises (2026-11-06)
+
+- **No rewrite of the hub in Rust now.** The hub is large: Fastify REST and WebSocket, the ssh2
+  client with SFTP and its Win32-OpenSSH particulars, transfers, the config cascade, migrations,
+  auth and pairing. About 6,400 TypeScript tests are written against it, and `@lasterm/shared`
+  gives the web client the same protocol types. A rewrite would freeze the product for months
+  right after its Store launch, for no problem measured today.
+- **Node orchestrates; Rust does what is critical.** The agent is Rust. The hub already reaches
+  for Rust where Node is weak at system work: `lasterm-hub-lock`, `lasterm-tls-identity`,
+  `lasterm-process-lock` and `lasterm-protected-fs`, through napi-rs. That is the direction. A
+  subsystem moves to a Rust crate when Node becomes a measured problem there, not before:
+  throughput, latency, footprint, a system API, or a packaging risk. SQLite is the next candidate
+  (#883, and the study of `node:sqlite` against a rusqlite crate).
+- **Native code goes through Node-API only.** It must be napi-rs, or anything else on Node-API's
+  stable ABI. A dependency whose addon uses Node's C++ `ObjectWrap` API is a liability: compiled
+  with Node ≥ 24.19 headers, it can abort the process on GC (#868, #883, nodejs/node#65446).
+- **Not a dead end.** Each step keeps a full move possible later:
+  - The protocol is the contract (PROTOCOL.md). Tests that drive the hub through REST, WebSocket
+    and the agent protocol are the ones a reimplementation would have to pass, so behaviour is
+    tested there rather than through TypeScript internals wherever possible.
+  - A Rust crate owns its logic whole, not a thin binding around TypeScript decisions, so a Rust hub
+    could use it as it is.
+- **What reopens the question.** Any one of these, measured, reopens it. The outcome is recorded
+  here.
+  - **Performance:** a throughput, latency or memory target the hub cannot meet in Node, for example
+    upload throughput or keystroke latency once their known causes are fixed (#873).
+  - **A hub without Node:** an ARM or headless hub where Node's footprint or startup matters.
+  - **Packaging:** recurring trouble with the single executable and its native addons (extraction,
+    antivirus, ABI drift).
+  - **Weight:** the share of the hub's hot paths already in Rust passing roughly half, when the Node
+    layer becomes glue more than logic.
+
 ## STALE-AGENT-RECORD — a stop that finds no agent running succeeds, and clears a record whose process is gone (#871, 2026-11-06)
 
 - **A record whose process is gone is stale, not a failed stop.** A crash, a kill or a Windows

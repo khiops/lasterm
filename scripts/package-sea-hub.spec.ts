@@ -32,7 +32,11 @@ describe("locateBetterSqlite3", () => {
 		const addonPath = locateBetterSqlite3();
 
 		expect(existsSync(addonPath)).toBe(true);
-		expect(addonPath).toMatch(/better_sqlite3\.node$/);
+		// The prebuild better-sqlite3 ships for this platform (13.0 and later), not a build/
+		// directory: nothing compiles it at install.
+		expect(addonPath.replaceAll("\\", "/")).toMatch(
+			new RegExp(`/better-sqlite3/prebuilds/${process.platform}-${process.arch}\\.node$`),
+		);
 
 		// Verify ELF (Linux) or Mach-O (macOS) or PE (Windows) header
 		const buf = readFileSync(addonPath);
@@ -60,6 +64,19 @@ describe("locateBetterSqlite3", () => {
 		expect(src).toContain("better-sqlite3 addon not found");
 		expect(src).toContain("pnpm install");
 		expect(src).toContain("Checked:");
+	});
+});
+
+describe("checkBetterSqlite3Gc", () => {
+	it("accepts the addon the executable embeds", async () => {
+		const { checkBetterSqlite3Gc, locateBetterSqlite3 } = await import("./package-sea-hub.js");
+		await expect(checkBetterSqlite3Gc(locateBetterSqlite3())).resolves.toBeUndefined();
+	});
+
+	it("refuses a file the churn did not load", async () => {
+		const { checkBetterSqlite3Gc } = await import("./package-sea-hub.js");
+		const missing = join(tmpdir(), `lasterm-missing-${process.pid}`, "better_sqlite3.node");
+		await expect(checkBetterSqlite3Gc(missing)).rejects.toThrow(/churn did not load/);
 	});
 });
 

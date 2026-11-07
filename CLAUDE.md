@@ -22,7 +22,7 @@ Sessions survive client disconnects and device switches; local sessions also sur
 
 | Key | Value |
 |-----|-------|
-| Runtime | Node.js 24 LTS, one exact version: `.nvmrc` for CI and `volta.node` in `package.json` locally, kept equal by `scripts/node-version.spec.ts` (hub, web, desktop shell — the agent is a Rust binary and needs none) |
+| Runtime | Node.js 24 LTS, one exact version: `.nvmrc` for CI and `mise.toml` locally (with pnpm, the `packageManager` one), kept equal by `scripts/node-version.spec.ts` (hub, web, desktop shell — the agent is a Rust binary and needs none) |
 | Language | TypeScript strict (all packages) |
 | Monorepo | pnpm workspaces |
 | Package manager | pnpm |
@@ -169,6 +169,8 @@ cd dist/sea && ./lasterm-hub start --port 4100   # serve PWA at https://127.0.0.
 node scripts/dev/ui/cdp.mjs eval "<js>"      # also: type [--no-enter] "<text>", shot <file.png>, watch <s> "<js>"
 node scripts/dev/ui/cdp.mjs eval-file <f.js> # also: type-file [--no-enter] <file>
 node scripts/dev/ui/cdp.mjs api GET api/health   # the app's hub REST API; JSON on stdout
+node scripts/dev/ui/cdp.mjs drop <x> <y> <path> [<path>…]   # drop files or folders, no mouse
+node scripts/dev/ui/cdp.mjs dragover [--hold <s>] [--eval-file <f.js>] <x> <y> <path> [<path>…]
 powershell -NoProfile -STA -File scripts\dev\ui\drag-file.ps1 -File <path> -X <cssX> -Y <cssY>
 .\scripts\dev\desktop-ui.ps1 -Stop
 ```
@@ -179,12 +181,39 @@ powershell -NoProfile -STA -File scripts\dev\ui\drag-file.ps1 -File <path> -X <c
   their development folder.
 - The app runs from a copy in `target\desktop-ui\bin`, against the real profile. An agent started
   from a `target\release` locks its executable, and the next build then fails with "access denied".
-- A drag dispatched over CDP skips the window's native drop handling. `drag-file.ps1` performs a real
-  OLE drag instead: it moves the user's mouse for a few seconds, then puts it back. Run it with
-  `-SelfTest` first, before trusting a result it gives on the app.
-- Text with quotes, `|` or line breaks goes in a file, for `eval-file` or `type-file`. Volta's
-  `node` shim hands its arguments to cmd.exe, which cuts one at a newline, drops `^`, expands
-  `%NAME%`, and splits the command at a `|` or `&` outside what it takes for quotes. `eval-file`
+- **Drop files with `cdp.mjs drop`**, which moves no mouse: it drags paths onto the page at a CSS
+  point (`getBoundingClientRect()`) through `Input.dispatchDragEvent`, as a copy, and prints
+  `dropped …`, or `refused: …` when the page did not cancel its dragover; the drag then leaves the
+  page, with no drop. The page gets what a real drop gives it, which the app's upload code relies on
+  (`packages/clients/web/src/utils/upload-walk.ts`): `dataTransfer.files` (a folder as a File of
+  size 0), `webkitGetAsEntry()` for files and folders, and `getAsFileSystemHandle()` resolving to
+  readable file and directory handles. Those handles keep in IndexedDB and, after a reload, come
+  back with `queryPermission` at `"prompt"`, like a real drop's: such a drop is resumable.
+- **Except under `%LOCALAPPDATA%`, which holds `%TEMP%`.** Chromium treats it as sensitive: a
+  dropped file's handle cannot read (SecurityError) and a folder's never resolves, so the app goes
+  on with the entry after its bound, and that drop cannot be resumed after a restart. Keep test
+  files under the repository instead (`target\` is ignored by git).
+- `dragover` holds the drag over the point (`--hold`, default 1 s), prints the `--eval-file`
+  script's value while it is there, then drags it out of the page: a dragleave, no drop. `eval` or
+  `shot` from another shell see the overlay during the hold. Ctrl+C ends the hold early; a
+  `dragover` killed outright leaves the page in the drag, overlay up, until the next drag. CDP's
+  `dragCancel` alone fires no event at all, hence the drag out.
+- A CDP drag enters the page directly, past the window's native drop handling. `drag-file.ps1`
+  performs a real OLE drag from another window instead. Use it only for that native path (a drop
+  from another app, the window's own drop handling), and for a drop the page refuses: a real one
+  ends with a dragleave at the point, which the app answers with its refusal note, while a CDP one
+  leaves the page outside it. It moves the user's mouse for a few seconds, then puts it back. Run it
+  with `-SelfTest` first, before trusting a result it gives on the app; the self-test also prints
+  which mouse events it saw as injected and which as physical.
+- `drag-file.ps1` starts only once the mouse has rested for 2 s, and cancels the drag, with no drop,
+  at any physical mouse event or a cursor found off its path. Exit 3 (interfered, or busy: no rest
+  within 30 s) and 4 (timed out, `-TimeoutSeconds`, default 20) mean the result is discarded: retry
+  later. 0 is a drag that ran, its `drop effect: …` the target's answer; 1 a harness failure.
+- Text with quotes, `|` or line breaks goes in a file, for `eval-file` or `type-file`. A `node`
+  reached through a `.cmd` shim (Volta's did, and mise's shims can) hands its arguments to cmd.exe,
+  which cuts one at a newline, drops `^`, expands `%NAME%`, and splits the command at a `|` or `&`
+  outside what it takes for quotes. With `mise activate` in the shell, `node` is the real
+  executable, but the file forms work whatever starts it. `eval-file`
   yields the script's last value and keeps its `let`/`const` to itself. `type` presses Enter at the
   end unless `--no-enter`, and each line break of the text is an Enter too.
 - `api <METHOD> <path> [body.json]` finds the hub's port in `runtime.json` in the state directory,

@@ -17,14 +17,18 @@ import {
 	type SftpSupport,
 	windowsLaunchCommand,
 } from "./agent-deployer.js";
+import { AskAgainError } from "./ask-again.js";
 import { AuthCancelledError } from "./auth-cancelled.js";
 import { HelloSeeker } from "./hello-seeker.js";
 import { openJumpRoute } from "./jump-connection.js";
 import {
-	authenticateWithPassword,
-	PasswordRefusedError,
-	passwordRefusal,
-} from "./password-auth.js";
+	agentSignerFailure,
+	agentSignerFor,
+	type KeySigner,
+	keySignerOf,
+	signWithAgent,
+} from "./key-agent-signer.js";
+import { authenticateWithPassword, passwordRefusal } from "./password-auth.js";
 import type { ResolvedJump } from "./proxy-jump.js";
 import {
 	attachRemoteDaemon,
@@ -208,11 +212,20 @@ async function promptUntilKeyDecrypts(
  * cancelled. A key's wrong passphrase is asked for again (#812). A wrong
  * password is known only once dialled: whoever dials asks for it again
  * (`passwordRefusal`, #815).
+ * A key that needs a passphrase is signed by the SSH agent instead when it
+ * holds that key, and nothing is asked (#876); `sshConfigHost` is the host's
+ * `~/.ssh/config` alias, whose `IdentityAgent none` keeps the agent out. An
+ * agent that then does not sign is known only once dialled: whoever dials
+ * decrypts the file then (`agentSignerFailure`).
  * Call sites that need non-throwing behavior (e.g. test-connect) should catch
  * and convert to their own error representation.
  */
 export async function buildSshConnectConfig(
-	auth: { method: string; keyPath?: string | undefined },
+	auth: {
+		method: string;
+		keyPath?: string | undefined;
+		sshConfigHost?: string | null | undefined;
+	},
 	hostname: string,
 	port: number,
 	user: string,
@@ -264,18 +277,29 @@ export async function buildSshConnectConfig(
 		const parsed = ssh2.utils.parseKey(keyContent);
 		if (parsed instanceof Error) {
 			console.error(`[lasterm-ssh] key needs passphrase (parseKey error: ${parsed.message})`);
-			if (!promptAuth || !hostId) {
-				throw new Error("Key is passphrase-protected but no prompt callback available");
+			const keyPath = auth.keyPath;
+			// The file, decrypted, in the agent's place if the agent was to sign.
+			const decryptFile = async (): Promise<void> => {
+				if (!promptAuth || !hostId) {
+					throw new Error("Key is passphrase-protected but no prompt callback available");
+				}
+				const { secret, type } = await promptUntilKeyDecrypts(
+					keyContent,
+					keyPath,
+					hostId,
+					promptAuth,
+				);
+				console.error(`[lasterm-ssh] key verified (type: ${type})`);
+				delete connectConfig.agent;
+				connectConfig.privateKey = keyContent;
+				connectConfig.passphrase = secret;
+			};
+			const signer = await agentSignerFor(resolvedPath, keyPath, keyContent, auth.sshConfigHost);
+			if (signer === null) {
+				await decryptFile();
+			} else {
+				signWithAgent(connectConfig, signer, decryptFile);
 			}
-			const { secret, type } = await promptUntilKeyDecrypts(
-				keyContent,
-				auth.keyPath,
-				hostId,
-				promptAuth,
-			);
-			console.error(`[lasterm-ssh] key verified (type: ${type})`);
-			connectConfig.privateKey = keyContent;
-			connectConfig.passphrase = secret;
 		} else {
 			connectConfig.privateKey = keyContent;
 		}
@@ -393,6 +417,13 @@ export class SshAgent extends AgentConnection {
 	 */
 	closedByHub = false;
 
+	/**
+	 * Which signer the connection authenticated with, on key auth: the SSH
+	 * agent, which held the key, or the key file (#876). Null for another
+	 * method, and until a connection is up. The security log says it.
+	 */
+	keySigner: KeySigner | null = null;
+
 	lastKeyVerification: HostKeyVerification = {
 		capturedFingerprint: "",
 		mismatch: false,
@@ -454,6 +485,7 @@ export class SshAgent extends AgentConnection {
 		this.reachedRunningDaemon = false;
 		this.sftpSupport = null;
 		this.socketForwardingRefused = false;
+		this.keySigner = null;
 		if (!this.host.sshHost) {
 			throw new Error("Host has no sshHost configured");
 		}
@@ -474,7 +506,11 @@ export class SshAgent extends AgentConnection {
 		// If aborted while building the connect config (which may prompt for auth),
 		// reject before proceeding.
 		const connectConfig = await buildSshConnectConfig(
-			{ method: authMethod, keyPath: this.host.sshKeyPath ?? undefined },
+			{
+				method: authMethod,
+				keyPath: this.host.sshKeyPath ?? undefined,
+				sshConfigHost: this.host.sshConfigHost,
+			},
 			hostname,
 			port,
 			username,
@@ -493,8 +529,9 @@ export class SshAgent extends AgentConnection {
 
 		// A password the host or its jump refused is asked for again, saying so,
 		// and the host dialled again, until one is taken or the person cancels
-		// (#815). The refused connection is closed first: nothing of it stays
-		// open while the person is asked.
+		// (#815). So is a key's passphrase, once the agent that was to sign with
+		// it did not (#876). The connection that ended is closed first: nothing
+		// of it stays open while the person is asked.
 		for (;;) {
 			try {
 				return await this.dial(
@@ -505,7 +542,7 @@ export class SshAgent extends AgentConnection {
 					jump === undefined || jumpAuth === undefined ? undefined : { jump, auth: jumpAuth },
 				);
 			} catch (err) {
-				if (!(err instanceof PasswordRefusedError)) throw err;
+				if (!(err instanceof AskAgainError)) throw err;
 				this.cleanup();
 				await err.askAgain();
 				if (signal?.aborted) {
@@ -676,10 +713,12 @@ export class SshAgent extends AgentConnection {
 						);
 						return;
 					}
-					// The server refused the password: `start` asks for it again, and
-					// dials again (#815).
+					// The server refused the password, or the agent did not sign with
+					// the key: `start` asks for the password or the key's passphrase,
+					// and dials again (#815, #876).
 					rejectOnce(
 						passwordRefusal(connectConfig, err) ??
+							agentSignerFailure(connectConfig) ??
 							(err instanceof Error ? err : new Error(String(err))),
 					);
 				});
@@ -701,6 +740,7 @@ export class SshAgent extends AgentConnection {
 
 				client.on("ready", () => {
 					console.error("[lasterm-ssh] SSH ready");
+					this.keySigner = keySignerOf(connectConfig);
 					// SEC-014: zero credentials immediately after successful auth
 					if (connectConfig.password) connectConfig.password = "";
 					if (connectConfig.passphrase) connectConfig.passphrase = "";

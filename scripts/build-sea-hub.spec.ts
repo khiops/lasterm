@@ -62,10 +62,10 @@ describe("esbuild bundle produces valid CJS", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test 2: better-sqlite3 is bundled (not external) with bindings shim
+// Test 2: better-sqlite3 is bundled (not external) with its binding shim
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("better-sqlite3 is bundled with bindings shim", () => {
+describe("better-sqlite3 is bundled with its binding shim", () => {
 	it("better-sqlite3 is NOT external — no require('better-sqlite3') in bundle", () => {
 		const content = readFileSync(OUT_FILE, "utf8");
 		// When bundled (not external), esbuild inlines the JS source.
@@ -80,11 +80,21 @@ describe("better-sqlite3 is bundled with bindings shim", () => {
 		expect(content).toMatch(/better.sqlite3|better_sqlite3/i);
 	});
 
-	it("bindings shim references __seaSqliteExports", () => {
+	it("binding shim references __seaSqliteExports", () => {
 		const content = readFileSync(OUT_FILE, "utf8");
-		// The betterSqliteBindingsPlugin shim must be present in the bundle,
+		// The betterSqliteBindingPlugin shim must be present in the bundle,
 		// routing native addon resolution to the SEA-pre-loaded exports.
 		expect(content).toContain("__seaSqliteExports");
+		expect(content).toContain("better-sqlite3 binding shim");
+	});
+
+	it("better-sqlite3's own addon finder is replaced by the shim", () => {
+		const content = readFileSync(OUT_FILE, "utf8");
+		// lib/binding.js looks for prebuilds/<platform>-<arch>.node beside itself and
+		// require()s it, which the executable can do neither of. Mutation caught: a
+		// shim that matches nothing bundles that finder again.
+		expect(content).not.toContain("PREBUILD_PLATFORMS");
+		expect(content).not.toContain("getPrebuildPath");
 	});
 
 	it("better_sqlite3.node is not embedded as a binary blob", () => {

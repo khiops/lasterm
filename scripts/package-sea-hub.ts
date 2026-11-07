@@ -15,10 +15,18 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	writeFileSync,
+} from "node:fs";
 import { extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { betterSqlite3Prebuild, churnBetterSqlite3 } from "./better-sqlite3-gc-churn.js";
 import type { SeaBuildConfig } from "./build-sea-binary.js";
 import { buildSeaBinary } from "./build-sea-binary.js";
 import { buildOptions } from "./build-sea-hub.js";
@@ -151,45 +159,43 @@ export function locateTomlWasm(): string {
 }
 
 /**
- * Locate the better-sqlite3 native addon from the hub's node_modules.
- * Falls back to root-level node_modules for hoisted installs.
+ * Locate the better-sqlite3 native addon the hub loads, from the hub's dependencies: the
+ * prebuild its package ships for the platform building the executable, which is the platform
+ * the executable runs on (#148).
  */
 export function locateBetterSqlite3(): string {
-	// Primary: hub package symlink (pnpm virtual store)
-	const hubNodeModules = join(
-		ROOT,
-		"packages",
-		"hub",
-		"node_modules",
-		"better-sqlite3",
-		"build",
-		"Release",
-		"better_sqlite3.node",
-	);
-	if (existsSync(hubNodeModules)) {
-		return hubNodeModules;
-	}
-
-	// Fallback: root-level node_modules (hoisted installs / npm/yarn)
-	const rootNodeModules = join(
-		ROOT,
-		"node_modules",
-		"better-sqlite3",
-		"build",
-		"Release",
-		"better_sqlite3.node",
-	);
-	if (existsSync(rootNodeModules)) {
-		return rootNodeModules;
+	const addon = betterSqlite3Prebuild();
+	if (existsSync(addon)) {
+		return addon;
 	}
 
 	throw new Error(
 		`[package-sea-hub] better-sqlite3 addon not found.\n` +
 			`  Checked:\n` +
-			`    ${hubNodeModules}\n` +
-			`    ${rootNodeModules}\n` +
-			`  Run \`pnpm install\` to build native addons first.`,
+			`    ${addon}\n` +
+			`  better-sqlite3 ships no prebuild for ${process.platform}-${process.arch}, or \`pnpm install\` has not run.`,
 	);
+}
+
+/**
+ * Refuse a better-sqlite3 addon that aborts when the garbage collector reclaims its statements
+ * (#883, docs/STORAGE.md § 2). The test suite churns the addon of its own install, and the one
+ * here is the install building the executable, so this runs the same churn on the file the
+ * executable embeds, under the Node it embeds: the one running this build.
+ */
+export async function checkBetterSqlite3Gc(addonPath: string): Promise<void> {
+	const { code, signal, stdout, stderr } = await churnBetterSqlite3(addonPath);
+	const loaded = /^addon (.+)$/m.exec(stdout)?.[1];
+	if (loaded === undefined || realpathSync(loaded) !== realpathSync(addonPath)) {
+		throw new Error(
+			`[package-sea-hub] the garbage-collector churn did not load ${addonPath} (it loaded ${loaded ?? "nothing"}).\n${stderr}`,
+		);
+	}
+	if (code !== 0 || signal !== null || !stdout.endsWith("survived\n")) {
+		throw new Error(
+			`[package-sea-hub] better-sqlite3 addon ${addonPath} aborts when the garbage collector reclaims a statement (exit ${code}, signal ${signal}); see docs/STORAGE.md § 2.\n${stderr}`,
+		);
+	}
 }
 
 /** The build script passes the target-qualified N-API artefact directly to packaging. */
@@ -405,12 +411,15 @@ async function main(): Promise<void> {
 	console.log("[package-sea-hub] step 5/5: SEA binary packaging");
 
 	const betterSqlite3Path = locateBetterSqlite3();
+	await checkBetterSqlite3Gc(betterSqlite3Path);
 	const hubLockAddonPath = locateHubLockAddon();
 	const tlsIdentityAddonPath = locateTlsIdentityAddon();
 	const tomlWasmPath = locateTomlWasm();
 	const version = readHubVersion();
 
-	console.log(`[package-sea-hub] better-sqlite3 addon: ${betterSqlite3Path}`);
+	console.log(
+		`[package-sea-hub] better-sqlite3 addon: ${betterSqlite3Path} (survives the garbage collector)`,
+	);
 	console.log(`[package-sea-hub] hub lock addon:      ${hubLockAddonPath}`);
 	console.log(`[package-sea-hub] TLS identity addon:  ${tlsIdentityAddonPath}`);
 	console.log(`[package-sea-hub] toml-edit WASM:        ${tomlWasmPath}`);

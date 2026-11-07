@@ -979,7 +979,15 @@ Each host record specifies exactly one auth method via `ssh_auth` field (`'agent
 - `agent`: the agent this machine publishes — `SSH_AUTH_SOCK` where there is one, and on Windows the OpenSSH agent's named pipe, which no variable announces. Fail if no agent answers.
 - `key`: read private key from `ssh_key_path`. If passphrase-protected, prompt user via UI dialog. A
   passphrase that does not decrypt the key is asked for again, saying so, until one does or the
-  user cancels; a cancel is not reported as a failure (`AUTH_CANCELLED`, #812).
+  user cancels; a cancel is not reported as a failure (`AUTH_CANCELLED`, #812). When the running
+  agent holds that same key, it signs instead and nothing is asked (#876): the key's public half,
+  read without the passphrase (an `openssh-key-v1` file's public section, or `<key>.pub`), is
+  matched against the agent's identities before dialling, and only that key is offered. This is
+  not a second method: the server sees the configured key either way. A key that needs no
+  passphrase, a legacy PEM key without `.pub`, no agent, an agent without the key, and a host whose
+  `~/.ssh/config` alias resolves `IdentityAgent none` keep the file. An agent that does not sign
+  ends that connection, which is closed before the passphrase is asked, then dialled again with the
+  file (SECURITY.md § 3.2).
 - `password`: prompt user via UI dialog at connect time. **Never stored.** A password the server
   refuses is asked for again, saying so, and the host dialled again, until the server takes one or
   the user cancels (#815). A server that takes no password, or a failure of any other kind, is not

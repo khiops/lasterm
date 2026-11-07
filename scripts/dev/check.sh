@@ -177,14 +177,16 @@ isolated() {
 	(
 		if [ "$windows" = 1 ]; then
 			local_app_data="$(cygpath -u "$LOCALAPPDATA")"
-			[ -n "${VOLTA_HOME:-}" ] || [ ! -d "$local_app_data/Volta" ] ||
-				export VOLTA_HOME="$(native "$local_app_data/Volta")"
+			[ -n "${MISE_DATA_DIR:-}" ] || [ ! -d "$local_app_data/mise" ] ||
+				export MISE_DATA_DIR="$(native "$local_app_data/mise")"
 			[ -n "${PNPM_HOME:-}" ] || [ ! -d "$local_app_data/pnpm" ] ||
 				export PNPM_HOME="$(native "$local_app_data/pnpm")"
 			export COREPACK_HOME="${COREPACK_HOME:-$(native "$local_app_data/node/corepack")}"
 			export LOCALAPPDATA="$(native "$profile/LocalAppData")"
 			export APPDATA="$(native "$profile/AppData")"
 		else
+			[ -n "${MISE_DATA_DIR:-}" ] || [ ! -d "${XDG_DATA_HOME:-$HOME/.local/share}/mise" ] ||
+				export MISE_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/mise"
 			[ -n "${PNPM_HOME:-}" ] || [ ! -d "${XDG_DATA_HOME:-$HOME/.local/share}/pnpm" ] ||
 				export PNPM_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/pnpm"
 			export COREPACK_HOME="${COREPACK_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/node/corepack}"

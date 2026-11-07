@@ -61,6 +61,35 @@ when another account does (SECURITY.md § 2.2, item 3).
 On Windows no mode is set or checked. The files, like the state directory, rely on the
 profile's default ACL, as `auth.json` does (SECURITY.md § 2.1, #200).
 
+**The addon and the garbage collector (#883).** An addon that wraps its objects in Node's C++
+`node::ObjectWrap`, compiled against Node 24.19 headers or later, aborts any Node 24 before
+24.22.0 when the garbage collector reclaims one of them: `Assertion failed: (env) != nullptr`
+(nodejs/node#65446), as ssh2's cipher binding did in the tests (#868). Node 24.22.0, the version
+`.nvmrc` pins, keeps the cleanup hooks of addons in a registry of its own (nodejs/node commits
+`abe1b673e9` and `5570a84048`), and such an addon survives it. better-sqlite3 12 wrapped its
+databases and statements that way, and was safe only while its prebuild predated those headers.
+
+better-sqlite3 13 wraps them in `Napi::ObjectWrap`, over Node-API, so the abort no longer applies
+to it, whatever headers built it:
+
+- Its prebuilds ship inside the package, one per platform: `prebuilds/<platform>-<arch>.node`.
+  Nothing downloads or compiles one at install. `allowBuilds` in `pnpm-workspace.yaml` denies the
+  node-gyp run pnpm would otherwise start, which needs a C++ toolchain and builds nothing.
+- The 13.0.3 prebuilds for Windows x64, Linux x64 and Linux arm64 each import 60 `napi_*`
+  functions, and no V8 or `node::` symbol. 12.11.1's Windows addon imported 74 V8 and `node::`
+  symbols, `node::AddEnvironmentCleanupHook` among them, and no `napi_*`.
+- The Linux prebuilds are built on Ubuntu 22.04: they need glibc 2.34 and the libstdc++ of GCC 11
+  (`GLIBCXX_3.4.29`).
+
+The churn stays, as a cheap tripwire against a regression back to an `ObjectWrap` build:
+
+- `packages/hub/src/storage/better-sqlite3-gc.spec.ts` prepares and drops statements by the ten
+  thousand in a child process, and expects it to survive.
+- `scripts/package-sea-hub.ts` runs the same churn on the addon the executable embeds, under the
+  Node it embeds, and refuses to package one that aborts.
+- **Before bumping better-sqlite3 or Node, run that spec first.** If it aborts, the bump waits
+  until a better-sqlite3 or a Node release no longer does.
+
 ## 3. Schema — meta.db
 
 ### 3.1 hosts

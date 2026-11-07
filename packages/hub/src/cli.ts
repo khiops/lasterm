@@ -1620,9 +1620,14 @@ async function cmdHostList(args: ParsedArgs): Promise<void> {
 	console.log(`${pad("LABEL", 20)}  ${pad("HOST", 30)}  ${pad("PORT", 6)}  USER`);
 	console.log(`${"-".repeat(20)}  ${"-".repeat(30)}  ${"-".repeat(6)}  ----`);
 	for (const h of hosts) {
-		console.log(
-			`${pad(String(h.label ?? ""), 20)}  ${pad(String(h.hostname ?? ""), 30)}  ${pad(String(h.port ?? 22), 6)}  ${String(h.username ?? "")}`,
-		);
+		// GET /api/hosts names these ssh_host, ssh_port and ssh_user, and leaves out
+		// the ones a host has none of (#903). An SSH host stored without a port uses
+		// 22. A local host shows none: the hub ignores any SSH field it still keeps.
+		const ssh = h.type === "ssh";
+		const address = ssh ? String(h.ssh_host ?? "") : "";
+		const port = ssh ? String(h.ssh_port ?? 22) : "";
+		const user = ssh ? String(h.ssh_user ?? "") : "";
+		console.log(`${pad(String(h.label ?? ""), 20)}  ${pad(address, 30)}  ${pad(port, 6)}  ${user}`);
 	}
 }
 

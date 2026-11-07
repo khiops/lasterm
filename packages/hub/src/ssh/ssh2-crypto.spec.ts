@@ -60,8 +60,8 @@ describe("ssh2's ciphers", () => {
 	// reclaims one of its ciphers (nodejs/node#65446). It killed the test worker of whichever
 	// spec opened the most SSH connections, upload-backends.spec.ts, with no exit event and
 	// nothing in dmesg. pnpm-workspace.yaml no longer builds that binding, which the shipped hub
-	// never loads. Mutation: allow ssh2's build again and install afresh on Node 24.21, and the
-	// churn aborts.
+	// never loads. Mutation: allow ssh2's build again, install afresh and run this spec on Node
+	// 24.21, and the churn aborts.
 	it("survive the garbage collector reclaiming them by the hundred thousand", async () => {
 		const { stderr, ...result } = await churn();
 		expect(result, stderr).toEqual({ code: 0, signal: null, stdout: "survived\n" });

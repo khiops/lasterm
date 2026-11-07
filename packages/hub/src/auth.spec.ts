@@ -11,7 +11,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	checkPermissions,
@@ -30,6 +29,7 @@ import {
 	validateTokenRecord,
 } from "./auth.js";
 import { openTestDatabases } from "./storage/db.js";
+import { Database } from "./storage/sqlite.js";
 
 // ─── initAuth ────────────────────────────────────────────────────────────────
 

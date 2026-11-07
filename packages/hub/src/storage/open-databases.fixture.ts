@@ -12,11 +12,11 @@
  */
 import { existsSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { DatabaseManager } from "./db.js";
 import { type MigrationSet, readMigrationFiles } from "./migration-files.js";
+import { Database } from "./sqlite.js";
 
 export type OpenDatabases = (dataDir: string) => DatabaseManager;
 
@@ -32,7 +32,7 @@ function lastMigration(set: MigrationSet): number {
 	return Number.parseInt(last.file.slice(0, 3), 10);
 }
 
-function schemaVersion(db: Database.Database): number | null {
+function schemaVersion(db: Database): number | null {
 	return (db.prepare("SELECT MAX(version) AS v FROM schema_version").get() as { v: number | null })
 		.v;
 }
@@ -95,6 +95,37 @@ export function describeOpenDatabases(subject: string, open: () => OpenDatabases
 			dbs = open()(dir);
 			expect(schemaVersion(dbs.meta)).toBe(lastMigration("meta"));
 			expect(schemaVersion(dbs.spool)).toBe(lastMigration("spool"));
+		});
+
+		// node:sqlite's own defaults differ from these: no busy timeout, a 2 MB cache
+		// and synchronous FULL in WAL mode (#893). Only what db.ts sets holds.
+		it("sets both up as STORAGE.md § 2 says: WAL, NORMAL, a 5 s busy timeout, an 8 MB cache", () => {
+			dbs = open()(dir);
+			for (const [name, db] of [
+				["meta", dbs.meta],
+				["spool", dbs.spool],
+			] as const) {
+				const settings = {
+					journal_mode: db.pragma("journal_mode", { simple: true }),
+					synchronous: db.pragma("synchronous", { simple: true }),
+					busy_timeout: db.pragma("busy_timeout", { simple: true }),
+					cache_size: db.pragma("cache_size", { simple: true }),
+					foreign_keys: db.pragma("foreign_keys", { simple: true }),
+				};
+				expect([name, settings]).toEqual([
+					name,
+					{
+						journal_mode: "wal",
+						synchronous: 1,
+						busy_timeout: 5000,
+						cache_size: -8000,
+						foreign_keys: 1,
+					},
+				]);
+			}
+			expect(dbs.meta.pragma("wal_autocheckpoint", { simple: true })).toBe(1000);
+			expect(dbs.spool.pragma("wal_autocheckpoint", { simple: true })).toBe(2000);
+			expect(dbs.spool.pragma("auto_vacuum", { simple: true })).toBe(2);
 		});
 
 		// Windows has no such mode, and relies on the profile's ACL (STORAGE.md § 2).

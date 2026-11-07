@@ -5,7 +5,7 @@ import type {
 	SupportedOs,
 } from "@lasterm/shared";
 import { generateId } from "@lasterm/shared";
-import type Database from "better-sqlite3";
+import type { Database } from "./sqlite.js";
 
 // ─── Row types ───────────────────────────────────────────────────────────────
 
@@ -122,7 +122,7 @@ export type HostMenuProfile = LaunchProfile & {
 // ─── LaunchProfilesDAL ───────────────────────────────────────────────────────
 
 export class LaunchProfilesDAL {
-	constructor(private db: Database.Database) {}
+	constructor(private db: Database) {}
 
 	// ─── Launch Profiles ─────────────────────────────────────────────────────
 

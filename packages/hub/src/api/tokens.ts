@@ -1,12 +1,12 @@
-import type Database from "better-sqlite3";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { listTokens, PRIMARY_TOKEN_ID, revokeToken } from "../auth.js";
 import { type TokenRevocationOutcome, WITHHELD } from "../logging/security-log.js";
+import type { Database } from "../storage/sqlite.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface TokenRouteOptions {
-	db: Database.Database;
+	db: Database;
 	/**
 	 * Called once a token is revoked, to end what it already opened. Without it
 	 * a revoked token kept every WebSocket it had authenticated.

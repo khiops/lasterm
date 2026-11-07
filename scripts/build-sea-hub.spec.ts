@@ -62,47 +62,25 @@ describe("esbuild bundle produces valid CJS", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test 2: better-sqlite3 is bundled (not external) with its binding shim
+// Test 2: SQLite is node:sqlite, built into the Node the executable embeds (#893)
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("better-sqlite3 is bundled with its binding shim", () => {
-	it("better-sqlite3 is NOT external — no require('better-sqlite3') in bundle", () => {
+describe("SQLite comes from node:sqlite", () => {
+	it("requires node:sqlite, which the executable's own Node provides", () => {
 		const content = readFileSync(OUT_FILE, "utf8");
-		// When bundled (not external), esbuild inlines the JS source.
-		// An external require("better-sqlite3") call must NOT appear.
+		// esbuild leaves a built-in module as a require(); the executable's require()
+		// loads built-in modules.
+		expect(content).toContain('require("node:sqlite")');
+	});
+
+	it("bundles none of better-sqlite3", () => {
+		const content = readFileSync(OUT_FILE, "utf8");
+		// Mutation caught: a hub module importing better-sqlite3 again, which
+		// bundles its lib/ and the shim that stands in for its addon finder.
 		expect(content).not.toContain('require("better-sqlite3")');
-	});
-
-	it("better-sqlite3 JS internals appear in the bundle", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// When bundled, better-sqlite3 identifiers appear inline.
-		// "Database" is the main export class from better-sqlite3.
-		expect(content).toMatch(/better.sqlite3|better_sqlite3/i);
-	});
-
-	it("binding shim references __seaSqliteExports", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// The betterSqliteBindingPlugin shim must be present in the bundle,
-		// routing native addon resolution to the SEA-pre-loaded exports.
-		expect(content).toContain("__seaSqliteExports");
-		expect(content).toContain("better-sqlite3 binding shim");
-	});
-
-	it("better-sqlite3's own addon finder is replaced by the shim", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// lib/binding.js looks for prebuilds/<platform>-<arch>.node beside itself and
-		// require()s it, which the executable can do neither of. Mutation caught: a
-		// shim that matches nothing bundles that finder again.
+		expect(content).not.toContain("better-sqlite3 binding shim");
 		expect(content).not.toContain("PREBUILD_PLATFORMS");
 		expect(content).not.toContain("getPrebuildPath");
-	});
-
-	it("better_sqlite3.node is not embedded as a binary blob", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// The raw .node file path patterns from better-sqlite3's build output
-		// must NOT appear — that would mean the native code was inlined (wrong).
-		expect(content).not.toContain("build/Release/better_sqlite3.node");
-		expect(content).not.toContain("build/Debug/better_sqlite3.node");
 	});
 });
 
@@ -216,9 +194,8 @@ const STORAGE_SOURCE = join(ROOT, "packages", "hub", "src", "storage");
 /**
  * A hub module as the executable bundles it, with the build's own options and
  * plugins, then loaded. Left out: the prelude and the call to main(), which
- * belong to the CLI entry, and better-sqlite3, loaded from the hub's
- * dependencies, since the executable loads its addon its own way, which the
- * started executable covers (sea-hub-e2e.spec.ts).
+ * belong to the CLI entry. SQLite is node:sqlite, a built-in module, required
+ * here as the executable requires it.
  */
 async function bundleAsTheExecutable<T>(source: string): Promise<T> {
 	const { buildOptions } = await import("./build-sea-hub.js");
@@ -228,7 +205,6 @@ async function bundleAsTheExecutable<T>(source: string): Promise<T> {
 		write: false,
 		banner: {},
 		footer: {},
-		external: ["better-sqlite3"],
 		logLevel: "silent",
 	});
 	const code = result.outputFiles?.[0]?.text;

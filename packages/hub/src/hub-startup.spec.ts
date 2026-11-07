@@ -4,7 +4,6 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
-import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	createToken,
@@ -18,6 +17,7 @@ import { STARTUP_UNWIND_TIMEOUT_MS, startHub } from "./hub-startup.js";
 import { SecurityLog } from "./logging/security-log.js";
 import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { openTestDatabases } from "./storage/db.js";
+import { Database } from "./storage/sqlite.js";
 import { makeTempDir, removeTempDir } from "./temp-dir.fixture.js";
 
 const TEST_TLS_IDENTITY = {

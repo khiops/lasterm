@@ -17,6 +17,9 @@ import { lastermDir, type PlatformDirContext } from "../../../packages/shared/sr
 /** The port scripts/dev/desktop-ui.ps1 gives the app; 9222 belongs to another WebView2 app. */
 export const DEFAULT_CDP_PORT = 9333;
 
+/** How long `dragover` keeps the drag over its point before it cancels, unless told --hold. */
+export const DEFAULT_HOLD_SECONDS = 1;
+
 export const USAGE = `usage: node scripts/dev/ui/cdp.mjs [--port N] <command>
 
   eval "<expression>"              print its JSON value
@@ -26,6 +29,10 @@ export const USAGE = `usage: node scripts/dev/ui/cdp.mjs [--port N] <command>
   shot <file.png>                  screenshot the page
   watch <seconds> "<expression>"   print each change of its value
   api <METHOD> <path> [body.json]  call the app's hub REST API (path: api/health); JSON answer on stdout
+  drop <x> <y> <path> [<path>...]  drop files or folders on the page at CSS point (x, y), without the mouse
+  dragover [--hold <seconds>] [--eval-file <file.js>] <x> <y> <path> [<path>...]
+                                   drag them over (x, y) for --hold seconds (default ${DEFAULT_HOLD_SECONDS}), print the
+                                   script's value while the drag is still over, then cancel: no drop
 
 --port is the app's CDP port (default ${DEFAULT_CDP_PORT}).`;
 
@@ -45,6 +52,20 @@ export type CdpCommand =
 			readonly method: HttpMethod;
 			readonly path: string;
 			readonly bodyFile: string | null;
+	  }
+	| {
+			readonly name: "drop";
+			readonly x: number;
+			readonly y: number;
+			readonly paths: readonly string[];
+	  }
+	| {
+			readonly name: "dragover";
+			readonly x: number;
+			readonly y: number;
+			readonly paths: readonly string[];
+			readonly holdSeconds: number;
+			readonly evalFile: string | null;
 	  };
 
 export interface CdpInvocation {
@@ -106,6 +127,31 @@ export function apiPathArgument(raw: string): string {
 		throw new CdpUsageError(`api takes a path on the hub, such as api/health, not ${raw}`);
 	}
 	return apiPath;
+}
+
+/** A point of the page in CSS pixels, as getBoundingClientRect() gives it: never negative. */
+function cssCoordinate(command: string, axis: "x" | "y", raw: string | undefined): number {
+	const value = Number(raw);
+	if (raw === undefined || raw.trim() === "" || !Number.isFinite(value) || value < 0) {
+		throw new CdpUsageError(
+			`${command} takes the point's ${axis} in CSS pixels, got ${raw ?? "nothing"}`,
+		);
+	}
+	return value;
+}
+
+/** `<x> <y> <path> [<path>...]`, what `drop` and `dragover` take after their flags. */
+function dragOperands(
+	command: string,
+	rest: readonly string[],
+): { x: number; y: number; paths: string[] } {
+	if (rest.length < 3) {
+		throw new CdpUsageError(
+			`${command} takes <x> <y> <path> [<path>...], got ${rest.length} argument(s)`,
+		);
+	}
+	const [x, y, ...paths] = rest;
+	return { x: cssCoordinate(command, "x", x), y: cssCoordinate(command, "y", y), paths };
 }
 
 /** Parse cdp.mjs's arguments, everything after the script's own path. */
@@ -179,6 +225,30 @@ export function parseCdpArgs(argv: readonly string[]): CdpInvocation {
 			return {
 				port,
 				command: { name, method, path: apiPathArgument(apiPath), bodyFile: bodyFile ?? null },
+			};
+		}
+		case "drop":
+			return { port, command: { name, ...dragOperands(name, rest) } };
+		case "dragover": {
+			let holdSeconds = DEFAULT_HOLD_SECONDS;
+			let evalFile: string | null = null;
+			let operandsLeft = [...rest];
+			while (operandsLeft[0] === "--hold" || operandsLeft[0] === "--eval-file") {
+				const [flag, value] = operandsLeft as [string, string | undefined];
+				if (value === undefined) throw new CdpUsageError(`${flag} takes a value`);
+				if (flag === "--hold") {
+					holdSeconds = Number(value);
+					if (value.trim() === "" || !Number.isFinite(holdSeconds) || holdSeconds < 0) {
+						throw new CdpUsageError(`--hold takes a number of seconds, got ${value}`);
+					}
+				} else {
+					evalFile = value;
+				}
+				operandsLeft = operandsLeft.slice(2);
+			}
+			return {
+				port,
+				command: { name, ...dragOperands(name, operandsLeft), holdSeconds, evalFile },
 			};
 		}
 		default:
@@ -362,4 +432,229 @@ export function callHubApi(
 		request.on("error", reject);
 		request.end(body?.text);
 	}).finally(() => agent.destroy());
+}
+
+// ─── Dropping files without the mouse ────────────────────────────────────────
+
+/** What `drop` and `dragover` drag: files and folders, each by its absolute path. */
+export function resolveDropPaths(
+	paths: readonly string[],
+	kindOf: (absolute: string) => "file" | "directory" | null,
+	base = process.cwd(),
+): string[] {
+	return paths.map((raw) => {
+		const absolute = path.resolve(base, raw);
+		if (kindOf(absolute) === null) throw new Error(`no file or folder at ${absolute}`);
+		return absolute;
+	});
+}
+
+/** CDP's `dragOperationsMask` for a copy, what a file manager offers when a file is let go. */
+export const DRAG_OPERATION_COPY = 1;
+
+/** How often a held drag repeats its dragover, as a browser does while the pointer rests. */
+export const DRAG_OVER_INTERVAL_MS = 250;
+
+/** How long one drag event may take to be acknowledged before the drag is given up. */
+export const DRAG_EVENT_TIMEOUT_MS = 15_000;
+
+/** The `Input.DragData` of a drag that carries files and folders, and nothing else. */
+export function fileDragData(paths: readonly string[]): {
+	items: never[];
+	files: string[];
+	dragOperationsMask: number;
+} {
+	return { items: [], files: [...paths], dragOperationsMask: DRAG_OPERATION_COPY };
+}
+
+/**
+ * Where a drag goes to leave the page: outside its viewport. The page then fires a dragleave, as
+ * when a pointer drags out of the window. `dragCancel` alone fires nothing: the page would stay in
+ * the drag, its drop overlay up.
+ */
+export const OUTSIDE_PAGE = { x: -1, y: -1 } as const;
+
+/**
+ * A capturing listener that keeps the last dragenter or dragover the page saw, so that the page's
+ * answer to the drag can be read once the event is over: it took the drag if it cancelled the
+ * event and left a copy allowed. Chromium decides the drop on that same answer.
+ */
+const PROBE = "__lastermCdpDragProbe";
+export const DRAG_PROBE_INSTALL = `(() => {
+	window.${PROBE}?.remove();
+	const probe = { last: null };
+	const keep = (event) => { probe.last = event; };
+	probe.remove = () => {
+		for (const type of ["dragenter", "dragover"]) window.removeEventListener(type, keep, true);
+		delete window.${PROBE};
+	};
+	for (const type of ["dragenter", "dragover"]) window.addEventListener(type, keep, true);
+	window.${PROBE} = probe;
+	return true;
+})()`;
+export const DRAG_PROBE_READ = `(() => {
+	const last = window.${PROBE}?.last;
+	return last ? { type: last.type, prevented: last.defaultPrevented, dropEffect: last.dataTransfer?.dropEffect ?? null } : null;
+})()`;
+export const DRAG_PROBE_REMOVE = `window.${PROBE}?.remove(); true`;
+
+/** What the page made of the drag: took it, refused it, or nothing it said reached the probe. */
+export type DragAnswer = "taken" | "refused" | "unseen";
+
+export function dragAnswer(probed: unknown): DragAnswer {
+	if (probed === null || typeof probed !== "object") return "unseen";
+	const { prevented, dropEffect } = probed as { prevented?: unknown; dropEffect?: unknown };
+	return prevented === true && dropEffect === "copy" ? "taken" : "refused";
+}
+
+/** A CDP reply, as cdp.mjs's `send` gives it: a result, or an error. */
+export interface CdpReply {
+	readonly result?: unknown;
+	readonly error?: { readonly code?: number; readonly message?: string };
+}
+
+export type CdpSend = (method: string, params?: Record<string, unknown>) => Promise<CdpReply>;
+
+export interface FileDrag {
+	readonly x: number;
+	readonly y: number;
+	readonly paths: readonly string[];
+	/**
+	 * Absent, the drag is dropped. Present, it stays over the point that long, repeating its
+	 * dragover; `inspect` then runs while it is still there, and the drag leaves the page.
+	 */
+	readonly hold?: {
+		readonly ms: number;
+		readonly onHolding?: (answer: DragAnswer) => void;
+		readonly inspect?: () => Promise<void>;
+	};
+	/** Ends a hold early (Ctrl+C): `inspect` does not run, and the drag still leaves the page. */
+	readonly signal?: AbortSignal;
+	readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+	readonly timeoutMs?: number;
+}
+
+export interface FileDragOutcome {
+	readonly answer: DragAnswer;
+	readonly dropped: boolean;
+}
+
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve) => {
+		if (signal?.aborted) {
+			resolve();
+			return;
+		}
+		const timer = setTimeout(done, ms);
+		function done(): void {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", done);
+			resolve();
+		}
+		signal?.addEventListener("abort", done, { once: true });
+	});
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error(`${what}: no answer in ${ms} ms`)), ms);
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(error: unknown) => {
+				clearTimeout(timer);
+				reject(error);
+			},
+		);
+	});
+}
+
+/**
+ * Drag files and folders onto the page through `Input.dispatchDragEvent`, every event carrying
+ * the same data: dragEnter and dragOver at the point, then the page's answer is read.
+ *
+ * - **A drop** follows if the page took the drag. If it refused, the drag leaves the page
+ *   instead: Chromium would not deliver that drop, and the page, left in the drag, would keep
+ *   its overlay. A real drag the page refuses ends the same way, but with its dragleave at the
+ *   point, not outside the page.
+ * - **A hold** repeats the dragOver for its length, runs `inspect`, and leaves the page.
+ *
+ * Any failure once the drag has entered makes it leave the page too, so that the page is never
+ * left in the middle of one. What the drop did is the page's to say: read it with `eval`.
+ */
+export async function dispatchFileDrag(send: CdpSend, drag: FileDrag): Promise<FileDragOutcome> {
+	const data = fileDragData(drag.paths);
+	const timeoutMs = drag.timeoutMs ?? DRAG_EVENT_TIMEOUT_MS;
+	const sleep = drag.sleep ?? abortableSleep;
+	async function call(
+		method: string,
+		params: Record<string, unknown>,
+		what: string,
+	): Promise<CdpReply> {
+		const reply = await withTimeout(send(method, params), timeoutMs, what);
+		if (reply.error !== undefined) throw new Error(`${what}: ${reply.error.message ?? "failed"}`);
+		return reply;
+	}
+	async function dispatch(
+		type: "dragEnter" | "dragOver" | "drop" | "dragCancel",
+		point: { readonly x: number; readonly y: number } = drag,
+	): Promise<void> {
+		await call(
+			"Input.dispatchDragEvent",
+			{ type, x: point.x, y: point.y, data },
+			`Input.dispatchDragEvent ${type}`,
+		);
+	}
+	async function probe(expression: string): Promise<unknown> {
+		const reply = await call(
+			"Runtime.evaluate",
+			{ expression, returnByValue: true },
+			"the drag probe",
+		);
+		const evaluated = reply.result as
+			| { result?: { value?: unknown }; exceptionDetails?: unknown }
+			| undefined;
+		if (evaluated?.exceptionDetails !== undefined) throw new Error("the drag probe failed");
+		return evaluated?.result?.value;
+	}
+	async function leave(): Promise<void> {
+		await dispatch("dragOver", OUTSIDE_PAGE);
+		await dispatch("dragCancel", OUTSIDE_PAGE);
+	}
+
+	await probe(DRAG_PROBE_INSTALL);
+	let inside = false;
+	try {
+		await dispatch("dragEnter");
+		inside = true;
+		await dispatch("dragOver");
+		const answer = dragAnswer(await probe(DRAG_PROBE_READ));
+		if (drag.hold === undefined) {
+			if (answer === "refused") {
+				inside = false;
+				await leave();
+				return { answer, dropped: false };
+			}
+			await dispatch("drop");
+			inside = false;
+			return { answer, dropped: true };
+		}
+		drag.hold.onHolding?.(answer);
+		for (let left = drag.hold.ms; left > 0; left -= DRAG_OVER_INTERVAL_MS) {
+			await sleep(Math.min(left, DRAG_OVER_INTERVAL_MS), drag.signal);
+			if (drag.signal?.aborted) break;
+			await dispatch("dragOver");
+		}
+		if (!drag.signal?.aborted) await drag.hold.inspect?.();
+		inside = false;
+		await leave();
+		return { answer, dropped: false };
+	} catch (error) {
+		if (inside) await leave().catch(() => undefined);
+		throw error;
+	} finally {
+		await probe(DRAG_PROBE_REMOVE).catch(() => undefined);
+	}
 }

@@ -630,6 +630,25 @@ describe("SSH connections are recorded in the security log", () => {
 		]);
 	});
 
+	// On key auth the record says whether the SSH agent signed or the key file did (#876).
+	it.each(["agent", "file"] as const)("says the %s signed a key-auth connection", (signer) => {
+		const { manager, records, host } = setup();
+		Object.assign(host, { sshAuth: "key" });
+		const agent = new SshAgent(host);
+		agent.keySigner = signer;
+		manager.wireAgentEvents(SSH_HOST_ID, SESSION_ID, agent);
+
+		expect(records).toEqual([
+			{
+				event: "ssh.connect",
+				hostId: SSH_HOST_ID,
+				hostLabel: "build box",
+				authMethod: "key",
+				signer,
+			},
+		]);
+	});
+
 	it("records a disconnect nobody here asked for as a lost connection", () => {
 		const { manager, records, host } = setup();
 		const agent = new SshAgent(host);

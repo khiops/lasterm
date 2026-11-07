@@ -17,6 +17,8 @@ vi.mock("../ssh/ssh-config-parser.js", () => ({
 
 vi.mock("ssh2", () => {
 	return {
+		// Extended as the key-auth agent signer loads (#876).
+		BaseAgent: class {},
 		Client: vi.fn().mockImplementation(() => {
 			return Object.assign(new EventEmitter(), {
 				connect: vi.fn(),

@@ -7,6 +7,42 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## KEY-AGENT-SIGNER — on key auth, the SSH agent signs when it holds the configured key (#876, 2026-11-06)
+
+- **On by default, with no setting.** OpenSSH uses the agent's copy of an `IdentityFile` key and
+  has no switch for it beyond `IdentityAgent none` or an empty `SSH_AUTH_SOCK`. The identity the
+  server sees does not change, and the agent is already the user's own. A setting can come later if
+  someone needs one.
+- **Only a key that needs a passphrase.** The point is the passphrase asked after every hub
+  restart. A key that needs none is signed from its file as before: nothing would be spared, and
+  falling back to the file after an agent refused (an `ssh-add -c` confirmation declined) would
+  override the agent's answer.
+- **The matching key alone, as `IdentitiesOnly yes`.** A wrapper around ssh2's agent
+  (`ConfiguredKeyAgent`, a `BaseAgent`) lists only the configured key and signs with nothing else.
+  Agent auth's way of offering every key would change who logs in and spend `MaxAuthTries`.
+- **The public half without the passphrase:** an `openssh-key-v1` file's own public section first,
+  which is in clear and cannot disagree with the private key beside it, then `<key>.pub`, which can
+  be stale. A legacy PEM key without `.pub` cannot be matched and keeps its prompt.
+- **Asked before dialling, bounded at 3 s.** Whether the passphrase is needed must be known before
+  the connection, since it is asked before anything is dialled (SECURITY.md § 3.3c). An agent that
+  does not list its keys in time is left out.
+- **The fallback is a new connection, not an authentication method after the agent's.** An agent
+  that is gone, no longer holds the key or refuses to sign ends that connection
+  (`AgentSignerFailedError`); it is closed, the passphrase asked for, and the host dialled again
+  with the file, as a refused password is (#815). Within the same connection the person's answer
+  would race ssh2's handshake bound (`readyTimeout`, 20 s, 10 s for a connection test) while the
+  server waits. `AskAgainError` is now the base of both retries, so every dialler (session, jump,
+  connection test) handles them in one place.
+- **`IdentityAgent none` is honoured** for the host's `ssh_config_host`: the first value of a part
+  of `~/.ssh/config` that applies, as ssh(1) resolves it. `Match` blocks are not evaluated and
+  `Include` is not followed, as the import follows none. Any other value changes nothing: the agent
+  is still the one `SSH_AUTH_SOCK` or the Windows pipe names.
+- **Nothing is written to the agent**, and the security log's `ssh.connect` says `signer: "agent"`
+  or `"file"` on key auth, without key material or fingerprint.
+- **Specs never reach the developer's agent.** The hub setup file points `SSH_AUTH_SOCK` at an agent
+  that does not exist, which on Windows also keeps the OpenSSH pipe out; the specs of this change
+  run a fake agent of their own.
+
 ## HUB-NODE-ORCHESTRATOR — the hub stays in Node and orchestrates; what is critical moves to Rust behind Node-API, as the need arises (2026-11-06)
 
 - **No rewrite of the hub in Rust now.** The hub is large: Fastify REST and WebSocket, the ssh2

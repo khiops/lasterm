@@ -52,7 +52,10 @@ import {
 import type { TransferItemRecord, TransferRecord, TransfersDAL } from "../storage/transfers-dal.js";
 import { buildUploadTree, isWholeNumber, type TreeItem } from "./upload-tree.js";
 
-/** How long the changes of an upload gather before they are said in one TRANSFER_PROGRESS. */
+/**
+ * How long the changes of an upload gather before they are said in one
+ * TRANSFER_PROGRESS, unless a file started sending (`settle`).
+ */
 const PROGRESS_FLUSH_MS = 100;
 
 /**
@@ -254,6 +257,8 @@ interface Upload {
 	dirtyFolders: Set<number>;
 	conflicts: TransferConflictItem[];
 	flushTimer: ReturnType<typeof setTimeout> | null;
+	/** A flush once the work at hand is done: a file started sending (#873). */
+	flushSoon: ReturnType<typeof setImmediate> | null;
 	doneSaid: boolean;
 	forgetTimer: ReturnType<typeof setTimeout> | null;
 	/** Placements and other host work under way that no state shows. */
@@ -1090,6 +1095,7 @@ export class TransferService {
 				if (sink !== null) void sink.abort();
 			}
 			if (upload.flushTimer !== null) clearTimeout(upload.flushTimer);
+			if (upload.flushSoon !== null) clearImmediate(upload.flushSoon);
 			this.clearForget(upload);
 			this.releaseBackend(upload);
 		}
@@ -1189,6 +1195,7 @@ export class TransferService {
 			dirtyFolders: new Set(),
 			conflicts: [],
 			flushTimer: null,
+			flushSoon: null,
 			doneSaid: false,
 			forgetTimer: null,
 			busy: 0,
@@ -1596,7 +1603,8 @@ export class TransferService {
 				if (item.state === "sending") this.fileFailed(upload, item, error);
 			},
 		);
-		this.settle(upload);
+		// The window sends its bytes once told: told now, not with the next batch.
+		this.settle(upload, true);
 	}
 
 	private async open(upload: Upload, item: Item): Promise<void> {
@@ -2568,6 +2576,8 @@ export class TransferService {
 		upload.waiting.clear();
 		if (upload.flushTimer !== null) clearTimeout(upload.flushTimer);
 		upload.flushTimer = null;
+		if (upload.flushSoon !== null) clearImmediate(upload.flushSoon);
+		upload.flushSoon = null;
 		this.clearForget(upload);
 		this.uploads.delete(upload.id);
 		this.unsaved.delete(upload.id);
@@ -2737,11 +2747,30 @@ export class TransferService {
 		return this.counted(upload, ["queued", "sending", "verifying"]) > 0;
 	}
 
-	/** Say what changed soon, and whether the upload is done; let go of what an idle one holds. */
-	private settle(upload: Upload): void {
+	/**
+	 * Say what changed soon, and whether the upload is done; let go of what an
+	 * idle one holds. Changes gather for `PROGRESS_FLUSH_MS`, but with `now`,
+	 * for a file that started sending, they are said once the work at hand is
+	 * done: the window sends a file's bytes only once told, and waiting for the
+	 * batch cost every file up to 100 ms, most of a small file's time (#873).
+	 */
+	private settle(upload: Upload, now = false): void {
 		// Its own state is written as it changes: a window that left, its end.
 		this.persist(upload);
-		if (upload.flushTimer === null && !this.stopped) {
+		if (this.stopped) return;
+		if (now) {
+			if (upload.flushSoon === null) {
+				upload.flushSoon = setImmediate(() => {
+					upload.flushSoon = null;
+					if (upload.flushTimer !== null) clearTimeout(upload.flushTimer);
+					upload.flushTimer = null;
+					this.flush(upload);
+				});
+				upload.flushSoon.unref?.();
+			}
+			return;
+		}
+		if (upload.flushTimer === null && upload.flushSoon === null) {
 			upload.flushTimer = setTimeout(() => {
 				upload.flushTimer = null;
 				this.flush(upload);

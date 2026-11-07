@@ -100,38 +100,57 @@ class SftpSink implements UploadSink {
 		}
 	}
 
+	/**
+	 * Flush, time, size and close go together, in one round trip rather than
+	 * four (#873): a server runs the requests on one handle in the order they
+	 * came, as the SFTP draft asks and as OpenSSH's sftp-server runs every
+	 * request. So the size is read once the bytes are flushed and the time set,
+	 * and the file is closed last, whatever each answer is.
+	 */
 	async finish(): Promise<TransferVerification> {
 		const what = "The file could not be written";
-		try {
+		const { channel } = this.session;
+		const mtime = this.options.mtime;
+		const [synced, timed, measured, closed] = await Promise.allSettled([
 			// Where the server offers it; a server without it writes on close.
-			await sftpRequest<void>(this.session, (done) => {
-				this.session.channel.ext_openssh_fsync(this.handle, (error) => done(error, undefined));
-			}).catch((error: unknown) => {
-				if (!unsupported(error)) throw error;
-			});
-			if (this.options.mtime !== null) {
-				const seconds = Math.floor(this.options.mtime / 1000);
-				// Kept when the server lets it be; the file is whole either way.
-				await sftpRequest<void>(this.session, (done) => {
-					this.session.channel.futimes(this.handle, seconds, seconds, (error) =>
-						done(error, undefined),
-					);
-				}).catch((error: unknown) => {
-					if (error instanceof SftpChannelClosed || this.backend.lost) throw error;
-				});
-			}
-			await sftpRequest<void>(this.session, (done) => {
-				this.session.channel.close(this.handle, (error) => done(error, undefined));
-			});
-		} catch (error) {
-			await this.abort();
-			throw this.backend.failure(error, what);
+			sftpRequest<void>(this.session, (done) => {
+				channel.ext_openssh_fsync(this.handle, (error) => done(error, undefined));
+			}),
+			mtime === null
+				? Promise.resolve()
+				: sftpRequest<void>(this.session, (done) => {
+						const seconds = Math.floor(mtime / 1000);
+						channel.futimes(this.handle, seconds, seconds, (error) => done(error, undefined));
+					}),
+			sftpRequest<Stats>(this.session, (done) => {
+				channel.fstat(this.handle, done);
+			}),
+			sftpRequest<void>(this.session, (done) => {
+				channel.close(this.handle, (error) => done(error, undefined));
+			}),
+		]);
+		let failed: { reason: unknown } | null = null;
+		if (synced.status === "rejected" && !unsupported(synced.reason)) failed = synced;
+		// The time is kept when the server lets it be; the file is whole either way.
+		else if (
+			timed.status === "rejected" &&
+			(timed.reason instanceof SftpChannelClosed || this.backend.lost)
+		)
+			failed = timed;
+		else if (closed.status === "rejected") failed = closed;
+		if (failed !== null) {
+			if (closed.status === "rejected") await this.abort();
+			throw this.backend.failure(failed.reason, what);
 		}
-		const attrs = await this.backend.lstat(this.session, this.path);
-		if (attrs?.size !== this.options.size) {
+		// What the open file holds; a server that does not say is asked for the path's.
+		const size =
+			measured.status === "fulfilled" && typeof measured.value.size === "number"
+				? measured.value.size
+				: (await this.backend.lstat(this.session, this.path))?.size;
+		if (size !== this.options.size) {
 			throw new VerifyFailed(
 				"SIZE_MISMATCH",
-				`${attrs?.size ?? 0} of ${this.options.size} bytes are on the host`,
+				`${size ?? 0} of ${this.options.size} bytes are on the host`,
 			);
 		}
 		return "size";
@@ -155,7 +174,8 @@ class SftpSink implements UploadSink {
  * (`lstat`): something there is a conflict, nothing an error.
  *
  * - The temporary is opened `wx` (CREAT | EXCL | WRITE), synced with
- *   `fsync@openssh.com` where offered, its time set with `futimes`.
+ *   `fsync@openssh.com` where offered, its time set with `futimes`, its size
+ *   read with `fstat`, then closed: four requests in one round trip (#873).
  * - It is placed with `hardlink@openssh.com`, which refuses a name that
  *   exists, then removed. Without it, with the plain rename, which refuses
  *   one on OpenSSH (it links, or checks then renames) and on Win32-OpenSSH

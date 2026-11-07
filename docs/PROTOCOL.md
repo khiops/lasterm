@@ -1571,7 +1571,9 @@ window that sends the bytes:
   reason?: "needs_passphrase" | "needs_password" | "host_key_not_accepted" | "host_unreachable" }
 ```
 
-PROGRESS carries what changed in the last 100 ms: the items, and the folders whose files changed,
+PROGRESS carries what changed since the last one, said 100 ms after the first change, or as soon
+as the work at hand is done when a file starts sending, since the window sends a file's bytes only
+once told (#873): the items, and the folders whose files changed,
 `acked` being the bytes the host acknowledged, the contiguous prefix it holds. `folders` and
 `totals` count files only ("118 of 120 placed, 2 failed"). CONFLICT lists the items that found
 something under their name after the start had looked (`late`): a file that appeared meanwhile, or
@@ -1675,6 +1677,13 @@ or folder they are in; over SFTP, at most four writes of 30 KiB per file are in 
 SSH connection's send queue never holds a terminal's keystrokes far behind file data. A chunk is
 answered once the host acknowledged it: the client goes at the host's pace.
 
+Over SFTP, a small file new at its destination costs five round trips on OpenSSH (#873): the
+exclusive `open`, the `write`, then its flush, time, size and close sent together (a server runs
+the requests on one handle in the order they came), the hard link, and the temporary's removal,
+which waits for the link since a link refused keeps the temporary for a conflict's answer. Without
+`hardlink@`, the rename is the fourth and last. Only the first two hold one of the window's
+`max_concurrent` places: the next file starts while one is checked and placed.
+
 **Placing without overwriting.** Each file is written to a hidden temporary beside its target,
 `.<name>.<16 hex>.partial` (its name cut short to keep within 255 bytes, or within MAX_PATH on
 Windows), created exclusively, then placed without replacing anything:
@@ -1682,7 +1691,7 @@ Windows), created exclusively, then placed without replacing anything:
 | Step | SFTP | SSH commands, POSIX | SSH commands, Windows | Local |
 |---|---|---|---|---|
 | Create | `open` `wx` (CREAT \| EXCL \| WRITE) | `set -C; cat > tmp`, the path an `sh -c` argument | `[IO.File]::Open(…, CreateNew)` | `fs.open(…, "wx")` |
-| Flush, time | `fsync@openssh.com` when offered, `futimes` | `TZ=UTC0 touch -t` | `Flush($true)`, `SetLastWriteTimeUtc` | `sync()`, `utimes` |
+| Flush, time | `fsync@openssh.com` when offered, `futimes`, then `fstat` and `close`, all sent together | `TZ=UTC0 touch -t` | `Flush($true)`, `SetLastWriteTimeUtc` | `sync()`, `utimes` |
 | Place | `hardlink@openssh.com`, then the temporary removed; without it, the plain rename | `ln`, then `rm`; without hard links, the name checked then `mv` | `[IO.File]::Move` (refuses a name that exists), tried again on a sharing violation | `fs.link`, then `unlink`; without hard links, `copyFile` with `COPYFILE_EXCL` |
 | Replace (asked) | `posix-rename@openssh.com`; without it, the name removed, then the rename | `mv -f` | the file set aside, the temporary moved in, the old one deleted | `fs.rename`, tried again on EPERM or EBUSY |
 
@@ -1715,7 +1724,9 @@ some 25 ms. It starts with the upload's first such script, and is let go when th
 after 30 s without one; a script that gives no answer in time closes it, and the next starts
 another.
 
-**Verification.** Every file's size is checked on the host before it is placed. Over SSH commands
+**Verification.** Every file's size is checked on the host before it is placed: over SFTP, the
+open file's (`fstat`, sent with its flush and close), or, on a server that answers no FSTAT, its
+path's once closed (`lstat`). Over SSH commands
 with `transfer_verify` on (the default), the hub hashes the bytes as they pass, and the host hashes
 the temporary before placement (`sha256sum`, else `openssl dgst -sha256`, else `shasum -a 256`,
 each reading it on stdin; on Windows .NET's SHA-256): a file whose hashes differ fails

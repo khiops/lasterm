@@ -3826,6 +3826,7 @@ import type { TestConnectMessage } from "@lasterm/shared";
 
 let mockSsh2Client: EventEmitter & {
 	connect: ReturnType<typeof vi.fn>;
+	setNoDelay: ReturnType<typeof vi.fn>;
 	end: ReturnType<typeof vi.fn>;
 	destroy: ReturnType<typeof vi.fn>;
 };
@@ -3838,6 +3839,8 @@ vi.mock("ssh2", () => {
 		Client: vi.fn().mockImplementation(function () {
 			mockSsh2Client = Object.assign(new EventEmitter(), {
 				connect: vi.fn(),
+				// Every connection the hub opens turns Nagle off (#873).
+				setNoDelay: vi.fn(),
 				end: vi.fn(),
 				destroy: vi.fn(),
 			});

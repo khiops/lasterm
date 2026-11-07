@@ -1,5 +1,6 @@
 import { Client } from "ssh2";
 import { type SftpServerOptions, startSftpServer } from "../session/sftp-server.fixture.js";
+import { connectWithoutDelay } from "../session/ssh-nodelay.js";
 
 export type MockSshServer = Awaited<ReturnType<typeof startSftpServer>>;
 
@@ -19,7 +20,7 @@ export async function startMockSshHost(options: SftpServerOptions = {}): Promise
 	const closed = new Promise<void>((resolve) => client.once("close", resolve));
 	await new Promise<void>((resolve, reject) => {
 		client.once("ready", resolve).once("error", reject);
-		client.connect({
+		connectWithoutDelay(client, {
 			host: "127.0.0.1",
 			port: server.port,
 			username: "test",

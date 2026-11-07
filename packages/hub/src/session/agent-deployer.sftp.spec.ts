@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { probeSftp, uploadAgentBinary } from "./agent-deployer.js";
 import { type SftpServerOptions, startSftpServer } from "./sftp-server.fixture.js";
+import { connectWithoutDelay } from "./ssh-nodelay.js";
 
 /** A real ssh2 server on loopback, a client connected to it, and a home directory on disk. */
 function useServer(options: SftpServerOptions) {
@@ -32,7 +33,8 @@ function useServer(options: SftpServerOptions) {
 		state.connectionClosed = new Promise<void>((resolve) => connection.once("close", resolve));
 		await new Promise<void>((resolve, reject) => {
 			connection.once("ready", resolve).once("error", reject);
-			connection.connect({
+			// As the hub connects (#873).
+			connectWithoutDelay(connection, {
 				host: "127.0.0.1",
 				port: started.port,
 				username: "test",

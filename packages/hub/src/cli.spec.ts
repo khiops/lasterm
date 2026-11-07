@@ -2316,3 +2316,65 @@ describe("host add --ssh-port (#901)", () => {
 		expect(exits).toEqual([]);
 	});
 });
+
+// ─── start --port (#902) ─────────────────────────────────────────────────────
+//
+// A port the CLI did not read as a whole number from 1 to 65535 starts
+// nothing. parseInt took `4100abc` for 4100 and listened there, and `--port`
+// given last, with no value, as no flag at all: the system chose the port.
+
+describe("start --port (#902)", () => {
+	const USAGE = "Usage: lasterm start [--port 4100] [--daemon] [--open]";
+
+	afterEach(() => {
+		vi.doUnmock("./hub-startup.js");
+		vi.unstubAllEnvs();
+	});
+
+	/** `lasterm start`, with a hub startup that only records what it was asked. */
+	async function start(extra: string[]) {
+		const startHub = vi.fn(async (_options: { port?: number }) => {});
+		vi.doMock("./hub-startup.js", () => ({ startHub }));
+		vi.stubEnv("LASTERM_PORT", "");
+		const errors: string[] = [];
+		const exits: unknown[] = [];
+		const error = vi.spyOn(console, "error").mockImplementation((line: string) => {
+			errors.push(line);
+		});
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exits.push(code);
+		}) as typeof process.exit);
+		try {
+			await main(["start", ...extra]);
+		} finally {
+			error.mockRestore();
+			exit.mockRestore();
+		}
+		return { startHub, errors, exits };
+	}
+
+	// Mutation: parse the port with parseInt again, or let a missing value pass
+	// as absent, and the hub starts.
+	it.each([
+		{ name: "4100abc", extra: ["--port", "4100abc"] },
+		{ name: "1.5", extra: ["--port", "1.5"] },
+		{ name: "0x1004", extra: ["--port", "0x1004"] },
+		{ name: "0", extra: ["--port", "0"] },
+		{ name: "70000", extra: ["--port", "70000"] },
+		{ name: "given last, with no value", extra: ["--port"] },
+		{ name: "followed by another flag", extra: ["--port", "--open"] },
+	])("refuses --port $name before anything starts", async ({ extra }) => {
+		const { startHub, errors, exits } = await start(extra);
+		expect(startHub).not.toHaveBeenCalled();
+		expect(errors).toEqual(["--port must be a number from 1 to 65535, in digits only", USAGE]);
+		expect(exits).toEqual([1]);
+	});
+
+	it("starts on a port it read as a whole number from 1 to 65535", async () => {
+		const { startHub, errors, exits } = await start(["--port", "4100"]);
+		expect(startHub).toHaveBeenCalledOnce();
+		expect(startHub.mock.calls[0]?.[0]).toMatchObject({ port: 4100 });
+		expect(errors).toEqual([]);
+		expect(exits).toEqual([]);
+	});
+});

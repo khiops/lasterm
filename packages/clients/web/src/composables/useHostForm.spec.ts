@@ -842,6 +842,19 @@ describe("useHostForm", () => {
 			expect(result.port).toBeUndefined();
 		});
 
+		// Mutation: read the port with parseInt again, and `1.5` fills port 1 and
+		// `2222abc` port 2222, which ssh itself refuses (#902).
+		it.each([
+			["server:1.5", { host: "server" }],
+			["server:2222abc", { host: "server" }],
+			["root@server:0x16", { host: "server", user: "root" }],
+			["[::1]:22abc", { host: "::1" }],
+			["[::1]:1.5", { host: "::1" }],
+		])("fills no port from the malformed %j, and keeps the host (#902)", (text, parsed) => {
+			const { parseConnectionString } = useHostForm();
+			expect(parseConnectionString(text)).toEqual(parsed);
+		});
+
 		it("parses host:port without user", () => {
 			const { parseConnectionString } = useHostForm();
 			expect(parseConnectionString("db.local:5432")).toEqual({ host: "db.local", port: 5432 });
@@ -899,6 +912,16 @@ describe("useHostForm", () => {
 			expect(form.value.sshHost).toBe("myhost");
 			expect(form.value.sshUser).toBe("admin");
 			expect(form.value.sshPort).toBe(3333);
+		});
+
+		it("fills the host of a pasted string with a malformed port, and no port (#902)", async () => {
+			const { form, quickConnect, portText } = useHostForm();
+			quickConnect.value = "admin@myhost:2222abc";
+			await nextTick();
+			expect(form.value.sshHost).toBe("myhost");
+			expect(form.value.sshUser).toBe("admin");
+			expect(form.value.sshPort).toBeUndefined();
+			expect(portText.value).toBe("");
 		});
 
 		it("does not clear fields when quick connect is emptied (INV-02)", async () => {

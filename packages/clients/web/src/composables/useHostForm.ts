@@ -627,30 +627,24 @@ export function useHostForm(editHost?: Host) {
 			str = str.slice(atIdx + 1);
 		}
 
+		// A port is read as the Port field reads it, digits only, 1 to 65535: one
+		// that is not fills no port and the host stays. parseInt took `2222abc`
+		// for 2222 and `1.5` for 1, ports ssh itself refuses (#902).
+
 		// Check for IPv6 bracket syntax: [addr]:port or [addr]
 		if (str.startsWith("[")) {
 			const closeBracket = str.indexOf("]");
 			if (closeBracket > 0) {
 				host = str.slice(1, closeBracket);
 				const after = str.slice(closeBracket + 1);
-				if (after.startsWith(":")) {
-					const p = Number.parseInt(after.slice(1), 10);
-					if (p > 0 && p <= 65535) port = p;
-				}
+				if (after.startsWith(":")) port = sshPortFromText(after.slice(1)) ?? undefined;
 			}
 		} else {
 			// Regular host:port or host
 			const colonIdx = str.lastIndexOf(":");
 			if (colonIdx > 0) {
-				const portStr = str.slice(colonIdx + 1);
-				const p = Number.parseInt(portStr, 10);
-				if (!Number.isNaN(p) && p > 0 && p <= 65535) {
-					host = str.slice(0, colonIdx);
-					port = p;
-				} else {
-					// Invalid port — use host part only, leave port undefined
-					host = str.slice(0, colonIdx);
-				}
+				host = str.slice(0, colonIdx);
+				port = sshPortFromText(str.slice(colonIdx + 1)) ?? undefined;
 			} else {
 				host = str;
 			}

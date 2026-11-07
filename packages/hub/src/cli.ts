@@ -480,6 +480,11 @@ export interface ParsedArgs {
 	command: string;
 	// start
 	port?: number;
+	/**
+	 * `--port` was given with no value, or one that is not a whole number from
+	 * 1 to 65535: start refuses it rather than listen elsewhere (#902).
+	 */
+	portRefused?: boolean;
 	daemon?: boolean;
 	/** Only the desktop passes it: stop when the launcher's stdin pipe closes (#188). */
 	exitWithStdin?: boolean;
@@ -542,8 +547,13 @@ export function parseArgs(argv: string[]): ParsedArgs | null {
 	}
 
 	// Consume named flags first (order-independent)
-	const portStr = flagValue("--port");
-	if (portStr !== undefined) result.port = Number.parseInt(portStr, 10);
+	// Read as digits only: parseInt took `4100abc` for 4100, and the flag given
+	// last, with no value, as no flag at all, so the system chose the port (#902).
+	if (args.includes("--port")) {
+		const port = sshPortFromText(flagValue("--port") ?? "");
+		if (port === null) result.portRefused = true;
+		else result.port = port;
+	}
 
 	const labelVal = flagValue("--label");
 	if (labelVal !== undefined) result.label = labelVal;
@@ -918,7 +928,12 @@ function printAgentStatusTable(
 
 // ─── Command handlers ──────────────────────────────────────────────────────────
 
-export async function cmdStart(args: ParsedArgs): Promise<void> {
+export async function cmdStart(args: ParsedArgs): Promise<number> {
+	if (args.portRefused) {
+		console.error("--port must be a number from 1 to 65535, in digits only");
+		console.error("Usage: lasterm start [--port 4100] [--daemon] [--open]");
+		return 1;
+	}
 	const { resolveStartPort } = await import("./start-port.js");
 	const port = resolveStartPort(args.port, process.env.LASTERM_PORT);
 
@@ -1019,6 +1034,7 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 			console.log(`State dir  : ${stateDir}`);
 		},
 	});
+	return 0;
 }
 
 export async function cmdStop(
@@ -1766,9 +1782,11 @@ export async function main(argv: string[]): Promise<void> {
 
 	try {
 		switch (parsed.command) {
-			case "start":
-				await cmdStart(parsed);
+			case "start": {
+				const code = await cmdStart(parsed);
+				if (code !== 0) process.exit(code);
 				break;
+			}
 			case "stop":
 				await cmdStop(parsed);
 				break;

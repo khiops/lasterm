@@ -1,17 +1,30 @@
+import { sshPortFromText } from "@lasterm/shared";
+
 /**
  * The port a hub is asked to listen on: the `--port` flag, else `LASTERM_PORT`,
  * else none, and the operating system assigns one (SPEC.md § 3). Both entry
  * points go through here, so `lasterm start` and the bare entry point no longer
  * disagree about the environment variable (#175). An empty variable counts as
  * unset, as shells commonly write it.
+ *
+ * The variable reads as the flag does, in digits only (#902): Number() took
+ * `0x1004` or ` 4100` for 4100, and rounded `4100.0000000000001` to it. The
+ * value is quoted in the error, so a trailing space left by cmd.exe's
+ * `set LASTERM_PORT=4100 && …` shows.
  */
 export function resolveStartPort(
 	flag: number | undefined,
 	env: string | undefined,
 ): number | undefined {
 	if (flag !== undefined) return validPort(flag, "--port", String(flag));
-	if (env !== undefined && env !== "") return validPort(Number(env), "LASTERM_PORT", env);
-	return undefined;
+	if (env === undefined || env === "") return undefined;
+	const port = sshPortFromText(env);
+	if (port === null) {
+		throw new Error(
+			`Invalid LASTERM_PORT: ${JSON.stringify(env)} — must be a number from 1 to 65535, in digits only`,
+		);
+	}
+	return port;
 }
 
 /** What a start reads from its environment: its port, and whether to open a browser. */

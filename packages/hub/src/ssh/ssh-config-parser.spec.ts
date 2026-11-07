@@ -130,6 +130,24 @@ Host badport
 		expect(result.entries[0]?.port).toBe(22); // default preserved
 	});
 
+	// Mutation: read the value with parseInt again, and `1.5` gives port 1 and
+	// `2222abc` port 2222, where OpenSSH refuses the line (#902).
+	it.each(["1.5", "2222abc", "0x16", "0", "70000", "2222#office", "2222 extra"])(
+		"keeps 22 for the malformed Port %j (#902)",
+		(value) => {
+			const result = parseSshConfig(`Host badport\n  Port ${value}\n`);
+			expect(result.entries[0]?.port).toBe(22);
+		},
+	);
+
+	// OpenSSH ends a line's arguments at a word starting with `#`: `ssh -G`
+	// gives port 2222 for this line. Mutation: read the whole value as the port,
+	// and the comment turns it into 22.
+	it("reads the port of a Port line ending in a comment, as OpenSSH does (#902)", () => {
+		const result = parseSshConfig("Host office\n  Port 2222 # office firewall\n");
+		expect(result.entries[0]?.port).toBe(2222);
+	});
+
 	it("resolves ~ in IdentityFile paths", () => {
 		const config = `
 Host tilde-test

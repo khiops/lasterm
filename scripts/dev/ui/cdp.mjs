@@ -8,6 +8,21 @@
 //   node scripts/dev/ui/cdp.mjs [--port 9333] shot  <file.png>       screenshot the page
 //   node scripts/dev/ui/cdp.mjs [--port 9333] watch <seconds> "<expression>"  print each change of its value
 //   node scripts/dev/ui/cdp.mjs [--port 9333] api <METHOD> <path> [body.json]  call the hub's REST API
+//   node scripts/dev/ui/cdp.mjs [--port 9333] drop <x> <y> <path> [<path>…]    drop files or folders at a point
+//   node scripts/dev/ui/cdp.mjs [--port 9333] dragover [--hold <s>] [--eval-file <f.js>] <x> <y> <path> [<path>…]
+//
+// `drop` and `dragover` drag files and folders, by path, onto the page at a
+// point in CSS pixels (getBoundingClientRect()), through Input.dispatchDragEvent:
+// no mouse moves. Both send dragEnter and dragOver, then read whether the page
+// took the drag. `drop` then drops, and prints `dropped …`; a drag the page
+// refused leaves it instead (a dragOver outside the page, then dragCancel), and
+// it prints `refused: …`. `dragover` holds the drag over the point for --hold
+// seconds (default 1), repeating its dragOver, prints the --eval-file script's
+// value while the drag is still over, then leaves the page: a dragleave, no
+// drop. Another cdp.mjs (eval, shot) can look at the page during the hold;
+// Ctrl+C ends the hold early. Killed outright, it leaves the page in the drag.
+// Such a drag enters the page directly, past the window's native drop handling:
+// drag-file.ps1 covers that path.
 //
 // Only a page served from tauri.localhost is driven, never another WebView2 app
 // that happens to expose a debugging port.
@@ -32,16 +47,18 @@
 // exits 1. Without a body file, POST, PUT and PATCH send `{}`. The path may drop
 // its leading slash (`api GET api/health`), which Git Bash would rewrite into a
 // Windows path. Read before you write: this is the user's real profile.
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import {
 	answerJson,
 	CdpUsageError,
 	callHubApi,
+	dispatchFileDrag,
 	hubApiBody,
 	hubRuntimePath,
 	PAGE_TOKEN_EXPRESSION,
 	parseCdpArgs,
 	parseHubRuntime,
+	resolveDropPaths,
 	scriptExpression,
 	typedLines,
 	USAGE,
@@ -78,6 +95,25 @@ if (command.name === "api") {
 	}
 }
 
+// The same for a drag: every path must name a file or a folder, and the script
+// to evaluate during a hold must be readable.
+let drag;
+if (command.name === "drop" || command.name === "dragover") {
+	try {
+		const kindOf = (absolute) => {
+			const found = statSync(absolute, { throwIfNoEntry: false });
+			return found === undefined ? null : found.isDirectory() ? "directory" : "file";
+		};
+		drag = {
+			paths: resolveDropPaths(command.paths, kindOf),
+			script: command.name === "dragover" && command.evalFile !== null ? readFileSync(command.evalFile, "utf8") : null,
+		};
+	} catch (error) {
+		console.error(error.message);
+		process.exit(2);
+	}
+}
+
 let targets;
 try {
 	targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
@@ -103,6 +139,12 @@ socket.addEventListener("message", (event) => {
 	pending.get(message.id)?.(message);
 	pending.delete(message.id);
 });
+// A page that closes the connection answers every call still waiting, with an
+// error, rather than leaving it pending for ever.
+socket.addEventListener("close", () => {
+	for (const settle of pending.values()) settle({ error: { message: "the page closed the CDP connection" } });
+	pending.clear();
+});
 function send(method, params = {}) {
 	const id = ++nextId;
 	socket.send(JSON.stringify({ id, method, params }));
@@ -110,8 +152,43 @@ function send(method, params = {}) {
 }
 async function evaluate(expression) {
 	const reply = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+	if (reply.error) throw new Error(`Runtime.evaluate: ${reply.error.message}`);
 	if (reply.result?.exceptionDetails) throw new Error(reply.result.exceptionDetails.exception?.description ?? "evaluation failed");
 	return reply.result?.result?.value;
+}
+// What the page made of a drag, as `drop` and `dragover` report it.
+const ANSWERS = {
+	taken: "the page took the drag",
+	refused: 'the page refused the drag: it did not cancel the dragover, or set dropEffect "none"',
+	unseen: "the page's answer was not seen (did the point fall in a frame?)",
+};
+async function dragFiles(paths, script) {
+	const where = `(${command.x}, ${command.y})`;
+	const interrupt = new AbortController();
+	const onInterrupt = () => interrupt.abort();
+	const hold =
+		command.name === "dragover"
+			? {
+					ms: command.holdSeconds * 1000,
+					onHolding: (answer) => console.error(`${ANSWERS[answer]}; holding it over ${where} for ${command.holdSeconds} s, Ctrl+C ends it`),
+					inspect: script === null ? undefined : async () => console.log(JSON.stringify(await evaluate(scriptExpression(script)), null, 2)),
+				}
+			: undefined;
+	if (hold !== undefined) process.once("SIGINT", onInterrupt);
+	try {
+		const { answer, dropped } = await dispatchFileDrag(send, { x: command.x, y: command.y, paths, hold, signal: interrupt.signal });
+		if (hold === undefined) {
+			// One line on stdout, its first word the result: dropped or refused.
+			console.log(dropped ? `dropped ${paths.length} path(s) at ${where}: ${ANSWERS[answer]}` : `refused: ${ANSWERS[answer]}; nothing dropped, the drag left the page`);
+		} else if (interrupt.signal.aborted) {
+			console.error("interrupted: the drag left the page, nothing dropped");
+			process.exitCode = 130;
+		} else {
+			console.error("the drag left the page, nothing dropped");
+		}
+	} finally {
+		process.off("SIGINT", onInterrupt);
+	}
 }
 async function pressEnter() {
 	for (const type of ["keyDown", "keyUp"]) {
@@ -176,7 +253,14 @@ try {
 			if (answer.status < 200 || answer.status > 299) process.exitCode = 1;
 			break;
 		}
+		case "drop":
+		case "dragover":
+			await dragFiles(drag.paths, drag.script);
+			break;
 	}
+} catch (error) {
+	console.error(error.message);
+	process.exitCode = 1;
 } finally {
 	socket.close();
 }

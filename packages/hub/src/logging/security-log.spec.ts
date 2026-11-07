@@ -201,6 +201,22 @@ describe("SecurityLog — the events of SECURITY.md § 7.1, with their fields", 
 		});
 	});
 
+	// Key auth says whether the agent signed or the key file did, never the key (#876).
+	it("SSH connect on key auth: who signed, from a closed list", () => {
+		const { log, records } = collect();
+		log.sshConnected({ hostId: HOST, hostLabel: "pi", authMethod: "key", signer: "agent" });
+		log.sshConnected({
+			hostId: HOST,
+			hostLabel: "pi",
+			authMethod: "key",
+			signer: "SHA256:not-a-signer" as "file",
+		});
+		expect(records.map((record) => record.fields)).toEqual([
+			{ event: "ssh.connect", hostId: HOST, hostLabel: "pi", authMethod: "key", signer: "agent" },
+			{ event: "ssh.connect", hostId: HOST, hostLabel: "pi", authMethod: "key", signer: WITHHELD },
+		]);
+	});
+
 	it("SSH disconnect: host and who ended it", () => {
 		const { log, records } = collect();
 		log.sshDisconnected({ hostId: HOST, reason: "connection_lost" });

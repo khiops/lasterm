@@ -1,4 +1,5 @@
 import type { AuthenticationType, AuthHandlerMiddleware, ConnectConfig } from "ssh2";
+import { AskAgainError } from "./ask-again.js";
 import { AuthCancelledError } from "./auth-cancelled.js";
 
 /**
@@ -18,16 +19,16 @@ import { AuthCancelledError } from "./auth-cancelled.js";
  */
 
 /** The server refused the password the connection was made with (#815). */
-export class PasswordRefusedError extends Error {
+export class PasswordRefusedError extends AskAgainError {
 	constructor(
 		account: string,
 		/**
 		 * Ask the person again, saying the last one was wrong, for the next
 		 * connection. Rejects with `AuthCancelledError` when no password is given.
 		 */
-		readonly askAgain: () => Promise<void>,
+		askAgain: () => Promise<void>,
 	) {
-		super(`The server refused the password for ${account}`);
+		super(`The server refused the password for ${account}`, askAgain);
 		this.name = "PasswordRefusedError";
 	}
 }

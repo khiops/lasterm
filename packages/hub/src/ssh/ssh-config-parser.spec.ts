@@ -1,7 +1,9 @@
+import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
-import { parseSshConfig } from "./ssh-config-parser.js";
+import { join, resolve } from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
+import { identityAgentIsNone, parseSshConfig, resolveIdentityAgent } from "./ssh-config-parser.js";
 
 describe("SSH Config Parser", () => {
 	it("parses a simple host block", () => {
@@ -250,5 +252,76 @@ Host myalias
 		expect(entry?.hostname).toBeNull();
 		expect(entry?.user).toBe("admin");
 		expect(entry?.port).toBe(2222);
+	});
+});
+
+// `IdentityAgent none` keeps the agent from signing a key-auth host's key (#876).
+describe("resolveIdentityAgent", () => {
+	it("gives the value of the alias's own block", () => {
+		const config = "Host box\n  HostName 10.0.0.5\n  IdentityAgent none\n";
+		expect(resolveIdentityAgent(config, "box")).toBe("none");
+	});
+
+	it("gives none for an alias no block names", () => {
+		expect(resolveIdentityAgent("Host other\n  IdentityAgent none\n", "box")).toBeNull();
+	});
+
+	it("keeps the first value obtained, as ssh(1) does", () => {
+		const config = [
+			"Host box",
+			"  IdentityAgent none",
+			"Host *",
+			"  IdentityAgent ~/.agent.sock",
+		].join("\n");
+		expect(resolveIdentityAgent(config, "box")).toBe("none");
+		expect(resolveIdentityAgent(config, "other")).toBe("~/.agent.sock");
+	});
+
+	it("reads the lines before any Host as applying to every host", () => {
+		expect(resolveIdentityAgent("IdentityAgent none\nHost box\n  User me\n", "box")).toBe("none");
+	});
+
+	it("takes wildcards, several patterns and negations", () => {
+		const config = "Host web-* !web-public db\n  IdentityAgent none\n";
+		expect(resolveIdentityAgent(config, "web-01")).toBe("none");
+		expect(resolveIdentityAgent(config, "DB")).toBe("none");
+		expect(resolveIdentityAgent(config, "web-public")).toBeNull();
+	});
+
+	it("reads Key=Value, a quoted value, and CRLF line ends", () => {
+		expect(resolveIdentityAgent('Host box\r\n  IdentityAgent="none"\r\n', "box")).toBe("none");
+	});
+
+	it("does not evaluate a Match block, and counts it as not applying", () => {
+		const config = "Match host box\n  IdentityAgent none\nHost box\n  User me\n";
+		expect(resolveIdentityAgent(config, "box")).toBeNull();
+	});
+});
+
+describe("identityAgentIsNone", () => {
+	const home = makeTempDir("lasterm-identity-agent-");
+	mkdirSync(join(home, ".ssh"));
+	writeFileSync(
+		join(home, ".ssh", "config"),
+		"Host box\n  IdentityAgent NONE\nHost forwarded\n  IdentityAgent SSH_AUTH_SOCK\n",
+	);
+	const empty = makeTempDir("lasterm-identity-agent-empty-");
+
+	afterAll(async () => {
+		await removeTempDir(home);
+		await removeTempDir(empty);
+	});
+
+	it("is true for IdentityAgent none in the alias's block, whatever its case", () => {
+		expect(identityAgentIsNone("box", home)).toBe(true);
+	});
+
+	it("is false for another value, or none at all", () => {
+		expect(identityAgentIsNone("forwarded", home)).toBe(false);
+		expect(identityAgentIsNone("elsewhere", home)).toBe(false);
+	});
+
+	it("is false where there is no ~/.ssh/config to read", () => {
+		expect(identityAgentIsNone("box", empty)).toBe(false);
 	});
 });

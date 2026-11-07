@@ -560,10 +560,13 @@ export class AgentConnectionManager {
 	 */
 	private recordSshConnection(hostId: string, agent: SshAgent): void {
 		const host = this.ctx.metaDal.getHost(hostId);
+		const authMethod = host?.sshAuth ?? "key";
 		this.ctx.security.sshConnected({
 			hostId,
 			hostLabel: host?.label ?? "",
-			authMethod: host?.sshAuth ?? "key",
+			authMethod,
+			// On key auth, whether the SSH agent signed or the key file did (#876).
+			...(authMethod === "key" && agent.keySigner !== null && { signer: agent.keySigner }),
 		});
 		agent.once("close", () => {
 			this.ctx.security.sshDisconnected({

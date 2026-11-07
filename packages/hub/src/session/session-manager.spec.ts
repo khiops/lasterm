@@ -3832,6 +3832,8 @@ let mockSsh2Client: EventEmitter & {
 
 vi.mock("ssh2", () => {
 	return {
+		// Extended as the key-auth agent signer loads (#876).
+		BaseAgent: class {},
 		// biome-ignore lint/complexity/useArrowFunction: vitest 4 needs a constructable function for new-ed mocks
 		Client: vi.fn().mockImplementation(function () {
 			mockSsh2Client = Object.assign(new EventEmitter(), {

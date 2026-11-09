@@ -22,6 +22,7 @@
 import { spawnSync } from "node:child_process";
 import {
 	copyFileSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -61,7 +62,13 @@ function bash(): string {
 	if (!onWindows) return "bash";
 	// <Git>/<mingw64, ucrt64 or clangarm64>/libexec/git-core
 	const gitCore = spawnSync("git", ["--exec-path"], { encoding: "utf8" }).stdout.trim();
-	return join(gitCore, "..", "..", "..", "bin", "bash.exe");
+	const bash = join(gitCore, "..", "..", "..", "bin", "bash.exe");
+	if (!existsSync(bash)) {
+		throw new Error(
+			`check.sh needs Git for Windows' bash, which is not at ${bash}: install Git for Windows`,
+		);
+	}
+	return bash;
 }
 
 /**
@@ -131,15 +138,15 @@ function environment(stubs: string, target: string, desktopTarget: string): Node
 		"lasterm_desktop_cargo_target_dir",
 		"lasterm_check_log_dir",
 		"rustup_toolchain",
-		// A git hook's, which would make `a` the repository it ran in.
-		"git_dir",
-		"git_work_tree",
 	]);
 	const env: NodeJS.ProcessEnv = {};
 	let path = "";
 	for (const [name, value] of Object.entries(process.env)) {
-		if (name.toLowerCase() === "path") path = value ?? "";
-		else if (!drop.has(name.toLowerCase())) env[name] = value;
+		const lower = name.toLowerCase();
+		if (lower === "path") path = value ?? "";
+		// A git hook's GIT_DIR, GIT_INDEX_FILE and the like would point git in
+		// `a` at the repository the hook ran in.
+		else if (!drop.has(lower) && !lower.startsWith("git_")) env[name] = value;
 	}
 	return {
 		...env,
@@ -203,9 +210,15 @@ describe("check.sh in a checkout that shares its cargo targets", () => {
 			a,
 			env,
 		);
+		// 1: a's clippy and desktop steps fail; 2 would be check.sh refusing to run.
+		expect(check.status, check.output).toBe(1);
 		const log = (step: string) => readFileSync(join(logs, `${step}.log`), "utf8");
 		const exit = (step: string) =>
 			check.output.match(new RegExp(`^${step}: exit=(\\d+)`, "m"))?.[1];
+		// A step after another's clean can pass for that clean: each must clean.
+		for (const step of ["cargo-test", "clippy", "desktop-clippy", "desktop-test"]) {
+			expect(log(step)).toContain("own_build: ");
+		}
 
 		// Mutation caught: a cargo-test step that runs cargo test alone ran b's test.
 		expect(exit("cargo-test"), log("cargo-test")).toBe("0");

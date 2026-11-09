@@ -121,9 +121,9 @@ test and clippy steps, the desktop crate's included, first run `cargo clean --wo
 cargo would otherwise take the workspace's crates, or the desktop's build script, as another
 checkout last built them, and test or lint that checkout (#862). That rebuilds them on every run,
 about 25 s for the main workspace on Windows, and in other checkouts at their next build; the
-dependencies stay built. Its steps mirror
-the `lint`, `test` and `build-agent` jobs of `.github/workflows/build.yml` and the Windows lint jobs
-of `ci.yml`: change them together.
+dependencies stay built. It holds while nothing else, an editor included, builds into those targets
+during the run. Its steps mirror the `lint`, `test` and `build-agent` jobs of
+`.github/workflows/build.yml` and the Windows lint jobs of `ci.yml`: change them together.
 
 ### TypeScript test prerequisite
 

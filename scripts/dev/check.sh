@@ -17,6 +17,11 @@
 #              Not from a worktree inside the main checkout (see desktop_cargo).
 #   --dry-run  print the directories and the steps, run nothing.
 #
+# The cargo steps first clean the workspace's crates, and with --desktop the
+# desktop crate, in the target directories every checkout shares (own_build):
+# other checkouts rebuild them at their next build. On Windows the clean fails
+# while a process started from those files still runs.
+#
 # Keep the steps in sync with CI: .github/workflows/build.yml (jobs lint, test,
 # build-agent) and .github/workflows/ci.yml (lint-desktop-windows,
 # lint-tls-identity-windows). Not run here: the license checks (job licenses),
@@ -151,8 +156,12 @@ desktop_cargo() { (cd "$desktop_crate" && CARGO_TARGET_DIR="$desktop_target" car
 # nothing: cargo test runs that checkout's tests, clippy lints nothing, and
 # tauri-build does not check this checkout's tauri.conf.json and capabilities
 # (#862). `own_build <cargo or desktop_cargo> <args>` therefore cleans the
-# workspace's crates where those args build (a --target picks the directory),
-# then runs the command. Their dependencies stay built: those from a registry
+# workspace's crates in the dev profile, under the triple of a separate
+# `--target <triple>` in the args if there is one, then runs the command. That
+# is where the steps below build; one passing --release, --profile, --target=
+# or --target-dir would build elsewhere than this cleans. It holds while
+# nothing else, an editor included, builds into the same target during the
+# run. Their dependencies stay built: those from a registry
 # are the same for every checkout, and the desktop crate's path dependencies,
 # outside its workspace's directory, have a build per checkout. It costs a
 # rebuild of the workspace's crates on each run, about 25 s for the main
@@ -165,7 +174,7 @@ own_build() {
 	done
 	echo "own_build: $1 ${clean[*]}"
 	"$1" "${clean[@]}" || {
-		echo "own_build: the clean failed. On Windows a running process may hold one of these files: stop it, then run again." >&2
+		echo "own_build: cargo clean failed, for the reason above. On Windows that is often a running process holding one of these files." >&2
 		return 1
 	}
 	"$@"

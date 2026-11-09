@@ -17,6 +17,11 @@
 #              Not from a worktree inside the main checkout (see desktop_cargo).
 #   --dry-run  print the directories and the steps, run nothing.
 #
+# The cargo steps first clean the workspace's crates, and with --desktop the
+# desktop crate, in the target directories every checkout shares (own_build):
+# other checkouts rebuild them at their next build. On Windows the clean fails
+# while a process started from those files still runs.
+#
 # Keep the steps in sync with CI: .github/workflows/build.yml (jobs lint, test,
 # build-agent) and .github/workflows/ci.yml (lint-desktop-windows,
 # lint-tls-identity-windows). Not run here: the license checks (job licenses),
@@ -140,6 +145,41 @@ fi
 # checkout's. So --desktop needs a worktree outside the main checkout.
 desktop_cargo() { (cd "$desktop_crate" && CARGO_TARGET_DIR="$desktop_target" cargo "$@"); }
 
+# Cargo takes a build as current when none of its inputs changed after it ran,
+# going by modification times, and keeps that record in the target directory,
+# which every checkout here shares. It names a crate inside the workspace's
+# directory by its path from there, one outside it by its full path, and a
+# build after its crate and everything it is built from. So the main
+# workspace's crates, and the desktop crate's build script, built from registry
+# crates alone, have one record for all checkouts. Once another checkout has
+# built them, after their files here last changed, a build here compiles
+# nothing: cargo test runs that checkout's tests, clippy lints nothing, and
+# tauri-build does not check this checkout's tauri.conf.json and capabilities
+# (#862). `own_build <cargo or desktop_cargo> <args>` therefore cleans the
+# workspace's crates in the dev profile, under the triple of a separate
+# `--target <triple>` in the args if there is one, then runs the command. That
+# is where the steps below build; one passing --release, --profile, --target=
+# or --target-dir would build elsewhere than this cleans. It holds while
+# nothing else, an editor included, builds into the same target during the
+# run. Their dependencies stay built: those from a registry
+# are the same for every checkout, and the desktop crate's path dependencies,
+# outside its workspace's directory, have a build per checkout. It costs a
+# rebuild of the workspace's crates on each run, about 25 s for the main
+# workspace on Windows, and in other checkouts their next build.
+own_build() {
+	local args=("$@") clean=(clean --workspace) i
+	for i in "${!args[@]}"; do
+		[ "${args[$i]}" != -- ] || break
+		[ "${args[$i]}" != --target ] || clean+=(--target "${args[$((i + 1))]}")
+	done
+	echo "own_build: $1 ${clean[*]}"
+	"$1" "${clean[@]}" || {
+		echo "own_build: cargo clean failed, for the reason above. On Windows that is often a running process holding one of these files." >&2
+		return 1
+	}
+	"$@"
+}
+
 # What `cargo fmt --all -- --check` runs in the desktop crate (ci.yml), without
 # cargo and so from any worktree: rustfmt on each target's root file, with the
 # crate's edition, which follows the modules from there.
@@ -171,7 +211,7 @@ desktop_clippy() {
 			echo "placed an empty $file for tauri to resolve"
 		fi
 	done
-	desktop_cargo clippy --all-targets -- -D warnings
+	own_build desktop_cargo clippy --all-targets -- -D warnings
 }
 
 # The tests run against a throwaway profile. lasterm finds its state, config and
@@ -220,13 +260,13 @@ step shared-build pnpm -F @lasterm/shared build
 step typecheck pnpm typecheck
 step tls-material pnpm build:test-tls-material --locked
 step test isolated pnpm test:run
-step cargo-test isolated cargo test --workspace --no-fail-fast
+step cargo-test isolated own_build cargo test --workspace --no-fail-fast
 step cargo-fmt cargo fmt --all -- --check
-step clippy cargo clippy "${clippy_args[@]}"
+step clippy own_build cargo clippy "${clippy_args[@]}"
 step desktop-fmt desktop_fmt
 if [ "$desktop" = 1 ]; then
 	step desktop-clippy desktop_clippy
-	step desktop-test isolated desktop_cargo test
+	step desktop-test isolated own_build desktop_cargo test
 fi
 
 echo "checkout      $root"

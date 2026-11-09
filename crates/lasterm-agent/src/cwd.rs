@@ -891,7 +891,12 @@ mod linux_tests {
         assert_eq!(moved.cwd.as_deref(), tmp.to_str());
 
         terminal.type_line("sleep 30");
-        let busy = read_until(terminal.pid, |r| r.at_prompt == Some(false)).await;
+        // The child bash forks for sleep may hold the terminal before it
+        // execs, still named bash: wait for sleep itself (#919).
+        let busy = read_until(terminal.pid, |r| {
+            r.at_prompt == Some(false) && r.foreground.as_deref() == Some("sleep")
+        })
+        .await;
         assert_eq!(busy.at_prompt, Some(false));
         assert_eq!(busy.foreground.as_deref(), Some("sleep"));
         assert_eq!(busy.cwd.as_deref(), tmp.to_str(), "the shell has not moved");

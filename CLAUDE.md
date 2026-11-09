@@ -116,7 +116,10 @@ throwaway profile, `cargo fmt`, clippy (on Windows with `--target x86_64-pc-wind
 desktop crate's `cargo fmt`; `--desktop` adds that crate's clippy and tests. Every step runs, prints
 `<step>: exit=<code>` and keeps its log in `$TMPDIR/lasterm-check/<label>`; a summary with the test
 counts ends it. Every worktree builds into the main checkout's `target` directories, never a fresh
-one (see below), unless `LASTERM_CARGO_TARGET_DIR` or `CARGO_TARGET_DIR` names another. Its steps mirror
+one (see below), unless `LASTERM_CARGO_TARGET_DIR` or `CARGO_TARGET_DIR` names another. Its cargo
+test and clippy steps first run `cargo clean --workspace` there: cargo would otherwise take the
+workspace's crates as another checkout last built them, and test or lint that checkout (#862). That
+rebuilds them on every run, about 25 s on Windows; the registry dependencies stay built. Its steps mirror
 the `lint`, `test` and `build-agent` jobs of `.github/workflows/build.yml` and the Windows lint jobs
 of `ci.yml`: change them together.
 

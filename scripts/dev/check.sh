@@ -140,6 +140,32 @@ fi
 # checkout's. So --desktop needs a worktree outside the main checkout.
 desktop_cargo() { (cd "$desktop_crate" && CARGO_TARGET_DIR="$desktop_target" cargo "$@"); }
 
+# Cargo takes a crate as built when none of its files changed after its last
+# build, going by modification times, and keeps that record in the target
+# directory, which every checkout here shares. It names a crate inside the
+# workspace's directory by its path from there, so all checkouts share one
+# record for it: once another checkout has built the workspace's crates, after
+# their files here last changed, a build here compiles nothing, cargo test runs
+# that checkout's tests and clippy lints nothing (#862). `own_cargo <args>`
+# therefore cleans the workspace's crates where those args build (a --target
+# picks the directory), then runs cargo with them. Their registry dependencies,
+# the same for every checkout, stay built. It costs a rebuild of the
+# workspace's crates on each run, about 25 s on Windows.
+#
+# The desktop crate needs none of it. It depends on crates outside its own
+# workspace's directory, which cargo names by their full path, and so names its
+# own build after them too: each checkout has its own. One that dropped those
+# dependencies would need the same clean.
+own_cargo() {
+	local args=("$@") clean=(clean --workspace) i
+	for i in "${!args[@]}"; do
+		[ "${args[$i]}" != -- ] || break
+		[ "${args[$i]}" != --target ] || clean+=(--target "${args[$((i + 1))]}")
+	done
+	echo "own_cargo: cargo ${clean[*]}"
+	cargo "${clean[@]}" && cargo "$@"
+}
+
 # What `cargo fmt --all -- --check` runs in the desktop crate (ci.yml), without
 # cargo and so from any worktree: rustfmt on each target's root file, with the
 # crate's edition, which follows the modules from there.
@@ -220,9 +246,9 @@ step shared-build pnpm -F @lasterm/shared build
 step typecheck pnpm typecheck
 step tls-material pnpm build:test-tls-material --locked
 step test isolated pnpm test:run
-step cargo-test isolated cargo test --workspace --no-fail-fast
+step cargo-test isolated own_cargo test --workspace --no-fail-fast
 step cargo-fmt cargo fmt --all -- --check
-step clippy cargo clippy "${clippy_args[@]}"
+step clippy own_cargo clippy "${clippy_args[@]}"
 step desktop-fmt desktop_fmt
 if [ "$desktop" = 1 ]; then
 	step desktop-clippy desktop_clippy

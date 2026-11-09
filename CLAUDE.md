@@ -117,9 +117,11 @@ desktop crate's `cargo fmt`; `--desktop` adds that crate's clippy and tests. Eve
 `<step>: exit=<code>` and keeps its log in `$TMPDIR/lasterm-check/<label>`; a summary with the test
 counts ends it. Every worktree builds into the main checkout's `target` directories, never a fresh
 one (see below), unless `LASTERM_CARGO_TARGET_DIR` or `CARGO_TARGET_DIR` names another. Its cargo
-test and clippy steps first run `cargo clean --workspace` there: cargo would otherwise take the
-workspace's crates as another checkout last built them, and test or lint that checkout (#862). That
-rebuilds them on every run, about 25 s on Windows; the registry dependencies stay built. Its steps mirror
+test and clippy steps, the desktop crate's included, first run `cargo clean --workspace` there:
+cargo would otherwise take the workspace's crates, or the desktop's build script, as another
+checkout last built them, and test or lint that checkout (#862). That rebuilds them on every run,
+about 25 s for the main workspace on Windows, and in other checkouts at their next build; the
+dependencies stay built. Its steps mirror
 the `lint`, `test` and `build-agent` jobs of `.github/workflows/build.yml` and the Windows lint jobs
 of `ci.yml`: change them together.
 

@@ -1690,12 +1690,16 @@ async function cmdSessionList(args: ParsedArgs): Promise<void> {
 		console.log("No active sessions.");
 		return;
 	}
+	const hosts = (await apiRequest("GET", "/api/hosts")) as Array<Record<string, unknown>>;
+	const hostLabels = new Map(hosts.map((h) => [h.id, h.label]));
 	const pad = (s: string, n: number) => s.padEnd(n);
 	console.log(`${pad("ID", 26)}  ${pad("HOST", 20)}  ${pad("STATE", 12)}  CREATED`);
 	console.log(`${"-".repeat(26)}  ${"-".repeat(20)}  ${"-".repeat(12)}  -------`);
 	for (const s of sessions) {
+		// GET /api/sessions names these status and host_id; the label comes from
+		// GET /api/hosts (#905). Keep the id when its host is no longer listed.
 		console.log(
-			`${pad(String(s.id ?? ""), 26)}  ${pad(String(s.host_label ?? s.host_id ?? ""), 20)}  ${pad(String(s.state ?? ""), 12)}  ${String(s.created_at ?? "")}`,
+			`${pad(String(s.id ?? ""), 26)}  ${pad(String(hostLabels.get(s.host_id) ?? s.host_id ?? ""), 20)}  ${pad(String(s.status ?? ""), 12)}  ${String(s.created_at ?? "")}`,
 		);
 	}
 }

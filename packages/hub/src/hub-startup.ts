@@ -300,11 +300,13 @@ export async function startHub(
 				// Preserve the startup error; the log line only explains the delay.
 			}
 		}
-		if (dbManager) {
+		if (dbManager && !(await closeWithinBound(dbManager))) {
 			try {
-				dbManager.close();
+				hubLogger?.log("warn", "databases did not close while unwinding a failed start", {
+					timeoutMs: STARTUP_UNWIND_TIMEOUT_MS,
+				});
 			} catch {
-				// Preserve the original startup error.
+				// Preserve the startup error; the log line only explains the delay.
 			}
 		}
 		if (runtimePublished && runtime) {
@@ -329,16 +331,18 @@ function listenHost(address: string): string {
 }
 
 /**
- * Wait for the server to close, but not forever. Both entry points exit once
+ * Wait for a server or the databases to close, but not forever. Both entry points exit once
  * `startHub` rejects, and that exit is what releases the lock. A close that never
  * settles — an `onClose` hook waiting on something that will not come — would
  * otherwise keep the process alive holding the databases and the lock, with the
  * startup error never reported. Past the bound the unwind goes on regardless, as
- * a graceful shutdown does past its own.
+ * a graceful shutdown does past its own. The bound covers only the waiting: the
+ * timer cannot fire while a close runs synchronous work, such as the databases'
+ * TRUNCATE checkpoints, so such work can overrun it and still count as finished.
  *
  * Resolves true when the close finished, false when the bound ran out first.
  */
-async function closeWithinBound(server: Pick<HubServer, "close">): Promise<boolean> {
+async function closeWithinBound(resource: { close(): Promise<unknown> }): Promise<boolean> {
 	let timer: NodeJS.Timeout | undefined;
 	const expired = new Promise<false>((resolve) => {
 		timer = setTimeout(() => resolve(false), STARTUP_UNWIND_TIMEOUT_MS);
@@ -347,7 +351,7 @@ async function closeWithinBound(server: Pick<HubServer, "close">): Promise<boole
 	// reporting, and a rejection arriving after the bound must not surface as an
 	// unhandled one while the process exits.
 	const closed = Promise.resolve()
-		.then(() => server.close())
+		.then(() => resource.close())
 		.then(
 			() => true as const,
 			() => true as const,

@@ -17,8 +17,8 @@ import { TransfersDAL } from "./transfers-dal.js";
 describe("openTestDatabases", () => {
 	let dbs: DatabaseManager;
 
-	afterEach(() => {
-		dbs?.close();
+	afterEach(async () => {
+		await dbs?.close();
 	});
 
 	it("creates both in-memory databases", () => {
@@ -123,9 +123,13 @@ describe("openTestDatabases", () => {
 		expect(v2).toBe(26);
 	});
 
-	it("close() does not throw", () => {
+	it("close() closes memory databases synchronously and returns a promise", async () => {
 		dbs = openTestDatabases();
-		expect(() => dbs.close()).not.toThrow();
+		const closed = dbs.close();
+		expect(dbs.meta.open).toBe(false);
+		expect(dbs.spool.open).toBe(false);
+		expect(closed).toBeInstanceOf(Promise);
+		await closed;
 	});
 
 	it("meta.db: wal_autocheckpoint = 1000", () => {
@@ -165,7 +169,7 @@ describe.skipIf(process.platform === "win32")("openDatabases: owner-only files (
 	});
 
 	afterEach(async () => {
-		dbs?.close();
+		await dbs?.close();
 		dbs = undefined;
 		process.umask(umask);
 		await removeTempDir(dir);
@@ -237,7 +241,7 @@ describe("meta.db and its baseline", () => {
 	});
 
 	afterEach(async () => {
-		dbs?.close();
+		await dbs?.close();
 		dbs = undefined;
 		await removeTempDir(dir);
 	});
@@ -415,7 +419,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 	});
 
 	afterEach(async () => {
-		dbs?.close();
+		await dbs?.close();
 		dbs = undefined;
 		await removeTempDir(dir);
 	});
@@ -525,11 +529,11 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 		expect(pins(dbs.meta)).toEqual([]);
 	});
 
-	it("changes nothing when it runs again", () => {
+	it("changes nothing when it runs again", async () => {
 		databaseAt21();
 		dbs = openDatabases(dir);
 		const migrated = pins(dbs.meta);
-		dbs.close();
+		await dbs.close();
 
 		// The runner does not run it twice...
 		dbs = openDatabases(dir);
@@ -572,7 +576,7 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 	});
 
 	afterEach(async () => {
-		dbs?.close();
+		await dbs?.close();
 		dbs = undefined;
 		await removeTempDir(dir);
 	});
@@ -653,14 +657,14 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 		}
 	});
 
-	it("is not run again over what a connection recorded since", () => {
+	it("is not run again over what a connection recorded since", async () => {
 		databaseAt22();
 		dbs = openDatabases(dir);
 		dbs.meta
 			.prepare("UPDATE hosts SET discovered_default_shell = '/usr/bin/fish' WHERE id = 'C'")
 			.run();
 		const chosen = shells(dbs.meta);
-		dbs.close();
+		await dbs.close();
 
 		dbs = openDatabases(dir);
 
@@ -691,7 +695,7 @@ describe("meta.db migration 024: a launch profile override says whether the user
 	});
 
 	afterEach(async () => {
-		dbs?.close();
+		await dbs?.close();
 		dbs = undefined;
 		await removeTempDir(dir);
 	});
@@ -793,7 +797,7 @@ describe("meta.db migration 025: a launch profile can have its PowerShell report
 	});
 
 	afterEach(async () => {
-		dbs?.close();
+		await dbs?.close();
 		dbs = undefined;
 		await removeTempDir(dir);
 	});
@@ -881,7 +885,7 @@ describe("meta.db migration 026: the uploads' tables", () => {
 	});
 
 	afterEach(async () => {
-		dbs?.close();
+		await dbs?.close();
 		dbs = undefined;
 		vi.doUnmock("./migration-files.js");
 		vi.resetModules();
@@ -1081,7 +1085,7 @@ describe("meta.db migration 026: the uploads' tables", () => {
 		dbs = openDatabases(dir);
 		uploadTo(dbs.meta, "T", "H2");
 		uploadTo(dbs.meta, "U", "H");
-		dbs.close();
+		await dbs.close();
 		dbs = undefined;
 
 		// The hub before #860: its migrations stop at 025.

@@ -31,15 +31,47 @@ PRAGMA synchronous = NORMAL;         -- Safe with WAL (fsync on checkpoint, not 
 PRAGMA foreign_keys = ON;            -- Enforce referential integrity
 PRAGMA busy_timeout = 5000;          -- Wait 5s on lock contention before SQLITE_BUSY
 PRAGMA cache_size = -8000;           -- 8MB page cache (negative = KB)
-PRAGMA wal_autocheckpoint = 1000;    -- Checkpoint every 1000 pages (~4MB)
 ```
+
+meta.db keeps `wal_autocheckpoint = 1000` (about 4 MB).
 
 Additional for spool.db (write-heavy):
 
 ```sql
 PRAGMA auto_vacuum = INCREMENTAL;    -- Free pages without full VACUUM
-PRAGMA wal_autocheckpoint = 2000;    -- Less frequent checkpoints (more batching)
+PRAGMA wal_autocheckpoint = 65536;   -- Threshold for a checkpoint on a commit
+PRAGMA journal_size_limit = 8388608; -- Truncate a rewound WAL to 8 MiB
 ```
+
+A worker thread opens its own connection to the file-backed spool after both databases'
+migrations succeed (#786). It runs `wal_checkpoint(PASSIVE)`, pausing 1,000 ms before each
+checkpoint: starts are one pause plus the previous checkpoint's duration apart. With nothing
+to copy a PASSIVE checkpoint does no sync. No worker starts for `:memory:`, whose threshold
+stays 2000. A failed worker restores 2000 on the hub's connection and writes one `[storage]`
+line to stderr, without a path; it is not restarted. After a fallback, the first commit past
+2000 frames checkpoints whatever the WAL holds on the hub's thread, in one stall. After a crash
+or an unclosed exit, the next start reads the whole WAL to recover it before the hub serves
+anything. Either can be about the 65,536-frame threshold, or more, since that threshold is not
+a hard bound (below).
+
+The 65,536-frame threshold (about 257.5 MiB with 4 KiB pages) is **not a hard WAL bound**:
+the automatic checkpoint is PASSIVE too, and does nothing while the worker holds the checkpoint
+lock; one transaction can also pass it. Commits still write the WAL and sync its new header at
+a rewind; a rewind also truncates a WAL past 8 MiB. `DatabaseManager.close()` returns one shared
+promise, waits for the worker's exit, then attempts a TRUNCATE checkpoint and close on both
+databases in one synchronous stretch, the second even when the first checkpoint fails, so no
+callback runs with one database closed and the other open. It rethrows the first error after
+both closes are attempted. Shutdown's
+existing timeout and a failed start's `STARTUP_UNWIND_TIMEOUT_MS` (10 seconds, after a separate
+wait of the same length for the server) bound only the asynchronous waits, including the wait
+for the worker. A checkpoint already running is not interrupted at the bound: this applies
+to the worker's last checkpoint and the final synchronous TRUNCATE on the hub's thread.
+Timers cannot run during synchronous checkpoints or closes, so a late close can still end in
+exit 0 without a timeout warning. If shutdown's timeout fires, the hub requests exit 1;
+`process.exit` waits for a running worker checkpoint to return, so the process can outlive the
+bound. The failed-start unwind rethrows the original error after its wait. When logging is on
+(the `main.ts` entry), an expired failed-start database wait writes a warning to `hub.jsonl`.
+Databases left unclosed rely on WAL recovery at the next start.
 
 **File permissions:** on Unix, `meta.db`, `spool.db` and their `-wal` and `-shm` files are 0600
 (owner read/write only), held to that each time the hub opens them (#536):
@@ -65,13 +97,15 @@ profile's default ACL, as `auth.json` does (SECURITY.md § 2.1, #200).
 compiled into Node itself. The single executable embeds no SQLite addon and extracts none, and
 nothing is downloaded or built at install. The Node `.nvmrc` pins, 24.22.0, carries SQLite 3.53.4.
 
-- **One module talks to it:** `packages/hub/src/storage/sqlite.ts`, and nothing else imports
-  `node:sqlite`. It gives the DAL the calls the DAL uses, and keeps the rules the DAL was written
-  for, better-sqlite3's until #893:
+- **The DAL's adapter:** `packages/hub/src/storage/sqlite.ts` gives the DAL the calls it uses,
+  and keeps the rules the DAL was written for, better-sqlite3's until #893:
   - a parameter left out throws, where `node:sqlite` would bind NULL in its place, silently;
   - `undefined` binds NULL, and booleans and other objects are refused;
   - a row is a plain object, and a BLOB a Buffer;
   - an SQLite error names its result code in `code` (`SQLITE_CONSTRAINT_UNIQUE`).
+  The one exception is `storage/spool-checkpointer.ts`'s CommonJS worker source: it requires
+  `node:sqlite` only to open a connection, set synchronous NORMAL, run PASSIVE checkpoints
+  and close. Update that source too when Node's SQLite API changes.
 - **A release candidate.** `node:sqlite` is at Stability 1.2 and still changes between minor
   versions: booleans bind since 24.21, `undefined` binds NULL from 26.10, and 26.11 renames
   `DatabaseSync` to `Database`. The hub runs one exact Node, so a change arrives with a bump.
@@ -525,9 +559,10 @@ Deleting a host (`DELETE /api/hosts/:id`) deletes its sessions, channels and `ca
 meta.db, and nothing in spool.db: its channels' chunks are orphans, which the next pass deletes.
 Before #786 the size cap kept each one's newest snapshot for ever.
 
-A step may still be slow when it commits past `wal_autocheckpoint`: SQLite then checkpoints the WAL
-in that commit, two fsyncs included, whatever wrote it. Clearing a 1.5 GB backlog takes about
-twenty of them.
+A step's checkpoint normally runs on the spool worker (§ 2), rather than in its commit.
+If the WAL reaches the 65,536-frame threshold, SQLite can still checkpoint on the hub's thread,
+two fsyncs included. Header syncs at WAL rewinds and the remaining disk work can still delay a
+step; nothing bounds each step's duration.
 
 ### 7.3 GC Safety
 

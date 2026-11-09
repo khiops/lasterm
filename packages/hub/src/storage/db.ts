@@ -1,6 +1,11 @@
 import { closeSync, constants, fchmodSync, fstatSync, openSync } from "node:fs";
 import { join } from "node:path";
 import { type MigrationFile, readMigrationFiles } from "./migration-files.js";
+import {
+	type SpoolCheckpointer,
+	type SpoolCheckpointerTestOptions,
+	startSpoolCheckpointer,
+} from "./spool-checkpointer.js";
 import { Database } from "./sqlite.js";
 
 /** The files SQLite keeps beside a database in WAL mode. */
@@ -76,7 +81,8 @@ function restrictToOwner(
 export interface DatabaseManager {
 	meta: Database;
 	spool: Database;
-	close(): void;
+	readonly checkpointerForTests?: SpoolCheckpointer | undefined;
+	close(): Promise<void>;
 }
 
 function checkpointAndClose(db: Database): void {
@@ -165,7 +171,11 @@ function runMigrations(db: Database, migrations: readonly MigrationFile[]): void
  * (#747) is then left with no connection on it, and on the last close SQLite
  * takes its `-wal` and `-shm` files away, so it can be moved aside as one file.
  */
-function openBoth(metaFile: string, spoolFile: string): DatabaseManager {
+function openBoth(
+	metaFile: string,
+	spoolFile: string,
+	testOptions?: SpoolCheckpointerTestOptions,
+): DatabaseManager {
 	const metaDb = new Database(metaFile);
 	let spoolDb: Database | undefined;
 	try {
@@ -191,23 +201,54 @@ function openBoth(metaFile: string, spoolFile: string): DatabaseManager {
 	}
 
 	const spool = spoolDb;
+	const checkpointer =
+		spoolFile === ":memory:" ? undefined : startSpoolCheckpointer(spoolFile, spool, testOptions);
+	let closePromise: Promise<void> | undefined;
 	return {
 		meta: metaDb,
 		spool,
+		checkpointerForTests: checkpointer,
 		close() {
-			checkpointAndClose(metaDb);
-			checkpointAndClose(spool);
+			if (closePromise) return closePromise;
+			let resolve!: () => void;
+			let reject!: (error: unknown) => void;
+			closePromise = new Promise<void>((done, fail) => {
+				resolve = done;
+				reject = fail;
+			});
+			const close = async () => {
+				// The worker goes first, and both closes then run in one synchronous
+				// stretch: no callback runs between them with one database closed and
+				// the other open, as none could before close() became asynchronous.
+				if (checkpointer) await checkpointer.stop();
+				let failed = false;
+				let firstError: unknown;
+				for (const db of [metaDb, spool]) {
+					try {
+						checkpointAndClose(db);
+					} catch (error) {
+						if (!failed) firstError = error;
+						failed = true;
+					}
+				}
+				if (failed) throw firstError;
+			};
+			void close().then(resolve, reject);
+			return closePromise;
 		},
 	};
 }
 
-export function openDatabases(dataDir: string): DatabaseManager {
+export function openDatabases(
+	dataDir: string,
+	testOptions?: SpoolCheckpointerTestOptions,
+): DatabaseManager {
 	const metaPath = join(dataDir, "meta.db");
 	const spoolPath = join(dataDir, "spool.db");
 	// Both before either opens, so a refusal leaves no connection behind.
 	restrictDatabaseFiles(metaPath);
 	restrictDatabaseFiles(spoolPath);
-	return openBoth(metaPath, spoolPath);
+	return openBoth(metaPath, spoolPath, testOptions);
 }
 
 export function openTestDatabases(): DatabaseManager {

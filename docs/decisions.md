@@ -7,6 +7,48 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## SPOOL-CHECKPOINTER — spool WAL checkpoints run on a worker thread (#786, 2026-11-09)
+
+- **Measured cause.** On Windows 11, Node 24.22.0 and SQLite 3.53.4, a 1.6 GB spool's
+  200 MB flood of 256 KiB chunks hit the 2,000-page automatic checkpoint 28–29 times per
+  run, holding commits for 40–470 ms. The GC pass had gaps of 220–439 ms. These are the
+  #786 design measurements, not a claim about every platform or disk.
+- **One connection on a worker, PASSIVE only.** After migrations succeed, the file-backed
+  spool gets a CommonJS source-string worker (`eval: true`), which works without another
+  file in the single executable. It opens the same path with `node:sqlite`, sets synchronous
+  NORMAL, and pauses 1,000 ms before every PASSIVE checkpoint, closing in a `finally`.
+  This source is the one exception to NODE-SQLITE's adapter boundary and must move with its
+  API at a Node bump. `:memory:` gets no worker; meta.db is unchanged.
+- **65,536 frames, not zero or 16,384.** A worker without a threshold cannot make the WAL
+  rewind while writes keep landing. At 16,384, prototype threshold crossings held commits
+  for 570–720 ms. At 65,536 with the one-second pause and 8 MiB journal size limit, the
+  measured flood had one commit ≥20 ms per run and a WAL below 230 MB; the GC's maximum
+  gap was 135 ms. The threshold is about 257.5 MiB, not a hard bound: the automatic
+  checkpoint is PASSIVE and may find the checkpoint lock busy, and a transaction can pass it.
+- **Pause and retained file size.** Checkpointing every 20 ms worsened paced commits; a
+  one-second pause reduced that contention. `journal_size_limit = 8388608` truncates the
+  WAL at its next rewind, rather than retaining a flood's high-water size. The header sync
+  and truncation stay on the hub's thread: at one commit a second the prototype median
+  rose from about 0.8 ms to 1.8–2.7 ms, with none ≥20 ms. Residual gaps up to about 135 ms
+  are outside this fix.
+- **Failure and teardown.** Creation failure, error or unsolicited exit restores 2,000
+  frames and reports once without a path; there is no retry. Stop refs and wakes the
+  worker and awaits its exit. All database closes share one promise: the worker's exit is
+  awaited first, then meta.db and spool.db get their TRUNCATE-and-close in one synchronous
+  stretch, so no callback ever runs with one database closed and the other open. The first
+  checkpoint error is reported only after both closes are attempted. Shutdown's existing timeout and a failed start's `STARTUP_UNWIND_TIMEOUT_MS`
+  (10 seconds, after a separate wait of the same length for the server) bound only the
+  asynchronous waits, including the wait for the worker. A checkpoint already running does
+  not stop at the bound, whether the worker's last one or the final synchronous TRUNCATE on
+  the hub's thread. Timers cannot run during synchronous checkpoints or closes, so a late
+  close can still end in exit 0 without a timeout warning. If shutdown's timeout fires, the
+  hub requests exit 1; `process.exit` waits for a running worker checkpoint to return, so the
+  process can outlive the bound. The failed-start unwind rethrows the original error after its
+  wait. When logging is on (the `main.ts` entry), an expired failed-start database wait writes a
+  warning to `hub.jsonl`. Databases left unclosed rely on WAL recovery at the next start.
+
+---
+
 ## HUB-ADDONS-BESIDE — the hub's native addons are installed beside its executable, checked against digests it embeds (#889, 2026-11-07)
 
 - **Beside the executable, never extracted.** The single executable embedded `lasterm_hub_lock.node`
@@ -66,7 +108,8 @@ heading, with a pointer to the section that replaced it. A section without one i
   § 2). The DAL was not rewritten: its 149 `prepare` sites run as they did. The adapter refuses a
   parameter left out, which `node:sqlite` would bind as NULL, maps `undefined` to NULL, refuses
   booleans and objects, returns plain rows and Buffer BLOBs, and names the result code of an SQLite
-  error in `code`. Nothing else imports `node:sqlite`.
+  error in `code`. The only exception is SPOOL-CHECKPOINTER's CommonJS worker source,
+  which opens, sets synchronous NORMAL, checkpoints and closes; update it too when the API moves.
 - **A release candidate, held by the Node pin.** `node:sqlite` is at Stability 1.2, and changes
   still land in minor releases: booleans bind since 24.21, `undefined` binds NULL from 26.10,
   `DatabaseSync` is renamed `Database` in 26.11. The hub runs one exact Node, so a change arrives

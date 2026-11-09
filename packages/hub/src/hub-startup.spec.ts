@@ -222,7 +222,7 @@ describe("startHub token restart sweep", () => {
 					openDatabases: () => ({
 						meta,
 						spool,
-						close: () => {
+						close: async () => {
 							meta.close();
 							spool.close();
 						},
@@ -447,6 +447,88 @@ describe("startHub carries the directory it locked", () => {
 // without a bound, the databases stay open, the error is never reported and the
 // process keeps the lock for as long as the close hangs.
 describe("startHub bounds the unwind of a failed start", () => {
+	// No await deletes runtime too early; no bound hangs instead of reporting the start error.
+	it.each(["settles", "hangs", "rejects"] as const)(
+		"waits within its bound when database close %s",
+		async (mode) => {
+			const dbs = openTestDatabases();
+			const stateDir = makeTempDir("lasterm-unwind-dbs-");
+			const failure = new Error("announcement failed");
+			const order: string[] = [];
+			let finish!: () => void;
+			let failClose!: (error: Error) => void;
+			const closed = new Promise<void>((resolve, reject) => {
+				finish = resolve;
+				failClose = reject;
+			});
+			let settled = false;
+			let outcome: unknown;
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const started = startHub(
+					{
+						logging: true,
+						announce: () => {
+							throw failure;
+						},
+					},
+					{
+						getStateDir: () => stateDir,
+						getConfigDir: () => stateDir,
+						acquireHubLock: () => null as never,
+						initAuth: () => randomBytes(32).toString("hex"),
+						createOwnerToken: () => "owner-token",
+						resolveHubTlsIdentity: () => TEST_TLS_IDENTITY,
+						openDatabases: () => ({
+							...dbs,
+							close: () => {
+								order.push("databases");
+								return closed;
+							},
+						}),
+						createServer: async () => ({ close: async () => undefined }) as never,
+						startServer: async () => "https://127.0.0.1:4100",
+						addStartupCorsOrigins: () => 4100,
+						persistRuntime: () => undefined,
+						deleteRuntime: () => {
+							order.push("record");
+							return true;
+						},
+					},
+				).catch((error: unknown) => {
+					settled = true;
+					outcome = error;
+				});
+				await vi.advanceTimersByTimeAsync(STARTUP_UNWIND_TIMEOUT_MS - 1);
+				expect(order).toEqual(["databases"]);
+				expect(settled).toBe(false);
+				if (mode === "hangs") await vi.advanceTimersByTimeAsync(1);
+				else if (mode === "rejects") failClose(new Error("close failed"));
+				else finish();
+				await vi.advanceTimersByTimeAsync(0);
+				expect(settled).toBe(true);
+				await started;
+				expect(outcome).toBe(failure);
+				expect(order).toEqual(["databases", "record"]);
+				const lines = readFileSync(join(stateDir, "logs", "hub.jsonl"), "utf8")
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line));
+				const warning = lines.find(
+					(line) => line.msg === "databases did not close while unwinding a failed start",
+				);
+				if (mode === "hangs")
+					expect(warning).toMatchObject({ lvl: "warn", timeoutMs: STARTUP_UNWIND_TIMEOUT_MS });
+				else expect(warning).toBeUndefined();
+			} finally {
+				finish();
+				vi.useRealTimers();
+				await dbs.close();
+				await removeTempDir(stateDir);
+			}
+		},
+	);
+
 	it("closes the databases and rethrows when the server never finishes closing", async () => {
 		const dbs = openTestDatabases();
 		const stateDir = join(tmpdir(), `lasterm-startup-${randomBytes(8).toString("hex")}`);
@@ -460,7 +542,7 @@ describe("startHub bounds the unwind of a failed start", () => {
 			...dbs,
 			close: () => {
 				order.push("databases");
-				dbs.close();
+				return dbs.close();
 			},
 		};
 		let settled = false;

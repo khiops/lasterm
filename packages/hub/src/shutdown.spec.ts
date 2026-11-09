@@ -37,6 +37,40 @@ describe("gracefulShutdown", () => {
 		resetGracefulShutdownForTests();
 	});
 
+	// Removing await from the database close publishes a stopped hub too early.
+	it("waits for database close before deleting runtime and exiting", async () => {
+		const order: string[] = [];
+		let finish!: () => void;
+		const closed = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		const shutdown = gracefulShutdown({
+			server: Fastify({ logger: false }),
+			dbManager: {
+				close: () => {
+					order.push("close");
+					return closed;
+				},
+			},
+			runtime: runtimeRecord(),
+			deleteRuntime: () => {
+				order.push("runtime");
+				return true;
+			},
+			exit: () => {
+				order.push("exit");
+			},
+		});
+		try {
+			await tick();
+			expect(order).toEqual(["close"]);
+		} finally {
+			finish();
+		}
+		await shutdown;
+		expect(order).toEqual(["close", "runtime", "exit"]);
+	});
+
 	it("is idempotent and tears down server, DB, runtime, then exits", async () => {
 		const server = Fastify({ logger: false });
 		const dbs = openTestDatabases();
@@ -51,7 +85,7 @@ describe("gracefulShutdown", () => {
 		const close = dbs.close.bind(dbs);
 		const closeSpy = vi.spyOn(dbs, "close").mockImplementation(() => {
 			order.push("db.close");
-			close();
+			return close();
 		});
 
 		const options = {
@@ -430,7 +464,7 @@ describe("POST /api/shutdown", () => {
 			},
 			{
 				server: Fastify({ logger: false }),
-				dbManager: { close: () => {} },
+				dbManager: { close: async () => {} },
 				runtime: runtimeRecord(),
 				deleteRuntime: () => true,
 				exit: () => {},

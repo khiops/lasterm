@@ -153,8 +153,8 @@ describe.each(RUNNING)("a hub restart, over $name", (kind) => {
 		const stateDir = makeTempDir("lasterm-transfer-restart-");
 		cleanups.push(() => removeTempDir(stateDir));
 		const first = openDatabases(stateDir);
-		cleanups.push(() => {
-			if (first.meta.open) first.close();
+		cleanups.push(async () => {
+			if (first.meta.open) await first.close();
 		});
 		addHost(first, kind);
 		const s1 = serviceOn(h, kind, { store: new TransfersDAL(first.meta) });
@@ -199,9 +199,14 @@ describe.each(RUNNING)("a hub restart, over $name", (kind) => {
 			missing: rowOf(first, transferId, "tree/missing.bin").temp_path as string,
 			short: rowOf(first, transferId, "tree/short.bin").temp_path as string,
 		};
-		// Killed: nothing more reaches meta.db, and its writes on the host stop.
-		first.close();
+		// Killed: nothing more reaches meta.db, and its writes on the host stop. meta.db
+		// closes in this turn, before shutdown(), as a kill would leave it: close() waits
+		// for the spool's checkpoint worker before closing either database, and a timer
+		// could persist the acknowledgements meanwhile.
+		first.meta.close();
+		const closed = first.close();
 		s1.service.shutdown();
+		await closed;
 
 		// Meanwhile, on the host: one temporary went, another was cut short. A
 		// command of the hub that died may hold them a moment longer.

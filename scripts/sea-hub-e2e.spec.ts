@@ -40,7 +40,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type RuntimeInfo, requestHub } from "../packages/hub/src/cli.js";
 import { HUB_LOCK_ADDON } from "../packages/hub/src/hub-lock.js";
 import { platformDirEnv } from "../packages/hub/src/platform-dirs.fixture.js";
@@ -48,6 +48,7 @@ import {
 	beforeBaselineRefusal,
 	createMetaDbBeforeBaseline,
 } from "../packages/hub/src/storage/open-databases.fixture.js";
+import { Database } from "../packages/hub/src/storage/sqlite.js";
 import { TLS_IDENTITY_ADDON } from "../packages/hub/src/tls-identity.js";
 import {
 	ADDON_MANIFEST_ASSET,
@@ -508,6 +509,42 @@ describe("lasterm-hub executable", () => {
 					}
 				},
 				READY_TIMEOUT_MS + 10_000,
+			);
+
+			// A worker missing from the executable leaves migrations only in the WAL.
+			it(
+				"checkpoints the spool schema into its main file within 5 s of announcement (#786)",
+				async () => {
+					const sandbox = createSandbox();
+					let hub: StartedHub | undefined;
+					try {
+						hub = await startHub(sandbox);
+						const copy = join(sandbox.root, "spool-copy.db");
+						await vi.waitFor(
+							() => {
+								copyFileSync(join(sandbox.stateDir, "spool.db"), copy);
+								const db = new Database(copy, { readonly: true });
+								try {
+									expect(
+										db
+											.prepare(
+												"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'chunks'",
+											)
+											.get(),
+									).toEqual({ name: "chunks" });
+								} finally {
+									db.close();
+								}
+							},
+							{ timeout: 5000, interval: 20 },
+						);
+						expect(hub.output()).not.toContain("[storage] spool checkpoint worker stopped");
+					} finally {
+						await hub?.kill();
+						removeSandbox(sandbox);
+					}
+				},
+				READY_TIMEOUT_MS + STOP_TIMEOUT_MS + 10_000,
 			);
 
 			// Mutations caught: all of the above, each failing the start itself, and

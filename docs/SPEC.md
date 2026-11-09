@@ -1680,7 +1680,7 @@ lasterm (root CLI)
   └── @lasterm/hub
         ├── @lasterm/shared
         ├── @lasterm/web (build output embedded as static files)
-        ├── node:sqlite (built into Node, through storage/sqlite.ts)
+        ├── node:sqlite (built into Node, through storage/sqlite.ts except the spool checkpoint worker; STORAGE.md § 2)
         ├── ssh2
         └── fastify + @fastify/websocket
 
@@ -1715,7 +1715,7 @@ detached daemon, or deploys and runs it over SSH.
 | Terminal (UI) | xterm.js + addon-fit + addon-search + addon-unicode11 | Rendering; the agent's snapshot is written to it as it comes |
 | Terminal (Agent) | the `vt100` crate (Rust) | Screen model |
 | Codec | @msgpack/msgpack | Binary protocol framing |
-| Storage | `node:sqlite`, built into Node, behind `storage/sqlite.ts` | SQLite WAL persistence |
+| Storage | `node:sqlite`, built into Node, behind `storage/sqlite.ts` except the spool checkpoint worker (STORAGE.md § 2) | SQLite WAL persistence |
 | HTTP/WS | Fastify + @fastify/websocket | REST + WS server |
 | UI Framework | Vue 3 (Composition API) | Reactive UI |
 | UI Build | Vite | Dev + production build |

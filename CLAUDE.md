@@ -34,7 +34,7 @@ Sessions survive client disconnects and device switches; local sessions also sur
 | Terminal (UI) | xterm.js + addon-fit + addon-search + addon-unicode11 |
 | Terminal (Agent) | the `vt100` crate — Rust screen model in `headless.rs` |
 | Codec | @msgpack/msgpack |
-| Storage | `node:sqlite`, built into Node (WAL mode), only through `packages/hub/src/storage/sqlite.ts` |
+| Storage | `node:sqlite`, built into Node (WAL mode), through `packages/hub/src/storage/sqlite.ts`; `storage/spool-checkpointer.ts`'s worker is the only exception |
 | HTTP/WS | Fastify + @fastify/websocket |
 | UI framework | Vue 3 (Composition API) |
 | UI build | Vite |
@@ -355,7 +355,7 @@ port refused on POSIX does not move: the start fails and says why.
 
 - never store SSH passwords (prompt at connect, clear after auth)
 - spool.db writes are continuous/heavy — use INCREMENTAL auto_vacuum, not full VACUUM
-- SQLite goes through `storage/sqlite.ts`, never `node:sqlite` directly: `node:sqlite` binds NULL for a parameter left out, without a word, and is still a release candidate that changes between Node minors. Before a Node bump, run `storage/sqlite.spec.ts` first (STORAGE.md § 2)
+- SQLite goes through `storage/sqlite.ts`; the only exception is `storage/spool-checkpointer.ts`'s worker source, which only opens, sets synchronous NORMAL, checkpoints and closes. `node:sqlite` binds NULL for a parameter left out, without a word, and is still a release candidate that changes between Node minors. Before a Node bump, run `storage/sqlite.spec.ts` first and update the worker source too (STORAGE.md § 2)
 - MessagePack Uint8Array: use `@msgpack/msgpack` with `useBigInt64: false`
 - SQLite cross-DB: no FK between meta.db and spool.db — use cache_index for consistency
 - Auth token comparison: always `crypto.timingSafeEqual` (constant-time)

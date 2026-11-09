@@ -20,6 +20,24 @@ function thrown(fn: () => unknown): Error & Record<string, unknown> {
 // changes between minor versions (#893): when one of these fails after a Node
 // bump, the comment beside it says what to change in the adapter.
 describe("node:sqlite on the pinned Node", () => {
+	it("is built thread-safe", () => {
+		// The spool checkpoint worker (storage/spool-checkpointer.ts) opens its own
+		// connection on another thread, so SQLite must not be built with THREADSAFE=0;
+		// each thread owning its connection, 1 or 2 both do.
+		const db = new DatabaseSync(":memory:");
+		try {
+			const options = db
+				.prepare("PRAGMA compile_options")
+				.all()
+				.map((row) => String(row.compile_options));
+			expect(options.filter((option) => option.startsWith("THREADSAFE="))).toEqual([
+				expect.stringMatching(/^THREADSAFE=[12]$/),
+			]);
+		} finally {
+			db.close();
+		}
+	});
+
 	it("loads without an ExperimentalWarning", () => {
 		// Stability 1.2 since 24.15.0 prints none; 24.14 still did. The control
 		// warning proves the child prints warnings at all.

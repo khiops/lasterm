@@ -113,7 +113,12 @@ describe("check.sh in a checkout that shares its cargo target", () => {
 		mkdirSync(base, { recursive: true });
 		const work = mkdtempSync(join(base, "lasterm-check-spec-"));
 		tempDirs.push(work);
-		const [a, b, target, logs] = ["a", "b", "target", "logs"].map((name) => join(work, name));
+		const [a, b, target, logs] = [
+			join(work, "a"),
+			join(work, "b"),
+			join(work, "target"),
+			join(work, "logs"),
+		];
 		const stubs = makeTempDir("lasterm-check-stubs-");
 		tempDirs.push(stubs);
 		writeFileSync(join(stubs, "pnpm"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });

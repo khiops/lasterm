@@ -2191,6 +2191,167 @@ describe("host list (#903)", () => {
 	});
 });
 
+// ─── session list (#905) ─────────────────────────────────────────────────────
+
+// GET /api/sessions sends `status` and `host_id`, never `state` or `host_label`.
+// The table resolves labels through GET /api/hosts; JSON keeps the wire answer.
+describe("session list (#905)", () => {
+	const SESSIONS = [
+		{
+			id: "01JCQ8S0000000000000000001",
+			host_id: "01JCQ8H0000000000000000001",
+			status: "active",
+			created_at: "2026-11-09T10:00:00.000Z",
+			updated_at: "2026-11-09T10:01:00.000Z",
+		},
+		{
+			id: "01JCQ8S0000000000000000002",
+			host_id: "01JCQ8H0000000000000000002",
+			status: "detached",
+			created_at: "2026-11-09T10:02:00.000Z",
+			updated_at: "2026-11-09T10:03:00.000Z",
+		},
+		{
+			id: "01JCQ8S0000000000000000003",
+			host_id: "01JCQ8H0000000000000000009",
+			status: "closed",
+			created_at: "2026-11-09T10:04:00.000Z",
+			updated_at: "2026-11-09T10:05:00.000Z",
+		},
+	];
+	const HOSTS = [
+		{ id: "01JCQ8H0000000000000000001", type: "local", label: "local" },
+		{
+			id: "01JCQ8H0000000000000000002",
+			type: "ssh",
+			label: "pi2222",
+			ssh_host: "pi.test",
+			ssh_port: 2222,
+			ssh_user: "pi",
+		},
+	];
+	let servers: HttpsServer[] = [];
+
+	afterEach(async () => {
+		const closing = servers;
+		servers = [];
+		await Promise.all(
+			closing.map(
+				(server) =>
+					new Promise<void>((resolve) => {
+						server.closeAllConnections();
+						server.close(() => resolve());
+					}),
+			),
+		);
+	});
+
+	/** A TLS peer holding the pinned key that answers by API path, and records requests. */
+	async function listenSessionsHub(sessions: typeof SESSIONS) {
+		const tls = getTestTlsMaterial();
+		const requests: Array<{ method: string; url: string }> = [];
+		const server = createHttpsServer(
+			{ cert: tls.pinned.cert, key: tls.pinned.key },
+			(request, response) => {
+				requests.push({ method: request.method ?? "", url: request.url ?? "" });
+				if (request.url === "/api/sessions" || request.url === "/api/hosts") {
+					response.writeHead(200, { "content-type": "application/json" });
+					response.end(JSON.stringify(request.url === "/api/sessions" ? sessions : HOSTS));
+				} else {
+					response.writeHead(404);
+					response.end();
+				}
+			},
+		);
+		servers.push(server);
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(0, "127.0.0.1", resolve);
+		});
+		const address = server.address();
+		if (typeof address !== "object" || address === null) throw new Error("expected TCP address");
+		const runtime: RuntimeInfo = {
+			pid: process.pid,
+			port: address.port,
+			started_at: "2026-11-09T00:00:00.000Z",
+			instanceId: "test",
+			ownerToken: "test",
+			spki: tls.pinned.spki,
+		};
+		return { runtime, requests };
+	}
+
+	async function sessionList(extra: string[] = [], sessions = SESSIONS) {
+		const { runtime, requests } = await listenSessionsHub(sessions);
+		const restoreDirs = usePlatformDirs({ state: makeTempDir(), config: makeTempDir() });
+		const output: string[] = [];
+		const errors: string[] = [];
+		const log = vi.spyOn(console, "log").mockImplementation((line: string) => {
+			output.push(line);
+		});
+		const error = vi.spyOn(console, "error").mockImplementation((line: string) => {
+			errors.push(line);
+		});
+		const exits: unknown[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exits.push(code);
+		}) as typeof process.exit);
+		try {
+			persistRuntime(runtime);
+			await main(["session", "list", ...extra]);
+		} finally {
+			log.mockRestore();
+			error.mockRestore();
+			exit.mockRestore();
+			restoreDirs();
+		}
+		expect(errors).toEqual([]);
+		expect(exits).toEqual([]);
+		return { output, requests };
+	}
+
+	const row = (id: string, host: string, status: string, created: string) =>
+		`${id.padEnd(26)}  ${host.padEnd(20)}  ${status.padEnd(12)}  ${created}`;
+
+	// Mutation: read `state` again and STATE is empty; print `host_id` without
+	// resolving labels, or filter closed sessions, and the table loses expected data.
+	it("shows every session in order with its host label, status and creation time", async () => {
+		const { output, requests } = await sessionList();
+		expect(output).toEqual([
+			row("ID", "HOST", "STATE", "CREATED"),
+			`${"-".repeat(26)}  ${"-".repeat(20)}  ${"-".repeat(12)}  -------`,
+			row("01JCQ8S0000000000000000001", "local", "active", "2026-11-09T10:00:00.000Z"),
+			row("01JCQ8S0000000000000000002", "pi2222", "detached", "2026-11-09T10:02:00.000Z"),
+			row(
+				"01JCQ8S0000000000000000003",
+				"01JCQ8H0000000000000000009",
+				"closed",
+				"2026-11-09T10:04:00.000Z",
+			),
+		]);
+		expect(requests).toEqual([
+			{ method: "GET", url: "/api/sessions" },
+			{ method: "GET", url: "/api/hosts" },
+		]);
+	});
+
+	// Mutation: transform the sessions or fetch hosts before the JSON return,
+	// and --json changes the wire answer or makes an unnecessary request.
+	it("prints the hub's answer unchanged with --json without requesting hosts", async () => {
+		const { output, requests } = await sessionList(["--json"]);
+		expect(output).toEqual([JSON.stringify(SESSIONS)]);
+		expect(requests).toEqual([{ method: "GET", url: "/api/sessions" }]);
+	});
+
+	// Mutation: fetch hosts before checking for an empty list, and an empty
+	// session list makes an unnecessary request instead of returning directly.
+	it("prints the empty-list message without requesting hosts", async () => {
+		const { output, requests } = await sessionList([], []);
+		expect(output).toEqual(["No active sessions."]);
+		expect(requests).toEqual([{ method: "GET", url: "/api/sessions" }]);
+	});
+});
+
 function parsed(argv: string[]): ParsedArgs {
 	const result = parseArgs(argv);
 	expect(result).not.toBeNull();

@@ -56,9 +56,9 @@ export function registerHostProfileRoutes(server: FastifyInstance, metaDal: Meta
 				},
 			});
 		}
-		// A safe integer: SQLite stores a larger one, which node:sqlite then
-		// refuses to read back, the launch menu included (#798).
-		if (sort_order !== undefined && !Number.isSafeInteger(sort_order)) {
+		// A safe integer, or null for none: SQLite stores a larger one, which
+		// node:sqlite then refuses to read back, the launch menu included (#798).
+		if (sort_order != null && !Number.isSafeInteger(sort_order)) {
 			return reply.code(400).send({
 				error: { code: "VALIDATION_ERROR", message: "sort_order must be an integer" },
 			});
@@ -68,7 +68,7 @@ export function registerHostProfileRoutes(server: FastifyInstance, metaDal: Meta
 			request.params.id,
 			request.params.profileId,
 			override_type,
-			sort_order as number | undefined,
+			(sort_order ?? undefined) as number | undefined,
 		);
 		// The user's default turned into a pin or hidden: the agent's applies
 		// again at once (#802).

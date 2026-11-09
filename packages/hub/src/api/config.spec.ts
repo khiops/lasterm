@@ -487,7 +487,22 @@ describe("profile PATCH: the merged profile is checked before it is stored", () 
 		}
 	});
 
-	it("refuses a stored member it cannot store, until a null removes it", async () => {
+	it("reads a stored profile that is not an object as none, never as numbered keys", async () => {
+		const urls = await profileUrls();
+		const meta = new MetaDAL(dbs.meta);
+		meta.updateHostProfile(urls.hostId, '"xy"');
+		meta.updateChannelProfile("ch-merged", "[1]");
+
+		for (const url of [urls.host, urls.channel]) {
+			const res = await patch(url, '{"profile":{"fontSize":13}}');
+			expect(res.statusCode, url).toBe(200);
+			expect((await server.inject({ method: "GET", url })).json(), url).toEqual({
+				profile: { fontSize: 13 },
+			});
+		}
+	});
+
+	it("refuses a stored profile key it cannot store, until a null removes it", async () => {
 		const urls = await profileUrls();
 		const meta = new MetaDAL(dbs.meta);
 		const deep = `{"themeOverrides":${nested(40)}}`;

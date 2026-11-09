@@ -61,7 +61,7 @@ function nested(levels: number, inner = '"x"'): string {
 
 // ─── A body that is not an object (#798) ─────────────────────────────────────
 
-describe("the host routes refuse a body that is not an object (#798)", () => {
+describe("the seven routes that read a JSON body refuse one that is not an object (#798)", () => {
 	async function routes(): Promise<Array<[name: string, method: Method, url: string]>> {
 		const hostId = await createHost();
 		const profileId = (
@@ -214,6 +214,10 @@ describe("the host routes refuse an id that names nothing (#798)", () => {
 		});
 		expect(accepted.statusCode).toBe(204);
 		expect(meta.getHostLaunchProfileOverride(id, profileId)?.overrideType).toBe("pin");
+
+		const none = await send("PUT", url, { value: { override_type: "hide", sort_order: null } });
+		expect(none.statusCode).toBe(204);
+		expect(meta.getHostLaunchProfileOverride(id, profileId)?.overrideType).toBe("hide");
 	});
 });
 

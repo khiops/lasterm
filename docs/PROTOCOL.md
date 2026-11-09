@@ -2038,16 +2038,19 @@ What the callers do with the answers:
 A write to the hosts or their groups, here and under SSH Config Import and Host Groups, sends
 every client `HOSTS_CHANGED`; § 4.18 lists which.
 
-The routes below that take a JSON body, and the two profile `PATCH` routes under Configuration,
-answer 400 `VALIDATION_ERROR` `"body must be an object"` for one that reaches them as anything
+`POST /api/hosts`, `PUT /api/hosts/order`, `PUT /api/hosts/:id`, `PUT /api/hosts/:id/welcome`,
+`PUT /api/hosts/:id/profiles/:profileId`, and the two profile `PATCH` routes under Configuration,
+answer 400 `VALIDATION_ERROR` `"body must be an object"` for a body that reaches them as anything
 but an object: none, `null`, an array or a scalar (#798). What Fastify's own parser refuses
-before, such as an empty body sent as `application/json`, keeps Fastify's 400.
+before, such as an empty body sent as `application/json`, keeps Fastify's 400. The connection
+routes (`connect`, `reconnect`, `disconnect`, `agent/stop-keeping`, `agent/replace`) are not among
+them: they read no body, or `null`, as an empty one.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
 | GET | `/api/hosts` | ● | `Host[]`, or a page with `?limit=&offset=` (see Pagination) |
 | POST | `/api/hosts` | ● | CreateHost → `Host` (201) |
-| PUT | `/api/hosts/order` | ● | `{ group_id, host_ids }` → 204: the hosts named, in that order, into that group (`null`: none). 400 `VALIDATION_ERROR` for `host_ids` that is not a non-empty array of strings, a `group_id` neither a string nor `null`, or one that names no host group (#798). An id that names no host moves nothing; the others still move |
+| PUT | `/api/hosts/order` | ● | `{ group_id, host_ids }` → 204: the hosts named, in that order, into that group (`null`, or `group_id` left out: none). 400 `VALIDATION_ERROR` for `host_ids` that is not a non-empty array of strings, a `group_id` neither a string nor `null`, or one that names no host group (#798). An id that names no host moves nothing; the others still move |
 | GET | `/api/hosts/:id` | ● | `Host` |
 | PUT | `/api/hosts/:id` | ● | UpdateHost → `Host` (partial update: each field sent replaces the stored one). 409 `CONFLICT` for a label in use |
 | DELETE | `/api/hosts/:id` | ● | 204 |
@@ -2061,7 +2064,7 @@ before, such as an empty body sent as `application/json`, keeps Fastify's 400.
 | POST | `/api/hosts/:id/disconnect` | ● | `{ force? }` → 200 `{ status: "disconnected", ended }`. Closes the host's connection, and stops any reconnect waiting or under way. A remote daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end (`end_reason: "stopped"`) and the session closes; 409 `TERMINALS_WOULD_END` as for reconnect until `force: true`, and `TRANSFERS_WOULD_STOP` likewise while uploads to the host run (§ 4.19). The hub then marks the host disconnected by its user (`disconnected_by_user`, § 4.6, § 4.7) and does not reach for it again by itself: no reconnect after a lost link or a keepalive, none for a window attaching to its terminals (answered from the spool, `cached: true`), and no start marked `automatic` (§ 4.4), until someone acts on it: connect, reconnect, a new terminal there, or a terminal restarted there (SPAWN, or `POST /api/channels/:id/restart`). Kept in memory only: a hub restart forgets it, and reaches the host as it always did. A host with nothing connected, nothing connecting and no session answers 200 `ended: 0` and is not marked |
 | POST | `/api/hosts/:id/agent/stop-keeping` | ● | `readStopKeepingBody` accepts `{ end_terminals?: boolean, force?: boolean, stop_transfers?: boolean }`; `SessionManager.stopKeepingAgent` tries to stop the remote daemon the host is connected through, and stores No after the attempt. 200 `{ outcome: "stopped", ended, host }` or `{ outcome: "disabled_not_stopped", message, host }`, with the saved host in the GET host shape. Admission and refusals are listed below |
 | GET | `/api/hosts/:id/profiles` | ● | The host's profile menu (query: `?os=linux\|darwin\|windows`): `LaunchProfile[]`, its default profile first, each with the host's `override_type` and `set_by_user` when it has one (`true` for the user's, `false` for one the hub made from what the host's agent reported, #802) |
-| PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type: "pin" \| "hide" \| "default", sort_order? }` → 204. `sort_order` is a safe integer, else 400 `VALIDATION_ERROR` and nothing is stored (#798). The override is the user's: a `default` set here replaces the host's, and no HELLO of its agent replaces it (#800). Edit Host's Default Shell and Settings › Profiles › "Set as Default" both send it (#802). An override that leaves the host without a default (the user's default turned into a pin, or hidden) gives it back the one the hub marks for its agent's default shell, at once |
+| PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type: "pin" \| "hide" \| "default", sort_order? }` → 204. `sort_order` is a safe integer, or `null` for none (the profile's own order), else 400 `VALIDATION_ERROR` and nothing is stored (#798). The override is the user's: a `default` set here replaces the host's, and no HELLO of its agent replaces it (#800). Edit Host's Default Shell and Settings › Profiles › "Set as Default" both send it (#802). An override that leaves the host without a default (the user's default turned into a pin, or hidden) gives it back the one the hub marks for its agent's default shell, at once |
 | DELETE | `/api/hosts/:id/profiles/:profileId` | ● | 204. Removing the user's default is Edit Host's "Automatic": the host gets back at once the default the hub marks for the default shell its agent last reported, when that profile exists and is not hidden (#802) |
 
 `SessionManager.stopKeepingAgent` admits requests in this order: 404 `NOT_FOUND`,
@@ -2323,7 +2326,7 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 | GET | `/api/config/logging` | ● | What Settings edits of `[logging]`: `{ agentFilesKept }`, the log files an agent daemon keeps (STORAGE.md § 12.1) |
 | PUT | `/api/config/logging` | ● | `{ agentFilesKept }` → `{ agentFilesKept }`, as saved. A whole number from 0 (all) to 3650, else 400 `INVALID_VALUE`; any other key 400 `VALIDATION_ERROR`. Reaches each agent daemon when it next starts |
 | GET | `/api/hosts/:id/profile` | ● | `{ profile: object }` — raw host Layer 3 profile |
-| PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into host Layer 3 profile. Each top-level key replaces the stored one, and a top-level `null` deletes it; inside `env`, a `null` is kept: it removes the variable (#576). A key that is not a profile key 400 `VALIDATION_ERROR`; then, on the profile as it will be stored, a number that is not finite or a value nested more than 32 deep 400 `INVALID_VALUE` naming its key, a stored one included, which a `null` for that key removes (#848); then a file-transfer value outside its table 400 `INVALID_VALUE` |
+| PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into host Layer 3 profile. Each top-level key replaces the stored one, and a top-level `null` deletes it; inside `env`, a `null` is kept: it removes the variable (#576). A key that is not a profile key 400 `VALIDATION_ERROR`; then, on the profile as it will be stored, a number that is not finite or a value nested more than 32 deep 400 `INVALID_VALUE` naming its key, a stored one included (#848): a `null` for that key removes it when it is a profile key, and the host's `PUT` with a `profile_json` that leaves it out removes any other; then a file-transfer value outside its table 400 `INVALID_VALUE` |
 | GET | `/api/channels/:id/profile` | ● | `{ profile: object }` — raw channel Layer 4 profile |
 | PATCH | `/api/channels/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into channel Layer 4 profile, checked as for a host. `transferFallbackDir` and `transferVerify`, which are the host's, 400 `VALIDATION_ERROR` unless `null` |
 
@@ -2450,15 +2453,18 @@ A `host_group_id` or `ssh_proxy_host_id` that names no host group or no host is 
 - text that is not a JSON object: 400 `VALIDATION_ERROR`;
 - a key that is not a profile key: 400 `VALIDATION_ERROR` `Unknown profile key: <key>`, a
   `null` one included. `visualProfile`, the dialog's banner, border and tint, is a key of these
-  routes only: an object whose colours are `#rrggbb` or empty;
+  routes only: an object, and a colour given in it as text is `#rrggbb` or empty, else 400
+  `VALIDATION_ERROR`. Its other values, and their types, are not checked;
 - a number that is not finite (`1e400`), or a value nesting objects and arrays more than 32 deep:
   400 `INVALID_VALUE`, naming the key;
 - a value outside its rule (the file-transfer keys, § Configuration): 400 `INVALID_VALUE`.
 
 Names are checked first, then the shape, then the values. A member sent as `null` is removed, as
 `PATCH` removes it. A member the stored profile already holds with the same value is kept as it
-is, unchecked, a `null` one included, so a profile an earlier version stored can still be edited.
-What is stored is the object checked, serialized again, not the text sent.
+is, unchecked, a `null` one included, so a profile an earlier version stored can still be edited;
+except one holding a number that is not finite or nesting more than 32 deep, which is checked as
+a new member is, and refused. What is stored is the object checked, serialized again, not the
+text sent.
 
 A field these routes do not know is ignored, `default_shell` among them: a host's default is a
 launch profile (§ 4.4), which the hosts' profile routes set (#802).

@@ -85,9 +85,10 @@ export const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => 
 };
 
 /**
- * The values a terminal profile accepts, by key, wherever it is written:
- * `PUT /api/config/global`, a host's or a channel's profile `PATCH`, and a
- * host's `profile_json` on `POST` and `PUT /api/hosts` (#848). A key
+ * The values a terminal profile accepts, by key, in the routes that consult
+ * it: `PUT /api/config/global`, a host's or a channel's profile `PATCH`, and
+ * a host's `profile_json` on `POST` and `PUT /api/hosts` (#848). A launch
+ * profile's `profile_overrides` does not go through it. A key
  * without an entry is stored as given; `null`, which removes a key, is never
  * asked about. Each rule is unit-tested in `config.spec.ts`, and each route
  * keeps one test proving it consults this table.
@@ -163,8 +164,10 @@ export function profileShapeError(
 }
 
 /**
- * The check every write of a terminal profile goes through (#848): the profile
- * PATCH routes, and a host's `profile_json` on POST and PUT. `written` holds the
+ * The check the writes of a host's or a channel's profile go through (#848):
+ * the two profile PATCH routes, and a host's `profile_json` on POST and PUT.
+ * `PUT /api/config/global`, which writes `config.toml`, keeps its own key
+ * check and `profileValueError`, with no shape check. `written` holds the
  * members the request sets, `null` for one it removes; `result`, the profile as
  * it will be stored. In this order: each written key against
  * `TERMINAL_PROFILE_KEYS` (or `extraKeys`), the shape of `result`, then the
@@ -192,13 +195,16 @@ export function profileFieldsError(
 
 /**
  * The profile a PATCH leaves: the stored one, each member of the patch over it,
- * and a `null` removing its key.
+ * and a `null` removing its key. A stored profile that is not an object, which
+ * an earlier version's POST or PUT could store, is none: spread, it would turn
+ * into "0", "1"… keys (#848).
  */
 function mergeProfile(
 	storedRaw: string | null,
 	patch: Record<string, unknown>,
 ): Record<string, unknown> {
-	const stored = storedRaw ? (JSON.parse(storedRaw) as Record<string, unknown>) : {};
+	const parsed: unknown = storedRaw ? JSON.parse(storedRaw) : {};
+	const stored = isPlainObject(parsed) ? parsed : {};
 	const merged: Record<string, unknown> = { ...stored, ...patch };
 	for (const [key, value] of Object.entries(patch)) {
 		if (value === null) delete merged[key];

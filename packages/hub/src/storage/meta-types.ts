@@ -24,7 +24,8 @@ export interface CreateHostInput {
 	iconValue?: string | null;
 	/** null stores none, which is how a client clears it (#659). */
 	color?: string | null;
-	profileJson?: string;
+	/** null stores none: the host then has no profile of its own. */
+	profileJson?: string | null;
 	trustRemoteHints?: "apply" | "ask" | "ignore";
 	defaultCwd?: string;
 	hostGroupId?: string | null;

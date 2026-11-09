@@ -1,4 +1,4 @@
-import { toSnakeCase } from "@lasterm/shared";
+import { isPlainObject, toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import { resolveHostOs } from "../session/host-profile-menu.js";
 import { restoreAgentDefaultProfile } from "../session/shell-profile-seed.js";
@@ -41,8 +41,14 @@ export function registerHostProfileRoutes(server: FastifyInstance, metaDal: Meta
 				.send({ error: { code: "NOT_FOUND", message: "Launch profile not found" } });
 		}
 
-		const { override_type, sort_order } = request.body;
-		if (!["pin", "hide", "default"].includes(override_type)) {
+		const body: unknown = request.body;
+		if (!isPlainObject(body)) {
+			return reply.code(400).send({
+				error: { code: "VALIDATION_ERROR", message: "body must be an object" },
+			});
+		}
+		const { override_type, sort_order } = body;
+		if (typeof override_type !== "string" || !["pin", "hide", "default"].includes(override_type)) {
 			return reply.code(400).send({
 				error: {
 					code: "VALIDATION_ERROR",
@@ -50,12 +56,19 @@ export function registerHostProfileRoutes(server: FastifyInstance, metaDal: Meta
 				},
 			});
 		}
+		// A safe integer: SQLite stores a larger one, which node:sqlite then
+		// refuses to read back, the launch menu included (#798).
+		if (sort_order !== undefined && !Number.isSafeInteger(sort_order)) {
+			return reply.code(400).send({
+				error: { code: "VALIDATION_ERROR", message: "sort_order must be an integer" },
+			});
+		}
 
 		metaDal.upsertHostProfileOverride(
 			request.params.id,
 			request.params.profileId,
 			override_type,
-			sort_order,
+			sort_order as number | undefined,
 		);
 		// The user's default turned into a pin or hidden: the agent's applies
 		// again at once (#802).

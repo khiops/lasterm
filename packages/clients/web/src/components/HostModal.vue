@@ -628,7 +628,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch, type PropType } from "vue";
-import type { Host, VisualProfile } from "@lasterm/shared";
+import { type Host, isPlainObject, type VisualProfile } from "@lasterm/shared";
 import { useHostForm } from "../composables/useHostForm.js";
 import { getHostColor } from "../composables/useHostIcon.js";
 import { useHostsStore } from "../stores/hosts.js";
@@ -926,7 +926,10 @@ function profileChange(): { profile_json?: string } {
 	let existingProfile: Record<string, unknown> = {};
 	if (storedHost.value?.profileJson) {
 		try {
-			existingProfile = JSON.parse(storedHost.value.profileJson);
+			// Anything else than an object would spread into "0", "1"… keys,
+			// which the hub refuses (#848).
+			const parsed: unknown = JSON.parse(storedHost.value.profileJson);
+			if (isPlainObject(parsed)) existingProfile = parsed;
 		} catch {
 			// Invalid JSON — start fresh
 		}

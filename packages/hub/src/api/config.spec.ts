@@ -5,6 +5,8 @@ import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	profileFieldsError,
+	profileShapeError,
 	profileValueError,
 	registerConfigRoutes,
 	TERMINAL_VALUE_VALIDATORS,
@@ -213,6 +215,86 @@ describe("profileValueError", () => {
 	});
 });
 
+/** A value of `levels` objects nested inside one another. */
+function nestedValue(levels: number): unknown {
+	let value: unknown = "x";
+	for (let i = 0; i < levels; i++) value = { a: value };
+	return value;
+}
+
+describe("profileShapeError", () => {
+	it("refuses a number that is not finite, at any depth", () => {
+		for (const n of [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN]) {
+			expect(profileShapeError({ fontSize: n })).toEqual({
+				code: "INVALID_VALUE",
+				message: 'Invalid value for "fontSize": numbers must be finite',
+			});
+			expect(profileShapeError({ env: { a: [{ b: n }] } })?.message).toBe(
+				'Invalid value for "env": numbers must be finite',
+			);
+		}
+	});
+
+	it("takes 32 levels, refuses 33, and refuses thousands without throwing", () => {
+		expect(profileShapeError({ themeOverrides: nestedValue(32) })).toBeNull();
+		const refusal = {
+			code: "INVALID_VALUE",
+			message: 'Invalid value for "themeOverrides": nested more than 32 levels deep',
+		};
+		expect(profileShapeError({ themeOverrides: nestedValue(33) })).toEqual(refusal);
+		expect(profileShapeError({ themeOverrides: nestedValue(100_000) })).toEqual(refusal);
+	});
+
+	it("takes what a profile holds", () => {
+		expect(
+			profileShapeError({
+				fontSize: 13,
+				env: { PATH: null, HOME: "/h" },
+				visualProfile: { banner: { enabled: true, text: "x" }, tint: { opacity: 5 } },
+			}),
+		).toBeNull();
+	});
+});
+
+describe("profileFieldsError", () => {
+	it("checks the names, then the shape of what is stored, then the values", () => {
+		const deep = nestedValue(40);
+		expect(
+			profileFieldsError({ transferDrop: deep, foo: 1 }, { transferDrop: deep, foo: 1 }, "host")
+				?.message,
+		).toBe("Unknown profile key: foo");
+		expect(
+			profileFieldsError(
+				{ transferDrop: "download", fontSize: Number.POSITIVE_INFINITY },
+				{ transferDrop: "download", fontSize: Number.POSITIVE_INFINITY },
+				"host",
+			)?.message,
+		).toBe('Invalid value for "fontSize": numbers must be finite');
+		expect(
+			profileFieldsError({ transferDrop: "download" }, { transferDrop: "download" }, "host"),
+		).toEqual({ code: "INVALID_VALUE", message: 'Invalid value for "transferDrop": "download"' });
+	});
+
+	it("checks the shape of members kept from the stored profile, and the names of those written only", () => {
+		expect(
+			profileFieldsError(
+				{ fontSize: 13 },
+				{ fontSize: 13, themeOverrides: nestedValue(40) },
+				"host",
+			)?.message,
+		).toBe('Invalid value for "themeOverrides": nested more than 32 levels deep');
+		expect(profileFieldsError({ fontSize: 13 }, { fontSize: 13, foo: 1 }, "host")).toBeNull();
+	});
+
+	it("takes the extra keys a writer allows by name, and leaves their values to it", () => {
+		const profile = { visualProfile: { tint: { color: "red" } } };
+		expect(profileFieldsError(profile, profile, "host")?.message).toBe(
+			"Unknown profile key: visualProfile",
+		);
+		expect(profileFieldsError(profile, profile, "host", ["visualProfile"])).toBeNull();
+	});
+});
+
 // ─── The profile writes consult TERMINAL_VALUE_VALIDATORS ────────────────────
 
 describe("terminal profile writes: value validation", () => {
@@ -305,6 +387,129 @@ describe("terminal profile writes: value validation", () => {
 		expect((await server.inject({ method: "GET", url })).json()).toEqual({
 			profile: { transferDrop: "off" },
 		});
+	});
+
+	it("POST and PUT /api/hosts check a profile_json with the same table, names first (#848)", async () => {
+		const { hostId } = await makeChannel();
+		const writes = [
+			(profile: string) =>
+				server.inject({
+					method: "POST",
+					url: "/api/hosts",
+					payload: { type: "local", label: "tabled", profile_json: profile },
+				}),
+			(profile: string) =>
+				server.inject({
+					method: "PUT",
+					url: `/api/hosts/${hostId}`,
+					payload: { profile_json: profile },
+				}),
+		];
+		for (const write of writes) {
+			const refused = await write('{"transferDrop":"download"}');
+			expect(refused.statusCode).toBe(400);
+			expect(refused.json()).toEqual(refusal);
+
+			for (const profile of ['{"foo":null}', '{"transferDrop":"download","foo":1}']) {
+				const unknown = await write(profile);
+				expect(unknown.statusCode, profile).toBe(400);
+				expect(unknown.json(), profile).toEqual({
+					error: { code: "VALIDATION_ERROR", message: "Unknown profile key: foo" },
+				});
+			}
+
+			const accepted = await write('{"transferDrop":"off"}');
+			expect(accepted.statusCode, accepted.body).toBeLessThan(300);
+		}
+		expect(new MetaDAL(dbs.meta).getHostProfile(hostId)).toBe('{"transferDrop":"off"}');
+	});
+});
+
+// ─── The profile PATCH routes check what they will store (#848) ──────────────
+
+describe("profile PATCH: the merged profile is checked before it is stored", () => {
+	useHubServer();
+
+	/** `levels` objects nested inside one another, as JSON text. */
+	function nested(levels: number): string {
+		return `${'{"a":'.repeat(levels)}"x"${"}".repeat(levels)}`;
+	}
+
+	async function profileUrls(): Promise<{ host: string; channel: string; hostId: string }> {
+		const hostId = (
+			await server.inject({
+				method: "POST",
+				url: "/api/hosts",
+				payload: { type: "local", label: "merged" },
+			})
+		).json<{ id: string }>().id;
+		const meta = new MetaDAL(dbs.meta);
+		meta.createSession({ id: "ses-merged", hostId, status: "starting" });
+		meta.createChannel({ id: "ch-merged", sessionId: "ses-merged", status: "born" });
+		return {
+			host: `/api/hosts/${hostId}/profile`,
+			channel: "/api/channels/ch-merged/profile",
+			hostId,
+		};
+	}
+
+	function patch(url: string, raw: string) {
+		return server.inject({
+			method: "PATCH",
+			url,
+			payload: raw,
+			headers: { "content-type": "application/json" },
+		});
+	}
+
+	it("refuses a number that is not finite and a value nested too deep, on both scopes", async () => {
+		const urls = await profileUrls();
+		const cases: Array<[raw: string, message: string]> = [
+			['{"profile":{"fontSize":1e400}}', 'Invalid value for "fontSize": numbers must be finite'],
+			[
+				`{"profile":{"themeOverrides":${nested(40)}}}`,
+				'Invalid value for "themeOverrides": nested more than 32 levels deep',
+			],
+			[
+				`{"profile":{"transferDrop":${nested(10_000)}}}`,
+				'Invalid value for "transferDrop": nested more than 32 levels deep',
+			],
+		];
+		for (const url of [urls.host, urls.channel]) {
+			for (const [raw, message] of cases) {
+				const res = await patch(url, raw);
+				expect(res.statusCode, `${url} ${message}`).toBe(400);
+				expect(res.json(), `${url} ${message}`).toEqual({
+					error: { code: "INVALID_VALUE", message },
+				});
+			}
+			expect((await server.inject({ method: "GET", url })).json()).toEqual({ profile: {} });
+		}
+	});
+
+	it("refuses a stored member it cannot store, until a null removes it", async () => {
+		const urls = await profileUrls();
+		const meta = new MetaDAL(dbs.meta);
+		const deep = `{"themeOverrides":${nested(40)}}`;
+		meta.updateHostProfile(urls.hostId, deep);
+		meta.updateChannelProfile("ch-merged", deep);
+
+		for (const url of [urls.host, urls.channel]) {
+			const refused = await patch(url, '{"profile":{"fontSize":13}}');
+			expect(refused.statusCode, url).toBe(400);
+			expect(refused.json(), url).toEqual({
+				error: {
+					code: "INVALID_VALUE",
+					message: 'Invalid value for "themeOverrides": nested more than 32 levels deep',
+				},
+			});
+
+			const removed = await patch(url, '{"profile":{"themeOverrides":null,"fontSize":13}}');
+			expect(removed.statusCode, url).toBe(200);
+			expect((await server.inject({ method: "GET", url })).json()).toEqual({
+				profile: { fontSize: 13 },
+			});
+		}
 	});
 });
 

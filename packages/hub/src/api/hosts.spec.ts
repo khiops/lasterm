@@ -3,11 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
 	type CreateHostBody,
 	MAX_ICON_IMAGE_LENGTH,
+	readHostProfileJson,
+	sameJson,
 	type UpdateHostBody,
 	validateCreateHost,
 	validateHostColor,
 	validateIconImage,
-	validateProfileJson,
 	validateSshPort,
 	validateUpdateHost,
 } from "./hosts.js";
@@ -297,24 +298,126 @@ describe("validateSshPort", () => {
 	});
 });
 
-// POST and PUT /api/hosts apply it to profile_json.
-describe("validateProfileJson", () => {
+// POST and PUT /api/hosts read profile_json with it (#848).
+describe("readHostProfileJson", () => {
 	function withBorderColor(color: unknown): string {
 		return JSON.stringify({ visualProfile: { border: { style: "subtle", color } } });
 	}
 
+	function refused(code: string, message: string) {
+		return { error: { code, message } };
+	}
+
+	/** `levels` objects nested inside one another, as JSON text. */
+	function nested(levels: number): string {
+		return `${'{"a":'.repeat(levels)}"x"${"}".repeat(levels)}`;
+	}
+
+	it("leaves the column alone when none is sent, and clears it for null", () => {
+		expect(readHostProfileJson(undefined, '{"fontSize":12}')).toEqual({ value: undefined });
+		expect(readHostProfileJson(null, '{"fontSize":12}')).toEqual({ value: null });
+	});
+
 	it("accepts a border colour of #rrggbb", () => {
-		expect(validateProfileJson(withBorderColor("#123456"))).toBeNull();
+		expect(readHostProfileJson(withBorderColor("#123456"), undefined)).toEqual({
+			value: withBorderColor("#123456"),
+		});
 	});
 
 	it("accepts a border with no colour, which follows the host's (#663)", () => {
-		expect(validateProfileJson(withBorderColor(""))).toBeNull();
+		expect(readHostProfileJson(withBorderColor(""), undefined)).not.toHaveProperty("error");
 		expect(
-			validateProfileJson(JSON.stringify({ visualProfile: { border: { style: "subtle" } } })),
-		).toBeNull();
+			readHostProfileJson(
+				JSON.stringify({ visualProfile: { border: { style: "subtle" } } }),
+				undefined,
+			),
+		).not.toHaveProperty("error");
 	});
 
-	it("refuses a colour that is not #rrggbb", () => {
-		expect(validateProfileJson(withBorderColor("red"))).toBe("Invalid color value: red");
+	it("refuses a colour that is not #rrggbb, and a visualProfile that is not an object", () => {
+		expect(readHostProfileJson(withBorderColor("red"), undefined)).toEqual(
+			refused("VALIDATION_ERROR", "Invalid color value: red"),
+		);
+		expect(readHostProfileJson('{"visualProfile":"x"}', undefined)).toEqual(
+			refused("VALIDATION_ERROR", "visualProfile must be an object"),
+		);
+	});
+
+	it("stores a tint's opacity as sent: the client bounds it where it renders it", () => {
+		const text = '{"visualProfile":{"tint":{"color":"#112233","opacity":50}}}';
+		expect(readHostProfileJson(text, undefined)).toEqual({ value: text });
+	});
+
+	it("refuses text that is not JSON, or JSON that is not an object", () => {
+		expect(readHostProfileJson("{", undefined)).toEqual(
+			refused("VALIDATION_ERROR", "Invalid profile_json format"),
+		);
+		for (const text of ["123", "[1]", "null", '"x"']) {
+			expect(readHostProfileJson(text, undefined), text).toEqual(
+				refused("VALIDATION_ERROR", "profile_json must be a JSON object"),
+			);
+		}
+	});
+
+	it("drops a member sent as null, and refuses one whose name is not a profile key", () => {
+		expect(readHostProfileJson('{"fontSize":null,"theme":"x"}', undefined)).toEqual({
+			value: '{"theme":"x"}',
+		});
+		expect(readHostProfileJson('{"foo":null}', undefined)).toEqual(
+			refused("VALIDATION_ERROR", "Unknown profile key: foo"),
+		);
+	});
+
+	it("keeps a member the stored profile holds unchanged, and checks one it changes", () => {
+		const stored = '{"foo":1,"fontSize":null,"transferDrop":"download"}';
+		expect(
+			readHostProfileJson('{"transferDrop":"download","fontSize":null,"foo":1}', stored),
+		).toEqual({ value: '{"transferDrop":"download","fontSize":null,"foo":1}' });
+		expect(readHostProfileJson('{"foo":2}', stored)).toEqual(
+			refused("VALIDATION_ERROR", "Unknown profile key: foo"),
+		);
+		expect(readHostProfileJson('{"transferDrop":"both"}', stored)).toEqual(
+			refused("INVALID_VALUE", 'Invalid value for "transferDrop": "both"'),
+		);
+	});
+
+	it("reads a stored profile that is not an object as none, and leaves out only a malformed member", () => {
+		expect(readHostProfileJson('{"0":1}', "[1]")).toEqual(
+			refused("VALIDATION_ERROR", "Unknown profile key: 0"),
+		);
+		const stored = `{"foo":1,"bar":${nested(40)}}`;
+		expect(readHostProfileJson('{"foo":1}', stored)).toEqual({ value: '{"foo":1}' });
+		expect(readHostProfileJson(`{"bar":${nested(40)}}`, stored)).toEqual(
+			refused("VALIDATION_ERROR", "Unknown profile key: bar"),
+		);
+	});
+
+	it("refuses a number that is not finite, and a value nested past the bound", () => {
+		expect(readHostProfileJson('{"fontSize":-1e400}', undefined)).toEqual(
+			refused("INVALID_VALUE", 'Invalid value for "fontSize": numbers must be finite'),
+		);
+		expect(readHostProfileJson(`{"themeOverrides":${nested(10_000)}}`, undefined)).toEqual(
+			refused(
+				"INVALID_VALUE",
+				'Invalid value for "themeOverrides": nested more than 32 levels deep',
+			),
+		);
+	});
+});
+
+describe("sameJson", () => {
+	it("compares JSON values in any key order", () => {
+		expect(sameJson({ a: [1, { b: null }], c: "x" }, { c: "x", a: [1, { b: null }] })).toBe(true);
+		expect(sameJson({ a: 1 }, { a: 1, b: 2 })).toBe(false);
+		expect(sameJson([1, 2], [2, 1])).toBe(false);
+		expect(sameJson([], {})).toBe(false);
+		expect(sameJson(null, null)).toBe(true);
+		expect(sameJson({ a: 1 }, null)).toBe(false);
+	});
+
+	it("goes no deeper than the stored value, however deep the one sent", () => {
+		let deep: unknown = "x";
+		for (let i = 0; i < 100_000; i++) deep = { a: deep };
+		expect(sameJson({ a: { a: "x" } }, deep)).toBe(false);
 	});
 });

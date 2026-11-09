@@ -1,3 +1,4 @@
+import { isPlainObject } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { MetaDAL } from "../storage/meta.js";
 
@@ -11,7 +12,13 @@ export function registerHostWelcomeRoutes(server: FastifyInstance, metaDal: Meta
 				return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
 			}
 
-			const { channel_id } = request.body;
+			const body: unknown = request.body;
+			if (!isPlainObject(body)) {
+				return reply.code(400).send({
+					error: { code: "VALIDATION_ERROR", message: "body must be an object" },
+				});
+			}
+			const { channel_id } = body;
 			if (!channel_id || typeof channel_id !== "string") {
 				return reply.code(400).send({
 					error: { code: "VALIDATION_ERROR", message: "channel_id is required" },

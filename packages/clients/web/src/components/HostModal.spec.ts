@@ -335,6 +335,45 @@ describe("HostModal visual profile: a border in the host's colour (#663)", () =>
 		expect(saved.visualProfile.border).toEqual({ style: "subtle", color: "" });
 		expect(saved.fontSize).toBe(15);
 	});
+
+	it("sends no member of a stored profile that is not an object (#848)", async () => {
+		const answer = {
+			id: LOCAL.id,
+			type: "local",
+			label: "local",
+			icon_type: "auto",
+			trust_remote_hints: "apply",
+			sort_order: 0,
+			os: "windows",
+			arch: "x64",
+			created_at: STAMP,
+			updated_at: STAMP,
+		};
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify(answer), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			}),
+		);
+		mountModal({ ...LOCAL, profileJson: "[1]" });
+		const tint = [
+			...document.body.querySelectorAll<HTMLInputElement>(
+				'#panel-appearance input[type="checkbox"]',
+			),
+		].find((box) => box.closest("label")?.textContent?.includes("Enable background tint"));
+		if (!tint) throw new Error("no tint checkbox");
+		tint.checked = true;
+		tint.dispatchEvent(new Event("change"));
+		await nextTick();
+
+		el<HTMLButtonElement>(".dialog-actions .btn-primary")?.click();
+		await settle();
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const [, init] = fetchSpy.mock.calls[0] ?? [];
+		const body = JSON.parse(String(init?.body)) as { profile_json: string };
+		expect(Object.keys(JSON.parse(body.profile_json))).toEqual(["visualProfile"]);
+	});
 });
 
 describe("HostModal for an SSH host", () => {

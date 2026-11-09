@@ -288,12 +288,12 @@ describe("a host's save, refused (#703)", () => {
 		const store = load();
 		await store.fetchHosts();
 		answerOnce(400, {
-			error: { code: "VALIDATION_ERROR", message: "Label must be 1-64 characters" },
+			error: { code: "VALIDATION_ERROR", message: "Label is required" },
 		});
 
 		const answer = await store.createHost({ label: "" });
 
-		expect(answer).toMatchObject({ ok: false, message: "Label must be 1-64 characters" });
+		expect(answer).toMatchObject({ ok: false, message: "Label is required" });
 		expect(store.hosts).toHaveLength(3);
 	});
 

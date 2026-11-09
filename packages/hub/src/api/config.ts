@@ -8,6 +8,7 @@ import {
 	HOST_ONLY_PROFILE_KEYS,
 	isHostRailBadgeSize,
 	isHostRailColumns,
+	isPlainObject,
 	isTransferPanelWidth,
 	LOGGING_SETTINGS_KEYS,
 	LOGGING_SETTINGS_VALIDATORS,
@@ -84,8 +85,10 @@ export const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => 
 };
 
 /**
- * The values a terminal profile accepts, by key, wherever it is written:
- * `PUT /api/config/global`, and a host's or a channel's profile `PATCH`. A key
+ * The values a terminal profile accepts, by key, in the routes that consult
+ * it: `PUT /api/config/global`, a host's or a channel's profile `PATCH`, and
+ * a host's `profile_json` on `POST` and `PUT /api/hosts` (#848). A launch
+ * profile's `profile_overrides` does not go through it. A key
  * without an entry is stored as given; `null`, which removes a key, is never
  * asked about. Each rule is unit-tested in `config.spec.ts`, and each route
  * keeps one test proving it consults this table.
@@ -123,6 +126,90 @@ export function profileValueError(
 		}
 	}
 	return null;
+}
+
+/** How deep a profile value may nest objects and arrays, the member's own value being level 1. */
+export const MAX_PROFILE_VALUE_DEPTH = 32;
+
+/** Why a value cannot be stored as JSON as it is, walking no deeper than the bound. */
+function valueShapeProblem(value: unknown, level: number): string | null {
+	if (typeof value === "number") return Number.isFinite(value) ? null : "numbers must be finite";
+	if (typeof value !== "object" || value === null) return null;
+	if (level > MAX_PROFILE_VALUE_DEPTH) {
+		return `nested more than ${MAX_PROFILE_VALUE_DEPTH} levels deep`;
+	}
+	for (const item of Array.isArray(value) ? value : Object.values(value)) {
+		const problem = valueShapeProblem(item, level + 1);
+		if (problem !== null) return problem;
+	}
+	return null;
+}
+
+/**
+ * What in a profile about to be stored would not come back as written, or null.
+ * `JSON.parse` reads `1e400` as `Infinity`, which `JSON.stringify` writes as
+ * `null`, and `JSON.stringify` throws on a value nested some thousands deep,
+ * which a request body can hold (#848). The walk stops at the bound.
+ */
+export function profileShapeError(
+	profile: Record<string, unknown>,
+): { code: "INVALID_VALUE"; message: string } | null {
+	for (const [key, value] of Object.entries(profile)) {
+		const problem = valueShapeProblem(value, 1);
+		if (problem !== null) {
+			return { code: "INVALID_VALUE", message: `Invalid value for "${key}": ${problem}` };
+		}
+	}
+	return null;
+}
+
+/**
+ * The check the writes of a host's or a channel's profile go through (#848):
+ * the two profile PATCH routes, and a host's `profile_json` on POST and PUT.
+ * `PUT /api/config/global`, which writes `config.toml`, keeps its own key
+ * check and `profileValueError`, with no shape check. `written` holds the
+ * members the request sets, `null` for one it removes; `result`, the profile as
+ * it will be stored. In this order: each written key against
+ * `TERMINAL_PROFILE_KEYS` (or `extraKeys`), the shape of `result`, then the
+ * values of the written terminal keys (`profileValueError`), whose message
+ * quotes a value the shape check has already bounded.
+ */
+export function profileFieldsError(
+	written: Record<string, unknown>,
+	result: Record<string, unknown>,
+	scope: ProfileScope,
+	extraKeys: readonly string[] = [],
+): { code: "VALIDATION_ERROR" | "INVALID_VALUE"; message: string } | null {
+	for (const key of Object.keys(written)) {
+		if (!(TERMINAL_PROFILE_KEYS as readonly string[]).includes(key) && !extraKeys.includes(key)) {
+			return { code: "VALIDATION_ERROR", message: `Unknown profile key: ${key}` };
+		}
+	}
+	const shapeError = profileShapeError(result);
+	if (shapeError !== null) return shapeError;
+	const terminal = Object.fromEntries(
+		Object.entries(written).filter(([key]) => !extraKeys.includes(key)),
+	);
+	return profileValueError(terminal, scope);
+}
+
+/**
+ * The profile a PATCH leaves: the stored one, each member of the patch over it,
+ * and a `null` removing its key. A stored profile that is not an object, which
+ * an earlier version's POST or PUT could store, is none: spread, it would turn
+ * into "0", "1"… keys (#848).
+ */
+function mergeProfile(
+	storedRaw: string | null,
+	patch: Record<string, unknown>,
+): Record<string, unknown> {
+	const parsed: unknown = storedRaw ? JSON.parse(storedRaw) : {};
+	const stored = isPlainObject(parsed) ? parsed : {};
+	const merged: Record<string, unknown> = { ...stored, ...patch };
+	for (const [key, value] of Object.entries(patch)) {
+		if (value === null) delete merged[key];
+	}
+	return merged;
 }
 
 export function registerConfigRoutes(
@@ -315,34 +402,22 @@ export function registerConfigRoutes(
 				return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
 			}
 
-			const { profile } = request.body;
-			if (profile === undefined || typeof profile !== "object" || Array.isArray(profile)) {
+			const body: unknown = request.body;
+			if (!isPlainObject(body)) {
+				return reply.code(400).send({
+					error: { code: "VALIDATION_ERROR", message: "body must be an object" },
+				});
+			}
+			const { profile } = body;
+			if (!isPlainObject(profile)) {
 				return reply.code(400).send({
 					error: { code: "VALIDATION_ERROR", message: "body.profile must be an object" },
 				});
 			}
 
-			for (const key of Object.keys(profile as Record<string, unknown>)) {
-				if (key !== null && !(TERMINAL_PROFILE_KEYS as readonly string[]).includes(key)) {
-					return reply.code(400).send({
-						error: { code: "VALIDATION_ERROR", message: `Unknown profile key: ${key}` },
-					});
-				}
-			}
-			const valueError = profileValueError(profile as Record<string, unknown>, "host");
-			if (valueError !== null) return reply.code(400).send({ error: valueError });
-
-			const existingRaw = metaDal.getHostProfile(id);
-			const existing = existingRaw ? (JSON.parse(existingRaw) as Record<string, unknown>) : {};
-			const merged: Record<string, unknown> = {
-				...existing,
-				...(profile as Record<string, unknown>),
-			};
-			for (const key of Object.keys(profile as Record<string, unknown>)) {
-				if ((profile as Record<string, unknown>)[key] === null) {
-					delete merged[key];
-				}
-			}
+			const merged = mergeProfile(metaDal.getHostProfile(id), profile);
+			const profileError = profileFieldsError(profile, merged, "host");
+			if (profileError !== null) return reply.code(400).send({ error: profileError });
 			metaDal.updateHostProfile(id, JSON.stringify(merged));
 
 			announce({ scope: "host", hostId: id });
@@ -532,34 +607,22 @@ export function registerConfigRoutes(
 				return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Channel not found" } });
 			}
 
-			const { profile } = request.body;
-			if (profile === undefined || typeof profile !== "object" || Array.isArray(profile)) {
+			const body: unknown = request.body;
+			if (!isPlainObject(body)) {
+				return reply.code(400).send({
+					error: { code: "VALIDATION_ERROR", message: "body must be an object" },
+				});
+			}
+			const { profile } = body;
+			if (!isPlainObject(profile)) {
 				return reply.code(400).send({
 					error: { code: "VALIDATION_ERROR", message: "body.profile must be an object" },
 				});
 			}
 
-			for (const key of Object.keys(profile as Record<string, unknown>)) {
-				if (key !== null && !(TERMINAL_PROFILE_KEYS as readonly string[]).includes(key)) {
-					return reply.code(400).send({
-						error: { code: "VALIDATION_ERROR", message: `Unknown profile key: ${key}` },
-					});
-				}
-			}
-			const valueError = profileValueError(profile as Record<string, unknown>, "channel");
-			if (valueError !== null) return reply.code(400).send({ error: valueError });
-
-			const existingRaw = metaDal.getChannelProfile(id);
-			const existing = existingRaw ? (JSON.parse(existingRaw) as Record<string, unknown>) : {};
-			const merged: Record<string, unknown> = {
-				...existing,
-				...(profile as Record<string, unknown>),
-			};
-			for (const key of Object.keys(profile as Record<string, unknown>)) {
-				if ((profile as Record<string, unknown>)[key] === null) {
-					delete merged[key];
-				}
-			}
+			const merged = mergeProfile(metaDal.getChannelProfile(id), profile);
+			const profileError = profileFieldsError(profile, merged, "channel");
+			if (profileError !== null) return reply.code(400).send({ error: profileError });
 			metaDal.updateChannelProfile(id, JSON.stringify(merged));
 
 			announce({ scope: "channel", channelId: id });

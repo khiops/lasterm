@@ -553,15 +553,29 @@ describe("TerminalPane rings no bell for a replay (#927)", () => {
 			await settle();
 			hear({ type: "OUTPUT", channelId: T, data: bytes(`after${BEL}`) });
 
-			// And an ended terminal's last output.
+			// A live ATTACH_OK's snapshot, now that the pane listens for bells.
 			useSessionStore().reconnectCount++;
 			await vi.waitFor(() => expect(attaches()).toHaveLength(3));
-			refuse(T, lastOutput({ snapshot: null, tail: [bytes(`ENDED${BEL}`)] }));
+			attachOk(T, `AGAIN${BEL}`);
+			await settle();
+
+			// And an ended terminal's last output, snapshot and tail.
+			useSessionStore().reconnectCount++;
+			await vi.waitFor(() => expect(attaches()).toHaveLength(4));
+			refuse(
+				T,
+				lastOutput({
+					snapshot: { serialized: `ENDSCREEN${BEL}`, cols: 100, rows: 30, cursorX: 0, cursorY: 0 },
+					tail: [bytes(`ENDED${BEL}`)],
+				}),
+			);
 			await settle();
 			drain();
 			await settle();
 
-			expect(xterm.events).toContain(`ENDED${BEL}`);
+			expect(xterm.events).toEqual(
+				expect.arrayContaining([`AGAIN${BEL}`, `ENDSCREEN${BEL}`, `ENDED${BEL}`]),
+			);
 			expect(useNotificationStore().bellCounts.get(T)).toBe(2);
 			expect(vi.mocked(playBellSound)).toHaveBeenCalledTimes(2);
 		});

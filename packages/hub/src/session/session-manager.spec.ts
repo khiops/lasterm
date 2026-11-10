@@ -2620,11 +2620,14 @@ describe("SessionManager", () => {
 			const last = lastOutputOf(received);
 			expect(last.snapshot).toEqual(SCREEN);
 			expect(text(last.tail)).toEqual(["after"]);
+			expect(last).not.toHaveProperty("truncated");
 			expect({ cols: last.cols, rows: last.rows }).toEqual({ cols: 100, rows: 30 });
 			expect(agent.send).not.toHaveBeenCalled();
 			const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext })
 				.ctx;
-			expect(ctx.channels.get(channelId)?.clients.has("reader") ?? false).toBe(false);
+			const still = ctx.channels.get(channelId);
+			expect(still?.status).toBe("dead");
+			expect(still?.clients.has("reader")).toBe(false);
 			expect(client.attachedChannels.has(channelId)).toBe(false);
 			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
 		});
@@ -2754,6 +2757,9 @@ describe("SessionManager", () => {
 
 			expect(huge).toEqual({ snapshot: null, tail: [], truncated: true, cols: 120, rows: 40 });
 			expect(reads.one).not.toHaveBeenCalled();
+			expect(reads.latest).not.toHaveBeenCalled();
+			expect(reads.byChannel).not.toHaveBeenCalled();
+			expect(reads.output).not.toHaveBeenCalled();
 
 			endedTerminal("ended-limit");
 			store("ended-limit", 10, "snapshot", snapshotOf(LIMIT));
@@ -2863,6 +2869,51 @@ describe("SessionManager", () => {
 						channelId: "ended-io",
 					},
 				]);
+			});
+
+			it("on a terminal its agent no longer has, with a hub logger", async () => {
+				const logged: Array<[string, string, Record<string, unknown> | undefined]> = [];
+				const logger = {
+					log: (level: string, msg: string, extra?: Record<string, unknown>) =>
+						logged.push([level, msg, extra]),
+				};
+				const withLog = new SessionManager(
+					dbManager,
+					undefined,
+					undefined,
+					undefined,
+					logger as never,
+				);
+				try {
+					withLog.addClient(makeClient("first", []));
+					const channelId = await withLog.handleSpawn("first", { type: "SPAWN", hostId: "local" });
+					if (channelId === null) throw new Error("expected a local channel");
+					nextLocalAttachNotFoundChannelId = channelId;
+					spoolFails();
+					const received: ProtocolMessage[] = [];
+					withLog.addClient(makeClient("second", received));
+
+					expect(await withLog.handleAttach("second", channelId)).toBe(false);
+
+					expect(received.filter((m) => m.type === "ERROR")).toEqual([
+						{
+							type: "ERROR",
+							code: "CHANNEL_DEAD",
+							message: "This terminal is no longer running on its host.",
+							channelId,
+						},
+					]);
+					expect(logged.filter(([level]) => level === "warn")).toEqual([
+						[
+							"warn",
+							"could not read an ended terminal's last output",
+							{ channelId, code: "ERR_SQLITE_ERROR" },
+						],
+					]);
+					expect(JSON.stringify(logged)).not.toContain(SECRET);
+				} finally {
+					await withLog.shutdown();
+				}
 			});
 
 			it("on a terminal its agent no longer has", async () => {

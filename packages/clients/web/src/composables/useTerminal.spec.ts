@@ -502,15 +502,19 @@ describe("an ended terminal's last output (#927)", () => {
 	it("draws an ended terminal's output at the size it last had", async () => {
 		// A snapshot taken at another size than the terminal's last: the last one decides.
 		const older = { ...SCREEN, cols: 120, rows: 40 };
+		const atLastSize = Array(4).fill({ cols: 100, rows: 30 });
 		const reader = pane();
 		await reader.attachEnded("T", output({ snapshot: older }));
-		expect(xterm.writtenAt[0]).toEqual({ cols: 100, rows: 30 });
+		expect(xterm.events).toEqual(["<reset>", "SCREEN", "a", "b", MOUSE_OFF]);
+		expect(xterm.writtenAt).toEqual(atLastSize);
 
+		xterm.events.length = 0;
 		xterm.writtenAt.length = 0;
 		const writer = pane();
 		writer.terminal.setDecidesSize(true);
 		await writer.attachEnded("T", output({ snapshot: older }));
-		expect(xterm.writtenAt[0]).toEqual({ cols: 100, rows: 30 });
+		expect(xterm.events).toEqual(["<reset>", "SCREEN", "a", "b", MOUSE_OFF]);
+		expect(xterm.writtenAt).toEqual(atLastSize);
 
 		xterm.writtenAt.length = 0;
 		const tailOnly = pane();
@@ -521,10 +525,11 @@ describe("an ended terminal's last output (#927)", () => {
 	it("says when an ended terminal's output was too long to send", async () => {
 		const withScreen = pane();
 		await withScreen.attachEnded("T", output({ tail: [], truncated: true }));
-		expect(xterm.events.slice(0, 3)).toEqual([
+		expect(xterm.events).toEqual([
 			"<reset>",
 			"SCREEN",
 			"\r\n\u001b[2m── output between this screen and now was dropped ──\u001b[0m\r\n",
+			MOUSE_OFF,
 		]);
 
 		xterm.events.length = 0;

@@ -117,7 +117,13 @@ export const ErrorCode = {
 	 * retry resumes them.
 	 */
 	TRANSFERS_WOULD_STOP: "TRANSFERS_WOULD_STOP",
-	/** DELETE /api/hosts/:id: uploads are running; no force overrides this refusal (#910). */
+	/**
+	 * DELETE /api/hosts/:id: transfersOn counts uploads Disconnect would stop:
+	 * preparation, operations in flight, folder creation, or a source present
+	 * and files queued, sending or verifying. No force overrides this refusal.
+	 * An upload whose remaining files only wait on a conflict answer is not
+	 * counted; its rows are deleted with the host (#910).
+	 */
 	TRANSFERS_RUNNING: "TRANSFERS_RUNNING",
 	/** WS TRANSFER_* and the transfer routes: `[experimental] file_transfer` is off (#835). */
 	FILE_TRANSFER_DISABLED: "FILE_TRANSFER_DISABLED",

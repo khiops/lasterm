@@ -11,9 +11,13 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 - **Refuse, count, force.** DELETE host accepts `force=true|false`. Admission is synchronous:
   absent host (404), invalid force (400), quitting, stopping, an acquisition, terminal start or
-  local daemon attach, uploads running/queued/preparing, then non-dead tracked terminals (409).
-  No force overrides `TRANSFERS_RUNNING`: the upload preparation cannot be interrupted. This is
-  the exception to UPLOADS' "every gesture that closes a connection … take force".
+  local daemon attach, uploads counted by `transfersOn(hostId)`, then non-dead tracked terminals
+  (409). That upload count is Disconnect's: a start being prepared, or an upload with an operation
+  in flight, folders being created, or a source present and files queued, sending or verifying.
+  An upload whose remaining files only wait on a conflict answer is not counted; its rows are
+  deleted with the host. No force overrides `TRANSFERS_RUNNING`: the upload preparation cannot
+  be interrupted. This is the exception to UPLOADS' "every gesture that closes a connection …
+  take force".
 - **What the count means.** `terminals` counts this hub's tracked, non-dead terminals for the
   host. `unreachable`, omitted at zero, equals that count when no agent is connected. They may
   still run: the previous connection's transport and the host's current daemon setting need not

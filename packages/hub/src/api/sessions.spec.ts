@@ -1,9 +1,7 @@
-import { writeFileSync } from "node:fs";
 import type { AgentChannelStateMessage, HelloMessage, ProtocolMessage } from "@lasterm/shared";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigResolver } from "../config.js";
-import { LOCAL_BACKEND } from "../files/upload-backends.fixture.js";
 import type { ChannelLifecycleManager } from "../session/channel-lifecycle-manager.js";
 import { captureQuitFence } from "../session/quit-fence.js";
 import {
@@ -17,8 +15,6 @@ import { SshAgent } from "../session/ssh-agent.js";
 import { SshConnectionManager } from "../session/ssh-connection-manager.js";
 import { type DatabaseManager, openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
-import { TransfersDAL } from "../storage/transfers-dal.js";
-import { serviceOn, startUpload, WRITER } from "../transfers/transfer-service.fixture.js";
 import { registerChannelRoutes } from "./channels.js";
 import { registerHostConnectionRoutes } from "./host-connection.js";
 import { registerHostRoutes } from "./hosts.js";
@@ -385,7 +381,7 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 	});
 
 	it.each(["", "?force=true"])("R5 never overrides running uploads with %s", async (force) => {
-		sm.setTransfers({ activeOn: () => 2, blockingHostDeletionOn: () => 2, interruptOn: vi.fn() });
+		sm.setTransfers({ activeOn: () => 2, interruptOn: vi.fn() });
 		const response = await remove(force);
 		expect(response.statusCode).toBe(409);
 		expect(response.json().error).toEqual({
@@ -396,57 +392,6 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		});
 		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
 	});
-
-	it.each(["file", "dir"] as const)(
-		"refuses forced deletion while an upload waits on a %s conflict",
-		async (kind) => {
-			const agent = connectedAgent();
-			const { channelId, ctx } = liveTerminalOn(agent);
-			const h = await LOCAL_BACKEND.start();
-			const store = new TransfersDAL(dbs.meta);
-			const s = serviceOn(h, LOCAL_BACKEND, { store });
-			s.world.hostOf.set(channelId, hostId);
-			sm.setTransfers(s.service);
-			try {
-				// An existing file conflicts both with another file and with a folder.
-				writeFileSync(h.at("there"), "existing");
-				const { transferId } = await startUpload(
-					s,
-					h.dir,
-					[
-						kind === "file"
-							? { relPath: "there", kind, size: 5, mtime: 0 }
-							: { relPath: "there", kind },
-					],
-					"ask",
-					WRITER,
-					channelId,
-				);
-				s.service.saveNow();
-				expect(store.list()).toEqual([
-					expect.objectContaining({ id: transferId, state: "running" }),
-				]);
-				const items = store.items(transferId);
-				expect(items).toEqual([expect.objectContaining({ state: "conflict" })]);
-				// Connection retirement keeps its existing definition of active work.
-				expect(s.service.activeOn(hostId)).toBe(0);
-				const response = await remove("?force=true");
-				expect(response.statusCode).toBe(409);
-				expect(response.json().error).toMatchObject({ code: "TRANSFERS_RUNNING", transfers: 1 });
-				expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
-				expect(new MetaDAL(dbs.meta).getChannel(channelId)).toBeDefined();
-				expect(ctx.channels.has(channelId)).toBe(true);
-				expect(store.list()).toEqual([
-					expect.objectContaining({ id: transferId, state: "running" }),
-				]);
-				expect(store.items(transferId)).toEqual(items);
-				expect(agent.sent).toEqual([]);
-			} finally {
-				s.service.shutdown();
-				await h.close();
-			}
-		},
-	);
 
 	it("R6 counts unreachable terminals without promising a send", async () => {
 		const agent = connectedAgent();
@@ -1559,7 +1504,6 @@ describe("POST stop-keeping", () => {
 		const interrupted: string[] = [];
 		sm.setTransfers({
 			activeOn: (id) => (id === hostId && interrupted.length === 0 ? 1 : 0),
-			blockingHostDeletionOn: (id) => (id === hostId && interrupted.length === 0 ? 1 : 0),
 			interruptOn: (id) => interrupted.push(id),
 		});
 		const refusal = await stop({ end_terminals: true, force: true });

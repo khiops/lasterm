@@ -223,8 +223,6 @@ export type ReplaceAgentOutcome =
 export interface HostTransfers {
 	/** How many uploads to this host are running or queued: they hold its connection. */
 	activeOn(hostId: string): number;
-	/** Uploads that forbid deleting the host: active work and running conflicts included (#910). */
-	blockingHostDeletionOn(hostId: string): number;
 	/** Its connection is being closed on purpose: they stop, interrupted, and resume on a retry. */
 	interruptOn(hostId: string): void;
 	/** A remote host's agent connected, whoever connected it: what waited for that goes on (#860). */
@@ -3000,7 +2998,7 @@ export class SessionManager {
 					"A terminal or a connection is starting on this host. Wait for it, or answer or cancel its question, then delete the host.",
 			};
 		}
-		const transfers = this.transfers?.blockingHostDeletionOn(hostId) ?? 0;
+		const transfers = this.transfersOn(hostId);
 		if (transfers > 0)
 			return {
 				kind: "refused",

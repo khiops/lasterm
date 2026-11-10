@@ -809,10 +809,38 @@ sends a frame or disconnects.
 { type: "DETACH", channel_id: string }
 ```
 
-An ATTACH on a terminal that has ended is answered `ERROR { code: "CHANNEL_DEAD", channel_id }`,
-whether the hub still holds it in memory or only in meta.db, and whether its host is connected or
-not. One the hub has no record of is answered `CHANNEL_NOT_FOUND`. An ATTACH never starts a
-terminal: bringing an ended one back is a SPAWN that names it, which is the user's Restart (#559).
+An ATTACH on a terminal that has ended is answered `ERROR { code: "CHANNEL_DEAD", channel_id,
+last_output }`, whether the hub still holds it in memory or only in meta.db, and whether its host is
+connected or not. One the hub has no record of is answered `CHANNEL_NOT_FOUND`, without
+`last_output`. An ATTACH never starts a terminal, attaches nobody to an ended one and takes no write
+lock: bringing an ended one back is a SPAWN that names it, which is the user's Restart (#559).
+
+```typescript
+// on ERROR CHANNEL_DEAD answering an ATTACH only (#927); absent from a hub older than that
+last_output: {
+  snapshot: { serialized, cols, rows, cursor_x, cursor_y } | null,
+  tail: Uint8Array[],   // the output after the snapshot, as one element; [] when none is sent
+  truncated?: true,     // there was output to send, and it was not
+  cols: number,         // the terminal's last size, which snapshot and tail were drawn at
+  rows: number
+}
+```
+
+`last_output` is what the terminal last printed, as far as spool.db still holds it: the newest
+snapshot and the output stored after it, or, with no snapshot, the whole stream from its first seq.
+Only output that continues where it starts is sent, since a piece of a terminal stream drawn on a
+screen it was not written for shows something wrong without saying so:
+
+- a snapshot whose following output starts after a gap (the GC took its start) is sent alone, with
+  `truncated`;
+- output with no snapshot whose stream lost its start, or after a snapshot that does not parse, is
+  not sent, and neither is `truncated`;
+- a channel the GC emptied, or one that printed nothing, has `snapshot: null` and `tail: []`.
+
+The tail follows the cached ATTACH_OK's rule: sent when it totals at most 128 KiB, else `tail: []`
+and `truncated`. A snapshot stored above 256 KiB is not sent (`snapshot: null`, `truncated`): the
+answer stays under the 512 KiB the desktop takes in one message. The pane draws it at `cols` ×
+`rows` under its exit card, read-only.
 
 The answer is what a pane shows, and a pane attaches again whenever its socket is replaced: an
 ATTACH_OK from the terminal leaves it uncovered, one with `cached: true` shows it is not connected,
@@ -1368,7 +1396,7 @@ An unknown or refused token is not an ERROR: it is `AUTH_FAIL` (§ 4.1).
 | `MALFORMED_MESSAGE` | The frame does not decode as MessagePack |
 | `INVALID_INPUT` | A field the hub checks is refused: an id that is not a ULID, `cols` or `rows`, `shell`, `cwd`, `env`, INPUT over 64 KiB, a prompt's answer |
 | `CHANNEL_NOT_FOUND` | ATTACH on a terminal the hub has no record of (§ 4.2) |
-| `CHANNEL_DEAD` | ATTACH on a terminal that has ended (§ 4.2) |
+| `CHANNEL_DEAD` | ATTACH on a terminal that has ended; carries `channel_id` and `last_output`, what it last printed (§ 4.2, #927) |
 | `CHANNEL_NOT_REUSABLE` | SPAWN with `reuse_channel_id` refused; `channel_id` names that terminal (§ 4.4) |
 | `WRITE_LOCK_DENIED` | INPUT from a client that does not hold the write lock, or FILES_PANEL from one that does not (§ 4.20); carries `channel_id` |
 | `HOST_NOT_FOUND` | SPAWN on a host this hub does not list; carries `host_id` |

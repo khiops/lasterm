@@ -2611,6 +2611,12 @@ describe("SessionManager", () => {
 
 			expect(attached).toBe(false);
 			expect(received).toHaveLength(1);
+			expect(received[0]).toMatchObject({
+				type: "ERROR",
+				code: "CHANNEL_DEAD",
+				message: "This terminal has ended.",
+				channelId,
+			});
 			const last = lastOutputOf(received);
 			expect(last.snapshot).toEqual(SCREEN);
 			expect(text(last.tail)).toEqual(["after"]);
@@ -2651,7 +2657,9 @@ describe("SessionManager", () => {
 			const fits = lastOutputOf((await attachFresh("ended-fits")).received);
 
 			expect(fits.tail).toHaveLength(1);
-			expect(fits.tail[0]?.byteLength).toBe(128 * KIB);
+			expect(Buffer.from(fits.tail[0] ?? new Uint8Array())).toEqual(
+				Buffer.concat([Buffer.alloc(64 * KIB, 0x61), Buffer.alloc(64 * KIB, 0x62)]),
+			);
 			expect(fits).not.toHaveProperty("truncated");
 		});
 
@@ -2721,9 +2729,10 @@ describe("SessionManager", () => {
 
 		it("shows nothing of an ended terminal whose snapshot does not parse", async () => {
 			endedTerminal("ended-bad");
-			store("ended-bad", 9, "output", "before");
-			store("ended-bad", 10, "snapshot", "{not json");
-			store("ended-bad", 11, "output", "after");
+			// From seq 1: a stream that would replay whole if the bad row were taken for none.
+			store("ended-bad", 1, "output", "before");
+			store("ended-bad", 2, "snapshot", "{not json");
+			store("ended-bad", 3, "output", "after");
 
 			const last = lastOutputOf((await attachFresh("ended-bad")).received);
 
@@ -2752,7 +2761,7 @@ describe("SessionManager", () => {
 
 			const limit = lastOutputOf((await attachFresh("ended-limit")).received);
 
-			expect(limit.snapshot?.serialized.length).toBeGreaterThan(LIMIT - 100);
+			expect(limit.snapshot).toEqual(JSON.parse(snapshotOf(LIMIT)));
 			expect(text(limit.tail)).toEqual(["tail"]);
 		});
 
@@ -2784,6 +2793,102 @@ describe("SessionManager", () => {
 			expect(ctx.channels.has(channelId)).toBe(false);
 			expect(client.attachedChannels.has(channelId)).toBe(false);
 			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
+		});
+
+		// Delivering the refusal depends on nothing it did not depend on before: a
+		// spool that cannot be read leaves the answer an older hub's.
+		describe("refuses an ended terminal without its last output when the spool cannot be read", () => {
+			const SECRET = "secret-output-4927";
+
+			function spoolFails(): void {
+				spies.push(
+					vi.spyOn(SpoolDAL.prototype, "getNewestSnapshotRef").mockImplementation(() => {
+						throw Object.assign(new Error(`disk I/O error near ${SECRET}`), {
+							code: "ERR_SQLITE_ERROR",
+						});
+					}),
+				);
+			}
+
+			it("on an ended terminal, with and without a hub logger", async () => {
+				const logged: Array<[string, string, Record<string, unknown> | undefined]> = [];
+				const logger = {
+					log: (level: string, msg: string, extra?: Record<string, unknown>) =>
+						logged.push([level, msg, extra]),
+				};
+				const withLog = new SessionManager(
+					dbManager,
+					undefined,
+					undefined,
+					undefined,
+					logger as never,
+				);
+				try {
+					endedTerminal("ended-io");
+					store("ended-io", 1, "output", SECRET);
+					spoolFails();
+					const received: ProtocolMessage[] = [];
+					withLog.addClient(makeClient("io", received));
+
+					expect(await withLog.handleAttach("io", "ended-io")).toBe(false);
+
+					expect(received).toEqual([
+						{
+							type: "ERROR",
+							code: "CHANNEL_DEAD",
+							message: "This terminal has ended.",
+							channelId: "ended-io",
+						},
+					]);
+					expect(logged.filter(([level]) => level === "warn")).toEqual([
+						[
+							"warn",
+							"could not read an ended terminal's last output",
+							{ channelId: "ended-io", code: "ERR_SQLITE_ERROR" },
+						],
+					]);
+					expect(JSON.stringify(logged)).not.toContain(SECRET);
+				} finally {
+					await withLog.shutdown();
+				}
+
+				// The suite's own manager has no hub logger: nothing throws.
+				const { attached, received } = await attachFresh("ended-io");
+				expect(attached).toBe(false);
+				expect(received).toEqual([
+					{
+						type: "ERROR",
+						code: "CHANNEL_DEAD",
+						message: "This terminal has ended.",
+						channelId: "ended-io",
+					},
+				]);
+			});
+
+			it("on a terminal its agent no longer has", async () => {
+				sm.addClient(makeClient("first", []));
+				const channelId = await sm.handleSpawn("first", { type: "SPAWN", hostId: "local" });
+				if (channelId === null) throw new Error("expected a local channel");
+				nextLocalAttachNotFoundChannelId = channelId;
+				spoolFails();
+
+				const { attached, received, client } = await attachFresh(channelId, "second");
+
+				expect(attached).toBe(false);
+				expect(received.filter((m) => m.type === "ERROR")).toEqual([
+					{
+						type: "ERROR",
+						code: "CHANNEL_DEAD",
+						message: "This terminal is no longer running on its host.",
+						channelId,
+					},
+				]);
+				const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext })
+					.ctx;
+				expect(ctx.channels.has(channelId)).toBe(false);
+				expect(client.attachedChannels.has(channelId)).toBe(false);
+				expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
+			});
 		});
 	});
 

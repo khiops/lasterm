@@ -18,7 +18,21 @@ import { type App, createApp, h, nextTick, type Ref, ref } from "vue";
 const xterm = vi.hoisted(() => ({
 	/** Clears and writes in order: "<reset>" for a clear, the text for a write. */
 	events: [] as string[],
+	/**
+	 * When a write is parsed: "now", inside `write()`, as xterm does right
+	 * after user input; "later", when the test drains, as xterm's timer does.
+	 * A parse rings the bell for a BEL, then calls the write's callback.
+	 */
+	parse: "now" as "now" | "later",
+	queue: [] as Array<() => void>,
+	/** The terminal settings the pane reads. */
+	profile: {} as Record<string, unknown>,
 }));
+
+/** Parse every write taken so far, in order. */
+function drain(): void {
+	for (let next = xterm.queue.shift(); next !== undefined; next = xterm.queue.shift()) next();
+}
 
 vi.mock("@xterm/xterm", () => ({
 	Terminal: class {
@@ -45,7 +59,9 @@ vi.mock("@xterm/xterm", () => ({
 		onTitleChange() {
 			return { dispose() {} };
 		}
-		onBell() {
+		private bellListeners: Array<() => void> = [];
+		onBell(listener: () => void) {
+			this.bellListeners.push(listener);
 			return { dispose() {} };
 		}
 		onScroll() {
@@ -64,8 +80,15 @@ vi.mock("@xterm/xterm", () => ({
 		reset(): void {
 			xterm.events.push("<reset>");
 		}
-		write(data: string | Uint8Array): void {
-			xterm.events.push(typeof data === "string" ? data : new TextDecoder().decode(data));
+		write(data: string | Uint8Array, callback?: () => void): void {
+			const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+			if (text !== "") xterm.events.push(text);
+			const parse = () => {
+				if (text.includes("\u0007")) for (const listener of this.bellListeners) listener();
+				callback?.();
+			};
+			if (xterm.parse === "now") parse();
+			else xterm.queue.push(parse);
 		}
 		dispose(): void {}
 	},
@@ -105,7 +128,7 @@ vi.mock("../composables/useResolvedProfile.js", async () => {
 			hostId: { value: string | null | undefined },
 			channelId: { value: string | null | undefined },
 		) => ({
-			profile: ref({ ...DEFAULT_PROFILE }),
+			profile: ref({ ...DEFAULT_PROFILE, ...xterm.profile }),
 			resolvedFor: computed(() => ({
 				hostId: hostId.value ?? null,
 				channelId: channelId.value ?? null,
@@ -115,8 +138,12 @@ vi.mock("../composables/useResolvedProfile.js", async () => {
 	};
 });
 
+vi.mock("../composables/useBellSound.js", () => ({ playBellSound: vi.fn() }));
+
+import { playBellSound } from "../composables/useBellSound.js";
 import { useAuthStore } from "../stores/auth.js";
 import { useChannelsStore } from "../stores/channels.js";
+import { useNotificationStore } from "../stores/notifications.js";
 import { useSessionStore } from "../stores/session.js";
 import TerminalPane from "./TerminalPane.vue";
 
@@ -228,6 +255,10 @@ async function settle(): Promise<void> {
 beforeEach(() => {
 	sent = [];
 	xterm.events.length = 0;
+	xterm.parse = "now";
+	xterm.queue.length = 0;
+	xterm.profile = {};
+	vi.mocked(playBellSound).mockClear();
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
 });
@@ -348,21 +379,29 @@ describe("TerminalPane over an ending it watched (#927)", () => {
 		await watchItEnd();
 
 		expect(xterm.events.at(-1)).toBe(MOUSE_OFF);
+		// In its own xterm only.
+		expect(sent.filter((m) => m.type === "INPUT" || m.type === "RESIZE")).toEqual([]);
 	});
 
 	it("keeps the whole ending it watched when its socket comes back", async () => {
 		await watchItEnd();
-		const watched = [...xterm.events];
+		expect(xterm.events).toEqual(["<reset>", "WHOLE", MOUSE_OFF]);
+		// Kept: no clear, no output, no notice; only the mouse reset (C12).
+		const keptAgain = () => ["<reset>", "WHOLE", MOUSE_OFF, ...extraResets];
+		const extraResets: string[] = [];
 
 		await socketComesBack(lastOutput());
-		expect(xterm.events).toEqual(watched);
+		extraResets.push(MOUSE_OFF);
+		expect(xterm.events).toEqual(keptAgain());
 
 		// Again: the refusal before reported the end as found, not as watched.
 		await socketComesBack(lastOutput());
-		expect(xterm.events).toEqual(watched);
+		extraResets.push(MOUSE_OFF);
+		expect(xterm.events).toEqual(keptAgain());
 
 		await socketComesBack(lastOutput({ snapshot: null, tail: [], truncated: true }));
-		expect(xterm.events).toEqual(watched);
+		extraResets.push(MOUSE_OFF);
+		expect(xterm.events).toEqual(keptAgain());
 	});
 
 	it("takes the hub's copy again once a terminal attached since", async () => {
@@ -386,4 +425,145 @@ describe("TerminalPane over an ending it watched (#927)", () => {
 
 		expect(xterm.events).toEqual(["<reset>", "FOUND", MOUSE_OFF]);
 	});
+
+	it("takes a live terminal's screen when its socket comes back to it restarted", async () => {
+		await watchItEnd();
+		xterm.events.length = 0;
+
+		// Restarted from another window while this pane's socket was down.
+		const before = attaches().length;
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(before + 1));
+		attachOk(T, "RESTARTED");
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "RESTARTED"]);
+	});
+
+	it("forgets the ending it watched when its terminal changes", async () => {
+		const channel = ref(T);
+		mountPane(channel, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "WHOLE");
+		await settle();
+		useChannelsStore().updateChannelStatus(T, "dead", 1);
+		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+
+		channel.value = S;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(S, lastOutput({ snapshot: null, tail: [new TextEncoder().encode("S-OUT")] }));
+		await settle();
+		channel.value = T;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		refuse(T, lastOutput({ snapshot: null, tail: [new TextEncoder().encode("T-OUT")] }));
+		await settle();
+		expect(xterm.events.slice(-3)).toEqual(["<reset>", "T-OUT", MOUSE_OFF]);
+
+		// Its screen is the hub's copy now, not the ending it watched.
+		xterm.events.length = 0;
+		await socketComesBack(
+			lastOutput({ snapshot: null, tail: [new TextEncoder().encode("T-FINAL")] }),
+		);
+		expect(xterm.events).toEqual(["<reset>", "T-FINAL", MOUSE_OFF]);
+	});
+
+	it("turns no mouse off for a late answer about another terminal", async () => {
+		const channel = ref(S);
+		mountPane(channel, "live");
+		useChannelsStore().updateChannelStatus(S, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(S, "S-LIVE");
+		await settle();
+
+		channel.value = T;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		channel.value = S;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(S, "S-AGAIN");
+		await settle();
+		xterm.events.length = 0;
+
+		refuse(T, lastOutput());
+		await settle();
+
+		expect(xterm.events).toEqual([]);
+	});
+});
+
+describe("TerminalPane given another terminal while it opens (#927)", () => {
+	it("attaches the terminal it was given while it opened, once T is answered", async () => {
+		const channel = ref(T);
+		mountPane(channel, "dead");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+
+		channel.value = S;
+		await settle();
+		refuse(T, lastOutput());
+
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		expect(attaches()[1]).toMatchObject({ channelId: S });
+	});
+
+	it("attaches the terminal it was given while it opened, once T's attach timed out", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const channel = ref(T);
+		mountPane(channel, "dead");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+
+		channel.value = S;
+		await settle();
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		expect(attaches()[1]).toMatchObject({ channelId: S });
+	});
+});
+
+describe("TerminalPane rings no bell for a replay (#927)", () => {
+	const BEL = "\u0007";
+	const bytes = (text: string) => new TextEncoder().encode(text);
+
+	for (const mode of ["now", "later"] as const) {
+		it(`with writes parsed ${mode === "now" ? "inside write()" : "later"}`, async () => {
+			xterm.parse = mode;
+			xterm.profile = { bellSound: "system" };
+			mountPane(ref(T), "live");
+			await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+			// A live ATTACH_OK's snapshot is a replay.
+			attachOk(T, `LIVE${BEL}`);
+			await settle();
+			drain();
+
+			// A live bell taken before the replay, then a cached ATTACH_OK's snapshot
+			// and tail, then a live bell after it: parsed in that order.
+			hear({ type: "OUTPUT", channelId: T, data: bytes(`before${BEL}`) });
+			useSessionStore().reconnectCount++;
+			await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+			hear({
+				type: "ATTACH_OK",
+				channelId: T,
+				snapshot: { serialized: `CACHED${BEL}`, cols: 100, rows: 30, cursorX: 0, cursorY: 0 },
+				tail: [bytes(`TAIL${BEL}`)],
+				writeLockHolder: null,
+				cached: true,
+				cols: 100,
+				rows: 30,
+			});
+			await settle();
+			hear({ type: "OUTPUT", channelId: T, data: bytes(`after${BEL}`) });
+
+			// And an ended terminal's last output.
+			useSessionStore().reconnectCount++;
+			await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+			refuse(T, lastOutput({ snapshot: null, tail: [bytes(`ENDED${BEL}`)] }));
+			await settle();
+			drain();
+			await settle();
+
+			expect(xterm.events).toContain(`ENDED${BEL}`);
+			expect(useNotificationStore().bellCounts.get(T)).toBe(2);
+			expect(vi.mocked(playBellSound)).toHaveBeenCalledTimes(2);
+		});
+	}
 });

@@ -234,7 +234,7 @@ describe("TerminalPane covers its terminal with what the hub answers now (#559)"
 		// Over an ending it watched, it keeps its screen (#927).
 		const reconnectWatcher = /sessionStore\.reconnectCount,[\s\S]*?\n\);/.exec(SOURCE)?.[0] ?? "";
 		expect(reconnectWatcher).toContain(
-			"await attachAndCover(chId, endSeenLiveOf === chId ? { preserveContent: true } : undefined);",
+			"await attachAndCover(chId, endSeenLiveOf === chId ? { keepScreenIfEnded: true } : undefined);",
 		);
 		expect(SOURCE).toContain("await attachAndCover(props.channelId);");
 		expect(SOURCE).toContain("await attachAndCover(newId);");
@@ -353,7 +353,7 @@ describe("TerminalPane when its terminal ends (#574)", () => {
 
 describe("TerminalPane overlay (#574)", () => {
 	const overlay =
-		/<div v-if="endedView\.kind === 'card'" class="exit-overlay">[\s\S]*?\n\t\t<\/div>\n/.exec(
+		/<div v-if="endedView\.kind === 'card'" class="exit-overlay"[^>]*>[\s\S]*?\n\t\t<\/div>\n/.exec(
 			SOURCE.replace(/\r\n/g, "\n"),
 		)?.[0] ?? "";
 
@@ -565,7 +565,7 @@ describe("TerminalPane shows the card only when it asks (#595)", () => {
 	});
 
 	it("shows the card when it says so, and the quiet line in its place otherwise", () => {
-		expect(SOURCE).toMatch(/<div v-if="endedView\.kind === 'card'" class="exit-overlay">/);
+		expect(SOURCE).toMatch(/<div v-if="endedView\.kind === 'card'" class="exit-overlay"[^>]*>/);
 		expect(SOURCE).toMatch(
 			/<span v-if="endedView\.kind === 'quiet'" class="exit-status__text">\{\{ endedView\.text \}\}<\/span>/,
 		);
@@ -795,6 +795,14 @@ describe("TerminalPane overlay card contrast (#574)", () => {
 	// What the terminal last printed shows around the card, and can be read,
 	// scrolled and selected there (#927): no scrim, no blur, and the overlay
 	// lets the pointer through to the terminal everywhere but on the card.
+	it("keeps the gone card's scrim over a screen that is not that terminal's", () => {
+		expect(SOURCE).toMatch(/class="exit-overlay" :class="\{ 'exit-overlay--gone': isGone \}"/);
+		const gone = declarations(".exit-overlay--gone");
+		expect(gone.get("background")).toBe("var(--nt-overlay)");
+		expect(gone.get("backdrop-filter")).toBe("blur(2px)");
+		expect(gone.get("pointer-events")).toBe("auto");
+	});
+
 	it("leaves an ended terminal's output readable around the card", () => {
 		const overlay = declarations(".exit-overlay");
 		expect(["transparent", undefined]).toContain(overlay.get("background"));

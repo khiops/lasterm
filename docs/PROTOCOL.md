@@ -821,7 +821,7 @@ last_output: {
   snapshot: { serialized, cols, rows, cursor_x, cursor_y } | null,
   tail: Uint8Array[],   // the output after the snapshot, as one element; [] when none is sent
   truncated?: true,     // there was output to send, and it was not
-  cols: number,         // the terminal's last size, which snapshot and tail were drawn at
+  cols: number,         // the terminal's last size, which the pane draws them at (resizes are not stored)
   rows: number
 }
 ```
@@ -835,7 +835,8 @@ screen it was not written for shows something wrong without saying so:
   `truncated`;
 - output with no snapshot whose stream lost its start, or after a snapshot that does not parse, is
   not sent, and neither is `truncated`;
-- a channel the GC emptied, or one that printed nothing, has `snapshot: null` and `tail: []`.
+- a channel the GC emptied, or one that printed nothing, has `snapshot: null` and `tail: []`;
+- a spool the hub cannot read leaves `last_output` out: the refusal goes as an older hub's.
 
 The tail follows the cached ATTACH_OK's rule: sent when it totals at most 128 KiB, else `tail: []`
 and `truncated`. A snapshot stored above 256 KiB is not sent (`snapshot: null`, `truncated`): the

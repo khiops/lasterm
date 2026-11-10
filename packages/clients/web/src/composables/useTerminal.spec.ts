@@ -66,11 +66,15 @@ vi.mock("@xterm/xterm", () => ({
 		reset(): void {
 			xterm.events.push("<reset>");
 		}
-		write(data: string | Uint8Array): void {
+		/** Parsed at once, as xterm does right after user input; its callback then. */
+		write(data: string | Uint8Array, callback?: () => void): void {
 			const text = typeof data === "string" ? data : new TextDecoder().decode(data);
-			xterm.written.push(text);
-			xterm.writtenAt.push({ cols: this.cols, rows: this.rows });
-			xterm.events.push(text);
+			if (text !== "") {
+				xterm.written.push(text);
+				xterm.writtenAt.push({ cols: this.cols, rows: this.rows });
+				xterm.events.push(text);
+			}
+			callback?.();
 		}
 		dispose(): void {}
 	},
@@ -436,7 +440,7 @@ describe("an ended terminal's last output (#927)", () => {
 		const attachLive = async (
 			channelId: string,
 			text: string,
-			opts?: { preserveContent?: boolean },
+			opts?: { preserveContent?: boolean; keepScreenIfEnded?: boolean },
 		) => {
 			const attached = terminal.reattachChannel(channelId, opts);
 			hub.hear({
@@ -455,7 +459,11 @@ describe("an ended terminal's last output (#927)", () => {
 		const attachEnded = async (
 			channelId: string,
 			lastOutput?: EndedOutput,
-			opts?: { preserveContent?: boolean; stillWanted?: () => boolean },
+			opts?: {
+				preserveContent?: boolean;
+				keepScreenIfEnded?: boolean;
+				stillWanted?: () => boolean;
+			},
 		) => {
 			const attached = terminal.reattachChannel(channelId, opts);
 			refuse(channelId, lastOutput);
@@ -481,43 +489,58 @@ describe("an ended terminal's last output (#927)", () => {
 		expect(xterm.events).toEqual(["<reset>", "SCREEN", "a", "b", MOUSE_OFF]);
 
 		xterm.events.length = 0;
+		xterm.writtenAt.length = 0;
 		const noScreen = pane();
 		expect(await noScreen.attachEnded("T", output({ snapshot: null }))).toBe("CHANNEL_DEAD");
 		expect(xterm.events).toEqual(["<reset>", "a", "b", MOUSE_OFF]);
+		expect(xterm.writtenAt.slice(0, 2)).toEqual([
+			{ cols: 100, rows: 30 },
+			{ cols: 100, rows: 30 },
+		]);
 	});
 
 	it("draws an ended terminal's output at the size it last had", async () => {
+		// A snapshot taken at another size than the terminal's last: the last one decides.
+		const older = { ...SCREEN, cols: 120, rows: 40 };
 		const reader = pane();
-		await reader.attachEnded("T", output());
+		await reader.attachEnded("T", output({ snapshot: older }));
 		expect(xterm.writtenAt[0]).toEqual({ cols: 100, rows: 30 });
 
 		xterm.writtenAt.length = 0;
 		const writer = pane();
 		writer.terminal.setDecidesSize(true);
-		await writer.attachEnded("T", output());
+		await writer.attachEnded("T", output({ snapshot: older }));
+		expect(xterm.writtenAt[0]).toEqual({ cols: 100, rows: 30 });
+
+		xterm.writtenAt.length = 0;
+		const tailOnly = pane();
+		await tailOnly.attachEnded("T", output({ snapshot: null }));
 		expect(xterm.writtenAt[0]).toEqual({ cols: 100, rows: 30 });
 	});
 
 	it("says when an ended terminal's output was too long to send", async () => {
 		const withScreen = pane();
 		await withScreen.attachEnded("T", output({ tail: [], truncated: true }));
-		expect(xterm.events[0]).toBe("<reset>");
-		expect(xterm.events[1]).toBe("SCREEN");
-		expect(xterm.events[2]).toContain("output between this screen and now was dropped");
+		expect(xterm.events.slice(0, 3)).toEqual([
+			"<reset>",
+			"SCREEN",
+			"\r\n\u001b[2m── output between this screen and now was dropped ──\u001b[0m\r\n",
+		]);
 
 		xterm.events.length = 0;
 		const fresh = pane();
 		await fresh.attachEnded("T", output({ snapshot: null, tail: [], truncated: true }));
-		expect(xterm.events).toHaveLength(3);
-		expect(xterm.events[0]).toBe("<reset>");
-		expect(xterm.events[1]).toContain("its last output was too long to show");
-		expect(xterm.events[2]).toBe(MOUSE_OFF);
+		expect(xterm.events).toEqual([
+			"<reset>",
+			"\r\n\u001b[2m── its last output was too long to show ──\u001b[0m\r\n",
+			MOUSE_OFF,
+		]);
 
 		const watched = pane();
 		await watched.attachLive("T", "OLD");
 		xterm.events.length = 0;
 		await watched.attachEnded("T", output({ snapshot: null, tail: [], truncated: true }));
-		expect(xterm.events).toEqual([]);
+		expect(xterm.events).toEqual([MOUSE_OFF]);
 	});
 
 	it("shows what an ended terminal printed while the pane was away", async () => {
@@ -537,13 +560,13 @@ describe("an ended terminal's last output (#927)", () => {
 		spawned.terminal.attachChannel("T");
 		xterm.events.length = 0;
 		await spawned.attachEnded("T", nothing);
-		expect(xterm.events).toEqual([]);
+		expect(xterm.events).toEqual([MOUSE_OFF]);
 
 		const attached = pane();
 		await attached.attachLive("T", "OLD");
 		xterm.events.length = 0;
 		await attached.attachEnded("T", nothing);
-		expect(xterm.events).toEqual([]);
+		expect(xterm.events).toEqual([MOUSE_OFF]);
 	});
 
 	it("clears another terminal's screen when the ended one left nothing", async () => {
@@ -591,7 +614,7 @@ describe("an ended terminal's last output (#927)", () => {
 		xterm.events.length = 0;
 
 		expect(await older.attachEnded("T")).toBe("CHANNEL_DEAD");
-		expect(xterm.events).toEqual([]);
+		expect(xterm.events).toEqual([MOUSE_OFF]);
 	});
 
 	it("leaves the screen alone on a Reconnect or Restart refused as ended", async () => {
@@ -600,18 +623,39 @@ describe("an ended terminal's last output (#927)", () => {
 		xterm.events.length = 0;
 
 		await kept.attachEnded("T", output(), { preserveContent: true });
+		expect(xterm.events).toEqual([MOUSE_OFF]);
 
-		expect(xterm.events).toEqual([]);
+		xterm.events.length = 0;
+		await kept.attachEnded("T", output(), { keepScreenIfEnded: true });
+		expect(xterm.events).toEqual([MOUSE_OFF]);
+	});
+
+	// Kept only on a refusal: an ATTACH_OK replaces the screen as it always does.
+	it("replaces the screen on an ATTACH_OK even when asked to keep it if ended", async () => {
+		const watched = pane();
+		await watched.attachLive("T", "OLD");
+		xterm.events.length = 0;
+
+		await watched.attachLive("T", "RESTARTED", { keepScreenIfEnded: true });
+
+		expect(xterm.events).toEqual(["<reset>", "RESTARTED"]);
 	});
 
 	describe("sends nothing for an ended terminal it shows", () => {
 		for (const withOutput of [true, false]) {
 			const label = withOutput ? "with its last output" : "from an older hub";
 
+			/** The terminal this pane created, which the keys typed go through. */
+			const typed = () => {
+				const term = xterm.last;
+				if (term === null) throw new Error("expected the pane's terminal");
+				return term;
+			};
+
 			it(`in a pane that never attached, ${label}`, async () => {
 				const fresh = pane();
 				await fresh.attachEnded("T", withOutput ? output() : undefined);
-				xterm.last?.type("x");
+				typed().type("x");
 				fresh.resizePane({ cols: 90, rows: 20 });
 				expect(fresh.sent()).toEqual([]);
 			});
@@ -620,12 +664,17 @@ describe("an ended terminal's last output (#927)", () => {
 				const writer = pane();
 				await writer.attachLive("T", "LIVE");
 				writer.terminal.setDecidesSize(true);
-				writer.sent();
+				// Live, it sends both: typing and its own size.
+				typed().type("x");
+				writer.resizePane({ cols: 90, rows: 20 });
+				expect(writer.sent().map((m) => m.type)).toEqual(
+					expect.arrayContaining(["INPUT", "RESIZE"]),
+				);
 				(writer.hub.client.send as ReturnType<typeof vi.fn>).mockClear();
 
 				await writer.attachEnded("T", withOutput ? output() : undefined);
-				xterm.last?.type("x");
-				writer.resizePane({ cols: 90, rows: 20 });
+				typed().type("y");
+				writer.resizePane({ cols: 70, rows: 18 });
 				expect(writer.sent()).toEqual([]);
 			});
 		}

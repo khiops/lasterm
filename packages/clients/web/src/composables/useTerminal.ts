@@ -56,6 +56,13 @@ export function useTerminal(
 	let endedSize: { cols: number; rows: number } | null = null;
 	/** Counts attach requests: only the latest may write what a refusal carries. */
 	let attachRequests = 0;
+	/**
+	 * Replays xterm is parsing now (#927). xterm parses a write later than it
+	 * takes it, or inside `write()` right after user input, and calls each
+	 * write's callback once that write is parsed: markers written around a
+	 * replay therefore bracket its parse, whichever way it goes.
+	 */
+	let replaysParsing = 0;
 	let resizeObserver: ResizeObserver | null = null;
 	let onScrollbarChanged: (() => void) | null = null;
 	/** Whether search matches are marked in the scrollbar gutter (profile). */
@@ -429,6 +436,11 @@ export function useTerminal(
 		id: string,
 		opts?: {
 			preserveContent?: boolean;
+			/**
+			 * Keep the screen if the hub answers that the terminal has ended; an
+			 * ATTACH_OK replaces it as usual. For a pane over an ending it watched.
+			 */
+			keepScreenIfEnded?: boolean;
 			/** Whether the pane still shows `id` when the answer comes; true when absent. */
 			stillWanted?: () => boolean;
 		},
@@ -500,19 +512,28 @@ export function useTerminal(
 					clearTimeout(timer);
 					unsubOk();
 					unsubErr();
-					// Only for the terminal the pane still shows, and only from its
-					// latest request: an older answer, or one for a terminal it has
-					// left, writes nothing (#927, #929).
-					if (
-						msg.code === "CHANNEL_DEAD" &&
-						request === attachRequests &&
-						(opts?.stillWanted?.() ?? true)
-					) {
-						showEnded(id, msg.lastOutput, opts?.preserveContent === true);
-					}
 					// The code travels with it: what a pane does about this is not a
 					// decision to make by reading a sentence, which changes.
-					reject(Object.assign(new Error(msg.message ?? msg.code), { code: msg.code }));
+					const refusal = Object.assign(new Error(msg.message ?? msg.code), { code: msg.code });
+					try {
+						// Only for the terminal the pane still shows, and only from its
+						// latest request: an older answer, or one for a terminal it has
+						// left, writes nothing (#927, #929).
+						if (
+							msg.code === "CHANNEL_DEAD" &&
+							request === attachRequests &&
+							(opts?.stillWanted?.() ?? true)
+						) {
+							showEnded(
+								id,
+								msg.lastOutput,
+								opts?.preserveContent === true || opts?.keepScreenIfEnded === true,
+							);
+						}
+					} finally {
+						// Settled whatever the writes did: the timer is gone.
+						reject(refusal);
+					}
 				}
 			});
 
@@ -533,22 +554,25 @@ export function useTerminal(
 			takePtySize(result.size.cols, result.size.rows);
 		}
 
-		// Restore snapshot if present (channelId still unset → no RESIZE sent)
-		if (terminal.value && result.snapshot && !opts?.preserveContent) {
-			terminal.value.reset();
-			const serialized = (result.snapshot as { serialized?: string }).serialized;
-			if (serialized) {
-				terminal.value.write(serialized);
+		// Restore snapshot if present (channelId still unset → no RESIZE sent).
+		// A replay: a bell in it already rang (#927).
+		replay(() => {
+			if (terminal.value && result.snapshot && !opts?.preserveContent) {
+				terminal.value.reset();
+				const serialized = (result.snapshot as { serialized?: string }).serialized;
+				if (serialized) {
+					terminal.value.write(serialized);
+				}
 			}
-		}
 
-		// Replay tail chunks
-		if (terminal.value && result.tail.length > 0 && !opts?.preserveContent) {
-			for (const chunk of result.tail) {
-				const data = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk as ArrayBuffer);
-				terminal.value.write(data);
+			// Replay tail chunks
+			if (terminal.value && result.tail.length > 0 && !opts?.preserveContent) {
+				for (const chunk of result.tail) {
+					const data = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk as ArrayBuffer);
+					terminal.value.write(data);
+				}
 			}
-		}
+		});
 
 		// Restore dynamic title from ATTACH_OK (SC-02 — titles survive reconnects)
 		if (result.dynamicTitle) {
@@ -603,34 +627,65 @@ export function useTerminal(
 	 * says, until a terminal attaches again. It replaces the screen when it
 	 * has something to draw, as an ATTACH_OK's snapshot does: output printed
 	 * while the pane's socket was away is in it. With nothing to draw, a screen
-	 * that is already this terminal's stays, and another's is cleared. Under
-	 * `preserveContent` (Reconnect, Restart, a re-attach over an ending the
-	 * pane watched) nothing is written. An older hub sends no last output, and
-	 * nothing is written either.
+	 * that is already this terminal's stays, and another's is cleared. When the
+	 * screen is kept (Reconnect, Restart, a re-attach over an ending the pane
+	 * watched), nothing is cleared and no output is written. An older hub sends
+	 * no last output, and none is written either. Whatever it shows, the pane
+	 * then turns mouse reporting off: that changes nothing on screen.
 	 */
-	function showEnded(id: string, last: EndedOutput | undefined, preserveContent: boolean): void {
+	function showEnded(id: string, last: EndedOutput | undefined, keepScreen: boolean): void {
 		channelId = null;
-		if (last === undefined) return;
-		endedSize = { cols: last.cols, rows: last.rows };
-		layout();
 		const term = terminal.value;
-		if (!term || preserveContent) return;
+		if (last !== undefined) {
+			endedSize = { cols: last.cols, rows: last.rows };
+			layout();
+			if (term && !keepScreen) showLastOutput(term, id, last);
+		}
+		term?.write(MOUSE_REPORTING_OFF);
+	}
+
+	/** Write what an ended terminal last printed, as `showEnded` decides. */
+	function showLastOutput(term: Terminal, id: string, last: EndedOutput): void {
 		const somethingToDraw = last.snapshot !== null || last.tail.some((part) => part.byteLength > 0);
 		if (somethingToDraw) {
 			term.reset();
-			if (last.snapshot?.serialized) term.write(last.snapshot.serialized);
-			for (const part of last.tail) term.write(part);
+			replay(() => {
+				if (last.snapshot?.serialized) term.write(last.snapshot.serialized);
+				for (const part of last.tail) term.write(part);
+			});
 			if (last.truncated === true) {
 				writeNotice("output between this screen and now was dropped");
 			}
+			shownId = id;
 		} else if (shownId !== id) {
 			term.reset();
 			if (last.truncated === true) writeNotice("its last output was too long to show");
-		} else {
+			shownId = id;
+		}
+	}
+
+	/**
+	 * Write a replay: what the hub kept, not what the terminal prints now. A
+	 * bell in it rang when it was printed, so it rings no bell here (#927).
+	 */
+	function replay(write: () => void): void {
+		const term = terminal.value;
+		if (!term) {
+			write();
 			return;
 		}
-		shownId = id;
-		term.write(MOUSE_REPORTING_OFF);
+		term.write("", () => {
+			replaysParsing++;
+		});
+		write();
+		term.write("", () => {
+			replaysParsing--;
+		});
+	}
+
+	/** Whether xterm is parsing a replay now: a bell it reports is not news. */
+	function bellMuted(): boolean {
+		return replaysParsing > 0;
 	}
 
 	/** Turn mouse reporting off in this pane's xterm, as over an ended terminal (#927). */
@@ -765,6 +820,7 @@ export function useTerminal(
 		channelId = null;
 		shownId = null;
 		endedSize = null;
+		replaysParsing = 0;
 		titleStack.length = 0;
 		currentDynamicTitle.value = null;
 	}
@@ -779,6 +835,7 @@ export function useTerminal(
 		attachChannel,
 		reattachChannel,
 		turnMouseReportingOff,
+		bellMuted,
 		applyProfile,
 		suppressNextResize,
 		syncChannelSize,

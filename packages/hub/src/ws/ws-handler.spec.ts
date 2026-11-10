@@ -141,14 +141,12 @@ describe("ws-handler codec round-trips", () => {
 		expect(Object.keys(wire.last_output).sort()).toEqual(["cols", "rows", "snapshot", "tail"]);
 		expect(Object.keys(wire.last_output.snapshot as object)).toContain("cursor_x");
 
+		// The whole message comes back as sent, the tail as bytes.
 		const decoded = decodeMessage(encoded) as unknown as {
-			lastOutput: { snapshot: { serialized: string; cursorX: number }; tail: Uint8Array[] };
+			lastOutput: { tail: Uint8Array[] };
 		};
-		expect(decoded.lastOutput.snapshot.serialized).toBe(screen);
-		expect(decoded.lastOutput.snapshot.cursorX).toBe(4);
-		expect(decoded.lastOutput.tail).toHaveLength(1);
 		expect(decoded.lastOutput.tail[0]).toBeInstanceOf(Uint8Array);
-		expect(decoded.lastOutput.tail[0]?.byteLength).toBe(128 * KIB);
+		expect(decoded).toEqual(msg);
 	});
 
 	it("RESIZE message round-trips", () => {

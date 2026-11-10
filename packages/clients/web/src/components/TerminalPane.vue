@@ -68,7 +68,7 @@
 		     to, the line below says so instead: the card is a question (#595).
 		     The card carries its own opaque ground, so what is behind it — the
 		     terminal's content, a wallpaper — never decides whether it reads. -->
-		<div v-if="endedView.kind === 'card'" class="exit-overlay">
+		<div v-if="endedView.kind === 'card'" class="exit-overlay" :class="{ 'exit-overlay--gone': isGone }">
 			<div
 				ref="exitCard"
 				class="exit-card"
@@ -405,6 +405,7 @@ const {
 	attachChannel,
 	reattachChannel,
 	turnMouseReportingOff,
+	bellMuted,
 	applyProfile,
 	suppressNextResize,
 	syncChannelSize,
@@ -679,7 +680,7 @@ function takeAnswer(chId: string, facts: AttachFacts): void {
  */
 async function attachAndCover(
 	chId: string,
-	opts?: { preserveContent?: boolean },
+	opts?: { preserveContent?: boolean; keepScreenIfEnded?: boolean },
 ): Promise<AttachResult | null> {
 	let result: AttachResult;
 	try {
@@ -885,6 +886,7 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 		await sessionStore.connect();
 
 		if (props.channelId !== null && props.channelId !== undefined) {
+			const opened = props.channelId;
 			const hostId = pendingHostId.value;
 
 			if (hostId !== null) {
@@ -944,9 +946,18 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			}
 			ready.value = true;
 			applyProfile(resolvedProfile.value);
-			if (askAgainOnNewSocket) {
+			// The watcher waits for `ready`: a terminal given to this pane while
+			// it opened is attached now (#927).
+			const now = props.channelId;
+			if (now !== null && now !== undefined && now !== opened && now !== internalChannelId.value) {
 				askAgainOnNewSocket = false;
-				void attachAndCover(props.channelId).catch(() => {
+				endSeenLiveOf = null;
+				void attachAndCover(now).catch((err) => {
+					error.value = err instanceof Error ? err.message : String(err);
+				});
+			} else if (askAgainOnNewSocket) {
+				askAgainOnNewSocket = false;
+				void attachAndCover(opened).catch(() => {
 					// Unanswered again: the card already says it has ended.
 				});
 			}
@@ -954,6 +965,8 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			if (bellBound) return;
 			bellBound = true;
 			terminal.value?.onBell(() => {
+				// A bell in what the hub kept rang when it was printed (#927).
+				if (bellMuted()) return;
 				const chId = props.channelId;
 				// Increment bell badge (agent BELL WS message not reliable for all shells)
 				if (chId != null && resolvedProfile.value.bellBadge !== false) {
@@ -1083,8 +1096,8 @@ watch(
 			try {
 				error.value = null;
 				// Over an ending it watched, the screen holds more than the hub
-				// keeps: it stays as it is (#927).
-				await attachAndCover(chId, endSeenLiveOf === chId ? { preserveContent: true } : undefined);
+				// keeps: it stays as it is if the hub says it still ended (#927).
+				await attachAndCover(chId, endSeenLiveOf === chId ? { keepScreenIfEnded: true } : undefined);
 			} catch (err) {
 				error.value = err instanceof Error ? err.message : String(err);
 			}
@@ -1942,6 +1955,14 @@ function onDragEnd(): void {
 	padding: 16px;
 	pointer-events: none;
 	z-index: 10;
+}
+
+/* Over a terminal the hub has no record of, the screen is not that terminal's:
+   it keeps the scrim, the blur and the pointer (#927). */
+.exit-overlay--gone {
+	background: var(--nt-overlay);
+	backdrop-filter: blur(2px);
+	pointer-events: auto;
 }
 
 /* The overlay lets pointer events through: the card takes its own back. */

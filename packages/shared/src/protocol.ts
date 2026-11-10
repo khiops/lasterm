@@ -263,7 +263,10 @@ export interface EndedOutput {
 	tail: Uint8Array[];
 	/** There was output to send and it was not sent: too large, or its snapshot was. */
 	truncated?: true;
-	/** The terminal's last size, which the snapshot and the tail were drawn at. */
+	/**
+	 * The terminal's last size, which the pane draws the replay at. Resizes are
+	 * not stored: output first drawn at another size is redrawn at this one.
+	 */
 	cols: number;
 	rows: number;
 }

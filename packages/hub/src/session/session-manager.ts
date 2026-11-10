@@ -28,6 +28,7 @@ import type {
 	ChannelEndReason,
 	ChannelSizeMessage,
 	ElevationMethod,
+	EndedOutput,
 	EnvMode,
 	ErrorMessage,
 	Host,
@@ -1798,10 +1799,7 @@ export class SessionManager {
 							// in twenty-six characters of noise.
 							message: "This terminal has ended.",
 							channelId,
-							lastOutput: this.lifecycle.buildEndedOutput(channelId, {
-								cols: ended.cols,
-								rows: ended.rows,
-							}),
+							...this.endedOutputOf(channelId, ended),
 						};
 			client.send(errorMsg);
 			return false;
@@ -1974,10 +1972,7 @@ export class SessionManager {
 					code: "CHANNEL_DEAD",
 					message: "This terminal is no longer running on its host.",
 					channelId,
-					lastOutput: this.lifecycle.buildEndedOutput(channelId, {
-						cols: channel.cols,
-						rows: channel.rows,
-					}),
+					...this.endedOutputOf(channelId, channel),
 				} satisfies ErrorMessage);
 				return false;
 			}
@@ -2001,6 +1996,33 @@ export class SessionManager {
 			client.send(attachOk);
 		}
 		return true;
+	}
+
+	/**
+	 * What an ended terminal last printed, for its CHANNEL_DEAD (#927), or
+	 * nothing when the spool cannot be read: the refusal goes all the same, as
+	 * an older hub's, since delivering it must depend on nothing it did not
+	 * depend on before. The failure is logged with the terminal's id and the
+	 * error's code, never any output.
+	 */
+	private endedOutputOf(
+		channelId: string,
+		size: { cols: number; rows: number },
+	): { lastOutput?: EndedOutput } {
+		try {
+			return {
+				lastOutput: this.lifecycle.buildEndedOutput(channelId, {
+					cols: size.cols,
+					rows: size.rows,
+				}),
+			};
+		} catch (err) {
+			this.ctx.hubLogger?.log("warn", "could not read an ended terminal's last output", {
+				channelId,
+				code: (err as { code?: unknown } | null)?.code ?? "unknown",
+			});
+			return {};
+		}
 	}
 
 	/**

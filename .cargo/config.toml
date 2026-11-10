@@ -1,0 +1,15 @@
+# The C runtime is linked statically into every Windows MSVC build (#924).
+# Rust links it dynamically by default, so the agent and the hub's two addons
+# imported VCRUNTIME140.dll, which the Visual C++ Redistributable installs and
+# Windows does not: on a Windows without it, the hub could not load its lock
+# addon and the Store app did not start. napi-rs's own template links its
+# addons this way.
+#
+# Cargo reads this file from the directory it runs in and every parent, so it
+# covers the workspace's crates and the desktop crate, which tauri-build
+# already links the Visual C++ runtime into while keeping the Universal CRT
+# dynamic; the UCRT ships with Windows 10 and later. A RUSTFLAGS or
+# CARGO_ENCODED_RUSTFLAGS in the environment would replace these flags, so
+# build.yml checks each Windows binary it produces with scripts/pe-imports.ts.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

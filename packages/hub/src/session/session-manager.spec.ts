@@ -6266,7 +6266,11 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 	// sole requester leaving does not take a connection an upload runs on.
 	it("sole-requester disconnect: the connection stays while an upload to the host runs", async () => {
 		const hostId = await createSshHost();
-		sm.setTransfers({ activeOn: (id) => (id === hostId ? 1 : 0), interruptOn: vi.fn() });
+		sm.setTransfers({
+			activeOn: (id) => (id === hostId ? 1 : 0),
+			blockingHostDeletionOn: (id) => (id === hostId ? 1 : 0),
+			interruptOn: vi.fn(),
+		});
 		sm.addClient(makeClient("c-upload-1", []));
 		const origMockImpl = vi
 			.mocked((await import("./ssh-agent.js")).SshAgent)

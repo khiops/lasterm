@@ -1424,13 +1424,15 @@ describe("an SSH key's passphrase leaves no trace in the logs (#644)", () => {
 		});
 		fs.writeFileSync(keyPath, privateKey, { mode: 0o600 });
 
-		const hostId = "spec-host";
+		const metaDal = new MetaDAL(dbs.meta);
+		const hostId = metaDal.createHost({ type: "ssh", label: "pi", sshHost: "pi@pi.local" }).id;
 		const sent: AuthPromptMessage[] = [];
 		const client = {
 			id: "spec-client",
 			send: (msg: AuthPromptMessage) => sent.push(msg),
 		} as unknown as WsClient;
 		const ctx = {
+			metaDal,
 			passphraseCache: new Map(),
 			promptContexts: new Map(),
 			promptIndex: new Map(),

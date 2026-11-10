@@ -435,7 +435,10 @@ export function readHostProfileJson(
 export function registerHostRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
-	sessionManager: Pick<SessionManager, "hostIsBeingStopped" | "daemonPolicyWouldBeRevoked">,
+	sessionManager: Pick<
+		SessionManager,
+		"hostIsBeingStopped" | "daemonPolicyWouldBeRevoked" | "deleteHost"
+	>,
 	announce: AnnounceHostsChange = () => {},
 ): void {
 	registerHostCrudRoutes(server, metaDal, sessionManager, announce);

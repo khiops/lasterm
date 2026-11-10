@@ -1112,7 +1112,8 @@ absent from `channels` has ended, or is unknown.
 // end_reason "killed": that terminal, or its session, was stopped on purpose.
 //   - DELETE /api/channels/:id on a live channel (the UI's Kill), including one
 //     this hub run does not hold, which it marks dead with the reason directly;
-//   - DELETE /api/sessions/:id, for every terminal of that session.
+//   - DELETE /api/sessions/:id, for every terminal of that session;
+//   - DELETE /api/hosts/:id?force=true, for every terminal of that host (#910).
 // end_reason "stopped": it ended with its agent or its hub, which nobody aimed at it.
 //   - POST /api/hosts/:id/agent/replace, for each CHANNEL_EXIT the stopping agent
 //     sends while the hub stops it, and, once the stop is confirmed, for every other
@@ -1743,7 +1744,9 @@ daemon is not retired while one runs there (§ 3.17, #805) and is retired once t
 and Disconnect, Reconnect, `DELETE /api/sessions/:id`, Stop keeping an agent and Replace answer 409
 `TRANSFERS_WOULD_STOP` with `transfers`, the count, until the request says to stop them (§ 6).
 Forced, they become `interrupted`, and a retry resumes them. The local host's uploads go through
-the hub's own file system, which none of these touch.
+the hub's own file system, which none of these touch. `DELETE /api/hosts/:id` instead answers
+409 `TRANSFERS_RUNNING` while uploads to that host are running, queued or being prepared, for
+local hosts too; no `force` overrides it (#910).
 
 **Kept across a restart (#860).** An upload is kept in `meta.db` (STORAGE.md § 3.9): a state change
 is written at once; a file's `acked`, the contiguous prefix its host acknowledged, once 8 MiB more
@@ -2053,7 +2056,7 @@ them: they read no body, or `null`, as an empty one.
 | PUT | `/api/hosts/order` | ● | `{ group_id, host_ids }` → 204: the hosts named, in that order, into that group (`null`, or `group_id` left out: none). 400 `VALIDATION_ERROR` for `host_ids` that is not a non-empty array of strings, a `group_id` neither a string nor `null`, or one that names no host group (#798). An id that names no host moves nothing; the others still move |
 | GET | `/api/hosts/:id` | ● | `Host` |
 | PUT | `/api/hosts/:id` | ● | UpdateHost → `Host` (partial update: each field sent replaces the stored one). 409 `CONFLICT` for a label in use |
-| DELETE | `/api/hosts/:id` | ● | 204 |
+| DELETE | `/api/hosts/:id` | ● | `?force=true\|false` → 204, no body. Admission in order: 404 `NOT_FOUND` if absent; 400 `VALIDATION_ERROR` for another `force`; 409 `HUB_QUITTING`; 409 `HOST_BUSY` while stopping, acquiring a connection, starting a terminal or attaching a local daemon; 409 `TRANSFERS_RUNNING` `{ transfers }` while any upload runs, is queued or is being prepared, regardless of `force`; 409 `TERMINALS_WOULD_END` `{ terminals, unreachable? }` unless `force=true`, when terminals have not ended. Counts come from this hub's tracked, non-dead terminals; `unreachable` is present only when positive and equals `terminals` when no agent is connected. Nothing changes on refusal. Once admitted, synchronously sends DESTROY for each such terminal if connected, reports it `dead` / `killed` under its own session, cancels reconnects, closes the connection and session, deletes dependent rows and the host, drops cached secrets and announces `HOSTS_CHANGED` before answering. It does not wait for the agent; see Host deletion below (#910). Hosts reached through this host lose their pinned target and jump keys and their jump is unset: their next connection is direct, with no pinned key |
 | POST | `/api/hosts/:id/duplicate` | ● | → `Host` (201). The copy takes a free `<label>-copy`, `-copy-2`… label and the host's settings, jump, elevation, OS and the default profile its user chose (#802) included, and goes into its group right after it, renumbering that group's `sort_order` (#746). Its pinned host key, jump key and agent hash are not copied: its first connection treats them as a new host's. 400 `VALIDATION_ERROR` for the local host or an unknown id |
 | PUT | `/api/hosts/:id/welcome` | ● | `{ channel_id }` → `{ ok: true }`. 404 for an unknown channel, 400 `VALIDATION_ERROR` for one of another host |
 | DELETE | `/api/hosts/:id/welcome` | ● | 204 |
@@ -2066,6 +2069,22 @@ them: they read no body, or `null`, as an empty one.
 | GET | `/api/hosts/:id/profiles` | ● | The host's profile menu (query: `?os=linux\|darwin\|windows`): `LaunchProfile[]`, its default profile first, each with the host's `override_type` and `set_by_user` when it has one (`true` for the user's, `false` for one the hub made from what the host's agent reported, #802) |
 | PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type: "pin" \| "hide" \| "default", sort_order? }` → 204. `sort_order` is a safe integer, or `null` for none (the profile's own order), else 400 `VALIDATION_ERROR` and nothing is stored (#798). The override is the user's: a `default` set here replaces the host's, and no HELLO of its agent replaces it (#800). Edit Host's Default Shell and Settings › Profiles › "Set as Default" both send it (#802). An override that leaves the host without a default (the user's default turned into a pin, or hidden) gives it back the one the hub marks for its agent's default shell, at once |
 | DELETE | `/api/hosts/:id/profiles/:profileId` | ● | 204. Removing the user's default is Edit Host's "Automatic": the host gets back at once the default the hub marks for the default shell its agent last reported, when that profile exists and is not hidden (#802) |
+
+**Host deletion (#910).** The hub does not wait for the agent. DESTROY is written to the
+connection, and the connection is closed in the same turn. A DESTROY still in the hub's send
+queue at that moment, held back by back-pressure, is discarded by the close; one the agent
+receives but cannot carry out keeps its terminal. On stdio the end of the connection makes the
+agent try to end every terminal (`destroy_all`), and a shell it could not stop is reported, not
+ended. On a daemon such a terminal keeps running until a later connection of this hub to that
+daemon reports it and the hub DESTROYs it as unknown, its row being gone, or until the daemon
+stops. Such a connection needs a host of this hub that reaches that daemon, for example the same
+machine added again; the delete removes the one that did. A daemon holding terminals does not
+exit on its own: it exits only with no terminal and no hub. Nothing is sent to `unreachable`
+terminals, which likewise may keep running. For an SSH host, connecting it first may reach them;
+its current daemon setting decides whether it reaches that daemon. One `force` both asks
+reachable terminals to end and leaves unreachable ones. The count belongs to the request that
+reported it; a forced retry ends what is there at its own time. There is no promised order of
+arrival between `HOSTS_CHANGED` over WebSocket and the HTTP answer.
 
 `SessionManager.stopKeepingAgent` admits requests in this order: 404 `NOT_FOUND`,
 400 `NOT_SSH_HOST`, 409 `HUB_QUITTING`, 409 `HOST_BUSY` (stop or acquisition),
@@ -2139,7 +2158,7 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 |--------|------|------|--------------|
 | GET | `/api/sessions` | ● | `Session[]` (query: `?host_id=X`) |
 | GET | `/api/sessions/:id` | ● | `Session` (includes channels) |
-| DELETE | `/api/sessions/:id` | ● | `?force=true\|false` → 204 (close). While uploads to the session's remote host run (§ 4.19), 409 `TRANSFERS_WOULD_STOP` `{ transfers }` and nothing is done, until `force=true`, which interrupts them; any other `force` 400 `VALIDATION_ERROR`. Its terminals end `killed` (§ 4.7) and the hub lets go of the host's agent: a daemon older than the hub, which then holds none of its terminals, gets STOP without `force` (§ 3.17, #805), and the next terminal there starts the current agent |
+| DELETE | `/api/sessions/:id` | ● | `?force=true\|false` → 204 (close). While uploads to the session's remote host run (§ 4.19), 409 `TRANSFERS_WOULD_STOP` `{ transfers }` and nothing is done, until `force=true`, which interrupts them; any other `force` 400 `VALIDATION_ERROR`. Sends DESTROY for each non-dead terminal when its agent is connected, before closing or stopping that connection (#910; the delivery caveats of Host deletion apply). Its terminals end `killed` (§ 4.7) and the hub lets go of the host's agent: a daemon older than the hub, which then holds none of its terminals, gets STOP without `force` (§ 3.17, #805), and the next terminal there starts the current agent |
 
 #### Channels
 

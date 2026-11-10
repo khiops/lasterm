@@ -848,7 +848,11 @@ describe("a remote daemon older than the hub (#805)", () => {
 
 	it("waits while an upload to the host runs, its connection carrying the upload's SFTP session, and goes once it ends (#833)", async () => {
 		let uploads = 1;
-		sm.setTransfers({ activeOn: (id) => (id === hostId ? uploads : 0), interruptOn: () => {} });
+		sm.setTransfers({
+			activeOn: (id) => (id === hostId ? uploads : 0),
+			blockingHostDeletionOn: (id) => (id === hostId ? uploads : 0),
+			interruptOn: () => {},
+		});
 		const old = daemons.make(OLD);
 		await connectHolding(old);
 

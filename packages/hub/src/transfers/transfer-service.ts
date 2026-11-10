@@ -470,6 +470,20 @@ export class TransferService {
 		return active;
 	}
 
+	/** Deletion also waits for running uploads whose only remaining work is a conflict (#910). */
+	blockingHostDeletionOn(hostId: string): number {
+		let blocking = this.starting.get(hostId) ?? 0;
+		for (const upload of this.uploads.values()) {
+			if (
+				upload.hostId === hostId &&
+				(this.isActive(upload) || this.uploadState(upload) === "running")
+			) {
+				blocking++;
+			}
+		}
+		return blocking;
+	}
+
 	/**
 	 * The connection to this host is being closed on purpose, forced past the
 	 * question (`transfers-would-stop`): its uploads stop, interrupted, their

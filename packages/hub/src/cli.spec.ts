@@ -2058,6 +2058,95 @@ describe("a large answer through requestHub", () => {
 	});
 });
 
+describe("host remove consent (#910)", () => {
+	it("aligns the host remove description with host list in help", async () => {
+		const output = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			await main(["--help"]);
+			const lines = output.mock.calls.flat().join("\n").split("\n");
+			const list = lines.find((line) => line.includes("lasterm host list"))!;
+			const remove = lines.find((line) => line.includes("lasterm host remove"))!;
+			expect(remove.indexOf("Remove a host")).toBe(list.indexOf("List all hosts"));
+		} finally {
+			output.mockRestore();
+		}
+	});
+
+	it.each([
+		{ force: false, count: 0, unreachable: false },
+		{ force: true, count: 0, unreachable: false },
+		{ force: false, count: 1, unreachable: false },
+		{ force: false, count: 2, unreachable: false },
+		{ force: false, count: 1, unreachable: true },
+		{ force: false, count: 2, unreachable: true },
+	])(
+		"requests and explains $force / $count / $unreachable",
+		async ({ force, count, unreachable }) => {
+			const tls = getTestTlsMaterial();
+			const requests: string[] = [];
+			const server = createHttpsServer(
+				{ cert: tls.pinned.cert, key: tls.pinned.key },
+				(request, response) => {
+					requests.push(`${request.method} ${request.url}`);
+					if (request.method === "GET") {
+						response.writeHead(200, { "content-type": "application/json" });
+						response.end(JSON.stringify([{ id: "host-id", label: "pi" }]));
+					} else if (count > 0) {
+						response.writeHead(409, { "content-type": "application/json" });
+						response.end(
+							JSON.stringify({
+								error: {
+									code: "TERMINALS_WOULD_END",
+									message: "hub text",
+									terminals: count,
+									...(unreachable && { unreachable: count }),
+								},
+							}),
+						);
+					} else {
+						response.writeHead(204);
+						response.end();
+					}
+				},
+			);
+			await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+			const address = server.address();
+			if (!address || typeof address === "string") throw new Error("expected TCP address");
+			const restore = usePlatformDirs({ state: makeTempDir(), config: makeTempDir() });
+			const error = vi.spyOn(console, "error").mockImplementation(() => {});
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			const exit = vi.spyOn(process, "exit").mockImplementation((() => {}) as typeof process.exit);
+			try {
+				persistRuntime({ ...runtimeRecord(), port: address.port, spki: tls.pinned.spki });
+				await main(["host", "remove", "pi", ...(force ? ["--force"] : [])]);
+				expect(requests).toEqual([
+					"GET /api/hosts",
+					`DELETE /api/hosts/host-id${force ? "?force=true" : ""}`,
+				]);
+				if (count > 0) {
+					const one = count === 1;
+					const prefix = `${count} ${one ? "terminal" : "terminals"} on pi ${one ? "has" : "have"} not ended`;
+					expect(error).toHaveBeenCalledExactlyOnceWith(
+						unreachable
+							? `${prefix}, and this hub is not connected to ${one ? "its" : "their"} agent: ${one ? "it" : "they"} may keep running. Rerun with --force to remove the host anyway.`
+							: `${prefix}. Rerun with --force to ask ${one ? "its" : "their"} agent to end ${one ? "it" : "them"} and remove the host.`,
+					);
+					expect(exit).toHaveBeenCalledExactlyOnceWith(1);
+				} else {
+					expect(exit).not.toHaveBeenCalled();
+				}
+			} finally {
+				restore();
+				error.mockRestore();
+				log.mockRestore();
+				exit.mockRestore();
+				server.closeAllConnections();
+				await new Promise<void>((resolve) => server.close(() => resolve()));
+			}
+		},
+	);
+});
+
 // ─── host list (#903) ────────────────────────────────────────────────────────
 //
 // GET /api/hosts names a host's address, port and user `ssh_host`, `ssh_port`

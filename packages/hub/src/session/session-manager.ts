@@ -48,6 +48,7 @@ import {
 	generateId,
 	validateCustomCommand,
 } from "@lasterm/shared";
+import { terminalsText, uploadsText } from "../api/host-connection.js";
 import { HUB_VERSION } from "../build-version.js";
 import type { ConfigResolver, GcConfig } from "../config.js";
 import type { HubLogger } from "../logging/hub-logger.js";
@@ -68,7 +69,7 @@ import { AgentBinaryDecisionNeeded, DeployError, getBinaryCacheDir } from "./age
 import { stopLocalAgent } from "./agent-launcher.js";
 import { AgentRetirement, isOlderVersion } from "./agent-retirement.js";
 import { HostKeyRejectedError, notResumedReason, sshConnectErrorCode } from "./auth-cancelled.js";
-import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
+import { ChannelLifecycleManager, HOST_NOT_FOUND_MESSAGE } from "./channel-lifecycle-manager.js";
 import { requestDaemonStop } from "./daemon-stop.js";
 import {
 	type HostConnectionFacts,
@@ -222,6 +223,8 @@ export type ReplaceAgentOutcome =
 export interface HostTransfers {
 	/** How many uploads to this host are running or queued: they hold its connection. */
 	activeOn(hostId: string): number;
+	/** Uploads that forbid deleting the host: active work and running conflicts included (#910). */
+	blockingHostDeletionOn(hostId: string): number;
 	/** Its connection is being closed on purpose: they stop, interrupted, and resume on a retry. */
 	interruptOn(hostId: string): void;
 	/** A remote host's agent connected, whoever connected it: what waited for that goes on (#860). */
@@ -310,7 +313,7 @@ export class SessionManager {
 	private readonly gc: SpoolGarbageCollector;
 
 	constructor(
-		dbManager: DatabaseManager,
+		private readonly dbManager: DatabaseManager,
 		gcConfig?: GcConfig,
 		agentConfig?: AgentConfig,
 		configResolver?: ConfigResolver,
@@ -851,6 +854,13 @@ export class SessionManager {
 
 		// Asked for (DELETE /api/sessions/:id): its terminals are killed, and a
 		// pane over one must not bring it back, now or later (#580, #592).
+		if (agent?.connected) {
+			for (const [channelId, channel] of this.ctx.channels) {
+				if (channel.hostId === hostId && channel.status !== "dead") {
+					agent.send({ type: "DESTROY", channelId });
+				}
+			}
+		}
 		this.lifecycle.closeSession(hostId, sessionId, "killed");
 		// A daemon older than this hub, which now holds nothing of it, is
 		// stopped rather than left running with nothing to do (#805); the next
@@ -1064,7 +1074,7 @@ export class SessionManager {
 			const errorMsg: ErrorMessage = {
 				type: "ERROR",
 				code: "HOST_NOT_FOUND",
-				message: "That host is no longer in this hub's list.",
+				message: HOST_NOT_FOUND_MESSAGE,
 				hostId,
 			};
 			client.send(errorMsg);
@@ -2957,6 +2967,93 @@ export class SessionManager {
 			ended: ending,
 		});
 		return { kind: "disconnected", ended: ending };
+	}
+
+	/** Delete a host in one turn, after counting what the person must consent to (#910). */
+	deleteHost(
+		hostId: string,
+		options: { readonly force?: boolean } = {},
+	):
+		| { kind: "deleted" }
+		| {
+				kind: "refused";
+				code: string;
+				message: string;
+				terminals?: number;
+				unreachable?: number;
+				transfers?: number;
+		  } {
+		if (this.isQuitting())
+			return { kind: "refused", code: "HUB_QUITTING", message: "The hub is quitting." };
+		if (this.ctx.stoppingAgents.has(hostId)) {
+			return { kind: "refused", code: "HOST_BUSY", message: "This host's agent is being stopped." };
+		}
+		if (
+			this.ctx.acquisitions.has(hostId) ||
+			this.retirement.isStarting(hostId) ||
+			this.agentMgr.isDaemonAttachPending(hostId)
+		) {
+			return {
+				kind: "refused",
+				code: "HOST_BUSY",
+				message:
+					"A terminal or a connection is starting on this host. Wait for it, or answer or cancel its question, then delete the host.",
+			};
+		}
+		const transfers = this.transfers?.blockingHostDeletionOn(hostId) ?? 0;
+		if (transfers > 0)
+			return {
+				kind: "refused",
+				code: ErrorCode.TRANSFERS_RUNNING,
+				transfers,
+				message: `${uploadsText(transfers)} to this host ${transfers === 1 ? "is" : "are"} running. Wait for them to end or cancel them, then delete the host.`,
+			};
+		const terminals = [...this.ctx.channels].filter(
+			([, ch]) => ch.hostId === hostId && ch.status !== "dead",
+		);
+		const unreachable = this.ctx.agents.get(hostId)?.connected === true ? 0 : terminals.length;
+		if (terminals.length > 0 && options.force !== true) {
+			const singular = terminals.length === 1;
+			const text = `${terminalsText(terminals.length)} on this host ${singular ? "has" : "have"} not ended`;
+			const message =
+				unreachable > 0
+					? `${text}, and this hub is not connected to ${singular ? "its" : "their"} agent: nothing can be sent to ${singular ? "it" : "them"}, and ${singular ? "it" : "they"} may keep running.${this.ctx.metaDal.getHost(hostId)?.type === "ssh" ? ` Connecting the host first may reach ${singular ? "it" : "them"}; or send force=true to delete it anyway.` : " Send force=true to delete it anyway."}`
+					: `${text}. Send force=true to ask ${singular ? "its" : "their"} agent to end ${singular ? "it" : "them"} and delete the host.`;
+			return {
+				kind: "refused",
+				code: ErrorCode.TERMINALS_WOULD_END,
+				message,
+				terminals: terminals.length,
+				...(unreachable > 0 && { unreachable }),
+			};
+		}
+		this.ctx.stoppingAgents.add(hostId);
+		try {
+			for (const [channelId] of terminals) this.lifecycle.destroyChannel(channelId);
+			this.cancelReconnect(hostId);
+			this.endHostSession(hostId, "killed");
+			// A disconnected host need not have a session in this hub run.
+			for (const [channelId, channel] of this.ctx.channels) {
+				if (channel.hostId === hostId) this.lifecycle.forgetChannel(channelId);
+			}
+			this.dbManager.meta.transaction(() => {
+				this.ctx.metaDal.deleteCascadeForHost(hostId);
+				this.ctx.metaDal.deleteHost(hostId);
+			})();
+		} finally {
+			this.ctx.stoppingAgents.delete(hostId);
+		}
+		this.ctx.passphraseCache.delete(hostId);
+		for (const key of this.ctx.elevationCache.keys()) {
+			if (key.startsWith(`${hostId}:`)) this.ctx.elevationCache.delete(key);
+		}
+		this.ctx.trustedAgentSha256.delete(hostId);
+		this.ctx.hubLogger?.log("info", "session-manager: host deleted", {
+			hostId,
+			ended: terminals.length - unreachable,
+			unreachable,
+		});
+		return { kind: "deleted" };
 	}
 
 	/**

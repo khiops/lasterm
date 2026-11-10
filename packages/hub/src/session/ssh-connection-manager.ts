@@ -125,10 +125,10 @@ export class SshConnectionManager {
 		if (secret === null || !this._isCacheableSessionPassphrase(promptEntry)) return;
 		const ttl = rememberSession === true ? 15 * 60 * 1000 : 60 * 1000;
 		const promptedHostId = (promptEntry?.resendPayload as { hostId?: unknown } | undefined)?.hostId;
-		this.ctx.passphraseCache.set(
-			typeof promptedHostId === "string" ? promptedHostId : (promptEntry?.hostId ?? fallbackHostId),
-			{ secret, expiresAt: Date.now() + ttl },
-		);
+		const hostId =
+			typeof promptedHostId === "string" ? promptedHostId : (promptEntry?.hostId ?? fallbackHostId);
+		if (!this.ctx.metaDal.getHost(hostId)) return;
+		this.ctx.passphraseCache.set(hostId, { secret, expiresAt: Date.now() + ttl });
 	}
 
 	private _getOrOpenSessionPromptContext(

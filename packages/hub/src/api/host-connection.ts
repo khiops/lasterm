@@ -38,12 +38,12 @@ export function readHostConnectionBody(
 }
 
 /** "3 terminals", "1 terminal". */
-function terminalsText(count: number): string {
+export function terminalsText(count: number): string {
 	return count === 1 ? "1 terminal" : `${count} terminals`;
 }
 
 /** "2 uploads", "1 upload". */
-function uploadsText(count: number): string {
+export function uploadsText(count: number): string {
 	return count === 1 ? "1 upload" : `${count} uploads`;
 }
 

@@ -881,6 +881,7 @@ describe("uploads to a host hold its connection (#833)", { timeout: 20_000 }, ()
 		const interrupted: string[] = [];
 		h.sm.setTransfers({
 			activeOn: (hostId) => (hostId === h.host.id ? running : 0),
+			blockingHostDeletionOn: (hostId) => (hostId === h.host.id ? running : 0),
 			interruptOn: (hostId) => {
 				interrupted.push(hostId);
 				running = 0;
@@ -1030,6 +1031,7 @@ describe("uploads to a host hold its connection (#833)", { timeout: 20_000 }, ()
 		const viewers: (string | null | undefined)[] = [];
 		h.sm.setTransfers({
 			activeOn: () => 0,
+			blockingHostDeletionOn: () => 0,
 			interruptOn: () => {},
 			hostConnected: (hostId) => told.push(hostId),
 			saveNow: () => {

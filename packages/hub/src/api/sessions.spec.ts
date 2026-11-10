@@ -168,6 +168,11 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	sm.beginQuit();
 	await sm.shutdown();
+	// A fake agent ends its connection after a STOP in a setImmediate, and
+	// nothing above leaves the microtask queue. Without this turn, the end of a
+	// STOP no test waited for, an idle agent's retirement (#805), reached this
+	// manager during the next test, with its meta.db closed (#925).
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	dbs.close();
 });
 

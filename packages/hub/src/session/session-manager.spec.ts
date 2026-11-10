@@ -2535,7 +2535,8 @@ describe("SessionManager", () => {
 			const refusal = received.find(
 				(m): m is ErrorMessage => m.type === "ERROR" && m.code === "CHANNEL_DEAD",
 			);
-			if (refusal?.lastOutput === undefined) throw new Error("expected a CHANNEL_DEAD with its last output");
+			if (refusal?.lastOutput === undefined)
+				throw new Error("expected a CHANNEL_DEAD with its last output");
 			return refusal.lastOutput;
 		}
 
@@ -2602,7 +2603,8 @@ describe("SessionManager", () => {
 			emit({ type: "CHANNEL_EXIT", channelId, exitCode: 1 });
 			agent.send.mockClear();
 			// Ended, and still held in memory: the branch this case is about.
-			const held = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+			const held = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext })
+				.ctx;
 			expect(held.channels.get(channelId)?.status).toBe("dead");
 
 			const { attached, received, client } = await attachFresh(channelId, "reader");
@@ -2614,7 +2616,8 @@ describe("SessionManager", () => {
 			expect(text(last.tail)).toEqual(["after"]);
 			expect({ cols: last.cols, rows: last.rows }).toEqual({ cols: 100, rows: 30 });
 			expect(agent.send).not.toHaveBeenCalled();
-			const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+			const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext })
+				.ctx;
 			expect(ctx.channels.get(channelId)?.clients.has("reader") ?? false).toBe(false);
 			expect(client.attachedChannels.has(channelId)).toBe(false);
 			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
@@ -2636,9 +2639,9 @@ describe("SessionManager", () => {
 			expect(reads.byChannel).not.toHaveBeenCalled();
 			expect(reads.output).not.toHaveBeenCalled();
 			expect(reads.latest).not.toHaveBeenCalled();
-			expect(reads.one.mock.results.map((r) => (r.value as { kind?: string } | undefined)?.kind)).toEqual([
-				"snapshot",
-			]);
+			expect(
+				reads.one.mock.results.map((r) => (r.value as { kind?: string } | undefined)?.kind),
+			).toEqual(["snapshot"]);
 
 			endedTerminal("ended-fits");
 			store("ended-fits", 10, "snapshot", JSON.stringify(SCREEN));
@@ -2762,7 +2765,8 @@ describe("SessionManager", () => {
 			const emit = (msg: unknown) => (agent as unknown as EventEmitter).emit("message", msg);
 			emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
 			emit({ type: "OUTPUT", channelId, seq: 1, ts: "", data: Buffer.from("gone") });
-			const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+			const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext })
+				.ctx;
 			ctx.chunker.flush(channelId);
 			nextLocalAttachNotFoundChannelId = channelId;
 

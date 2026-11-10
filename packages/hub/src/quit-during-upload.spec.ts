@@ -79,7 +79,7 @@ async function startQuittableHub(): Promise<Hub> {
 		return {
 			server,
 			// The next hub reads them: the test closes them.
-			dbManager: { close: () => {} },
+			dbManager: { close: async () => {} },
 			runtime: runtimeRecord(),
 			deleteRuntime: () => true,
 			exit,

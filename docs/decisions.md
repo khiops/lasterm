@@ -7,6 +7,107 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## HOST-DELETE — deleting a host ends its terminals once the person was told how many (#910, 2026-11-09)
+
+- **Refuse, count, force.** DELETE host accepts `force=true|false`. Admission is synchronous:
+  absent host (404), invalid force (400), quitting, stopping, an acquisition, terminal start or
+  local daemon attach, uploads counted by `transfersOn(hostId)`, then non-dead tracked terminals
+  (409). That upload count is Disconnect's: a start being prepared, or an upload with an operation
+  in flight, folders being created, or a source present and files queued, sending or verifying.
+  An upload whose remaining files only wait on a conflict answer is not counted; its rows are
+  deleted with the host. No force overrides `TRANSFERS_RUNNING`: the upload preparation cannot
+  be interrupted. This is the exception to UPLOADS' "every gesture that closes a connection …
+  take force".
+- **What the count means.** `terminals` counts this hub's tracked, non-dead terminals for the
+  host. `unreachable`, omitted at zero, equals that count when no agent is connected. They may
+  still run: the previous connection's transport and the host's current daemon setting need not
+  agree. An SSH host can be connected first, which may reach them. A forced retry acts on what
+  exists then; consent is not bound to the earlier number.
+- **One synchronous stretch.** Hold `stoppingAgents` in a `finally`; destroy each counted
+  channel (DESTROY if connected, broadcast killed under its own session, untrack and forget);
+  cancel reconnect timers and attempts; release and close the agent and close the session;
+  forget any remaining channels even without a session; delete dependent rows and the host in
+  a transaction. Drop the host's passphrase, elevation passwords and trusted binary hash, log
+  ids and counts, announce hosts, answer 204. An outstanding bastion answer still reaches its
+  target connection but is not cached under a host whose row is gone.
+- **Delivery is not confirmed.** DESTROY is written, then the connection closes in the same
+  turn. Back-pressure may leave it queued and the close discards it; an agent unable to carry
+  it out keeps its terminal. Stdio EOF makes the agent try `destroy_all`, reporting a shell it
+  cannot stop. A daemon's leftover runs until it stops or a later connection of this hub to
+  that daemon reports it and the hub DESTROYs the unknown terminal. Reaching it requires a
+  host entry, for example the machine added again; deletion removed the old one. A daemon
+  holding terminals exits only with no terminal and no hub. Nothing is sent to unreachable
+  terminals. These caveats also apply to session deletion, which now sends DESTROY first.
+- **Late work.** Every SPAWN send checks the host row. Reconnect SPAWN callbacks act only for
+  the same tracked channel object and the host's current agent; stale callbacks settle silently.
+  Snapshots of forgotten channels write neither spool nor cache index. The dialog first reads
+  the hub's count, then asks for the exact label; requests are bound to that opening and host.
+  CLI `host remove --force` deliberately sends consent directly.
+- **Prior art, read 2026-11-09 for the frozen #910 spec.** [Data] Docker API 1.57 refuses a
+  running container with 409 and force kills/removes it ([Moby API](https://github.com/moby/moby/blob/master/api/swagger.yaml),
+  [docker rm](https://docs.docker.com/reference/cli/docker/container/rm/)). [Data] Zellij 0.45.1
+  (2026-08-28) refuses active session deletion unless forced, then kills and deletes
+  ([sessions.rs](https://github.com/zellij-org/zellij/blob/v0.45.1/zellij-utils/src/sessions.rs)).
+  [Data] Coder v2.39 destroys resources on delete and keeps leaving resources behind under its
+  own `--orphan` ([CLI](https://coder.com/docs/reference/cli/delete)); its v2.38.6 UI
+  (2026-11-03) asks for the workspace name. Lasterm uses one force to ask reachable terminals
+  to end and leave unreachable ones after the 409 counted and named them.
+  [Data] Kubernetes documents asynchronous namespace termination and unreachable pods
+  ([namespaces](https://kubernetes.io/docs/tasks/administer-cluster/namespaces/), 2026-07-18;
+  [pod lifecycle](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/), 2026-10-29).
+  [Opinion] Refusing with a count and forcing after consent fits an object that owns runtime
+  state. [Data] Deleting a launcher in [Tabby v1.0.238](https://github.com/Eugeny/tabby/blob/v1.0.238/tabby-core/src/services/profiles.service.ts)
+  (2026-10-07) or [Windows Terminal](https://github.com/microsoft/terminal/blob/main/src/cascadia/TerminalApp/TerminalPaneContent.cpp)
+  (main, read 2026-11-09) leaves tabs alive.
+  [Data] [Proxmox Qemu.pm](https://git.proxmox.com/?p=qemu-server.git;a=blob;f=PVE/API2/Qemu.pm)
+  (2026-10-29) refuses running VMs and asks for the VMID; offline behavior: DATA GAP.
+  Termius, MobaXterm, Royal TS and SecureCRT offline behavior: DATA GAP. Termius confirmation
+  evidence ([changelog](https://docs.termius.com/), 4.0.18, 2019-02-20) is over 18 months old.
+
+---
+
+## SPOOL-CHECKPOINTER — spool WAL checkpoints run on a worker thread (#786, 2026-11-09)
+
+- **Measured cause.** On Windows 11, Node 24.22.0 and SQLite 3.53.4, a 1.6 GB spool's
+  200 MB flood of 256 KiB chunks hit the 2,000-page automatic checkpoint 28–29 times per
+  run, holding commits for 40–470 ms. The GC pass had gaps of 220–439 ms. These are the
+  #786 design measurements, not a claim about every platform or disk.
+- **One connection on a worker, PASSIVE only.** After migrations succeed, the file-backed
+  spool gets a CommonJS source-string worker (`eval: true`), which works without another
+  file in the single executable. It opens the same path with `node:sqlite`, sets synchronous
+  NORMAL, and pauses 1,000 ms before every PASSIVE checkpoint, closing in a `finally`.
+  This source is the one exception to NODE-SQLITE's adapter boundary and must move with its
+  API at a Node bump. `:memory:` gets no worker; meta.db is unchanged.
+- **65,536 frames, not zero or 16,384.** A worker without a threshold cannot make the WAL
+  rewind while writes keep landing. At 16,384, prototype threshold crossings held commits
+  for 570–720 ms. At 65,536 with the one-second pause and 8 MiB journal size limit, the
+  measured flood had one commit ≥20 ms per run and a WAL below 230 MB; the GC's maximum
+  gap was 135 ms. The threshold is about 257.5 MiB, not a hard bound: the automatic
+  checkpoint is PASSIVE and may find the checkpoint lock busy, and a transaction can pass it.
+- **Pause and retained file size.** Checkpointing every 20 ms worsened paced commits; a
+  one-second pause reduced that contention. `journal_size_limit = 8388608` truncates the
+  WAL at its next rewind, rather than retaining a flood's high-water size. The header sync
+  and truncation stay on the hub's thread: at one commit a second the prototype median
+  rose from about 0.8 ms to 1.8–2.7 ms, with none ≥20 ms. Residual gaps up to about 135 ms
+  are outside this fix.
+- **Failure and teardown.** Creation failure, error or unsolicited exit restores 2,000
+  frames and reports once without a path; there is no retry. Stop refs and wakes the
+  worker and awaits its exit. All database closes share one promise: the worker's exit is
+  awaited first, then meta.db and spool.db get their TRUNCATE-and-close in one synchronous
+  stretch, so no callback ever runs with one database closed and the other open. The first
+  checkpoint error is reported only after both closes are attempted. Shutdown's existing timeout and a failed start's `STARTUP_UNWIND_TIMEOUT_MS`
+  (10 seconds, after a separate wait of the same length for the server) bound only the
+  asynchronous waits, including the wait for the worker. A checkpoint already running does
+  not stop at the bound, whether the worker's last one or the final synchronous TRUNCATE on
+  the hub's thread. Timers cannot run during synchronous checkpoints or closes, so a late
+  close can still end in exit 0 without a timeout warning. If shutdown's timeout fires, the
+  hub requests exit 1; `process.exit` waits for a running worker checkpoint to return, so the
+  process can outlive the bound. The failed-start unwind rethrows the original error after its
+  wait. When logging is on (the `main.ts` entry), an expired failed-start database wait writes a
+  warning to `hub.jsonl`. Databases left unclosed rely on WAL recovery at the next start.
+
+---
+
 ## HUB-ADDONS-BESIDE — the hub's native addons are installed beside its executable, checked against digests it embeds (#889, 2026-11-07)
 
 - **Beside the executable, never extracted.** The single executable embedded `lasterm_hub_lock.node`
@@ -66,7 +167,8 @@ heading, with a pointer to the section that replaced it. A section without one i
   § 2). The DAL was not rewritten: its 149 `prepare` sites run as they did. The adapter refuses a
   parameter left out, which `node:sqlite` would bind as NULL, maps `undefined` to NULL, refuses
   booleans and objects, returns plain rows and Buffer BLOBs, and names the result code of an SQLite
-  error in `code`. Nothing else imports `node:sqlite`.
+  error in `code`. The only exception is SPOOL-CHECKPOINTER's CommonJS worker source,
+  which opens, sets synchronous NORMAL, checkpoints and closes; update it too when the API moves.
 - **A release candidate, held by the Node pin.** `node:sqlite` is at Stability 1.2, and changes
   still land in minor releases: booleans bind since 24.21, `undefined` binds NULL from 26.10,
   `DatabaseSync` is renamed `Database` in 26.11. The hub runs one exact Node, so a change arrives

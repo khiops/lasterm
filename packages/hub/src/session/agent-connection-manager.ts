@@ -618,6 +618,11 @@ export class AgentConnectionManager {
 		return attachPromise;
 	}
 
+	/** Whether a local daemon connection is still being acquired (#910). */
+	isDaemonAttachPending(hostId: string): boolean {
+		return this.daemonAttachPromises.has(hostId);
+	}
+
 	private async attachDaemonFresh(hostId: string, sessionId: string): Promise<LastermAgent> {
 		const quitEpoch = captureQuitFence(this.ctx);
 		const socketPath = getSocketPath(this.ctx.agentConfig.socketPath);

@@ -21,6 +21,7 @@ import {
 import { request as httpsRequest } from "node:https";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { sshPortFromText } from "@lasterm/shared";
 import { lastermDir } from "@lasterm/shared/dist/platform-dirs.js";
 import { replaceFileSync } from "@lasterm/shared/dist/replace-file.js";
 import { createOwnerOnlyDirectory } from "./auth.js";
@@ -286,6 +287,15 @@ function loadAuthToken(): string | null {
 
 // ─── HTTP client ───────────────────────────────────────────────────────────────
 
+class ApiRequestError extends Error {
+	constructor(
+		readonly status: number,
+		readonly body: string,
+	) {
+		super(`HTTP ${status}: ${body}`);
+	}
+}
+
 async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
 	const runtimeResult = loadRuntime();
 	if (runtimeResult.kind === "absent") {
@@ -311,7 +321,7 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
 
 	if (!res.ok) {
 		const text = await res.text();
-		throw new Error(`HTTP ${res.status}: ${text}`);
+		throw new ApiRequestError(res.status, text);
 	}
 
 	const ct = res.headers.get("content-type") ?? "";
@@ -479,6 +489,11 @@ export interface ParsedArgs {
 	command: string;
 	// start
 	port?: number;
+	/**
+	 * `--port` was given with no value, or one that is not a whole number from
+	 * 1 to 65535: start refuses it rather than listen elsewhere (#902).
+	 */
+	portRefused?: boolean;
 	daemon?: boolean;
 	/** Only the desktop passes it: stop when the launcher's stdin pipe closes (#188). */
 	exitWithStdin?: boolean;
@@ -486,6 +501,11 @@ export interface ParsedArgs {
 	label?: string;
 	host?: string;
 	sshPort?: number;
+	/**
+	 * `--ssh-port` was given with no value, or one that is not a whole number
+	 * from 1 to 65535: host add refuses it rather than send it (#901).
+	 */
+	sshPortRefused?: boolean;
 	user?: string;
 	authMethod?: string;
 	keyPath?: string;
@@ -536,8 +556,13 @@ export function parseArgs(argv: string[]): ParsedArgs | null {
 	}
 
 	// Consume named flags first (order-independent)
-	const portStr = flagValue("--port");
-	if (portStr !== undefined) result.port = Number.parseInt(portStr, 10);
+	// Read as digits only: parseInt took `4100abc` for 4100, and the flag given
+	// last, with no value, as no flag at all, so the system chose the port (#902).
+	if (args.includes("--port")) {
+		const port = sshPortFromText(flagValue("--port") ?? "");
+		if (port === null) result.portRefused = true;
+		else result.port = port;
+	}
 
 	const labelVal = flagValue("--label");
 	if (labelVal !== undefined) result.label = labelVal;
@@ -545,8 +570,13 @@ export function parseArgs(argv: string[]): ParsedArgs | null {
 	const hostVal = flagValue("--host");
 	if (hostVal !== undefined) result.host = hostVal;
 
-	const sshPortStr = flagValue("--ssh-port");
-	if (sshPortStr !== undefined) result.sshPort = Number.parseInt(sshPortStr, 10);
+	// Read as digits only: parseInt took `1.5` for 1 and `2222abc` for 2222,
+	// and the flag given last, with no value, as no flag at all (#901).
+	if (args.includes("--ssh-port")) {
+		const sshPort = sshPortFromText(flagValue("--ssh-port") ?? "");
+		if (sshPort === null) result.sshPortRefused = true;
+		else result.sshPort = sshPort;
+	}
 
 	const userVal = flagValue("--user");
 	if (userVal !== undefined) result.user = userVal;
@@ -907,7 +937,12 @@ function printAgentStatusTable(
 
 // ─── Command handlers ──────────────────────────────────────────────────────────
 
-export async function cmdStart(args: ParsedArgs): Promise<void> {
+export async function cmdStart(args: ParsedArgs): Promise<number> {
+	if (args.portRefused) {
+		console.error("--port must be a number from 1 to 65535, in digits only");
+		console.error("Usage: lasterm start [--port 4100] [--daemon] [--open]");
+		return 1;
+	}
 	const { resolveStartPort } = await import("./start-port.js");
 	const port = resolveStartPort(args.port, process.env.LASTERM_PORT);
 
@@ -1008,6 +1043,7 @@ export async function cmdStart(args: ParsedArgs): Promise<void> {
 			console.log(`State dir  : ${stateDir}`);
 		},
 	});
+	return 0;
 }
 
 export async function cmdStop(
@@ -1579,12 +1615,14 @@ function statusExitCode(probe: HubProbe): number {
 	return probe.kind === "refused" || probe.kind === "not-answering" ? 1 : 0;
 }
 
-async function cmdHostAdd(args: ParsedArgs): Promise<void> {
-	if (!args.label || !args.host) {
+async function cmdHostAdd(args: ParsedArgs): Promise<number> {
+	if (args.sshPortRefused)
+		console.error("--ssh-port must be a number from 1 to 65535, in digits only");
+	if (!args.label || !args.host || args.sshPortRefused) {
 		console.error(
 			"Usage: lasterm host add --label <label> --host <user@hostname> [--ssh-port 22] [--auth agent|key] [--key-path ~/.ssh/id_ed25519]",
 		);
-		process.exit(1);
+		return 1;
 	}
 
 	const body: Record<string, unknown> = {
@@ -1603,6 +1641,7 @@ async function cmdHostAdd(args: ParsedArgs): Promise<void> {
 		const r = result as Record<string, unknown>;
 		console.log(`Host added: ${String(r.label ?? args.label)} (id: ${String(r.id ?? "?")})`);
 	}
+	return 0;
 }
 
 async function cmdHostList(args: ParsedArgs): Promise<void> {
@@ -1620,15 +1659,20 @@ async function cmdHostList(args: ParsedArgs): Promise<void> {
 	console.log(`${pad("LABEL", 20)}  ${pad("HOST", 30)}  ${pad("PORT", 6)}  USER`);
 	console.log(`${"-".repeat(20)}  ${"-".repeat(30)}  ${"-".repeat(6)}  ----`);
 	for (const h of hosts) {
-		console.log(
-			`${pad(String(h.label ?? ""), 20)}  ${pad(String(h.hostname ?? ""), 30)}  ${pad(String(h.port ?? 22), 6)}  ${String(h.username ?? "")}`,
-		);
+		// GET /api/hosts names these ssh_host, ssh_port and ssh_user, and leaves out
+		// the ones a host has none of (#903). An SSH host stored without a port uses
+		// 22. A local host shows none: the hub ignores any SSH field it still keeps.
+		const ssh = h.type === "ssh";
+		const address = ssh ? String(h.ssh_host ?? "") : "";
+		const port = ssh ? String(h.ssh_port ?? 22) : "";
+		const user = ssh ? String(h.ssh_user ?? "") : "";
+		console.log(`${pad(String(h.label ?? ""), 20)}  ${pad(address, 30)}  ${pad(port, 6)}  ${user}`);
 	}
 }
 
 async function cmdHostRemove(args: ParsedArgs): Promise<void> {
 	if (!args.label) {
-		console.error("Usage: lasterm host remove <label>");
+		console.error("Usage: lasterm host remove <label> [--force]");
 		process.exit(1);
 	}
 
@@ -1640,7 +1684,32 @@ async function cmdHostRemove(args: ParsedArgs): Promise<void> {
 		process.exit(1);
 	}
 
-	await apiRequest("DELETE", `/api/hosts/${encodeURIComponent(String(match.id))}`);
+	try {
+		await apiRequest(
+			"DELETE",
+			`/api/hosts/${encodeURIComponent(String(match.id))}${args.force === true ? "?force=true" : ""}`,
+		);
+	} catch (err) {
+		if (err instanceof ApiRequestError && err.status === 409) {
+			let error: { code?: unknown; terminals?: unknown; unreachable?: unknown } | undefined;
+			try {
+				error = (JSON.parse(err.body) as { error?: typeof error }).error;
+			} catch {
+				/* Keep the HTTP error for a non-JSON refusal. */
+			}
+			if (error?.code === "TERMINALS_WOULD_END" && typeof error.terminals === "number") {
+				const one = error.terminals === 1;
+				const prefix = `${error.terminals} ${one ? "terminal" : "terminals"} on ${args.label} ${one ? "has" : "have"} not ended`;
+				console.error(
+					typeof error.unreachable === "number" && error.unreachable > 0
+						? `${prefix}, and this hub is not connected to ${one ? "its" : "their"} agent: ${one ? "it" : "they"} may keep running. Rerun with --force to remove the host anyway.`
+						: `${prefix}. Rerun with --force to ask ${one ? "its" : "their"} agent to end ${one ? "it" : "them"} and remove the host.`,
+				);
+				return process.exit(1);
+			}
+		}
+		throw err;
+	}
 	console.log(`Host "${args.label}" removed.`);
 }
 
@@ -1655,12 +1724,16 @@ async function cmdSessionList(args: ParsedArgs): Promise<void> {
 		console.log("No active sessions.");
 		return;
 	}
+	const hosts = (await apiRequest("GET", "/api/hosts")) as Array<Record<string, unknown>>;
+	const hostLabels = new Map(hosts.map((h) => [h.id, h.label]));
 	const pad = (s: string, n: number) => s.padEnd(n);
 	console.log(`${pad("ID", 26)}  ${pad("HOST", 20)}  ${pad("STATE", 12)}  CREATED`);
 	console.log(`${"-".repeat(26)}  ${"-".repeat(20)}  ${"-".repeat(12)}  -------`);
 	for (const s of sessions) {
+		// GET /api/sessions names these status and host_id; the label comes from
+		// GET /api/hosts (#905). Keep the id when its host is no longer listed.
 		console.log(
-			`${pad(String(s.id ?? ""), 26)}  ${pad(String(s.host_label ?? s.host_id ?? ""), 20)}  ${pad(String(s.state ?? ""), 12)}  ${String(s.created_at ?? "")}`,
+			`${pad(String(s.id ?? ""), 26)}  ${pad(String(hostLabels.get(s.host_id) ?? s.host_id ?? ""), 20)}  ${pad(String(s.status ?? ""), 12)}  ${String(s.created_at ?? "")}`,
 		);
 	}
 }
@@ -1717,7 +1790,7 @@ Usage:
               [--ssh-port 22] [--auth agent|key]
               [--key-path ~/.ssh/id_ed25519]
   lasterm host list [--json]                    List all hosts
-  lasterm host remove <label>                   Remove a host
+  lasterm host remove <label> [--force]         Remove a host (--force: even with terminals open)
 
   lasterm agent fetch <os-arch>|--all           Populate the agent binary cache
               [--version x.y.z] [--prune]
@@ -1752,9 +1825,11 @@ export async function main(argv: string[]): Promise<void> {
 
 	try {
 		switch (parsed.command) {
-			case "start":
-				await cmdStart(parsed);
+			case "start": {
+				const code = await cmdStart(parsed);
+				if (code !== 0) process.exit(code);
 				break;
+			}
 			case "stop":
 				await cmdStop(parsed);
 				break;
@@ -1766,9 +1841,11 @@ export async function main(argv: string[]): Promise<void> {
 				if (code !== 0) process.exit(code);
 				break;
 			}
-			case "host-add":
-				await cmdHostAdd(parsed);
+			case "host-add": {
+				const code = await cmdHostAdd(parsed);
+				if (code !== 0) process.exit(code);
 				break;
+			}
 			case "host-list":
 				await cmdHostList(parsed);
 				break;

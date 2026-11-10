@@ -107,6 +107,7 @@ export const ErrorCode = {
 	/**
 	 * REST, reconnect, disconnect and POST /api/hosts/:id/agent/stop-keeping: closing this host's connection would end
 	 * terminals. Consent is read by readHostConnectionBody or readStopKeepingBody (#648).
+	 * DELETE /api/hosts/:id also counts tracked terminals, with force in the query (#910).
 	 */
 	TERMINALS_WOULD_END: "TERMINALS_WOULD_END",
 	/**
@@ -116,6 +117,14 @@ export const ErrorCode = {
 	 * retry resumes them.
 	 */
 	TRANSFERS_WOULD_STOP: "TRANSFERS_WOULD_STOP",
+	/**
+	 * DELETE /api/hosts/:id: transfersOn counts uploads Disconnect would stop:
+	 * preparation, operations in flight, folder creation, or a source present
+	 * and files queued, sending or verifying. No force overrides this refusal.
+	 * An upload whose remaining files only wait on a conflict answer is not
+	 * counted; its rows are deleted with the host (#910).
+	 */
+	TRANSFERS_RUNNING: "TRANSFERS_RUNNING",
 	/** WS TRANSFER_* and the transfer routes: `[experimental] file_transfer` is off (#835). */
 	FILE_TRANSFER_DISABLED: "FILE_TRANSFER_DISABLED",
 	/** REST, connect, reconnect, disconnect and POST /api/hosts/:id/agent/stop-keeping: the host is the local one, which has no connection to act on (#648). */

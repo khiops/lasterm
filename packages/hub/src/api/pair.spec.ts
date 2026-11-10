@@ -51,7 +51,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
 	await server.close();
-	dbs.close();
+	await dbs.close();
 });
 
 function authHeader() {
@@ -381,11 +381,11 @@ describe("meta.db never holds a pairing code", () => {
 			expect(metaDbBytes(dir)).not.toContain(code);
 			await hub.close();
 			hub = undefined;
-			disk.close();
+			await disk.close();
 			expect(metaDbBytes(dir)).not.toContain(code);
 		} finally {
 			await hub?.close();
-			disk.close();
+			await disk.close();
 			removeDataDir(dir);
 		}
 	});

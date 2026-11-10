@@ -2,6 +2,7 @@ import type { AgentChannelStateMessage, HelloMessage, ProtocolMessage } from "@l
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigResolver } from "../config.js";
+import type { ChannelLifecycleManager } from "../session/channel-lifecycle-manager.js";
 import { captureQuitFence } from "../session/quit-fence.js";
 import {
 	REMOTE_STATE_DIR_COMMAND,
@@ -246,6 +247,461 @@ function endsOf(heard: ProtocolMessage[], channelId: string): ProtocolMessage[] 
 		(m) => m.type === "CHANNEL_STATE" && m.channelId === channelId && m.status === "dead",
 	);
 }
+
+describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => {
+	function remove(force = "") {
+		return server.inject({ method: "DELETE", url: `/api/hosts/${hostId}${force}` });
+	}
+
+	it("R1 refuses with the live count without sending or deleting anything", async () => {
+		const agent = connectedAgent();
+		const { channelId, ctx } = liveTerminalOn(agent);
+		const response = await remove();
+		expect(response.statusCode).toBe(409);
+		expect(response.json()).toEqual({
+			error: {
+				code: "TERMINALS_WOULD_END",
+				terminals: 1,
+				message:
+					"1 terminal on this host has not ended. Send force=true to ask its agent to end it and delete the host.",
+			},
+		});
+		expect(agent.sent).toEqual([]);
+		expect(ctx.channels.has(channelId)).toBe(true);
+		expect((await server.inject(`/api/hosts/${hostId}`)).statusCode).toBe(200);
+	});
+
+	it("V1 sends every DESTROY before close, reports each own session, and drops rows and secrets", async () => {
+		const agent = connectedAgent();
+		const { channelIds, heard, ctx } = liveTerminalsOn(agent, 2);
+		const dal = new MetaDAL(dbs.meta);
+		const olderSession = "01K580SESSION0000000000001";
+		dal.createSession({ id: olderSession, hostId, status: "active" });
+		const second = channelIds[1]!;
+		dbs.meta.prepare("UPDATE channels SET session_id = ? WHERE id = ?").run(olderSession, second);
+		ctx.channels.get(second)!.sessionId = olderSession;
+		const anotherWindow: ProtocolMessage[] = [];
+		sm.addClient({
+			id: "other-window",
+			send: (msg) => anotherWindow.push(msg),
+			attachedChannels: new Set(),
+		});
+		const order: string[] = [];
+		agent.send.mockImplementation((msg: ProtocolMessage) => order.push(msg.type));
+		vi.spyOn(agent, "close").mockImplementation(async () => {
+			order.push("close");
+			agent.connected = false;
+		});
+		const log = vi.fn();
+		ctx.hubLogger = { log } as never;
+		ctx.passphraseCache.set(hostId, { secret: "secret", expiresAt: Infinity });
+		ctx.passphraseCache.set("other", { secret: "other", expiresAt: Infinity });
+		ctx.elevationCache.set(`${hostId}:window`, { secret: "secret", expiresAt: Infinity });
+		ctx.elevationCache.set("other:window", { secret: "other", expiresAt: Infinity });
+		ctx.trustedAgentSha256.set(hostId, "hash");
+		ctx.trustedAgentSha256.set("other", "other-hash");
+		expect((await remove("?force=true")).statusCode).toBe(204);
+		expect(order).toEqual(["DESTROY", "DESTROY", "close"]);
+		for (const messages of [heard, anotherWindow]) {
+			for (const [index, id] of channelIds.entries()) {
+				expect(endsOf(messages, id)).toEqual([
+					{
+						type: "CHANNEL_STATE",
+						channelId: id,
+						sessionId: index === 0 ? SESSION_ID : olderSession,
+						status: "dead",
+						endReason: "killed",
+					},
+				]);
+			}
+		}
+		expect((await server.inject(`/api/hosts/${hostId}`)).statusCode).toBe(404);
+		for (const id of channelIds) {
+			expect(ctx.channels.has(id)).toBe(false);
+			expect(dal.getChannel(id)).toBeUndefined();
+		}
+		expect(ctx.sessions.has(hostId)).toBe(false);
+		expect(ctx.agents.has(hostId)).toBe(false);
+		expect(ctx.stoppingAgents.has(hostId)).toBe(false);
+		expect(ctx.passphraseCache.has(hostId)).toBe(false);
+		expect(ctx.passphraseCache.has("other")).toBe(true);
+		expect(ctx.elevationCache.has(`${hostId}:window`)).toBe(false);
+		expect(ctx.elevationCache.has("other:window")).toBe(true);
+		expect(ctx.trustedAgentSha256.has(hostId)).toBe(false);
+		expect(ctx.trustedAgentSha256.get("other")).toBe("other-hash");
+		expect(
+			log.mock.calls.filter(([, message]) => message === "session-manager: host deleted"),
+		).toEqual([["info", "session-manager: host deleted", { hostId, ended: 2, unreachable: 0 }]]);
+	});
+
+	it("R2 validates force before changing the host", async () => {
+		expect((await remove("?force=yes")).statusCode).toBe(400);
+		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+	});
+
+	it.each(
+		["stop", "acquisition", "start", "attach"].flatMap((kind) =>
+			["", "?force=false", "?force=true"].map((force) => ({ kind, force })),
+		),
+	)("R3 refuses $kind with $force", async ({ kind, force }) => {
+		const agent = connectedAgent();
+		const { ctx } = liveTerminalOn(agent);
+		const internals = sm as unknown as {
+			retirement: { startOn(id: string): () => void };
+			agentMgr: { daemonAttachPromises: Map<string, Promise<unknown>> };
+		};
+		const has = vi.spyOn(ctx.acquisitions, "has").mockReturnValue(kind === "acquisition");
+		if (kind === "stop") ctx.stoppingAgents.add(hostId);
+		const end = kind === "start" ? internals.retirement.startOn(hostId) : () => {};
+		if (kind === "attach")
+			internals.agentMgr.daemonAttachPromises.set(hostId, new Promise(() => {}));
+		const response = await remove(force);
+		expect(response.statusCode).toBe(409);
+		expect(response.json().error).toMatchObject({
+			code: "HOST_BUSY",
+			message:
+				kind === "stop"
+					? "This host's agent is being stopped."
+					: "A terminal or a connection is starting on this host. Wait for it, or answer or cancel its question, then delete the host.",
+		});
+		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+		expect(agent.sent).toEqual([]);
+		has.mockRestore();
+		ctx.stoppingAgents.delete(hostId);
+		end();
+		internals.agentMgr.daemonAttachPromises.delete(hostId);
+	});
+
+	it.each(["", "?force=true"])("R4 refuses during quit with %s", async (force) => {
+		sm.beginQuit();
+		const response = await remove(force);
+		expect(response.statusCode).toBe(409);
+		expect(response.json().error.code).toBe("HUB_QUITTING");
+		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+	});
+
+	it.each(["", "?force=true"])("R5 never overrides running uploads with %s", async (force) => {
+		sm.setTransfers({ activeOn: () => 2, interruptOn: vi.fn() });
+		const response = await remove(force);
+		expect(response.statusCode).toBe(409);
+		expect(response.json().error).toEqual({
+			code: "TRANSFERS_RUNNING",
+			transfers: 2,
+			message:
+				"2 uploads to this host are running. Wait for them to end or cancel them, then delete the host.",
+		});
+		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+	});
+
+	it("R6 counts unreachable terminals without promising a send", async () => {
+		const agent = connectedAgent();
+		const { ctx, channelId } = liveTerminalOn(agent);
+		ctx.agents.delete(hostId);
+		ctx.channels.get(channelId)!.status = "orphan";
+		const response = await remove();
+		expect(response.statusCode).toBe(409);
+		expect(response.json().error).toEqual({
+			code: "TERMINALS_WOULD_END",
+			terminals: 1,
+			unreachable: 1,
+			message:
+				"1 terminal on this host has not ended, and this hub is not connected to its agent: nothing can be sent to it, and it may keep running. Connecting the host first may reach it; or send force=true to delete it anyway.",
+		});
+		expect((await remove("?force=true")).statusCode).toBe(204);
+		expect(agent.sent).toEqual([]);
+	});
+
+	it.each(["deleteCascadeForHost", "deleteHost"] as const)(
+		"R12 releases the marker when %s throws",
+		async (method) => {
+			const agent = connectedAgent();
+			const { ctx } = liveTerminalOn(agent);
+			const ids = [...ctx.channels.keys()];
+			const fail = vi.spyOn(MetaDAL.prototype, method).mockImplementationOnce(() => {
+				throw new Error("disk full");
+			});
+			expect((await remove("?force=true")).statusCode).toBe(500);
+			expect(ctx.stoppingAgents.has(hostId)).toBe(false);
+			expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+			for (const id of ids) expect(new MetaDAL(dbs.meta).getChannel(id)).toBeDefined();
+			fail.mockRestore();
+			expect((await remove("?force=true")).statusCode).toBe(204);
+		},
+	);
+
+	it("V3 session deletion sends DESTROY before closing its daemon connection", async () => {
+		const agent = connectedAgent();
+		const { channelIds } = liveTerminalsOn(agent, 2);
+		const order: string[] = [];
+		agent.send.mockImplementation((msg: ProtocolMessage) =>
+			order.push(msg.type === "DESTROY" ? msg.channelId : msg.type),
+		);
+		vi.spyOn(agent, "close").mockImplementation(async () => {
+			order.push("close");
+			agent.connected = false;
+		});
+		expect(
+			(await server.inject({ method: "DELETE", url: `/api/sessions/${SESSION_ID}` })).statusCode,
+		).toBe(204);
+		expect(order).toEqual([...channelIds, "STOP"]);
+	});
+});
+
+describe("terminal work arriving after deletion or a lost connection (#910)", () => {
+	function fixture() {
+		const agent = connectedAgent();
+		agent.helloMessage = { ...DAEMON_HELLO, agentVersion: "0.15.3" };
+		const f = liveTerminalOn(agent);
+		const lifecycle = (sm as unknown as { lifecycle: ChannelLifecycleManager }).lifecycle;
+		return { ...f, agent, lifecycle, dal: new MetaDAL(dbs.meta) };
+	}
+
+	it("V6 cancels an open waiting on the reconnect after retirement", async () => {
+		const { ctx, agent, heard } = fixture();
+		let resume!: () => void;
+		let entered!: () => void;
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const held = new Promise<void>((resolve) => {
+			resume = resolve;
+		});
+		agentHooks.start = async () => {
+			entered();
+			await held;
+		};
+		const retirement = (
+			sm as unknown as { retirement: { retireIfIdle: (id: string) => Promise<unknown> | null } }
+		).retirement;
+		vi.spyOn(retirement, "retireIfIdle").mockImplementationOnce(() => {
+			ctx.agents.delete(hostId);
+			return Promise.resolve();
+		});
+		const opening = sm.handleSpawn("c-window", { type: "SPAWN", hostId });
+		await started;
+		expect(ctx.reconnectAbortControllers.has(hostId)).toBe(true);
+		expect(
+			(await server.inject({ method: "DELETE", url: `/api/hosts/${hostId}?force=true` }))
+				.statusCode,
+		).toBe(204);
+		resume();
+		expect(await opening).toBeNull();
+		const reconnect = constructedAgents.at(-1) as FakeSshAgent;
+		expect(reconnect).not.toBe(agent);
+		expect(reconnect.closedByHub).toBe(true);
+		expect(reconnect.sent.some((msg) => msg.type === "SPAWN")).toBe(false);
+		expect(ctx.agents.has(hostId)).toBe(false);
+		expect(heard).toContainEqual(expect.objectContaining({ type: "ERROR", hostId }));
+	});
+
+	it.each(["open", "restart", "reconnect"])(
+		"R7 refuses a prepared %s SPAWN after its host row goes",
+		async (kind) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const { agent, ctx, lifecycle, dal, heard, channelId } = fixture();
+				dal.deleteCascadeForHost(hostId);
+				dal.deleteHost(hostId);
+				const spawnMsg = {
+					type: "SPAWN" as const,
+					requestId: "deleted-request",
+					cols: 80,
+					rows: 24,
+					envMode: "inherit" as const,
+				};
+				let result: unknown;
+				if (kind === "open") {
+					const pending = lifecycle
+						.sendSpawnAndWait({
+							agent,
+							spawnMsg,
+							hostId,
+							session: { id: SESSION_ID },
+							client: ctx.clients.get("c-window")!,
+							clientId: "c-window",
+							resolvedShell: undefined,
+							resolvedArgs: [],
+							resolvedCwd: undefined,
+							resolvedDirectProcess: false,
+							resolvedLaunchProfileId: undefined,
+							cols: 80,
+							rows: 24,
+							reuseChannelId: channelId,
+						})
+						.catch((error: Error) => ({ error: error.message }));
+					await vi.advanceTimersByTimeAsync(10_001);
+					result = await pending;
+					expect(result).toEqual({ channelId: null, errCode: "HOST_NOT_FOUND" });
+					expect(heard).toContainEqual({
+						type: "ERROR",
+						code: "HOST_NOT_FOUND",
+						hostId,
+						channelId,
+						message: "That host is no longer in this hub's list.",
+					});
+				} else if (kind === "restart") {
+					const pending = (
+						lifecycle as unknown as {
+							sendRestartSpawn(agent: unknown, msg: unknown, hostId: string): Promise<unknown>;
+						}
+					).sendRestartSpawn(agent, spawnMsg, hostId);
+					await vi.advanceTimersByTimeAsync(10_001);
+					result = await pending;
+					expect(result).toEqual({ ok: false, channelId: null, errCode: "HOST_NOT_FOUND" });
+				} else {
+					const pending = lifecycle.spawnChannelsForHost(hostId, agent, vi.fn(), vi.fn());
+					await vi.advanceTimersByTimeAsync(10_001);
+					await pending;
+				}
+				expect(agent.sent).toEqual([]);
+				expect(ctx.pendingRequests.size).toBe(0);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	it("R11 delivers a bastion answer but does not cache it after the bastion is deleted", async () => {
+		const { ctx, dal } = fixture();
+		const target = dal.createHost({
+			type: "ssh",
+			label: "target",
+			sshHost: "target.test",
+			sshProxyHostId: hostId,
+		});
+		ctx.acquisitions.set(target.id, {
+			id: "target-acquisition",
+			hostId: target.id,
+			state: "CONNECTING",
+			controller: new AbortController(),
+			connectPromise: new Promise(() => {}),
+			_resolve: vi.fn(),
+			_reject: vi.fn(),
+			leases: new Set(),
+		});
+		const mgr = (sm as unknown as { sshMgr: SshConnectionManager }).sshMgr;
+		const client = ctx.clients.get("c-window")!;
+		const auth = mgr.buildPromptAuth(client, undefined, "target-acquisition");
+		const targetAnswer = auth(target.id, "password", "Target password");
+		const [targetPromptId, targetPending] = [...ctx.pendingPrompts.entries()][0]!;
+		mgr.handleAuthPromptResponse(client.id, {
+			hostId: target.id,
+			secret: "target answer",
+			promptId: targetPromptId,
+			deliveryEpoch: targetPending.deliveryEpoch!,
+		});
+		await targetAnswer;
+		const answer = auth(hostId, "passphrase", "Enter bastion passphrase");
+		const [promptId, pending] = [...ctx.pendingPrompts.entries()][0]!;
+		expect(ctx.promptContexts.get(pending.contextId!)?.hostId).toBe(target.id);
+		// The owning connection can keep asking about its jump after deletion.
+		expect(target.sshProxyHostId).toBe(hostId);
+		expect(
+			(await server.inject({ method: "DELETE", url: `/api/hosts/${hostId}?force=true` }))
+				.statusCode,
+		).toBe(204);
+		mgr.handleAuthPromptResponse(client.id, {
+			hostId,
+			secret: "answer",
+			rememberSession: true,
+			promptId,
+			deliveryEpoch: pending.deliveryEpoch!,
+		});
+		await expect(answer).resolves.toBe("answer");
+		expect(ctx.passphraseCache.has(hostId)).toBe(false);
+	});
+
+	it.each([false, true])("R8 ignores a forgotten snapshot with row present=%s", (rowPresent) => {
+		const { lifecycle, dal, channelId, ctx } = fixture();
+		lifecycle.destroyChannel(channelId);
+		if (!rowPresent) dal.deleteCascadeForHost(hostId);
+		const write = vi.spyOn(ctx.spoolDal, "insertSnapshot");
+		expect(() => lifecycle.storeSnapshot(channelId, { rows: [] }, 10)).not.toThrow();
+		expect(write).not.toHaveBeenCalled();
+		expect(
+			dbs.meta.prepare("SELECT * FROM cache_index WHERE channel_id = ?").all(channelId),
+		).toEqual([]);
+	});
+
+	it.each(["timeout", "answer"])(
+		"R10 ignores a forgotten reconnect terminal's %s",
+		async (mode) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const { agent, ctx, lifecycle, channelId, heard } = fixture();
+				ctx.channels.get(channelId)!.clients.add("c-window");
+				lifecycle.reAttachChannels(hostId, SESSION_ID, agent);
+				const request = agent.sent.find((m) => m.type === "SPAWN")!;
+				if (request.type !== "SPAWN") throw new Error("expected SPAWN");
+				lifecycle.destroyChannel(channelId);
+				heard.length = 0;
+				const track = vi.spyOn(ctx.scheduler, "trackChannel");
+				const chunk = vi.spyOn(ctx.chunker, "trackChannel");
+				if (mode === "answer")
+					agent.emit("message", {
+						type: "SPAWN_OK",
+						requestId: request.requestId,
+						channelId,
+						pid: 1,
+					});
+				else await vi.advanceTimersByTimeAsync(10_001);
+				expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([]);
+				expect(ctx.channels.has(channelId)).toBe(false);
+				expect(track).not.toHaveBeenCalled();
+				expect(chunk).not.toHaveBeenCalled();
+				expect(ctx.pendingRequests.size).toBe(0);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	it.each(["new-spawn", "lost", "adopted"])(
+		"R10 keeps the terminal after the old connection is %s",
+		async (mode) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const { agent, ctx, lifecycle, channelId, heard } = fixture();
+				const state = ctx.channels.get(channelId)!;
+				state.clients.add("c-window");
+				lifecycle.reAttachChannels(hostId, SESSION_ID, agent);
+				const old = agent.sent.find((m) => m.type === "SPAWN")!;
+				if (old.type !== "SPAWN") throw new Error("expected SPAWN");
+				ctx.agents.delete(hostId);
+				if (mode !== "lost") {
+					const next = connectedAgent();
+					if (mode === "adopted") await lifecycle.adoptWhatTheDaemonHolds(hostId, next);
+					else {
+						lifecycle.reAttachChannels(hostId, SESSION_ID, next);
+						const request = next.sent.find((m) => m.type === "SPAWN")!;
+						if (request.type !== "SPAWN") throw new Error("expected SPAWN");
+						if (!request.requestId) throw new Error("expected request id");
+						ctx.pendingRequests.get(request.requestId)?.({
+							type: "SPAWN_OK",
+							requestId: request.requestId,
+							channelId,
+						});
+					}
+				}
+				heard.length = 0;
+				await vi.advanceTimersByTimeAsync(10_001);
+				agent.emit("message", { type: "SPAWN_OK", requestId: old.requestId, channelId, pid: 1 });
+				expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([]);
+				expect(ctx.channels.get(channelId)).toBe(state);
+				expect(state.status).not.toBe("dead");
+				if (mode === "lost") {
+					const next = connectedAgent();
+					const batch = lifecycle.spawnChannelsForHost(hostId, next, vi.fn(), vi.fn());
+					expect(next.sent.some((m) => m.type === "SPAWN")).toBe(true);
+					await vi.advanceTimersByTimeAsync(10_001);
+					await batch;
+				}
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+});
 
 // Replacing the agent ends its terminals, and on purpose: a pane set to
 // restart them must not bring them back on the new one (#580).

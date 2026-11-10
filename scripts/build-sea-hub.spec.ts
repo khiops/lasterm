@@ -60,9 +60,8 @@ describe("esbuild bundle produces valid CJS", () => {
 describe("SQLite comes from node:sqlite", () => {
 	it("requires node:sqlite, which the executable's own Node provides", () => {
 		const content = readFileSync(OUT_FILE, "utf8");
-		// esbuild leaves a built-in module as a require(); the executable's require()
-		// loads built-in modules.
-		expect(content).toContain('require("node:sqlite")');
+		// One require for storage/sqlite.ts, one in the spool checkpoint worker's source.
+		expect(content.split('require("node:sqlite")').length - 1).toBe(2);
 	});
 
 	it("bundles no SQLite addon, nor a prelude to extract one", () => {

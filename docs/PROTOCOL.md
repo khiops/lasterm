@@ -1112,7 +1112,8 @@ absent from `channels` has ended, or is unknown.
 // end_reason "killed": that terminal, or its session, was stopped on purpose.
 //   - DELETE /api/channels/:id on a live channel (the UI's Kill), including one
 //     this hub run does not hold, which it marks dead with the reason directly;
-//   - DELETE /api/sessions/:id, for every terminal of that session.
+//   - DELETE /api/sessions/:id, for every terminal of that session;
+//   - DELETE /api/hosts/:id?force=true, for every terminal of that host (#910).
 // end_reason "stopped": it ended with its agent or its hub, which nobody aimed at it.
 //   - POST /api/hosts/:id/agent/replace, for each CHANNEL_EXIT the stopping agent
 //     sends while the hub stops it, and, once the stop is confirmed, for every other
@@ -1743,7 +1744,12 @@ daemon is not retired while one runs there (§ 3.17, #805) and is retired once t
 and Disconnect, Reconnect, `DELETE /api/sessions/:id`, Stop keeping an agent and Replace answer 409
 `TRANSFERS_WOULD_STOP` with `transfers`, the count, until the request says to stop them (§ 6).
 Forced, they become `interrupted`, and a retry resumes them. The local host's uploads go through
-the hub's own file system, which none of these touch.
+the hub's own file system, which none of these touch. `DELETE /api/hosts/:id` instead answers
+409 `TRANSFERS_RUNNING` when `transfersOn(hostId)` is positive, for local hosts too; no `force`
+overrides it (#910). This counts the uploads Disconnect would stop: a start being prepared, or
+an upload with an operation in flight, folders being created, or a source present and files
+queued, sending or verifying. An upload whose remaining files only wait on a conflict answer
+is not counted; its rows are deleted with the host.
 
 **Kept across a restart (#860).** An upload is kept in `meta.db` (STORAGE.md § 3.9): a state change
 is written at once; a file's `acked`, the contiguous prefix its host acknowledged, once 8 MiB more
@@ -2038,14 +2044,22 @@ What the callers do with the answers:
 A write to the hosts or their groups, here and under SSH Config Import and Host Groups, sends
 every client `HOSTS_CHANGED`; § 4.18 lists which.
 
+`POST /api/hosts`, `PUT /api/hosts/order`, `PUT /api/hosts/:id`, `PUT /api/hosts/:id/welcome`,
+`PUT /api/hosts/:id/profiles/:profileId`, and the two profile `PATCH` routes under Configuration,
+answer 400 `VALIDATION_ERROR` `"body must be an object"` for a body that reaches them as anything
+but an object: none, `null`, an array or a scalar (#798). What Fastify's own parser refuses
+before, such as an empty body sent as `application/json`, keeps Fastify's 400. The connection
+routes (`connect`, `reconnect`, `disconnect`, `agent/stop-keeping`, `agent/replace`) are not among
+them: they read no body, or `null`, as an empty one.
+
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
 | GET | `/api/hosts` | ● | `Host[]`, or a page with `?limit=&offset=` (see Pagination) |
 | POST | `/api/hosts` | ● | CreateHost → `Host` (201) |
-| PUT | `/api/hosts/order` | ● | `{ group_id, host_ids }` → 204 |
+| PUT | `/api/hosts/order` | ● | `{ group_id, host_ids }` → 204: the hosts named, in that order, into that group (`null`, or `group_id` left out: none). 400 `VALIDATION_ERROR` for `host_ids` that is not a non-empty array of strings, a `group_id` neither a string nor `null`, or one that names no host group (#798). An id that names no host moves nothing; the others still move |
 | GET | `/api/hosts/:id` | ● | `Host` |
 | PUT | `/api/hosts/:id` | ● | UpdateHost → `Host` (partial update: each field sent replaces the stored one). 409 `CONFLICT` for a label in use |
-| DELETE | `/api/hosts/:id` | ● | 204 |
+| DELETE | `/api/hosts/:id` | ● | `?force=true\|false` → 204, no body. Admission in order: 404 `NOT_FOUND` if absent; 400 `VALIDATION_ERROR` for another `force`; 409 `HUB_QUITTING`; 409 `HOST_BUSY` while stopping, acquiring a connection, starting a terminal or attaching a local daemon; 409 `TRANSFERS_RUNNING` `{ transfers }` when `transfersOn(hostId)` counts uploads Disconnect would stop (preparation, operations in flight, folder creation, or a source present and files queued, sending or verifying; § 4.19), regardless of `force`. An upload whose remaining files only wait on a conflict answer is not counted; its rows are deleted with the host. Then 409 `TERMINALS_WOULD_END` `{ terminals, unreachable? }` unless `force=true`, when terminals have not ended. Counts come from this hub's tracked, non-dead terminals; `unreachable` is present only when positive and equals `terminals` when no agent is connected. Nothing changes on refusal. Once admitted, synchronously sends DESTROY for each such terminal if connected, reports it `dead` / `killed` under its own session, cancels reconnects, closes the connection and session, deletes dependent rows and the host, drops cached secrets and announces `HOSTS_CHANGED` before answering. It does not wait for the agent; see Host deletion below (#910). Hosts reached through this host lose their pinned target and jump keys and their jump is unset: their next connection is direct, with no pinned key |
 | POST | `/api/hosts/:id/duplicate` | ● | → `Host` (201). The copy takes a free `<label>-copy`, `-copy-2`… label and the host's settings, jump, elevation, OS and the default profile its user chose (#802) included, and goes into its group right after it, renumbering that group's `sort_order` (#746). Its pinned host key, jump key and agent hash are not copied: its first connection treats them as a new host's. 400 `VALIDATION_ERROR` for the local host or an unknown id |
 | PUT | `/api/hosts/:id/welcome` | ● | `{ channel_id }` → `{ ok: true }`. 404 for an unknown channel, 400 `VALIDATION_ERROR` for one of another host |
 | DELETE | `/api/hosts/:id/welcome` | ● | 204 |
@@ -2056,8 +2070,24 @@ every client `HOSTS_CHANGED`; § 4.18 lists which.
 | POST | `/api/hosts/:id/disconnect` | ● | `{ force? }` → 200 `{ status: "disconnected", ended }`. Closes the host's connection, and stops any reconnect waiting or under way. A remote daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end (`end_reason: "stopped"`) and the session closes; 409 `TERMINALS_WOULD_END` as for reconnect until `force: true`, and `TRANSFERS_WOULD_STOP` likewise while uploads to the host run (§ 4.19). The hub then marks the host disconnected by its user (`disconnected_by_user`, § 4.6, § 4.7) and does not reach for it again by itself: no reconnect after a lost link or a keepalive, none for a window attaching to its terminals (answered from the spool, `cached: true`), and no start marked `automatic` (§ 4.4), until someone acts on it: connect, reconnect, a new terminal there, or a terminal restarted there (SPAWN, or `POST /api/channels/:id/restart`). Kept in memory only: a hub restart forgets it, and reaches the host as it always did. A host with nothing connected, nothing connecting and no session answers 200 `ended: 0` and is not marked |
 | POST | `/api/hosts/:id/agent/stop-keeping` | ● | `readStopKeepingBody` accepts `{ end_terminals?: boolean, force?: boolean, stop_transfers?: boolean }`; `SessionManager.stopKeepingAgent` tries to stop the remote daemon the host is connected through, and stores No after the attempt. 200 `{ outcome: "stopped", ended, host }` or `{ outcome: "disabled_not_stopped", message, host }`, with the saved host in the GET host shape. Admission and refusals are listed below |
 | GET | `/api/hosts/:id/profiles` | ● | The host's profile menu (query: `?os=linux\|darwin\|windows`): `LaunchProfile[]`, its default profile first, each with the host's `override_type` and `set_by_user` when it has one (`true` for the user's, `false` for one the hub made from what the host's agent reported, #802) |
-| PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type: "pin" \| "hide" \| "default", sort_order? }` → 204. The override is the user's: a `default` set here replaces the host's, and no HELLO of its agent replaces it (#800). Edit Host's Default Shell and Settings › Profiles › "Set as Default" both send it (#802). An override that leaves the host without a default (the user's default turned into a pin, or hidden) gives it back the one the hub marks for its agent's default shell, at once |
+| PUT | `/api/hosts/:id/profiles/:profileId` | ● | `{ override_type: "pin" \| "hide" \| "default", sort_order? }` → 204. `sort_order` is a safe integer, or `null` for none (the profile's own order), else 400 `VALIDATION_ERROR` and nothing is stored (#798). The override is the user's: a `default` set here replaces the host's, and no HELLO of its agent replaces it (#800). Edit Host's Default Shell and Settings › Profiles › "Set as Default" both send it (#802). An override that leaves the host without a default (the user's default turned into a pin, or hidden) gives it back the one the hub marks for its agent's default shell, at once |
 | DELETE | `/api/hosts/:id/profiles/:profileId` | ● | 204. Removing the user's default is Edit Host's "Automatic": the host gets back at once the default the hub marks for the default shell its agent last reported, when that profile exists and is not hidden (#802) |
+
+**Host deletion (#910).** The hub does not wait for the agent. DESTROY is written to the
+connection, and the connection is closed in the same turn. A DESTROY still in the hub's send
+queue at that moment, held back by back-pressure, is discarded by the close; one the agent
+receives but cannot carry out keeps its terminal. On stdio the end of the connection makes the
+agent try to end every terminal (`destroy_all`), and a shell it could not stop is reported, not
+ended. On a daemon such a terminal keeps running until a later connection of this hub to that
+daemon reports it and the hub DESTROYs it as unknown, its row being gone, or until the daemon
+stops. Such a connection needs a host of this hub that reaches that daemon, for example the same
+machine added again; the delete removes the one that did. A daemon holding terminals does not
+exit on its own: it exits only with no terminal and no hub. Nothing is sent to `unreachable`
+terminals, which likewise may keep running. For an SSH host, connecting it first may reach them;
+its current daemon setting decides whether it reaches that daemon. One `force` both asks
+reachable terminals to end and leaves unreachable ones. The count belongs to the request that
+reported it; a forced retry ends what is there at its own time. There is no promised order of
+arrival between `HOSTS_CHANGED` over WebSocket and the HTTP answer.
 
 `SessionManager.stopKeepingAgent` admits requests in this order: 404 `NOT_FOUND`,
 400 `NOT_SSH_HOST`, 409 `HUB_QUITTING`, 409 `HOST_BUSY` (stop or acquisition),
@@ -2131,7 +2161,7 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 |--------|------|------|--------------|
 | GET | `/api/sessions` | ● | `Session[]` (query: `?host_id=X`) |
 | GET | `/api/sessions/:id` | ● | `Session` (includes channels) |
-| DELETE | `/api/sessions/:id` | ● | `?force=true\|false` → 204 (close). While uploads to the session's remote host run (§ 4.19), 409 `TRANSFERS_WOULD_STOP` `{ transfers }` and nothing is done, until `force=true`, which interrupts them; any other `force` 400 `VALIDATION_ERROR`. Its terminals end `killed` (§ 4.7) and the hub lets go of the host's agent: a daemon older than the hub, which then holds none of its terminals, gets STOP without `force` (§ 3.17, #805), and the next terminal there starts the current agent |
+| DELETE | `/api/sessions/:id` | ● | `?force=true\|false` → 204 (close). While uploads to the session's remote host run (§ 4.19), 409 `TRANSFERS_WOULD_STOP` `{ transfers }` and nothing is done, until `force=true`, which interrupts them; any other `force` 400 `VALIDATION_ERROR`. Sends DESTROY for each non-dead terminal when its agent is connected, before closing or stopping that connection (#910; the delivery caveats of Host deletion apply). Its terminals end `killed` (§ 4.7) and the hub lets go of the host's agent: a daemon older than the hub, which then holds none of its terminals, gets STOP without `force` (§ 3.17, #805), and the next terminal there starts the current agent |
 
 #### Channels
 
@@ -2318,9 +2348,9 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 | GET | `/api/config/logging` | ● | What Settings edits of `[logging]`: `{ agentFilesKept }`, the log files an agent daemon keeps (STORAGE.md § 12.1) |
 | PUT | `/api/config/logging` | ● | `{ agentFilesKept }` → `{ agentFilesKept }`, as saved. A whole number from 0 (all) to 3650, else 400 `INVALID_VALUE`; any other key 400 `VALIDATION_ERROR`. Reaches each agent daemon when it next starts |
 | GET | `/api/hosts/:id/profile` | ● | `{ profile: object }` — raw host Layer 3 profile |
-| PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into host Layer 3 profile. Each top-level key replaces the stored one, and a top-level `null` deletes it; inside `env`, a `null` is kept: it removes the variable (#576). A key that is not a profile key 400 `VALIDATION_ERROR`; a file-transfer value outside its table 400 `INVALID_VALUE` |
+| PATCH | `/api/hosts/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into host Layer 3 profile. Each top-level key replaces the stored one, and a top-level `null` deletes it; inside `env`, a `null` is kept: it removes the variable (#576). A key that is not a profile key 400 `VALIDATION_ERROR`; then, on the profile as it will be stored, a number that is not finite or a value nested more than 32 deep 400 `INVALID_VALUE` naming its key, a stored one included (#848): a `null` for that key removes it when it is a profile key, and the host's `PUT` with a `profile_json` that leaves it out removes any other; then a file-transfer value outside its table 400 `INVALID_VALUE` |
 | GET | `/api/channels/:id/profile` | ● | `{ profile: object }` — raw channel Layer 4 profile |
-| PATCH | `/api/channels/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into channel Layer 4 profile, as for a host. `transferFallbackDir` and `transferVerify`, which are the host's, 400 `VALIDATION_ERROR` unless `null` |
+| PATCH | `/api/channels/:id/profile` | ● | `{ profile: object }` → `{ ok: true }` — merge into channel Layer 4 profile, checked as for a host. `transferFallbackDir` and `transferVerify`, which are the host's, 400 `VALIDATION_ERROR` unless `null` |
 
 #### Fonts
 
@@ -2436,6 +2466,27 @@ on the host as it will be once saved, the stored values under the sent ones. An 
 address, and key auth a key path, sent or stored: `{ ssh_auth: "key" }` with none, or
 `{ ssh_key_path: null }` on a host that stays on key auth, is refused; `{ ssh_auth: "agent",
 ssh_key_path: null }` is not.
+
+A `host_group_id` or `ssh_proxy_host_id` that names no host group or no host is 400
+`VALIDATION_ERROR`, and nothing is written (#798).
+
+`profile_json` is the host's Layer 3 profile as JSON text, checked as `PATCH
+/api/hosts/:id/profile` checks a profile, on each member the edit introduces or changes (#848):
+- text that is not a JSON object: 400 `VALIDATION_ERROR`;
+- a key that is not a profile key: 400 `VALIDATION_ERROR` `Unknown profile key: <key>`, a
+  `null` one included. `visualProfile`, the dialog's banner, border and tint, is a key of these
+  routes only: an object, and a colour given in it as text is `#rrggbb` or empty, else 400
+  `VALIDATION_ERROR`. Its other values, and their types, are not checked;
+- a number that is not finite (`1e400`), or a value nesting objects and arrays more than 32 deep:
+  400 `INVALID_VALUE`, naming the key;
+- a value outside its rule (the file-transfer keys, § Configuration): 400 `INVALID_VALUE`.
+
+Names are checked first, then the shape, then the values. A member sent as `null` is removed, as
+`PATCH` removes it. A member the stored profile already holds with the same value is kept as it
+is, unchecked, a `null` one included, so a profile an earlier version stored can still be edited;
+except one holding a number that is not finite or nesting more than 32 deep, which is checked as
+a new member is, and refused. What is stored is the object checked, serialized again, not the
+text sent.
 
 A field these routes do not know is ignored, `default_shell` among them: a host's default is a
 launch profile (§ 4.4), which the hosts' profile routes set (#802).

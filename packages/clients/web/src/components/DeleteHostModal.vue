@@ -15,13 +15,10 @@
 						<strong>{{ hostLabel }}</strong
 						>?
 					</p>
-					<p v-if="hasActiveSessions" class="warning-text">
-						This host has active sessions. They will be
-						disconnected. Type
-						<strong>{{ hostLabel }}</strong> to confirm:
-					</p>
+					<p v-if="consent" class="warning-text">{{ warningText }}</p>
+					<p v-if="consent">Type <strong>{{ hostLabel }}</strong> to confirm:</p>
 					<input
-						v-if="hasActiveSessions"
+						v-if="consent"
 						v-model="confirmText"
 						type="text"
 						class="field-input"
@@ -37,7 +34,7 @@
 					<button
 						class="btn btn-danger"
 						:disabled="
-							hasActiveSessions && confirmText !== hostLabel
+							submitting || (consent !== null && confirmText !== hostLabel)
 						"
 						@click="onDelete"
 					>
@@ -51,8 +48,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { useChannelsStore } from "../stores/channels.js";
-import { useHostsStore } from "../stores/hosts.js";
+import { type HostDeleteAnswer, useHostsStore } from "../stores/hosts.js";
 import { whyRefused } from "../utils/hub-answer.js";
 
 const props = defineProps<{
@@ -66,8 +62,10 @@ const emit = defineEmits<{
 }>();
 
 const hostsStore = useHostsStore();
-const channelsStore = useChannelsStore();
 const confirmText = ref("");
+const consent = ref<{ terminals: number; unreachable: number } | null>(null);
+const submitting = ref(false);
+let opening = 0;
 /** Why the hub did not delete the host, or that it did not answer (#734). */
 const deleteError = ref<string | null>(null);
 
@@ -75,35 +73,60 @@ const host = computed(() =>
 	hostsStore.hosts.find((h) => h.id === props.hostId) ?? null,
 );
 
-const hostLabel = computed(() => host.value?.label ?? "");
+// An older opening's successful delete can remove the cached row while this one is open.
+const openingLabel = ref(host.value?.label ?? "");
+const hostLabel = computed(() => host.value?.label ?? openingLabel.value);
 
-const hasActiveSessions = computed(() => {
-	// Check channel-level status: any channel belonging to this host that is
-	// alive (live or orphan) means the host has active sessions.
-	for (const [chId, hId] of channelsStore.channelHostMap) {
-		if (hId !== props.hostId) continue;
-		const ch = channelsStore.channels.find((c) => c.id === chId);
-		if (ch && (ch.status === "live" || ch.status === "orphan")) return true;
+const warningText = computed(() => {
+	if (!consent.value) return "";
+	const { terminals, unreachable } = consent.value;
+	const one = terminals === 1;
+	const text = `${terminals} ${one ? "terminal" : "terminals"} on ${hostLabel.value} ${one ? "has" : "have"} not ended`;
+	if (unreachable > 0) {
+		return `${text}, and Lasterm is not connected to ${one ? "its" : "their"} agent: nothing can be sent to ${one ? "it" : "them"}, and ${one ? "it" : "they"} may keep running.${host.value?.type === "ssh" ? ` Connecting ${hostLabel.value} first may let Lasterm reach ${one ? "it" : "them"}.` : ""}`;
 	}
-	// Fallback: session-level status for non-active hosts whose channels
-	// aren't loaded in the channels store.
-	const status = hostsStore.getHostStatus(props.hostId);
-	return status === "live" || status === "reconnecting";
+	return `${text}. Lasterm will ask ${one ? "its" : "their"} agent to end ${one ? "it" : "them"}, without waiting for it to confirm.`;
 });
 
 // Reset confirm text and the last refusal when modal opens/closes or host changes
 watch(
 	() => [props.visible, props.hostId],
 	() => {
+		opening++;
+		openingLabel.value = host.value?.label ?? "";
 		confirmText.value = "";
 		deleteError.value = null;
+		consent.value = null;
+		submitting.value = false;
 	},
 );
 
 /** Delete the host, or stay open and say why the hub did not. */
 async function onDelete(): Promise<void> {
-	deleteError.value = await whyRefused(hostsStore.deleteHost(props.hostId));
-	if (deleteError.value !== null) return;
+	if (submitting.value || (consent.value !== null && confirmText.value !== hostLabel.value)) return;
+	const hostId = props.hostId;
+	const sentFrom = opening;
+	const force = consent.value !== null;
+	submitting.value = true;
+	let answer: HostDeleteAnswer | undefined;
+	const reason = await whyRefused(
+		hostsStore.deleteHost(hostId, { force }).then((value) => {
+			answer = value;
+			return value;
+		}),
+	);
+	if (hostId !== props.hostId || sentFrom !== opening || !props.visible) return;
+	submitting.value = false;
+	if (
+		!force && answer && !answer.ok && answer.status === 409 &&
+		answer.code === "TERMINALS_WOULD_END" && typeof answer.terminals === "number"
+	) {
+		consent.value = { terminals: answer.terminals, unreachable: answer.unreachable ?? 0 };
+		deleteError.value = null;
+		return;
+	}
+	deleteError.value = reason;
+	if (reason !== null) return;
 	emit("deleted");
 	emit("close");
 }

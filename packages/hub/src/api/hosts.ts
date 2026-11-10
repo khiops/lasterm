@@ -1,7 +1,8 @@
-import { ELEVATION_METHODS_ALL, type Host } from "@lasterm/shared";
+import { ELEVATION_METHODS_ALL, type Host, isPlainObject } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
+import { profileFieldsError, profileShapeError } from "./config.js";
 import { registerHostCrudRoutes } from "./host-crud.js";
 import { registerHostProfileRoutes } from "./host-profiles.js";
 import { registerHostSshImportRoutes } from "./host-ssh-import.js";
@@ -313,7 +314,15 @@ export function validateUpdateHost(stored: Host, body: UpdateHostBody): string |
 	return validateSshSignIn(host);
 }
 
-function validateAndClampVisualProfile(vp: Record<string, unknown>): string | null {
+/**
+ * What is wrong with a host's visual profile, which only Edit Host writes: it
+ * is an object, and its colours are #rrggbb or empty (INV-09). Its other values
+ * are the client's to send right, as most terminal values are; the client
+ * bounds the tint's opacity where it renders it.
+ */
+function visualProfileError(vp: unknown): string | null {
+	if (vp === undefined || vp === null) return null;
+	if (!isPlainObject(vp)) return "visualProfile must be an object";
 	const hexRe = /^#[0-9a-fA-F]{6}$/;
 	const colorsToCheck = [
 		(vp.banner as Record<string, unknown> | undefined)?.bgColor,
@@ -324,40 +333,112 @@ function validateAndClampVisualProfile(vp: Record<string, unknown>): string | nu
 	for (const c of colorsToCheck) {
 		if (!hexRe.test(c)) return `Invalid color value: ${c}`;
 	}
-	const tint = vp.tint as Record<string, unknown> | undefined;
-	if (typeof tint?.opacity === "number" && tint.opacity > 15) {
-		tint.opacity = 15;
-	}
 	return null;
 }
 
-/** Validate profile_json: parse if string, check visualProfile colors.
- * Returns an error message string on failure, or null on success. */
-export function validateProfileJson(profileJson: string | object | undefined): string | null {
-	if (profileJson === undefined) return null;
-	let profileObj: Record<string, unknown>;
-	try {
-		profileObj =
-			typeof profileJson === "string"
-				? JSON.parse(profileJson)
-				: (profileJson as Record<string, unknown>);
-	} catch {
-		return "Invalid profile_json format";
-	}
-	if (profileObj?.visualProfile) {
-		const colorError = validateAndClampVisualProfile(
-			profileObj.visualProfile as Record<string, unknown>,
+/**
+ * Whether `sent` holds the same JSON value as `stored`, in any key order. The
+ * recursion follows `stored`, which `storedProfileMembers` has bounded, so a
+ * `sent` nested arbitrarily deep cannot overflow it.
+ */
+export function sameJson(stored: unknown, sent: unknown): boolean {
+	if (stored === null || typeof stored !== "object") return stored === sent;
+	if (sent === null || typeof sent !== "object") return false;
+	if (Array.isArray(stored)) {
+		return (
+			Array.isArray(sent) &&
+			stored.length === sent.length &&
+			stored.every((item, i) => sameJson(item, sent[i]))
 		);
-		if (colorError) return colorError;
 	}
-	return null;
+	if (Array.isArray(sent)) return false;
+	const storedKeys = Object.keys(stored);
+	return (
+		storedKeys.length === Object.keys(sent).length &&
+		storedKeys.every(
+			(key) =>
+				Object.hasOwn(sent, key) &&
+				sameJson((stored as Record<string, unknown>)[key], (sent as Record<string, unknown>)[key]),
+		)
+	);
+}
+
+/**
+ * The members of a host's stored profile an edit may send back unchanged
+ * without their being checked again: each member the shape check accepts on its
+ * own. A profile an earlier version stored raw may hold others (#848).
+ */
+function storedProfileMembers(stored: string | null | undefined): Record<string, unknown> {
+	const members: Record<string, unknown> = Object.create(null);
+	if (stored == null) return members;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stored);
+	} catch {
+		return members;
+	}
+	if (!isPlainObject(parsed)) return members;
+	for (const [key, value] of Object.entries(parsed)) {
+		if (profileShapeError({ [key]: value }) === null) members[key] = value;
+	}
+	return members;
+}
+
+export type HostProfileJson =
+	| { error: { code: "VALIDATION_ERROR" | "INVALID_VALUE"; message: string } }
+	/** The text to store; `undefined` leaves the column alone, `null` clears it. */
+	| { value: string | null | undefined };
+
+/**
+ * A host's `profile_json`, as POST and PUT store it (#848). Each member the
+ * stored profile does not already hold with the same value goes through the
+ * profile PATCH route's check, `visualProfile`, which only Edit Host writes,
+ * through its own. A member sent as `null` is removed, as PATCH removes it; one
+ * the stored profile holds unchanged is kept as it is, so a host whose profile an
+ * earlier version stored raw can still be edited (the rule of #795). What is
+ * stored is the object checked, serialized.
+ *
+ * @param stored The host's stored profile on PUT; none on POST.
+ */
+export function readHostProfileJson(
+	raw: string | null | undefined,
+	stored: string | null | undefined,
+): HostProfileJson {
+	if (raw === undefined || raw === null) return { value: raw };
+	let sent: unknown;
+	try {
+		sent = JSON.parse(raw);
+	} catch {
+		return { error: { code: "VALIDATION_ERROR", message: "Invalid profile_json format" } };
+	}
+	if (!isPlainObject(sent)) {
+		return { error: { code: "VALIDATION_ERROR", message: "profile_json must be a JSON object" } };
+	}
+	const kept = storedProfileMembers(stored);
+	const written: Record<string, unknown> = Object.create(null);
+	const result: Record<string, unknown> = Object.create(null);
+	for (const [key, value] of Object.entries(sent)) {
+		const unchanged = Object.hasOwn(kept, key) && sameJson(kept[key], value);
+		if (!unchanged) written[key] = value;
+		if (unchanged || value !== null) result[key] = value;
+	}
+	const error = profileFieldsError(written, result, "host", ["visualProfile"]);
+	if (error !== null) return { error };
+	const visualError = visualProfileError(written.visualProfile);
+	if (visualError !== null) {
+		return { error: { code: "VALIDATION_ERROR", message: visualError } };
+	}
+	return { value: JSON.stringify(result) };
 }
 
 /** @param announce Tells every client the hosts changed (#783). */
 export function registerHostRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
-	sessionManager: Pick<SessionManager, "hostIsBeingStopped" | "daemonPolicyWouldBeRevoked">,
+	sessionManager: Pick<
+		SessionManager,
+		"hostIsBeingStopped" | "daemonPolicyWouldBeRevoked" | "deleteHost"
+	>,
 	announce: AnnounceHostsChange = () => {},
 ): void {
 	registerHostCrudRoutes(server, metaDal, sessionManager, announce);

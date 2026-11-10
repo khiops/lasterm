@@ -17,10 +17,34 @@ describe("resolveStartPort", () => {
 	});
 
 	it("refuses a port that is not an integer in range, naming where it came from", () => {
-		expect(() => resolveStartPort(undefined, "http")).toThrow("Invalid LASTERM_PORT: http");
-		expect(() => resolveStartPort(undefined, "70000")).toThrow("Invalid LASTERM_PORT: 70000");
+		expect(() => resolveStartPort(undefined, "http")).toThrow('Invalid LASTERM_PORT: "http"');
+		expect(() => resolveStartPort(undefined, "70000")).toThrow('Invalid LASTERM_PORT: "70000"');
 		expect(() => resolveStartPort(Number.NaN, undefined)).toThrow("Invalid --port: NaN");
 		expect(() => resolveStartPort(0, "4200")).toThrow("Invalid --port: 0");
+	});
+
+	// The variable reads as `--port` does (#902). Mutation: read it with
+	// Number() again, and these pass: the port in another notation, or
+	// `4100.0000000000001` rounded into 4100. The value is quoted as it was read.
+	it.each(["4100abc", "0x1004", "1e3", "4100.0", "+4100", "4100 abc", "4100.0000000000001", " "])(
+		"refuses LASTERM_PORT %j, as --port does",
+		(env) => {
+			expect(() => resolveStartPort(undefined, env)).toThrow(
+				`Invalid LASTERM_PORT: ${JSON.stringify(env)} — must be a number from 1 to 65535, in digits only`,
+			);
+		},
+	);
+
+	// Mutation: read the value untrimmed, and cmd.exe's
+	// `set LASTERM_PORT=4100 && lasterm start`, which leaves a trailing space,
+	// stops a start that Number() let through.
+	it.each([
+		["04100", 4100],
+		["4100 ", 4100],
+		[" 4100", 4100],
+		["\t4100\t", 4100],
+	])("reads LASTERM_PORT %j as %i", (env, port) => {
+		expect(resolveStartPort(undefined, env)).toBe(port);
 	});
 });
 

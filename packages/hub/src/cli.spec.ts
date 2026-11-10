@@ -2058,6 +2058,389 @@ describe("a large answer through requestHub", () => {
 	});
 });
 
+describe("host remove consent (#910)", () => {
+	it("aligns the host remove description with host list in help", async () => {
+		const output = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			await main(["--help"]);
+			const lines = output.mock.calls.flat().join("\n").split("\n");
+			const list = lines.find((line) => line.includes("lasterm host list"))!;
+			const remove = lines.find((line) => line.includes("lasterm host remove"))!;
+			expect(remove.indexOf("Remove a host")).toBe(list.indexOf("List all hosts"));
+		} finally {
+			output.mockRestore();
+		}
+	});
+
+	it.each([
+		{ force: false, count: 0, unreachable: false },
+		{ force: true, count: 0, unreachable: false },
+		{ force: false, count: 1, unreachable: false },
+		{ force: false, count: 2, unreachable: false },
+		{ force: false, count: 1, unreachable: true },
+		{ force: false, count: 2, unreachable: true },
+	])(
+		"requests and explains $force / $count / $unreachable",
+		async ({ force, count, unreachable }) => {
+			const tls = getTestTlsMaterial();
+			const requests: string[] = [];
+			const server = createHttpsServer(
+				{ cert: tls.pinned.cert, key: tls.pinned.key },
+				(request, response) => {
+					requests.push(`${request.method} ${request.url}`);
+					if (request.method === "GET") {
+						response.writeHead(200, { "content-type": "application/json" });
+						response.end(JSON.stringify([{ id: "host-id", label: "pi" }]));
+					} else if (count > 0) {
+						response.writeHead(409, { "content-type": "application/json" });
+						response.end(
+							JSON.stringify({
+								error: {
+									code: "TERMINALS_WOULD_END",
+									message: "hub text",
+									terminals: count,
+									...(unreachable && { unreachable: count }),
+								},
+							}),
+						);
+					} else {
+						response.writeHead(204);
+						response.end();
+					}
+				},
+			);
+			await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+			const address = server.address();
+			if (!address || typeof address === "string") throw new Error("expected TCP address");
+			const restore = usePlatformDirs({ state: makeTempDir(), config: makeTempDir() });
+			const error = vi.spyOn(console, "error").mockImplementation(() => {});
+			const log = vi.spyOn(console, "log").mockImplementation(() => {});
+			const exit = vi.spyOn(process, "exit").mockImplementation((() => {}) as typeof process.exit);
+			try {
+				persistRuntime({ ...runtimeRecord(), port: address.port, spki: tls.pinned.spki });
+				await main(["host", "remove", "pi", ...(force ? ["--force"] : [])]);
+				expect(requests).toEqual([
+					"GET /api/hosts",
+					`DELETE /api/hosts/host-id${force ? "?force=true" : ""}`,
+				]);
+				if (count > 0) {
+					const one = count === 1;
+					const prefix = `${count} ${one ? "terminal" : "terminals"} on pi ${one ? "has" : "have"} not ended`;
+					expect(error).toHaveBeenCalledExactlyOnceWith(
+						unreachable
+							? `${prefix}, and this hub is not connected to ${one ? "its" : "their"} agent: ${one ? "it" : "they"} may keep running. Rerun with --force to remove the host anyway.`
+							: `${prefix}. Rerun with --force to ask ${one ? "its" : "their"} agent to end ${one ? "it" : "them"} and remove the host.`,
+					);
+					expect(exit).toHaveBeenCalledExactlyOnceWith(1);
+				} else {
+					expect(exit).not.toHaveBeenCalled();
+				}
+			} finally {
+				restore();
+				error.mockRestore();
+				log.mockRestore();
+				exit.mockRestore();
+				server.closeAllConnections();
+				await new Promise<void>((resolve) => server.close(() => resolve()));
+			}
+		},
+	);
+});
+
+// ─── host list (#903) ────────────────────────────────────────────────────────
+//
+// GET /api/hosts names a host's address, port and user `ssh_host`, `ssh_port`
+// and `ssh_user`. The table read `hostname`, `port` and `username`, which the
+// hub never sends, so every host showed no address, port 22 and no user.
+
+describe("host list (#903)", () => {
+	/**
+	 * Hosts as GET /api/hosts answers them, which leaves out a field the host has
+	 * none of rather than sending null (`rowToHost`): a local host, one made local
+	 * by an edit that kept its SSH fields, and two over SSH, one on its default port.
+	 */
+	const HOSTS = [
+		{ id: "01HOSTLOCAL000000000000000", type: "local", label: "local" },
+		{
+			id: "01HOSTWASSSH00000000000000",
+			type: "local",
+			label: "was-ssh",
+			ssh_host: "old.test",
+			ssh_port: 2200,
+			ssh_user: "old",
+		},
+		{
+			id: "01HOSTPI000000000000000000",
+			type: "ssh",
+			label: "pi2222",
+			ssh_host: "pi.test",
+			ssh_port: 2222,
+			ssh_user: "pi",
+		},
+		{ id: "01HOSTDEFAULTPORT000000000", type: "ssh", label: "nas", ssh_host: "nas.test" },
+	];
+	let servers: HttpsServer[] = [];
+
+	afterEach(async () => {
+		const closing = servers;
+		servers = [];
+		await Promise.all(
+			closing.map(
+				(server) =>
+					new Promise<void>((resolve) => {
+						server.closeAllConnections();
+						server.close(() => resolve());
+					}),
+			),
+		);
+	});
+
+	/** A TLS peer holding the pinned key that answers every request with HOSTS, and records it. */
+	async function listenHostsHub() {
+		const tls = getTestTlsMaterial();
+		const requests: Array<{ method: string; url: string }> = [];
+		const server = createHttpsServer(
+			{ cert: tls.pinned.cert, key: tls.pinned.key },
+			(request, response) => {
+				requests.push({ method: request.method ?? "", url: request.url ?? "" });
+				response.writeHead(200, { "content-type": "application/json" });
+				response.end(JSON.stringify(HOSTS));
+			},
+		);
+		servers.push(server);
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(0, "127.0.0.1", resolve);
+		});
+		const address = server.address();
+		if (typeof address !== "object" || address === null) throw new Error("expected TCP address");
+		const runtime: RuntimeInfo = {
+			pid: process.pid,
+			port: address.port,
+			started_at: "2026-11-07T00:00:00.000Z",
+			instanceId: "test",
+			ownerToken: "test",
+			spki: tls.pinned.spki,
+		};
+		return { runtime, requests };
+	}
+
+	async function hostList(extra: string[] = []) {
+		const { runtime, requests } = await listenHostsHub();
+		const restoreDirs = usePlatformDirs({ state: makeTempDir(), config: makeTempDir() });
+		const output: string[] = [];
+		const errors: string[] = [];
+		const log = vi.spyOn(console, "log").mockImplementation((line: string) => {
+			output.push(line);
+		});
+		const error = vi.spyOn(console, "error").mockImplementation((line: string) => {
+			errors.push(line);
+		});
+		const exits: unknown[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exits.push(code);
+		}) as typeof process.exit);
+		try {
+			persistRuntime(runtime);
+			await main(["host", "list", ...extra]);
+		} finally {
+			log.mockRestore();
+			error.mockRestore();
+			exit.mockRestore();
+			restoreDirs();
+		}
+		expect(errors).toEqual([]);
+		expect(exits).toEqual([]);
+		expect(requests).toEqual([{ method: "GET", url: "/api/hosts" }]);
+		return output;
+	}
+
+	const row = (label: string, host: string, port: string, user: string) =>
+		`${label.padEnd(20)}  ${host.padEnd(30)}  ${port.padEnd(6)}  ${user}`;
+
+	// Mutation: read `hostname`, `port` and `username` again, and every SSH host
+	// shows no address, port 22 and no user. Default every host's port to 22, and
+	// a local host shows an SSH port it does not have; print a local host's SSH
+	// fields, and `was-ssh` shows an address the hub never dials.
+	it("shows each host's address, port and user as the hub names them", async () => {
+		expect(await hostList()).toEqual([
+			row("LABEL", "HOST", "PORT", "USER"),
+			`${"-".repeat(20)}  ${"-".repeat(30)}  ${"-".repeat(6)}  ----`,
+			row("local", "", "", ""),
+			row("was-ssh", "", "", ""),
+			row("pi2222", "pi.test", "2222", "pi"),
+			row("nas", "nas.test", "22", ""),
+		]);
+	});
+
+	// Mutation: map the hosts before printing them, and --json no longer prints
+	// what the hub answered.
+	it("prints the hub's answer unchanged with --json", async () => {
+		expect(await hostList(["--json"])).toEqual([JSON.stringify(HOSTS)]);
+	});
+});
+
+// ─── session list (#905) ─────────────────────────────────────────────────────
+
+// GET /api/sessions sends `status` and `host_id`, never `state` or `host_label`.
+// The table resolves labels through GET /api/hosts; JSON keeps the wire answer.
+describe("session list (#905)", () => {
+	const SESSIONS = [
+		{
+			id: "01JCQ8S0000000000000000001",
+			host_id: "01JCQ8H0000000000000000001",
+			status: "active",
+			created_at: "2026-11-09T10:00:00.000Z",
+			updated_at: "2026-11-09T10:01:00.000Z",
+		},
+		{
+			id: "01JCQ8S0000000000000000002",
+			host_id: "01JCQ8H0000000000000000002",
+			status: "detached",
+			created_at: "2026-11-09T10:02:00.000Z",
+			updated_at: "2026-11-09T10:03:00.000Z",
+		},
+		{
+			id: "01JCQ8S0000000000000000003",
+			host_id: "01JCQ8H0000000000000000009",
+			status: "closed",
+			created_at: "2026-11-09T10:04:00.000Z",
+			updated_at: "2026-11-09T10:05:00.000Z",
+		},
+	];
+	const HOSTS = [
+		{ id: "01JCQ8H0000000000000000001", type: "local", label: "local" },
+		{
+			id: "01JCQ8H0000000000000000002",
+			type: "ssh",
+			label: "pi2222",
+			ssh_host: "pi.test",
+			ssh_port: 2222,
+			ssh_user: "pi",
+		},
+	];
+	let servers: HttpsServer[] = [];
+
+	afterEach(async () => {
+		const closing = servers;
+		servers = [];
+		await Promise.all(
+			closing.map(
+				(server) =>
+					new Promise<void>((resolve) => {
+						server.closeAllConnections();
+						server.close(() => resolve());
+					}),
+			),
+		);
+	});
+
+	/** A TLS peer holding the pinned key that answers by API path, and records requests. */
+	async function listenSessionsHub(sessions: typeof SESSIONS) {
+		const tls = getTestTlsMaterial();
+		const requests: Array<{ method: string; url: string }> = [];
+		const server = createHttpsServer(
+			{ cert: tls.pinned.cert, key: tls.pinned.key },
+			(request, response) => {
+				requests.push({ method: request.method ?? "", url: request.url ?? "" });
+				if (request.url === "/api/sessions" || request.url === "/api/hosts") {
+					response.writeHead(200, { "content-type": "application/json" });
+					response.end(JSON.stringify(request.url === "/api/sessions" ? sessions : HOSTS));
+				} else {
+					response.writeHead(404);
+					response.end();
+				}
+			},
+		);
+		servers.push(server);
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(0, "127.0.0.1", resolve);
+		});
+		const address = server.address();
+		if (typeof address !== "object" || address === null) throw new Error("expected TCP address");
+		const runtime: RuntimeInfo = {
+			pid: process.pid,
+			port: address.port,
+			started_at: "2026-11-09T00:00:00.000Z",
+			instanceId: "test",
+			ownerToken: "test",
+			spki: tls.pinned.spki,
+		};
+		return { runtime, requests };
+	}
+
+	async function sessionList(extra: string[] = [], sessions = SESSIONS) {
+		const { runtime, requests } = await listenSessionsHub(sessions);
+		const restoreDirs = usePlatformDirs({ state: makeTempDir(), config: makeTempDir() });
+		const output: string[] = [];
+		const errors: string[] = [];
+		const log = vi.spyOn(console, "log").mockImplementation((line: string) => {
+			output.push(line);
+		});
+		const error = vi.spyOn(console, "error").mockImplementation((line: string) => {
+			errors.push(line);
+		});
+		const exits: unknown[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exits.push(code);
+		}) as typeof process.exit);
+		try {
+			persistRuntime(runtime);
+			await main(["session", "list", ...extra]);
+		} finally {
+			log.mockRestore();
+			error.mockRestore();
+			exit.mockRestore();
+			restoreDirs();
+		}
+		expect(errors).toEqual([]);
+		expect(exits).toEqual([]);
+		return { output, requests };
+	}
+
+	const row = (id: string, host: string, status: string, created: string) =>
+		`${id.padEnd(26)}  ${host.padEnd(20)}  ${status.padEnd(12)}  ${created}`;
+
+	// Mutation: read `state` again and STATE is empty; print `host_id` without
+	// resolving labels, or filter closed sessions, and the table loses expected data.
+	it("shows every session in order with its host label, status and creation time", async () => {
+		const { output, requests } = await sessionList();
+		expect(output).toEqual([
+			row("ID", "HOST", "STATE", "CREATED"),
+			`${"-".repeat(26)}  ${"-".repeat(20)}  ${"-".repeat(12)}  -------`,
+			row("01JCQ8S0000000000000000001", "local", "active", "2026-11-09T10:00:00.000Z"),
+			row("01JCQ8S0000000000000000002", "pi2222", "detached", "2026-11-09T10:02:00.000Z"),
+			row(
+				"01JCQ8S0000000000000000003",
+				"01JCQ8H0000000000000000009",
+				"closed",
+				"2026-11-09T10:04:00.000Z",
+			),
+		]);
+		expect(requests).toEqual([
+			{ method: "GET", url: "/api/sessions" },
+			{ method: "GET", url: "/api/hosts" },
+		]);
+	});
+
+	// Mutation: transform the sessions or fetch hosts before the JSON return,
+	// and --json changes the wire answer or makes an unnecessary request.
+	it("prints the hub's answer unchanged with --json without requesting hosts", async () => {
+		const { output, requests } = await sessionList(["--json"]);
+		expect(output).toEqual([JSON.stringify(SESSIONS)]);
+		expect(requests).toEqual([{ method: "GET", url: "/api/sessions" }]);
+	});
+
+	// Mutation: fetch hosts before checking for an empty list, and an empty
+	// session list makes an unnecessary request instead of returning directly.
+	it("prints the empty-list message without requesting hosts", async () => {
+		const { output, requests } = await sessionList([], []);
+		expect(output).toEqual(["No active sessions."]);
+		expect(requests).toEqual([{ method: "GET", url: "/api/sessions" }]);
+	});
+});
+
 function parsed(argv: string[]): ParsedArgs {
 	const result = parseArgs(argv);
 	expect(result).not.toBeNull();
@@ -2194,3 +2577,187 @@ function builtAgentTargetIds(): string[] {
 	}
 	return ids;
 }
+
+// ─── host add --ssh-port (#901) ──────────────────────────────────────────────
+//
+// A port the CLI did not read as a whole number from 1 to 65535 never reaches
+// the hub. `1.5` and `2222abc` went as 1 and 2222, `abc` as null, which stores
+// no port, and `--ssh-port` given last was taken as absent.
+
+describe("host add --ssh-port (#901)", () => {
+	const USAGE =
+		"Usage: lasterm host add --label <label> --host <user@hostname> [--ssh-port 22] [--auth agent|key] [--key-path ~/.ssh/id_ed25519]";
+	let servers: HttpsServer[] = [];
+
+	afterEach(async () => {
+		const closing = servers;
+		servers = [];
+		await Promise.all(
+			closing.map(
+				(server) =>
+					new Promise<void>((resolve) => {
+						server.closeAllConnections();
+						server.close(() => resolve());
+					}),
+			),
+		);
+	});
+
+	/** A TLS peer holding the pinned key that answers every request as a host created, and records it. */
+	async function listenRecordingHub() {
+		const tls = getTestTlsMaterial();
+		const requests: Array<{ method: string; url: string; body: unknown }> = [];
+		const server = createHttpsServer(
+			{ cert: tls.pinned.cert, key: tls.pinned.key },
+			(request, response) => {
+				let text = "";
+				request.setEncoding("utf8");
+				request.on("data", (chunk: string) => {
+					text += chunk;
+				});
+				request.on("end", () => {
+					requests.push({
+						method: request.method ?? "",
+						url: request.url ?? "",
+						body: text === "" ? undefined : JSON.parse(text),
+					});
+					response.writeHead(201, { "content-type": "application/json" });
+					response.end(JSON.stringify({ id: "01HOSTADDED000000000000000", label: "prod" }));
+				});
+			},
+		);
+		servers.push(server);
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(0, "127.0.0.1", resolve);
+		});
+		const address = server.address();
+		if (typeof address !== "object" || address === null) throw new Error("expected TCP address");
+		const runtime: RuntimeInfo = {
+			pid: process.pid,
+			port: address.port,
+			started_at: "2026-11-07T00:00:00.000Z",
+			instanceId: "test",
+			ownerToken: "test",
+			spki: tls.pinned.spki,
+		};
+		return { runtime, requests };
+	}
+
+	async function hostAdd(extra: string[]) {
+		const { runtime, requests } = await listenRecordingHub();
+		const restoreDirs = usePlatformDirs({ state: makeTempDir(), config: makeTempDir() });
+		const errors: string[] = [];
+		const exits: unknown[] = [];
+		const error = vi.spyOn(console, "error").mockImplementation((line: string) => {
+			errors.push(line);
+		});
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exits.push(code);
+		}) as typeof process.exit);
+		try {
+			persistRuntime(runtime);
+			await main(["host", "add", "--label", "prod", "--host", "example.org", ...extra]);
+		} finally {
+			error.mockRestore();
+			log.mockRestore();
+			exit.mockRestore();
+			restoreDirs();
+		}
+		return { requests, errors, exits };
+	}
+
+	// Mutation: parse the port with parseInt again, or let a missing value pass
+	// as absent, and the request reaches the hub.
+	it.each([
+		{ name: "abc", extra: ["--ssh-port", "abc"] },
+		{ name: "0", extra: ["--ssh-port", "0"] },
+		{ name: "-1", extra: ["--ssh-port", "-1"] },
+		{ name: "70000", extra: ["--ssh-port", "70000"] },
+		{ name: "1.5", extra: ["--ssh-port", "1.5"] },
+		{ name: "2222abc", extra: ["--ssh-port", "2222abc"] },
+		{ name: "given last, with no value", extra: ["--ssh-port"] },
+		{ name: "followed by another flag", extra: ["--ssh-port", "--auth", "agent"] },
+	])("refuses --ssh-port $name before any request", async ({ extra }) => {
+		const { requests, errors, exits } = await hostAdd(extra);
+		expect(requests).toEqual([]);
+		expect(errors).toEqual(["--ssh-port must be a number from 1 to 65535, in digits only", USAGE]);
+		expect(exits).toEqual([1]);
+	});
+
+	it("sends a port it read as a whole number from 1 to 65535", async () => {
+		const { requests, errors, exits } = await hostAdd(["--ssh-port", "2222"]);
+		expect(requests).toEqual([
+			{
+				method: "POST",
+				url: "/api/hosts",
+				body: { type: "ssh", label: "prod", ssh_host: "example.org", ssh_port: 2222 },
+			},
+		]);
+		expect(errors).toEqual([]);
+		expect(exits).toEqual([]);
+	});
+});
+
+// ─── start --port (#902) ─────────────────────────────────────────────────────
+//
+// A port the CLI did not read as a whole number from 1 to 65535 starts
+// nothing. parseInt took `4100abc` for 4100 and listened there, and `--port`
+// given last, with no value, as no flag at all: the system chose the port.
+
+describe("start --port (#902)", () => {
+	const USAGE = "Usage: lasterm start [--port 4100] [--daemon] [--open]";
+
+	afterEach(() => {
+		vi.doUnmock("./hub-startup.js");
+		vi.unstubAllEnvs();
+	});
+
+	/** `lasterm start`, with a hub startup that only records what it was asked. */
+	async function start(extra: string[]) {
+		const startHub = vi.fn(async (_options: { port?: number }) => {});
+		vi.doMock("./hub-startup.js", () => ({ startHub }));
+		vi.stubEnv("LASTERM_PORT", "");
+		const errors: string[] = [];
+		const exits: unknown[] = [];
+		const error = vi.spyOn(console, "error").mockImplementation((line: string) => {
+			errors.push(line);
+		});
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exits.push(code);
+		}) as typeof process.exit);
+		try {
+			await main(["start", ...extra]);
+		} finally {
+			error.mockRestore();
+			exit.mockRestore();
+		}
+		return { startHub, errors, exits };
+	}
+
+	// Mutation: parse the port with parseInt again, or let a missing value pass
+	// as absent, and the hub starts.
+	it.each([
+		{ name: "4100abc", extra: ["--port", "4100abc"] },
+		{ name: "1.5", extra: ["--port", "1.5"] },
+		{ name: "0x1004", extra: ["--port", "0x1004"] },
+		{ name: "0", extra: ["--port", "0"] },
+		{ name: "70000", extra: ["--port", "70000"] },
+		{ name: "given last, with no value", extra: ["--port"] },
+		{ name: "followed by another flag", extra: ["--port", "--open"] },
+	])("refuses --port $name before anything starts", async ({ extra }) => {
+		const { startHub, errors, exits } = await start(extra);
+		expect(startHub).not.toHaveBeenCalled();
+		expect(errors).toEqual(["--port must be a number from 1 to 65535, in digits only", USAGE]);
+		expect(exits).toEqual([1]);
+	});
+
+	it("starts on a port it read as a whole number from 1 to 65535", async () => {
+		const { startHub, errors, exits } = await start(["--port", "4100"]);
+		expect(startHub).toHaveBeenCalledOnce();
+		expect(startHub.mock.calls[0]?.[0]).toMatchObject({ port: 4100 });
+		expect(errors).toEqual([]);
+		expect(exits).toEqual([]);
+	});
+});

@@ -84,7 +84,7 @@ export function describeOpenDatabases(subject: string, open: () => OpenDatabases
 		});
 
 		afterEach(async () => {
-			dbs?.close();
+			await dbs?.close();
 			dbs = undefined;
 			if (umask !== undefined) process.umask(umask);
 			umask = undefined;
@@ -124,7 +124,8 @@ export function describeOpenDatabases(subject: string, open: () => OpenDatabases
 				]);
 			}
 			expect(dbs.meta.pragma("wal_autocheckpoint", { simple: true })).toBe(1000);
-			expect(dbs.spool.pragma("wal_autocheckpoint", { simple: true })).toBe(2000);
+			expect(dbs.spool.pragma("wal_autocheckpoint", { simple: true })).toBe(65536);
+			expect(dbs.spool.pragma("journal_size_limit", { simple: true })).toBe(8388608);
 			expect(dbs.spool.pragma("auto_vacuum", { simple: true })).toBe(2);
 		});
 
@@ -137,7 +138,7 @@ export function describeOpenDatabases(subject: string, open: () => OpenDatabases
 			}
 		});
 
-		it("empties both WAL files as it closes, even while another connection holds the database", () => {
+		it("empties both WAL files as it closes, even while another connection holds the database", async () => {
 			dbs = open()(dir);
 			// A connection that has read keeps its hold on the file, so this close is
 			// not the last one, and SQLite neither checkpoints nor deletes the WAL by
@@ -151,7 +152,7 @@ export function describeOpenDatabases(subject: string, open: () => OpenDatabases
 				for (const name of Object.values(DATABASES)) {
 					expect([name, statSync(join(dir, `${name}-wal`)).size > 0]).toEqual([name, true]);
 				}
-				dbs.close();
+				await dbs.close();
 				dbs = undefined;
 				for (const name of Object.values(DATABASES)) {
 					expect([name, statSync(join(dir, `${name}-wal`)).size]).toEqual([name, 0]);

@@ -179,7 +179,7 @@ async function runGracefulShutdown(options: GracefulShutdownOptions): Promise<vo
 		await options.server.close();
 
 		phase = "db.close";
-		options.dbManager.close();
+		await options.dbManager.close();
 
 		phase = "runtime.delete";
 		options.deleteRuntime(options.runtime);

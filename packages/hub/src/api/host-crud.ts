@@ -1,16 +1,41 @@
-import { toSnakeCase, validateCustomCommand } from "@lasterm/shared";
+import { isPlainObject, toSnakeCase, validateCustomCommand } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
 import type { CreateHostBody, UpdateHostBody } from "./hosts.js";
 import {
+	readHostProfileJson,
 	validateCreateHost,
 	validateIconImage,
-	validateProfileJson,
 	validateUpdateHost,
 } from "./hosts.js";
 import type { AnnounceHostsChange } from "./hosts-changed.js";
 import { parsePagination } from "./pagination.js";
+
+const BODY_NOT_AN_OBJECT = {
+	error: { code: "VALIDATION_ERROR", message: "body must be an object" },
+} as const;
+
+/**
+ * The group and the jump host a host's fields name must exist: the database's
+ * foreign keys refuse the write otherwise, which answered 500 (#798). `null`
+ * clears either, and a field left out is left alone.
+ */
+function hostReferenceError(
+	metaDal: MetaDAL,
+	fields: Pick<CreateHostBody, "host_group_id" | "ssh_proxy_host_id">,
+): string | null {
+	if (
+		typeof fields.host_group_id === "string" &&
+		!metaDal.getHostGroupEntity(fields.host_group_id)
+	) {
+		return "host_group_id names no host group";
+	}
+	if (typeof fields.ssh_proxy_host_id === "string" && !metaDal.getHost(fields.ssh_proxy_host_id)) {
+		return "ssh_proxy_host_id names no host";
+	}
+	return null;
+}
 
 /**
  * @param announce Tells every client the hosts changed, once a write is stored
@@ -20,7 +45,10 @@ import { parsePagination } from "./pagination.js";
 export function registerHostCrudRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
-	sessionManager: Pick<SessionManager, "hostIsBeingStopped" | "daemonPolicyWouldBeRevoked">,
+	sessionManager: Pick<
+		SessionManager,
+		"hostIsBeingStopped" | "daemonPolicyWouldBeRevoked" | "deleteHost"
+	>,
 	announce: AnnounceHostsChange = () => {},
 ): void {
 	// GET /api/hosts?limit=N&offset=M
@@ -42,6 +70,7 @@ export function registerHostCrudRoutes(
 
 	// POST /api/hosts
 	server.post<{ Body: CreateHostBody }>("/api/hosts", async (request, reply) => {
+		if (!isPlainObject(request.body as unknown)) return reply.code(400).send(BODY_NOT_AN_OBJECT);
 		const body = request.body;
 
 		const validationError = validateCreateHost(body);
@@ -66,12 +95,13 @@ export function registerHostCrudRoutes(
 			return reply.code(400).send({ error: { code: "VALIDATION_ERROR", message: iconError } });
 		}
 
-		// Validate visual profile colors in profile_json (INV-09)
-		const profileJsonError = validateProfileJson(body.profile_json);
-		if (profileJsonError) {
-			return reply.code(400).send({
-				error: { code: "VALIDATION_ERROR", message: profileJsonError },
-			});
+		// The profile PATCH route's checks, and visualProfile's (#848, INV-09)
+		const profile = readHostProfileJson(body.profile_json, undefined);
+		if ("error" in profile) return reply.code(400).send({ error: profile.error });
+
+		const referenceError = hostReferenceError(metaDal, body);
+		if (referenceError) {
+			return reply.code(400).send({ error: { code: "VALIDATION_ERROR", message: referenceError } });
 		}
 
 		// Duplicate label check
@@ -101,7 +131,7 @@ export function registerHostCrudRoutes(
 			...(body.ssh_proxy_host_id !== undefined && { sshProxyHostId: body.ssh_proxy_host_id }),
 			...(body.ssh_proxy_spec !== undefined && { sshProxySpec: body.ssh_proxy_spec }),
 			...(body.ssh_remote_daemon !== undefined && { sshRemoteDaemon: body.ssh_remote_daemon }),
-			...(body.profile_json !== undefined && { profileJson: body.profile_json }),
+			...(profile.value != null && { profileJson: profile.value }),
 			...(body.elevation_method !== undefined && { elevationMethod: body.elevation_method }),
 			...(body.custom_command !== undefined && { customCommand: body.custom_command }),
 			...(body.os !== undefined && { os: body.os }),
@@ -117,16 +147,33 @@ export function registerHostCrudRoutes(
 	server.put<{ Body: { group_id: string | null; host_ids: string[] } }>(
 		"/api/hosts/order",
 		async (request, reply) => {
-			const { group_id, host_ids } = request.body;
-			if (!Array.isArray(host_ids) || host_ids.length === 0) {
+			const body: unknown = request.body;
+			if (!isPlainObject(body)) return reply.code(400).send(BODY_NOT_AN_OBJECT);
+			const { group_id, host_ids } = body;
+			if (
+				!Array.isArray(host_ids) ||
+				host_ids.length === 0 ||
+				!host_ids.every((id) => typeof id === "string")
+			) {
 				return reply.code(400).send({
 					error: {
 						code: "VALIDATION_ERROR",
-						message: "host_ids must be a non-empty array",
+						message: "host_ids must be a non-empty array of host ids",
 					},
 				});
 			}
-			metaDal.reorderHosts(group_id ?? null, host_ids);
+			if (group_id !== undefined && group_id !== null && typeof group_id !== "string") {
+				return reply.code(400).send({
+					error: { code: "VALIDATION_ERROR", message: "group_id must be a string or null" },
+				});
+			}
+			// The group must exist (#798); an id in host_ids that names no host moves nothing.
+			if (typeof group_id === "string" && !metaDal.getHostGroupEntity(group_id)) {
+				return reply.code(400).send({
+					error: { code: "VALIDATION_ERROR", message: "group_id names no host group" },
+				});
+			}
+			metaDal.reorderHosts(group_id ?? null, host_ids as string[]);
 			announce("hosts");
 			return reply.code(204).send();
 		},
@@ -150,6 +197,9 @@ export function registerHostCrudRoutes(
 				return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
 			}
 
+			if (!isPlainObject(request.body as unknown)) {
+				return reply.code(400).send(BODY_NOT_AN_OBJECT);
+			}
 			const body = request.body;
 			if (
 				("ssh_remote_daemon" in body || "os" in body) &&
@@ -176,12 +226,15 @@ export function registerHostCrudRoutes(
 				}
 			}
 
-			// Validate visual profile colors (INV-09)
-			const profileJsonError = validateProfileJson(body.profile_json);
-			if (profileJsonError) {
-				return reply.code(400).send({
-					error: { code: "VALIDATION_ERROR", message: profileJsonError },
-				});
+			// The profile PATCH route's checks on what the edit changes (#848, INV-09)
+			const profile = readHostProfileJson(body.profile_json, host.profileJson);
+			if ("error" in profile) return reply.code(400).send({ error: profile.error });
+
+			const referenceError = hostReferenceError(metaDal, body);
+			if (referenceError) {
+				return reply
+					.code(400)
+					.send({ error: { code: "VALIDATION_ERROR", message: referenceError } });
 			}
 
 			if (body.label !== undefined) {
@@ -220,7 +273,7 @@ export function registerHostCrudRoutes(
 			if (body.ssh_remote_daemon !== undefined) {
 				updateInput.sshRemoteDaemon = body.ssh_remote_daemon;
 			}
-			if (body.profile_json !== undefined) updateInput.profileJson = body.profile_json;
+			if (profile.value !== undefined) updateInput.profileJson = profile.value;
 			if (body.elevation_method !== undefined) updateInput.elevationMethod = body.elevation_method;
 			if (body.custom_command !== undefined) {
 				// Validate custom_command if non-null (AUD-012)
@@ -262,28 +315,30 @@ export function registerHostCrudRoutes(
 	);
 
 	// DELETE /api/hosts/:id
-	server.delete<{ Params: { id: string } }>("/api/hosts/:id", async (request, reply) => {
-		const hostId = request.params.id;
-		// Check existence before cascade to return proper 404
-		const existing = metaDal.getHost(hostId);
-		if (!existing) {
-			return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
-		}
-		if (sessionManager.hostIsBeingStopped(hostId)) {
-			return reply.code(409).send({
-				error: { code: "HOST_BUSY", message: "This host's agent is being stopped." },
-			});
-		}
-		// Cascade-delete dependents: cache_index → channels → sessions
-		// channel_groups has ON DELETE CASCADE in schema but we do it explicitly for safety
-		metaDal.deleteCascadeForHost(hostId);
-		const deleted = metaDal.deleteHost(hostId);
-		if (!deleted) {
-			return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
-		}
-		announce("hosts");
-		return reply.code(204).send();
-	});
+	server.delete<{ Params: { id: string }; Querystring: { force?: string } }>(
+		"/api/hosts/:id",
+		async (request, reply) => {
+			const hostId = request.params.id;
+			// Check existence before cascade to return proper 404
+			const existing = metaDal.getHost(hostId);
+			if (!existing) {
+				return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
+			}
+			const force = request.query.force;
+			if (force !== undefined && force !== "true" && force !== "false") {
+				return reply
+					.code(400)
+					.send({ error: { code: "VALIDATION_ERROR", message: "force must be true or false." } });
+			}
+			const outcome = sessionManager.deleteHost(hostId, { force: force === "true" });
+			if (outcome.kind === "refused") {
+				const { kind: _kind, ...error } = outcome;
+				return reply.code(409).send({ error });
+			}
+			announce("hosts");
+			return reply.code(204).send();
+		},
+	);
 
 	// POST /api/hosts/:id/duplicate — duplicate a host
 	server.post<{ Params: { id: string } }>("/api/hosts/:id/duplicate", async (request, reply) => {

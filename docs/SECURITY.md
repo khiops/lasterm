@@ -496,7 +496,9 @@ again, which is now roughly every two and a quarter years rather than every rest
   memory until then (`ssh-connection-manager.ts`). One that does not decrypt the key is removed
   before it is asked for again, or, on a reconnect, before it gives up (#812). Each is kept under
   the host its prompt named, a jump's under the jump. A key the SSH agent signs for is never asked
-  for, so nothing is kept, and a reconnect signs through the agent as well (§ 3.2, #876)
+  for, so nothing is kept, and a reconnect signs through the agent as well (§ 3.2, #876).
+  Deleting the host drops its cached passphrase; an answer to a jump's outstanding question is
+  still delivered to its connection but is not cached if that jump's host row is gone (#910)
 - Elevation passwords: kept per host and per client, the one that typed it, and sent to the agent
   in each SPAWN that needs one. How long depends on where it was typed: 5 min when opening an
   elevated terminal (`spawnOnHost`, `session-manager.ts`), 15 min when restarting one
@@ -505,7 +507,7 @@ again, which is now roughly every two and a quarter years rather than every rest
   client attached to the terminal, using what that client typed or asking it; with none attached,
   it asks nobody and uses any unexpired password kept for that host, whichever client typed it. An
   expired one is never removed: it stays in memory until the same client types another for that
-  host, or the hub stops
+  host, the host is deleted (#910), or the hub stops
 - Terminal output (hub): up to 256 KB per channel waits in memory, for 1 s at most, before it is
   written to spool.db as a chunk (`output-chunker.ts`, STORAGE.md § 5.1). Nothing else bounds it:
   the hub applies no backpressure, never pausing an agent's stream, and does not check how much a

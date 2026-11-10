@@ -5,6 +5,8 @@ import type {
 	AgentSpawnMessage,
 	AuthPromptMessage,
 	ChannelCreatedMessage,
+	EndedOutput,
+	ErrorMessage,
 	ProtocolMessage,
 	UiSpawnMessage,
 } from "@lasterm/shared";
@@ -2381,6 +2383,8 @@ describe("SessionManager", () => {
 		const errMsg = received[0] as unknown as { type: string; code: string };
 		expect(errMsg.type).toBe("ERROR");
 		expect(errMsg.code).toBe("CHANNEL_NOT_FOUND");
+		// Only an ended terminal has a last output to show (#927).
+		expect(errMsg).not.toHaveProperty("lastOutput");
 	});
 
 	it("handleAttach sends CHANNEL_DEAD error for a channel that is dead in the DB but not in memory", async () => {
@@ -2479,6 +2483,304 @@ describe("SessionManager", () => {
 		const errMsg = received[0] as unknown as { type: string; code: string };
 		expect(errMsg.type).toBe("ERROR");
 		expect(errMsg.code).toBe("CHANNEL_DEAD");
+	});
+
+	// ─── An ended terminal's last output (#927) ──────────────────────────────
+	//
+	// The refusal of an ATTACH on an ended terminal carries what it last
+	// printed, read from the spool: the newest snapshot and the output after
+	// it, or with no snapshot the whole stream from its first seq, as long as
+	// it continues where it starts and fits one message. Nothing else changes:
+	// nothing attaches and nothing starts (#559).
+	describe("an ended terminal's last output (#927)", () => {
+		const KIB = 1024;
+		const SCREEN = {
+			serialized: "\u001b[1mlast screen\u001b[0m",
+			cols: 120,
+			rows: 40,
+			cursorX: 3,
+			cursorY: 1,
+		};
+
+		/** A terminal dead in meta.db only, of the size given, on a host with no session open. */
+		function endedTerminal(id: string, cols = 120, rows = 40): MetaDAL {
+			const dal = new MetaDAL(dbManager.meta);
+			const host = dal.createHost({ type: "local", label: `ended-${id}` });
+			const sessionId = `ENDEDSESS${id}`;
+			dal.createSession({ id: sessionId, hostId: host.id, status: "closed" });
+			dal.createChannel({ id, sessionId, status: "dead", shell: "/bin/sh", cols, rows });
+			return dal;
+		}
+
+		function store(id: string, seq: number, kind: "output" | "snapshot", data: string | Buffer) {
+			const dataBlob = typeof data === "string" ? Buffer.from(data) : data;
+			new SpoolDAL(dbManager.spool).insertChunk({
+				channelId: id,
+				seq,
+				kind,
+				dataBlob,
+				uncompressedLen: dataBlob.length,
+			});
+		}
+
+		async function attachFresh(id: string, clientId = `pane-${id}`) {
+			const received: ProtocolMessage[] = [];
+			const client = makeClient(clientId, received);
+			sm.addClient(client);
+			const attached = await sm.handleAttach(clientId, id);
+			return { attached, received, client };
+		}
+
+		function lastOutputOf(received: ProtocolMessage[]): EndedOutput {
+			const refusal = received.find(
+				(m): m is ErrorMessage => m.type === "ERROR" && m.code === "CHANNEL_DEAD",
+			);
+			if (refusal?.lastOutput === undefined) throw new Error("expected a CHANNEL_DEAD with its last output");
+			return refusal.lastOutput;
+		}
+
+		const text = (tail: Uint8Array[]) => tail.map((part) => Buffer.from(part).toString());
+
+		const spies: Array<{ mockRestore(): void }> = [];
+
+		/** Spies on every SpoolDAL read that returns a chunk's data. */
+		function dataReads() {
+			const reads = {
+				byChannel: vi.spyOn(SpoolDAL.prototype, "getChunksByChannel"),
+				one: vi.spyOn(SpoolDAL.prototype, "getChunk"),
+				output: vi.spyOn(SpoolDAL.prototype, "readOutput"),
+				latest: vi.spyOn(SpoolDAL.prototype, "getLatestSnapshot"),
+			};
+			spies.push(...Object.values(reads));
+			return reads;
+		}
+
+		afterEach(() => {
+			for (const spy of spies.splice(0)) spy.mockRestore();
+		});
+
+		it("answers an ended terminal with what it last printed, and starts nothing", async () => {
+			const dal = endedTerminal("ended-h1", 120, 40);
+			store("ended-h1", 10, "snapshot", JSON.stringify(SCREEN));
+			store("ended-h1", 11, "output", "ab");
+			store("ended-h1", 12, "output", "cd");
+
+			const { attached, received, client } = await attachFresh("ended-h1");
+
+			expect(attached).toBe(false);
+			expect(received).toHaveLength(1);
+			expect(received[0]).toMatchObject({
+				type: "ERROR",
+				code: "CHANNEL_DEAD",
+				message: "This terminal has ended.",
+				channelId: "ended-h1",
+			});
+			const last = lastOutputOf(received);
+			expect(last.snapshot).toEqual(SCREEN);
+			// One element, the chunks in seq order.
+			expect(text(last.tail)).toEqual(["abcd"]);
+			expect(last).not.toHaveProperty("truncated");
+			expect({ cols: last.cols, rows: last.rows }).toEqual({ cols: 120, rows: 40 });
+			// Nothing started, nothing attached.
+			expect(mockLocalAgents).toHaveLength(0);
+			expect(dal.getChannel("ended-h1")?.status).toBe("dead");
+			expect(client.attachedChannels.size).toBe(0);
+		});
+
+		it("answers a terminal that ended under it with its last output, attaching nobody", async () => {
+			const heard: ProtocolMessage[] = [];
+			sm.addClient(makeClient("writer", heard));
+			const channelId = await sm.handleSpawn("writer", { type: "SPAWN", hostId: "local" });
+			if (channelId === null) throw new Error("expected a local channel");
+			const agent = mockLocalAgents.at(-1);
+			if (agent === undefined) throw new Error("expected the local agent");
+			sm.handleResize("writer", channelId, 100, 30);
+			const emit = (msg: unknown) => (agent as unknown as EventEmitter).emit("message", msg);
+			emit({ type: "OUTPUT", channelId, seq: 1, ts: "", data: Buffer.from("before") });
+			emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 1 });
+			emit({ type: "OUTPUT", channelId, seq: 2, ts: "", data: Buffer.from("after") });
+			emit({ type: "CHANNEL_EXIT", channelId, exitCode: 1 });
+			agent.send.mockClear();
+			// Ended, and still held in memory: the branch this case is about.
+			const held = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+			expect(held.channels.get(channelId)?.status).toBe("dead");
+
+			const { attached, received, client } = await attachFresh(channelId, "reader");
+
+			expect(attached).toBe(false);
+			expect(received).toHaveLength(1);
+			const last = lastOutputOf(received);
+			expect(last.snapshot).toEqual(SCREEN);
+			expect(text(last.tail)).toEqual(["after"]);
+			expect({ cols: last.cols, rows: last.rows }).toEqual({ cols: 100, rows: 30 });
+			expect(agent.send).not.toHaveBeenCalled();
+			const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+			expect(ctx.channels.get(channelId)?.clients.has("reader") ?? false).toBe(false);
+			expect(client.attachedChannels.has(channelId)).toBe(false);
+			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
+		});
+
+		it("bounds an ended terminal's last output as the cached attach does", async () => {
+			endedTerminal("ended-over");
+			store("ended-over", 10, "snapshot", JSON.stringify(SCREEN));
+			store("ended-over", 11, "output", Buffer.alloc(64 * KIB, 0x61));
+			store("ended-over", 12, "output", Buffer.alloc(64 * KIB + 1, 0x62));
+			const reads = dataReads();
+
+			const over = lastOutputOf((await attachFresh("ended-over")).received);
+
+			expect(over.snapshot).toEqual(SCREEN);
+			expect(over.tail).toEqual([]);
+			expect(over.truncated).toBe(true);
+			// Measured, not loaded: only the snapshot's own row was read.
+			expect(reads.byChannel).not.toHaveBeenCalled();
+			expect(reads.output).not.toHaveBeenCalled();
+			expect(reads.latest).not.toHaveBeenCalled();
+			expect(reads.one.mock.results.map((r) => (r.value as { kind?: string } | undefined)?.kind)).toEqual([
+				"snapshot",
+			]);
+
+			endedTerminal("ended-fits");
+			store("ended-fits", 10, "snapshot", JSON.stringify(SCREEN));
+			store("ended-fits", 11, "output", Buffer.alloc(64 * KIB, 0x61));
+			store("ended-fits", 12, "output", Buffer.alloc(64 * KIB, 0x62));
+
+			const fits = lastOutputOf((await attachFresh("ended-fits")).received);
+
+			expect(fits.tail).toHaveLength(1);
+			expect(fits.tail[0]?.byteLength).toBe(128 * KIB);
+			expect(fits).not.toHaveProperty("truncated");
+		});
+
+		it("sends the snapshot alone when the start of its tail is gone", async () => {
+			endedTerminal("ended-gap");
+			store("ended-gap", 10, "snapshot", JSON.stringify(SCREEN));
+			// Seq 11 deleted, as a GC cut after the snapshot leaves it.
+			store("ended-gap", 12, "output", "late");
+			store("ended-gap", 13, "output", "later");
+
+			const last = lastOutputOf((await attachFresh("ended-gap")).received);
+
+			expect(last.snapshot).toEqual(SCREEN);
+			expect(last.tail).toEqual([]);
+			expect(last.truncated).toBe(true);
+		});
+
+		it("gives an ended terminal with no snapshot all its output when it fits", async () => {
+			endedTerminal("ended-short", 90, 20);
+			store("ended-short", 1, "output", "$ make\r\n");
+			store("ended-short", 2, "output", "error: ");
+			store("ended-short", 3, "output", "no rule\r\n");
+
+			const last = lastOutputOf((await attachFresh("ended-short")).received);
+
+			expect(last.snapshot).toBeNull();
+			expect(text(last.tail)).toEqual(["$ make\r\nerror: no rule\r\n"]);
+			expect(last).not.toHaveProperty("truncated");
+			expect({ cols: last.cols, rows: last.rows }).toEqual({ cols: 90, rows: 20 });
+		});
+
+		it("drops an ended terminal's output with no snapshot when it does not fit, unread", async () => {
+			endedTerminal("ended-burst");
+			store("ended-burst", 1, "output", Buffer.alloc(64 * KIB, 0x61));
+			store("ended-burst", 2, "output", Buffer.alloc(64 * KIB + 1, 0x62));
+			const reads = dataReads();
+
+			const last = lastOutputOf((await attachFresh("ended-burst")).received);
+
+			expect(last.snapshot).toBeNull();
+			expect(last.tail).toEqual([]);
+			expect(last.truncated).toBe(true);
+			expect(reads.byChannel).not.toHaveBeenCalled();
+			expect(reads.one).not.toHaveBeenCalled();
+			expect(reads.output).not.toHaveBeenCalled();
+			expect(reads.latest).not.toHaveBeenCalled();
+		});
+
+		it("shows nothing of an ended terminal whose output lost its start", async () => {
+			endedTerminal("ended-cut");
+			// Seqs 1-3 deleted, as a GC pass part-way through leaves them.
+			store("ended-cut", 4, "output", "middle");
+			store("ended-cut", 5, "output", "end");
+
+			const last = lastOutputOf((await attachFresh("ended-cut")).received);
+
+			expect(last).toEqual({ snapshot: null, tail: [], cols: 120, rows: 40 });
+		});
+
+		it("answers an ended terminal the GC emptied with nothing to show", async () => {
+			endedTerminal("ended-empty", 132, 43);
+
+			const last = lastOutputOf((await attachFresh("ended-empty")).received);
+
+			expect(last).toEqual({ snapshot: null, tail: [], cols: 132, rows: 43 });
+		});
+
+		it("shows nothing of an ended terminal whose snapshot does not parse", async () => {
+			endedTerminal("ended-bad");
+			store("ended-bad", 9, "output", "before");
+			store("ended-bad", 10, "snapshot", "{not json");
+			store("ended-bad", 11, "output", "after");
+
+			const last = lastOutputOf((await attachFresh("ended-bad")).received);
+
+			expect(last).toEqual({ snapshot: null, tail: [], cols: 120, rows: 40 });
+		});
+
+		it("sends no snapshot too large for one message", async () => {
+			const LIMIT = 256 * KIB;
+			const snapshotOf = (bytes: number) => {
+				const frame = JSON.stringify({ ...SCREEN, serialized: "" });
+				return JSON.stringify({ ...SCREEN, serialized: "x".repeat(bytes - frame.length) });
+			};
+			endedTerminal("ended-huge");
+			store("ended-huge", 10, "snapshot", snapshotOf(LIMIT + 1));
+			store("ended-huge", 11, "output", "tail");
+			const reads = dataReads();
+
+			const huge = lastOutputOf((await attachFresh("ended-huge")).received);
+
+			expect(huge).toEqual({ snapshot: null, tail: [], truncated: true, cols: 120, rows: 40 });
+			expect(reads.one).not.toHaveBeenCalled();
+
+			endedTerminal("ended-limit");
+			store("ended-limit", 10, "snapshot", snapshotOf(LIMIT));
+			store("ended-limit", 11, "output", "tail");
+
+			const limit = lastOutputOf((await attachFresh("ended-limit")).received);
+
+			expect(limit.snapshot?.serialized.length).toBeGreaterThan(LIMIT - 100);
+			expect(text(limit.tail)).toEqual(["tail"]);
+		});
+
+		it("answers a terminal its agent no longer has with its last output", async () => {
+			sm.addClient(makeClient("first", []));
+			const channelId = await sm.handleSpawn("first", { type: "SPAWN", hostId: "local" });
+			if (channelId === null) throw new Error("expected a local channel");
+			const agent = mockLocalAgents.at(-1);
+			if (agent === undefined) throw new Error("expected the local agent");
+			const emit = (msg: unknown) => (agent as unknown as EventEmitter).emit("message", msg);
+			emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+			emit({ type: "OUTPUT", channelId, seq: 1, ts: "", data: Buffer.from("gone") });
+			const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+			ctx.chunker.flush(channelId);
+			nextLocalAttachNotFoundChannelId = channelId;
+
+			const { attached, received, client } = await attachFresh(channelId, "second");
+
+			expect(attached).toBe(false);
+			expect(received.find((m) => m.type === "ERROR")).toMatchObject({
+				code: "CHANNEL_DEAD",
+				message: "This terminal is no longer running on its host.",
+				channelId,
+			});
+			const last = lastOutputOf(received);
+			expect(last.snapshot).toEqual(SCREEN);
+			expect(text(last.tail)).toEqual(["gone"]);
+			expect(ctx.channels.has(channelId)).toBe(false);
+			expect(client.attachedChannels.has(channelId)).toBe(false);
+			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
+		});
 	});
 
 	// A restart is the same terminal asked for a second time, and the only

@@ -1774,22 +1774,35 @@ export class SessionManager {
 		// came back — so a reload restarted terminals nobody had asked for, and a
 		// pane mounted after a CHANNEL_EXIT offered to reconnect to a shell that
 		// no longer existed.
+		//
+		// What it ended on goes with the answer (#927): the pane shows it under
+		// its exit card. Reading the spool is all this adds; the terminal is
+		// neither attached nor started.
 		if (channel === undefined || channel.status === "dead") {
-			const dead =
-				channel !== undefined || this.ctx.metaDal.getChannel(channelId)?.status === "dead";
-			const code = dead ? "CHANNEL_DEAD" : "CHANNEL_NOT_FOUND";
-			const errorMsg: ErrorMessage = {
-				type: "ERROR",
-				code,
-				// The id is in the field beside this and in the log. A sentence
-				// carrying it says nothing to the person reading it, and says it
-				// in twenty-six characters of noise.
-				message:
-					code === "CHANNEL_DEAD"
-						? "This terminal has ended."
-						: "This terminal no longer exists — it may have been deleted from another window.",
-				channelId,
-			};
+			const recorded = channel === undefined ? this.ctx.metaDal.getChannel(channelId) : undefined;
+			const ended = channel ?? (recorded?.status === "dead" ? recorded : undefined);
+			const errorMsg: ErrorMessage =
+				ended === undefined
+					? {
+							type: "ERROR",
+							code: "CHANNEL_NOT_FOUND",
+							message:
+								"This terminal no longer exists — it may have been deleted from another window.",
+							channelId,
+						}
+					: {
+							type: "ERROR",
+							code: "CHANNEL_DEAD",
+							// The id is in the field beside this and in the log. A sentence
+							// carrying it says nothing to the person reading it, and says it
+							// in twenty-six characters of noise.
+							message: "This terminal has ended.",
+							channelId,
+							lastOutput: this.lifecycle.buildEndedOutput(channelId, {
+								cols: ended.cols,
+								rows: ended.rows,
+							}),
+						};
 			client.send(errorMsg);
 			return false;
 		}
@@ -1961,6 +1974,10 @@ export class SessionManager {
 					code: "CHANNEL_DEAD",
 					message: "This terminal is no longer running on its host.",
 					channelId,
+					lastOutput: this.lifecycle.buildEndedOutput(channelId, {
+						cols: channel.cols,
+						rows: channel.rows,
+					}),
 				} satisfies ErrorMessage);
 				return false;
 			}

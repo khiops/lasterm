@@ -7,8 +7,10 @@ import {
 	isValidInputData,
 	isValidUlid,
 } from "@lasterm/shared";
+import { decode } from "@msgpack/msgpack";
 import { describe, expect, it, vi } from "vitest";
 import { HostUnreachableError } from "../session/host-reachability.js";
+import { handleAttach as handleAttachMessage } from "./handlers/attach.js";
 import { handleAuthPromptResponse as handleAuthPromptResponseMessage } from "./handlers/auth-prompt-response.js";
 import { handleSpawn as handleSpawnMessage } from "./handlers/spawn.js";
 import type { WsHandlerContext } from "./handlers/types.js";
@@ -103,6 +105,50 @@ describe("ws-handler codec round-trips", () => {
 		const errMsg = decoded as unknown as Record<string, string>;
 		expect(errMsg.code).toBe("CHANNEL_NOT_FOUND");
 		expect(errMsg.message).toBe("Channel xyz not found");
+	});
+
+	// An ended terminal's refusal carries what it last printed (#927): nested
+	// keys go snake_case on the wire like every other, its output stays bytes,
+	// and the largest answer the hub builds still fits the 512 KiB the desktop
+	// takes in one message.
+	it("ERROR CHANNEL_DEAD with its last output round-trips", () => {
+		const KIB = 1024;
+		// A snapshot stored at exactly the hub's 256 KiB bound: half escape-heavy,
+		// half plain text, which MessagePack sends byte for byte.
+		const frame = JSON.stringify({ serialized: "", cols: 200, rows: 60, cursorX: 4, cursorY: 2 });
+		const unit = "[38;5;160mx[0m";
+		let screen = unit.repeat(Math.floor((128 * KIB) / (JSON.stringify(unit).length - 2)));
+		screen += "x".repeat(256 * KIB - frame.length - (JSON.stringify(screen).length - 2));
+		const msg: ProtocolMessage = {
+			type: "ERROR",
+			code: "CHANNEL_DEAD",
+			message: "This terminal has ended.",
+			channelId: "ch-1",
+			lastOutput: {
+				snapshot: { serialized: screen, cols: 200, rows: 60, cursorX: 4, cursorY: 2 },
+				tail: [new Uint8Array(128 * KIB).fill(0x61)],
+				cols: 200,
+				rows: 60,
+			},
+		};
+		expect(
+			JSON.stringify((msg as { lastOutput: { snapshot: unknown } }).lastOutput.snapshot).length,
+		).toBe(256 * KIB);
+
+		const encoded = encodeMessage(msg);
+		expect(encoded.byteLength).toBeLessThan(512 * KIB);
+		const wire = decode(encoded) as { last_output: Record<string, unknown> };
+		expect(Object.keys(wire.last_output).sort()).toEqual(["cols", "rows", "snapshot", "tail"]);
+		expect(Object.keys(wire.last_output.snapshot as object)).toContain("cursor_x");
+
+		const decoded = decodeMessage(encoded) as unknown as {
+			lastOutput: { snapshot: { serialized: string; cursorX: number }; tail: Uint8Array[] };
+		};
+		expect(decoded.lastOutput.snapshot.serialized).toBe(screen);
+		expect(decoded.lastOutput.snapshot.cursorX).toBe(4);
+		expect(decoded.lastOutput.tail).toHaveLength(1);
+		expect(decoded.lastOutput.tail[0]).toBeInstanceOf(Uint8Array);
+		expect(decoded.lastOutput.tail[0]?.byteLength).toBe(128 * KIB);
 	});
 
 	it("RESIZE message round-trips", () => {
@@ -558,6 +604,33 @@ describe("ws-handler TEST_CONNECT validation", () => {
 });
 
 // ─── A SPAWN whose host went away while it started (#605) ────────────────────
+
+// An ATTACH the hub refuses — an ended terminal answered with its last output
+// (#927), one it has no record of — attaches nobody, so nobody takes the write
+// lock with it.
+describe("ws-handler ATTACH", () => {
+	const CHANNEL = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
+
+	function attachAnswered(ok: boolean) {
+		const writeLockManager = { attach: vi.fn() };
+		const ctx = {
+			clientId: "client-1",
+			client: { send: vi.fn() },
+			log: { debug: vi.fn(), error: vi.fn() } as never,
+			sessionManager: { handleAttach: vi.fn().mockResolvedValue(ok) } as never,
+			writeLockManager: writeLockManager as never,
+		} as unknown as WsHandlerContext;
+		handleAttachMessage({ type: "ATTACH", channelId: CHANNEL }, ctx);
+		return writeLockManager;
+	}
+
+	it("takes no write lock when the attach is refused", async () => {
+		const refused = attachAnswered(false);
+		const granted = attachAnswered(true);
+		await vi.waitFor(() => expect(granted.attach).toHaveBeenCalledWith(CHANNEL, "client-1"));
+		expect(refused.attach).not.toHaveBeenCalled();
+	});
+});
 
 describe("ws-handler SPAWN: a host gone while the terminal started", () => {
 	const HOST = "01ARZ3NDEKTSV4RRFFQ69G5FAV";

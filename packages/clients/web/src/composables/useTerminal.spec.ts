@@ -1,9 +1,9 @@
 /**
  * A pane's terminal and the hub: what it says when the input typed there was
- * dropped (#767), and the size it draws at and sends (#831). Only xterm and
- * its addons are stand-ins.
+ * dropped (#767), the size it draws at and sends (#831), and what it shows of
+ * a terminal that has ended (#927). Only xterm and its addons are stand-ins.
  */
-import type { ProtocolMessage } from "@lasterm/shared";
+import type { EndedOutput, ProtocolMessage } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
@@ -17,6 +17,10 @@ const xterm = vi.hoisted(() => ({
 	writtenAt: [] as Array<{ cols: number; rows: number }>,
 	/** What a fit gives: the size the pane holds, as the test sets it. */
 	fit: { cols: 80, rows: 24 },
+	/** Clears and writes in order: "<reset>" for a clear, the text for a write. */
+	events: [] as string[],
+	/** The terminal created last, to type into. */
+	last: null as { type(data: string): void } | null,
 }));
 
 vi.mock("@xterm/xterm", () => ({
@@ -29,14 +33,21 @@ vi.mock("@xterm/xterm", () => ({
 		/** A cell 9 px wide, as xterm's core reports it to the fit addon. */
 		_core = { _renderService: { dimensions: { css: { cell: { width: 9, height: 17 } } } } };
 		private resizeListeners: Array<(size: { cols: number; rows: number }) => void> = [];
+		private dataListeners: Array<(data: string) => void> = [];
 		constructor(options: Record<string, unknown>) {
 			this.options = { ...options };
+			xterm.last = this;
+		}
+		/** What someone typing into the terminal makes it emit. */
+		type(data: string): void {
+			for (const listener of this.dataListeners) listener(data);
 		}
 		loadAddon(addon: { activate?: (terminal: unknown) => void }): void {
 			addon.activate?.(this);
 		}
 		open(): void {}
-		onData() {
+		onData(listener: (data: string) => void) {
+			this.dataListeners.push(listener);
 			return { dispose() {} };
 		}
 		onResize(listener: (size: { cols: number; rows: number }) => void) {
@@ -52,10 +63,14 @@ vi.mock("@xterm/xterm", () => ({
 		onTitleChange() {
 			return { dispose() {} };
 		}
-		reset(): void {}
+		reset(): void {
+			xterm.events.push("<reset>");
+		}
 		write(data: string | Uint8Array): void {
-			xterm.written.push(typeof data === "string" ? data : new TextDecoder().decode(data));
+			const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+			xterm.written.push(text);
 			xterm.writtenAt.push({ cols: this.cols, rows: this.rows });
+			xterm.events.push(text);
 		}
 		dispose(): void {}
 	},
@@ -360,5 +375,287 @@ describe("one size per terminal (#831)", () => {
 		spawner.terminal.setDecidesSize(true);
 
 		expect(spawner.resizes()).toEqual([]);
+	});
+});
+
+// ─── An ended terminal's last output (#927) ─────────────────────────────────
+//
+// The hub's CHANNEL_DEAD carries what the terminal last printed. The pane
+// shows it, drawn at the size it was drawn for, only for the terminal it still
+// shows and only from its latest request, and then speaks to nothing: typing
+// and resizing go nowhere until a terminal attaches again.
+describe("an ended terminal's last output (#927)", () => {
+	const MOUSE_OFF = "\u001b[?1000l";
+	const SCREEN = { serialized: "SCREEN", cols: 100, rows: 30, cursorX: 0, cursorY: 0 };
+	const bytes = (text: string) => new TextEncoder().encode(text);
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		xterm.written.length = 0;
+		xterm.writtenAt.length = 0;
+		xterm.events.length = 0;
+		xterm.fit = { cols: 80, rows: 24 };
+		setActivePinia(createPinia());
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	function pane() {
+		const container = document.createElement("div");
+		Object.defineProperty(container, "clientWidth", { configurable: true, value: 800 });
+		Object.defineProperty(container, "clientHeight", { configurable: true, value: 600 });
+		const hub = fakeWsClient();
+		const terminal = useTerminal(ref(container), hub.client);
+		terminal.init();
+		const sent = () => {
+			vi.advanceTimersByTime(100);
+			return (hub.client.send as ReturnType<typeof vi.fn>).mock.calls
+				.map(([msg]) => msg as ProtocolMessage)
+				.filter((msg) => msg.type === "INPUT" || msg.type === "RESIZE");
+		};
+		const resizePane = (next: { cols: number; rows: number }) => {
+			xterm.fit = next;
+			window.dispatchEvent(new Event("nt:scrollbar-changed"));
+		};
+		const size = () => ({
+			cols: terminal.terminal.value?.cols,
+			rows: terminal.terminal.value?.rows,
+		});
+		/** The hub refuses the attach of `channelId` as ended, with `lastOutput` or none. */
+		const refuse = (channelId: string, lastOutput?: EndedOutput) =>
+			hub.hear({
+				type: "ERROR",
+				code: "CHANNEL_DEAD",
+				message: "This terminal has ended.",
+				channelId,
+				...(lastOutput !== undefined && { lastOutput }),
+			});
+		/** Attach `channelId`, answered ATTACH_OK with a screen holding `text`. */
+		const attachLive = async (
+			channelId: string,
+			text: string,
+			opts?: { preserveContent?: boolean },
+		) => {
+			const attached = terminal.reattachChannel(channelId, opts);
+			hub.hear({
+				type: "ATTACH_OK",
+				channelId,
+				snapshot: { serialized: text, cols: 100, rows: 30, cursorX: 0, cursorY: 0 },
+				tail: [],
+				writeLockHolder: null,
+				cached: false,
+				cols: 100,
+				rows: 30,
+			});
+			await attached;
+		};
+		/** Attach `channelId` and have it refused; resolves with the rejection's code. */
+		const attachEnded = async (
+			channelId: string,
+			lastOutput?: EndedOutput,
+			opts?: { preserveContent?: boolean; stillWanted?: () => boolean },
+		) => {
+			const attached = terminal.reattachChannel(channelId, opts);
+			refuse(channelId, lastOutput);
+			return attached.then(
+				() => "resolved",
+				(err: { code?: string }) => err.code,
+			);
+		};
+		return { hub, terminal, sent, resizePane, size, refuse, attachLive, attachEnded };
+	}
+
+	const output = (over: Partial<EndedOutput> = {}): EndedOutput => ({
+		snapshot: SCREEN,
+		tail: [bytes("a"), bytes("b")],
+		cols: 100,
+		rows: 30,
+		...over,
+	});
+
+	it("shows an ended terminal's last output when the hub refuses the attach", async () => {
+		const withScreen = pane();
+		expect(await withScreen.attachEnded("T", output())).toBe("CHANNEL_DEAD");
+		expect(xterm.events).toEqual(["<reset>", "SCREEN", "a", "b", MOUSE_OFF]);
+
+		xterm.events.length = 0;
+		const noScreen = pane();
+		expect(await noScreen.attachEnded("T", output({ snapshot: null }))).toBe("CHANNEL_DEAD");
+		expect(xterm.events).toEqual(["<reset>", "a", "b", MOUSE_OFF]);
+	});
+
+	it("draws an ended terminal's output at the size it last had", async () => {
+		const reader = pane();
+		await reader.attachEnded("T", output());
+		expect(xterm.writtenAt[0]).toEqual({ cols: 100, rows: 30 });
+
+		xterm.writtenAt.length = 0;
+		const writer = pane();
+		writer.terminal.setDecidesSize(true);
+		await writer.attachEnded("T", output());
+		expect(xterm.writtenAt[0]).toEqual({ cols: 100, rows: 30 });
+	});
+
+	it("says when an ended terminal's output was too long to send", async () => {
+		const withScreen = pane();
+		await withScreen.attachEnded("T", output({ tail: [], truncated: true }));
+		expect(xterm.events[0]).toBe("<reset>");
+		expect(xterm.events[1]).toBe("SCREEN");
+		expect(xterm.events[2]).toContain("output between this screen and now was dropped");
+
+		xterm.events.length = 0;
+		const fresh = pane();
+		await fresh.attachEnded("T", output({ snapshot: null, tail: [], truncated: true }));
+		expect(xterm.events).toHaveLength(3);
+		expect(xterm.events[0]).toBe("<reset>");
+		expect(xterm.events[1]).toContain("its last output was too long to show");
+		expect(xterm.events[2]).toBe(MOUSE_OFF);
+
+		const watched = pane();
+		await watched.attachLive("T", "OLD");
+		xterm.events.length = 0;
+		await watched.attachEnded("T", output({ snapshot: null, tail: [], truncated: true }));
+		expect(xterm.events).toEqual([]);
+	});
+
+	it("shows what an ended terminal printed while the pane was away", async () => {
+		const away = pane();
+		await away.attachLive("T", "OLD");
+		xterm.events.length = 0;
+
+		await away.attachEnded("T", output({ snapshot: null, tail: [bytes("FINAL")] }));
+
+		expect(xterm.events).toEqual(["<reset>", "FINAL", MOUSE_OFF]);
+	});
+
+	it("keeps the screen of a terminal it watched when the hub kept nothing", async () => {
+		const nothing = output({ snapshot: null, tail: [] });
+
+		const spawned = pane();
+		spawned.terminal.attachChannel("T");
+		xterm.events.length = 0;
+		await spawned.attachEnded("T", nothing);
+		expect(xterm.events).toEqual([]);
+
+		const attached = pane();
+		await attached.attachLive("T", "OLD");
+		xterm.events.length = 0;
+		await attached.attachEnded("T", nothing);
+		expect(xterm.events).toEqual([]);
+	});
+
+	it("clears another terminal's screen when the ended one left nothing", async () => {
+		const nothing = output({ snapshot: null, tail: [] });
+		const reused = pane();
+		await reused.attachLive("T", "T-SCREEN");
+		await reused.attachEnded("S", output({ snapshot: null, tail: [bytes("S-OUT")] }));
+		xterm.events.length = 0;
+
+		await reused.attachEnded("T", nothing);
+		expect(xterm.events).toEqual(["<reset>", MOUSE_OFF]);
+
+		xterm.events.length = 0;
+		await reused.attachEnded("S", nothing);
+		expect(xterm.events).toEqual(["<reset>", MOUSE_OFF]);
+	});
+
+	it("writes nothing for an answer to an attach it no longer waits on", async () => {
+		const quick = pane();
+		const first = quick.terminal.reattachChannel("T").then(
+			() => "resolved",
+			(err: { code?: string }) => err.code,
+		);
+		const second = quick.terminal.reattachChannel("S").catch(() => undefined);
+
+		quick.refuse("S", output({ snapshot: null, tail: [bytes("S-OUT")] }));
+		quick.refuse("T", output({ snapshot: null, tail: [bytes("T-OUT")] }));
+		await second;
+
+		expect(await first).toBe("CHANNEL_DEAD");
+		expect(xterm.events).toEqual(["<reset>", "S-OUT", MOUSE_OFF]);
+	});
+
+	it("writes nothing for a terminal the pane no longer shows", async () => {
+		const moved = pane();
+		const code = await moved.attachEnded("T", output(), { stillWanted: () => false });
+
+		expect(code).toBe("CHANNEL_DEAD");
+		expect(xterm.events).toEqual([]);
+	});
+
+	it("writes nothing for an older hub's refusal", async () => {
+		const older = pane();
+		await older.attachLive("S", "S-SCREEN");
+		xterm.events.length = 0;
+
+		expect(await older.attachEnded("T")).toBe("CHANNEL_DEAD");
+		expect(xterm.events).toEqual([]);
+	});
+
+	it("leaves the screen alone on a Reconnect or Restart refused as ended", async () => {
+		const kept = pane();
+		await kept.attachLive("T", "WHOLE");
+		xterm.events.length = 0;
+
+		await kept.attachEnded("T", output(), { preserveContent: true });
+
+		expect(xterm.events).toEqual([]);
+	});
+
+	describe("sends nothing for an ended terminal it shows", () => {
+		for (const withOutput of [true, false]) {
+			const label = withOutput ? "with its last output" : "from an older hub";
+
+			it(`in a pane that never attached, ${label}`, async () => {
+				const fresh = pane();
+				await fresh.attachEnded("T", withOutput ? output() : undefined);
+				xterm.last?.type("x");
+				fresh.resizePane({ cols: 90, rows: 20 });
+				expect(fresh.sent()).toEqual([]);
+			});
+
+			it(`in a pane that decided its size, ${label}`, async () => {
+				const writer = pane();
+				await writer.attachLive("T", "LIVE");
+				writer.terminal.setDecidesSize(true);
+				writer.sent();
+				(writer.hub.client.send as ReturnType<typeof vi.fn>).mockClear();
+
+				await writer.attachEnded("T", withOutput ? output() : undefined);
+				xterm.last?.type("x");
+				writer.resizePane({ cols: 90, rows: 20 });
+				expect(writer.sent()).toEqual([]);
+			});
+		}
+	});
+
+	it("draws an ended terminal at its size until a terminal attaches again", async () => {
+		const writer = pane();
+		writer.terminal.setDecidesSize(true);
+		await writer.attachEnded("T", output());
+		writer.resizePane({ cols: 80, rows: 24 });
+		expect(writer.size()).toEqual({ cols: 100, rows: 30 });
+		expect(writer.sent()).toEqual([]);
+
+		await writer.attachLive("T", "RESTARTED", { preserveContent: true });
+
+		expect(writer.size()).toEqual({ cols: 80, rows: 24 });
+		expect(writer.sent()).toEqual([{ type: "RESIZE", channelId: "T", cols: 80, rows: 24 }]);
+	});
+
+	it("turns mouse reporting off in an ended terminal it shows", async () => {
+		const shown = pane();
+		await shown.attachEnded("T", output());
+		expect(xterm.events.at(-1)).toBe(MOUSE_OFF);
+
+		xterm.events.length = 0;
+		const left = pane();
+		await left.attachEnded("T", output(), { stillWanted: () => false });
+		expect(xterm.events).not.toContain(MOUSE_OFF);
+
+		left.terminal.turnMouseReportingOff();
+		expect(xterm.events).toEqual([MOUSE_OFF]);
 	});
 });

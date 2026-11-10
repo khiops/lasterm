@@ -1,4 +1,4 @@
-import type { TerminalProfile, UiAttachOkMessage } from "@lasterm/shared";
+import type { EndedOutput, TerminalProfile, UiAttachOkMessage } from "@lasterm/shared";
 import { sanitizeTitle } from "@lasterm/shared";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -23,6 +23,14 @@ const DEFAULT_FONT_SIZE = 14;
 /** xterm's scrollbar width when no ruler width is set (its `DEFAULT_SCROLL_BAR_WIDTH`). */
 const DEFAULT_XTERM_SCROLLBAR_WIDTH = 14;
 
+/**
+ * Turns mouse reporting off in the pane's own xterm (#927). A program that
+ * turned it on and then ended leaves xterm sending the wheel and clicks to a
+ * terminal that is gone, and plain selection off. In xterm 6 every
+ * mouse-tracking DECRST sets the protocol to none, so this one is enough.
+ */
+const MOUSE_REPORTING_OFF = "\u001b[?1000l";
+
 export function useTerminal(
 	containerRef: Ref<HTMLElement | null>,
 	wsClient: IWsClient,
@@ -34,6 +42,20 @@ export function useTerminal(
 	const fitAddon = new FitAddon();
 	const search = useTerminalSearch();
 	let channelId: string | null = null;
+	/**
+	 * The terminal whose output the screen holds: the one attached last, or
+	 * the ended one whose last output it shows (#927). A refusal with nothing
+	 * to show keeps a screen that is already that terminal's.
+	 */
+	let shownId: string | null = null;
+	/**
+	 * Set while the pane shows an ended terminal's last output: the size that
+	 * output was drawn at, which the pane keeps whatever its write lock says,
+	 * until a terminal attaches again (#927).
+	 */
+	let endedSize: { cols: number; rows: number } | null = null;
+	/** Counts attach requests: only the latest may write what a refusal carries. */
+	let attachRequests = 0;
 	let resizeObserver: ResizeObserver | null = null;
 	let onScrollbarChanged: (() => void) | null = null;
 	/** Whether search matches are marked in the scrollbar gutter (profile). */
@@ -129,6 +151,10 @@ export function useTerminal(
 	function layout(): void {
 		const term = terminal.value;
 		if (!term) return;
+		if (endedSize !== null) {
+			drawAtPtySize(term, endedSize);
+			return;
+		}
 		if (decidesSize || ptySize === null) {
 			drawAtPaneSize(term);
 			if (!paneMeasurable()) return;
@@ -368,6 +394,8 @@ export function useTerminal(
 	 */
 	function attachChannel(id: string): void {
 		channelId = id;
+		shownId = id;
+		leaveEndedSize();
 
 		// Clean up previous subscription if any
 		outputUnsubscribe?.();
@@ -399,8 +427,13 @@ export function useTerminal(
 	 */
 	async function reattachChannel(
 		id: string,
-		opts?: { preserveContent?: boolean },
+		opts?: {
+			preserveContent?: boolean;
+			/** Whether the pane still shows `id` when the answer comes; true when absent. */
+			stillWanted?: () => boolean;
+		},
 	): Promise<{ writeLockHolder: string | null; cached: boolean; truncated: boolean }> {
+		const request = ++attachRequests;
 		// Clean up previous OUTPUT subscription
 		outputUnsubscribe?.();
 
@@ -467,6 +500,16 @@ export function useTerminal(
 					clearTimeout(timer);
 					unsubOk();
 					unsubErr();
+					// Only for the terminal the pane still shows, and only from its
+					// latest request: an older answer, or one for a terminal it has
+					// left, writes nothing (#927, #929).
+					if (
+						msg.code === "CHANNEL_DEAD" &&
+						request === attachRequests &&
+						(opts?.stillWanted?.() ?? true)
+					) {
+						showEnded(id, msg.lastOutput, opts?.preserveContent === true);
+					}
 					// The code travels with it: what a pane does about this is not a
 					// decision to make by reading a sentence, which changes.
 					reject(Object.assign(new Error(msg.message ?? msg.code), { code: msg.code }));
@@ -475,6 +518,10 @@ export function useTerminal(
 
 			wsClient.send({ type: "ATTACH", channelId: id });
 		});
+
+		// A terminal attached: the size rules of #831 apply again.
+		shownId = id;
+		leaveEndedSize();
 
 		// The PTY's size. A pane that does not decide it draws the screen below
 		// at that size, the one it was drawn for (#831). One that decides it
@@ -545,6 +592,57 @@ export function useTerminal(
 			cached: result.cached,
 			truncated: result.truncated,
 		};
+	}
+
+	/**
+	 * Show what an ended terminal last printed, as its CHANNEL_DEAD carried it
+	 * (#927), and stop speaking to it.
+	 *
+	 * The pane is then bound to no terminal: typing and resizing send nothing.
+	 * The output is drawn at the size it was drawn for, whatever the write lock
+	 * says, until a terminal attaches again. It replaces the screen when it
+	 * has something to draw, as an ATTACH_OK's snapshot does: output printed
+	 * while the pane's socket was away is in it. With nothing to draw, a screen
+	 * that is already this terminal's stays, and another's is cleared. Under
+	 * `preserveContent` (Reconnect, Restart, a re-attach over an ending the
+	 * pane watched) nothing is written. An older hub sends no last output, and
+	 * nothing is written either.
+	 */
+	function showEnded(id: string, last: EndedOutput | undefined, preserveContent: boolean): void {
+		channelId = null;
+		if (last === undefined) return;
+		endedSize = { cols: last.cols, rows: last.rows };
+		layout();
+		const term = terminal.value;
+		if (!term || preserveContent) return;
+		const somethingToDraw = last.snapshot !== null || last.tail.some((part) => part.byteLength > 0);
+		if (somethingToDraw) {
+			term.reset();
+			if (last.snapshot?.serialized) term.write(last.snapshot.serialized);
+			for (const part of last.tail) term.write(part);
+			if (last.truncated === true) {
+				writeNotice("output between this screen and now was dropped");
+			}
+		} else if (shownId !== id) {
+			term.reset();
+			if (last.truncated === true) writeNotice("its last output was too long to show");
+		} else {
+			return;
+		}
+		shownId = id;
+		term.write(MOUSE_REPORTING_OFF);
+	}
+
+	/** Turn mouse reporting off in this pane's xterm, as over an ended terminal (#927). */
+	function turnMouseReportingOff(): void {
+		terminal.value?.write(MOUSE_REPORTING_OFF);
+	}
+
+	/** Leave the size an ended terminal's output was drawn at, once a terminal attaches. */
+	function leaveEndedSize(): void {
+		if (endedSize === null) return;
+		endedSize = null;
+		layout();
 	}
 
 	/**
@@ -665,6 +763,8 @@ export function useTerminal(
 		terminal.value?.dispose();
 		terminal.value = null;
 		channelId = null;
+		shownId = null;
+		endedSize = null;
 		titleStack.length = 0;
 		currentDynamicTitle.value = null;
 	}
@@ -678,6 +778,7 @@ export function useTerminal(
 		init,
 		attachChannel,
 		reattachChannel,
+		turnMouseReportingOff,
 		applyProfile,
 		suppressNextResize,
 		syncChannelSize,

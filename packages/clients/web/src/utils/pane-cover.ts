@@ -59,8 +59,9 @@ export function factsFromRefusal(code: string | undefined): AttachFacts | null {
 }
 
 /**
- * What a pane knows when the client already says its terminal has ended, and
- * it does not attach: what the hub would answer, CHANNEL_DEAD.
+ * What a pane knows when the client already says its terminal has ended and
+ * its attach gets no answer: what the hub would answer, CHANNEL_DEAD. Such a
+ * pane asks all the same, for what the terminal last printed (#927).
  *
  * The pane keeps it as its own. It learnt it from the list of the host in
  * view, and that list changes with the rail: a pane over an ended terminal of

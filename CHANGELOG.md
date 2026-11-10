@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.16.0](https://github.com/khiops/lasterm/compare/v0.15.3...v0.16.0) (2026-11-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **hub:** DELETE /api/hosts/:id and `lasterm host remove` now refuse by default when the host has terminals open (409 TERMINALS_WOULD_END), where they answered 204 before. Pass ?force=true, or --force on the CLI, to delete the host and end its terminals.
+
+### Features
+
+* **agent:** report a terminal's live working directory ([#850](https://github.com/khiops/lasterm/issues/850)) ([d6c6a08](https://github.com/khiops/lasterm/commit/d6c6a08f16d0ba58203a06c810c85740e0837c10))
+* **desktop:** ask before quitting while uploads run, and grant file access to the app's page ([#863](https://github.com/khiops/lasterm/issues/863)) ([b1e97e8](https://github.com/khiops/lasterm/commit/b1e97e8743c0e160050b6b83b3d02de8056516b3))
+* file transfer settings, behind an experimental switch ([#847](https://github.com/khiops/lasterm/issues/847)) ([2512ef7](https://github.com/khiops/lasterm/commit/2512ef774b88368a39d99cdefb6dbe8179a08d95))
+* files panel beside the panes, and the ways to open it ([#861](https://github.com/khiops/lasterm/issues/861)) ([00f197a](https://github.com/khiops/lasterm/commit/00f197a68fa3a186c6e16c417fe199b6b4c8951c))
+* **hub:** browse a terminal's host files over SFTP, SSH commands or the hub's own file system ([#849](https://github.com/khiops/lasterm/issues/849)) ([a876af8](https://github.com/khiops/lasterm/commit/a876af8d99bf6599477b084e7a18a3fd5e699b0d))
+* **hub:** let a running ssh-agent sign for a key-auth host that holds the key ([#892](https://github.com/khiops/lasterm/issues/892)) ([a614fa1](https://github.com/khiops/lasterm/commit/a614fa12e5d237b94bff041c9abeb70f498aafa5)), closes [#876](https://github.com/khiops/lasterm/issues/876)
+* **hub:** upload files to a terminal's host, never overwriting one unasked ([#859](https://github.com/khiops/lasterm/issues/859)) ([affd9af](https://github.com/khiops/lasterm/commit/affd9af3affbcd4706bfb7aeb7464edca2089bb6))
+* **hub:** uploads survive a hub restart: kept in meta.db, resumed, discarded and swept ([#867](https://github.com/khiops/lasterm/issues/867)) ([432d599](https://github.com/khiops/lasterm/commit/432d599198c00347f2644df7b1b352d27c4ed64b))
+* PowerShell reports its directory, by a $PROFILE snippet or a launch profile switch ([#839](https://github.com/khiops/lasterm/issues/839)) ([#857](https://github.com/khiops/lasterm/issues/857)) ([978073e](https://github.com/khiops/lasterm/commit/978073ec440c2cfc8dad77a434541124f4ad77bd))
+* share the writer's files panel with every client showing the terminal ([#864](https://github.com/khiops/lasterm/issues/864)) ([15b137a](https://github.com/khiops/lasterm/commit/15b137ac8dbc9bf4bb576d018a39a4efe1fe8131))
+* **web:** resume interrupted uploads after a crash or a restart ([#870](https://github.com/khiops/lasterm/issues/870)) ([1869981](https://github.com/khiops/lasterm/commit/1869981916cea3f0ebf82c72a2f23d88a1f0540f))
+* **web:** upload by dropping files on a terminal or on the files panel ([#866](https://github.com/khiops/lasterm/issues/866)) ([c815c61](https://github.com/khiops/lasterm/commit/c815c618687c803e2c68ac4c0e4872e244ae781a))
+
+
+### Bug Fixes
+
+* a writer that reloads gets its lock, and its terminal's size, back within 10 s ([#851](https://github.com/khiops/lasterm/issues/851)) ([4e28310](https://github.com/khiops/lasterm/commit/4e283106939c4f289042585490b412ab5e74f2b0)), closes [#846](https://github.com/khiops/lasterm/issues/846)
+* **agent:** a stop that finds no agent running succeeds, and clears a dead daemon's record ([#879](https://github.com/khiops/lasterm/issues/879)) ([820a15a](https://github.com/khiops/lasterm/commit/820a15a6d7b1ae5dded596682c4808d5c61e4d82)), closes [#871](https://github.com/khiops/lasterm/issues/871)
+* **desktop:** own the quit questions by the main window, so they take the keyboard ([#884](https://github.com/khiops/lasterm/issues/884)) ([2c6184e](https://github.com/khiops/lasterm/commit/2c6184ecba528504e9e569539325908549e440a9))
+* **desktop:** say "it" of one upload in the quit question ([#880](https://github.com/khiops/lasterm/issues/880)) ([98fdd61](https://github.com/khiops/lasterm/commit/98fdd61478c78cec19322b2f603bb0e5cfd76c0c))
+* **hub:** a quit during an upload ends the hub at once, and the desktop leaves ([#878](https://github.com/khiops/lasterm/issues/878)) ([b8c4d82](https://github.com/khiops/lasterm/commit/b8c4d82acfbb4e449b9889de083298edacb91c91))
+* **hub:** end a deleted host's terminals once the person was told how many ([#910](https://github.com/khiops/lasterm/issues/910)) ([#922](https://github.com/khiops/lasterm/issues/922)) ([42ffe68](https://github.com/khiops/lasterm/commit/42ffe689b3e1f400c328d2393de942ae6de2e75a))
+* **hub:** read the wire names in lasterm host list ([#906](https://github.com/khiops/lasterm/issues/906)) ([ec83756](https://github.com/khiops/lasterm/commit/ec83756a225bfa8859537d3f6cdb9d20ab9e56d8)), closes [#903](https://github.com/khiops/lasterm/issues/903)
+* **hub:** read the wire names in lasterm session list ([#905](https://github.com/khiops/lasterm/issues/905)) ([#912](https://github.com/khiops/lasterm/issues/912)) ([b34343a](https://github.com/khiops/lasterm/commit/b34343aa7670067f255788d81e557e4326e785bc))
+* **hub:** refuse a malformed port instead of truncating it ([#907](https://github.com/khiops/lasterm/issues/907)) ([27ebc8d](https://github.com/khiops/lasterm/commit/27ebc8d275dab43051282a19311c77d22c26258c)), closes [#902](https://github.com/khiops/lasterm/issues/902)
+* **hub:** refuse what the host API cannot store, instead of storing it or answering 500 ([#918](https://github.com/khiops/lasterm/issues/918)) ([161fcc3](https://github.com/khiops/lasterm/commit/161fcc36b88bf91c29316e0caddfd7d75977cf23)), closes [#848](https://github.com/khiops/lasterm/issues/848) [#798](https://github.com/khiops/lasterm/issues/798)
+* **hub:** run a Windows upload's scripts in one PowerShell ([#869](https://github.com/khiops/lasterm/issues/869)) ([69477fe](https://github.com/khiops/lasterm/commit/69477fe42ad5720cae342585d71b08d329b8f5a2)), closes [#865](https://github.com/khiops/lasterm/issues/865) [#868](https://github.com/khiops/lasterm/issues/868)
+* **hub:** run spool WAL checkpoints on a worker thread ([#786](https://github.com/khiops/lasterm/issues/786)) ([#914](https://github.com/khiops/lasterm/issues/914)) ([aeeb390](https://github.com/khiops/lasterm/commit/aeeb39033c640e6c2ffaab27d721d50935cf4960))
+* one size per terminal, decided by the write lock's holder and told to every client ([#841](https://github.com/khiops/lasterm/issues/841)) ([2242a37](https://github.com/khiops/lasterm/commit/2242a371c956423b4c6c0e0124d2fcce327aaad3)), closes [#831](https://github.com/khiops/lasterm/issues/831)
+* **root:** clean the workspace's crates before check.sh's cargo steps ([#862](https://github.com/khiops/lasterm/issues/862)) ([daa43db](https://github.com/khiops/lasterm/commit/daa43db2d266ae91ff2f6bd79731520e01e344c6))
+* **root:** link the C runtime statically on Windows, and refuse a build that imports it ([#924](https://github.com/khiops/lasterm/issues/924)) ([#928](https://github.com/khiops/lasterm/issues/928)) ([032b48a](https://github.com/khiops/lasterm/commit/032b48aa863a168ed7db47602d4caf923000669a))
+* **root:** stop building ssh2's native ciphers, which abort the test workers ([#868](https://github.com/khiops/lasterm/issues/868)) ([#882](https://github.com/khiops/lasterm/issues/882)) ([e8a1ac0](https://github.com/khiops/lasterm/commit/e8a1ac06f936087d8bbedb507710165f86fe9e61))
+* **web:** a reader's pane keeps its scrollbars when they are hidden ([#852](https://github.com/khiops/lasterm/issues/852)) ([a6372f4](https://github.com/khiops/lasterm/commit/a6372f48a88aa5594b4bcf17bcf98b7b016a8ae0)), closes [#845](https://github.com/khiops/lasterm/issues/845)
+* **web:** refuse an invalid SSH port instead of clearing the stored one ([#904](https://github.com/khiops/lasterm/issues/904)) ([f6c76ee](https://github.com/khiops/lasterm/commit/f6c76ee25a7bcaed7ce06c8418153f9d4376b32e)), closes [#901](https://github.com/khiops/lasterm/issues/901)
+* **web:** say a new terminal whose passphrase was not given is not connected ([#877](https://github.com/khiops/lasterm/issues/877)) ([b5392b9](https://github.com/khiops/lasterm/commit/b5392b9b6508e6278ece3e90a94b4a8e0ee18b81)), closes [#875](https://github.com/khiops/lasterm/issues/875)
+* **web:** the Thin and Wide scrollbar styles draw different widths ([#856](https://github.com/khiops/lasterm/issues/856)) ([2cf26cf](https://github.com/khiops/lasterm/commit/2cf26cf3be727085614fbce1194d0f27998b8b75)), closes [#853](https://github.com/khiops/lasterm/issues/853)
+* **web:** toasts take their ground and colours from the theme ([#830](https://github.com/khiops/lasterm/issues/830)) ([#844](https://github.com/khiops/lasterm/issues/844)) ([0b49f32](https://github.com/khiops/lasterm/commit/0b49f3223d736619de3a5408e8ba2c39c7a1f080))
+
+
+### Refactoring
+
+* **hub:** drop better-sqlite3, now that the hub runs on node:sqlite ([#899](https://github.com/khiops/lasterm/issues/899)) ([0266c01](https://github.com/khiops/lasterm/commit/0266c01ada0d4571a5de58c175f9a37611b9c419)), closes [#893](https://github.com/khiops/lasterm/issues/893) [#146](https://github.com/khiops/lasterm/issues/146)
+* **hub:** open SQLite through node:sqlite, behind an adapter ([#898](https://github.com/khiops/lasterm/issues/898)) ([7a7de35](https://github.com/khiops/lasterm/commit/7a7de3547f3a62637d20484f2fcef04449437783))
+* **hub:** ship the native addons beside the executable, checked against digests it embeds ([#900](https://github.com/khiops/lasterm/issues/900)) ([942bc8b](https://github.com/khiops/lasterm/commit/942bc8b5c7ed5071601e7d3785c6e771e2fce9fe)), closes [#889](https://github.com/khiops/lasterm/issues/889)
+
+
+### Performance
+
+* **hub:** send each SSH packet in one write, now that Nagle is off ([#897](https://github.com/khiops/lasterm/issues/897)) ([001f4d9](https://github.com/khiops/lasterm/commit/001f4d922b0d9c916378cae3ce1cd873a05ceb8e))
+* **hub:** small-file uploads: Nagle off on SSH sockets, the window told at once, fewer SFTP round trips ([#886](https://github.com/khiops/lasterm/issues/886)) ([df7e164](https://github.com/khiops/lasterm/commit/df7e16494bb990970a6ca28c1d23e138911cafe1))
+
+
+### Tests
+
+* **agent:** wait for sleep itself before naming the foreground ([#919](https://github.com/khiops/lasterm/issues/919)) ([#921](https://github.com/khiops/lasterm/issues/921)) ([1268da2](https://github.com/khiops/lasterm/commit/1268da2b6293c43c57684f09214575c8fc1696d8))
+* **hub:** guard better-sqlite3 against aborting when the GC reclaims a statement ([#883](https://github.com/khiops/lasterm/issues/883)) ([#887](https://github.com/khiops/lasterm/issues/887)) ([c0c0d25](https://github.com/khiops/lasterm/commit/c0c0d25fee690149e431a93f700f3b35e4b95111))
+* **hub:** let a fake agent's queued close arrive before the databases close ([#925](https://github.com/khiops/lasterm/issues/925)) ([#926](https://github.com/khiops/lasterm/issues/926)) ([942411e](https://github.com/khiops/lasterm/commit/942411e9817d40785b9400e297d8e787934f0963))
+
+
+### Documentation
+
+* add the Microsoft Store competitive analysis ([#826](https://github.com/khiops/lasterm/issues/826)) ([2484409](https://github.com/khiops/lasterm/commit/2484409c2d40fd18203858e38a871eea20f26f2f)), closes [#721](https://github.com/khiops/lasterm/issues/721)
+* remove the competitive analysis from this repository ([#828](https://github.com/khiops/lasterm/issues/828)) ([e89a099](https://github.com/khiops/lasterm/commit/e89a099c0f2b158256df38f4bace5eb68144429d))
+* **root:** add the Store news for the malformed port refusal ([#907](https://github.com/khiops/lasterm/issues/907)) ([#909](https://github.com/khiops/lasterm/issues/909)) ([78b5a53](https://github.com/khiops/lasterm/commit/78b5a539f5dea54db35e6c7fd6478ebb01f5c379))
+* the hub stays in Node and orchestrates; critical paths move to Rust behind Node-API ([#885](https://github.com/khiops/lasterm/issues/885)) ([b016c62](https://github.com/khiops/lasterm/commit/b016c62dee28a5ca1e6b5dde22d0220af6afdd85))
+
 ## [0.15.3](https://github.com/khiops/lasterm/compare/v0.15.2...v0.15.3) (2026-10-31)
 
 

@@ -116,7 +116,9 @@ describe("ws-handler codec round-trips", () => {
 		// A snapshot stored at exactly the hub's 256 KiB bound: half escape-heavy,
 		// half plain text, which MessagePack sends byte for byte.
 		const frame = JSON.stringify({ serialized: "", cols: 200, rows: 60, cursorX: 4, cursorY: 2 });
-		const unit = "[38;5;160mx[0m";
+		const unit = "\u001b[38;5;160mx\u001b[0m";
+		// JSON escapes each ESC in six bytes, MessagePack sends it in one.
+		expect(JSON.stringify(unit).length - 2).toBeGreaterThan(unit.length);
 		let screen = unit.repeat(Math.floor((128 * KIB) / (JSON.stringify(unit).length - 2)));
 		screen += "x".repeat(256 * KIB - frame.length - (JSON.stringify(screen).length - 2));
 		const msg: ProtocolMessage = {

@@ -2632,6 +2632,31 @@ describe("SessionManager", () => {
 			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
 		});
 
+		it("reads nothing of a terminal deleted while this hub still holds it", async () => {
+			const heard: ProtocolMessage[] = [];
+			sm.addClient(makeClient("writer", heard));
+			const channelId = await sm.handleSpawn("writer", { type: "SPAWN", hostId: "local" });
+			if (channelId === null) throw new Error("expected a local channel");
+			const agent = mockLocalAgents.at(-1);
+			if (agent === undefined) throw new Error("expected the local agent");
+			const emit = (msg: unknown) => (agent as unknown as EventEmitter).emit("message", msg);
+			emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+			emit({ type: "CHANNEL_EXIT", channelId, exitCode: 0 });
+			// Deleted as DELETE /api/channels/:id deletes an ended one: its row first,
+			// its output purged after the answer.
+			new MetaDAL(dbManager.meta).deleteChannel(channelId);
+			const reads = dataReads();
+
+			const { attached, received } = await attachFresh(channelId, "late");
+
+			expect(attached).toBe(false);
+			expect(received).toEqual([
+				{ type: "ERROR", code: "CHANNEL_DEAD", message: "This terminal has ended.", channelId },
+			]);
+			expect(reads.one).not.toHaveBeenCalled();
+			expect(reads.output).not.toHaveBeenCalled();
+		});
+
 		it("bounds an ended terminal's last output as the cached attach does", async () => {
 			endedTerminal("ended-over");
 			store("ended-over", 10, "snapshot", JSON.stringify(SCREEN));

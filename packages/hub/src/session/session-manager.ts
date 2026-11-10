@@ -1780,8 +1780,9 @@ export class SessionManager {
 		// its exit card. Reading the spool is all this adds; the terminal is
 		// neither attached nor started.
 		if (channel === undefined || channel.status === "dead") {
-			const recorded = channel === undefined ? this.ctx.metaDal.getChannel(channelId) : undefined;
-			const ended = channel ?? (recorded?.status === "dead" ? recorded : undefined);
+			const recorded = this.ctx.metaDal.getChannel(channelId);
+			const kept = recorded?.status === "dead" ? recorded : undefined;
+			const ended = channel ?? kept;
 			const errorMsg: ErrorMessage =
 				ended === undefined
 					? {
@@ -1799,7 +1800,10 @@ export class SessionManager {
 							// in twenty-six characters of noise.
 							message: "This terminal has ended.",
 							channelId,
-							...this.endedOutputOf(channelId, ended),
+							// Only for a terminal meta.db still holds: one deleted is
+							// being purged, and nothing reads its output any more,
+							// even while this hub still holds it in memory.
+							...(kept !== undefined && this.endedOutputOf(channelId, ended)),
 						};
 			client.send(errorMsg);
 			return false;

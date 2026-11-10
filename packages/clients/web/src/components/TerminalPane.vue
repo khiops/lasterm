@@ -928,7 +928,9 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 					try {
 						await attachAndCover(chId);
 					} catch {
-						takeAnswer(chId, factsFromKnownEnd());
+						// Only while the pane still shows it: one given another
+						// terminal meanwhile attaches that one below (#929).
+						if (effectiveChannelId.value === chId) takeAnswer(chId, factsFromKnownEnd());
 						askAgainOnNewSocket = reconnectedWhileOpening;
 						reconnectedWhileOpening = false;
 					}
@@ -1937,8 +1939,9 @@ function onDragEnd(): void {
 	margin: 4px 0;
 }
 
-/* Exit overlay: a neutral scrim over whatever the pane shows, and on it a card
-   of the theme's own opaque ground. The card's text and its ground are a pair
+/* Exit overlay: a card of the theme's own opaque ground, over the pane, with a
+   neutral scrim only over a terminal the hub has no record of (below). The
+   card's text and its ground are a pair
    the theme guarantees (`--nt-text-strong` is made to read at 4.5:1 on
    `--nt-bg`), so what lies behind — the terminal's content, a wallpaper, a
    translucent terminal — never decides whether it reads. Every colour a rule

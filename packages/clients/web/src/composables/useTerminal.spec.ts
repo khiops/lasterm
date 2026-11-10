@@ -660,6 +660,8 @@ describe("an ended terminal's last output (#927)", () => {
 			it(`in a pane that never attached, ${label}`, async () => {
 				const fresh = pane();
 				await fresh.attachEnded("T", withOutput ? output() : undefined);
+				// A write lock arriving later makes it the size's decider: still nothing.
+				fresh.terminal.setDecidesSize(true);
 				typed().type("x");
 				fresh.resizePane({ cols: 90, rows: 20 });
 				expect(fresh.sent()).toEqual([]);

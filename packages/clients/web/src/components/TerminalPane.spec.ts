@@ -266,7 +266,11 @@ describe("TerminalPane over an ended terminal of the host not in view (#594)", (
 		// hasEnded either way, which paneCover reads whatever the status says
 		// (pane-cover.spec.ts).
 		expect(deadBranch).toContain("await attachAndCover(chId);");
-		expect(deadBranch).toMatch(/\} catch \{\s*takeAnswer\(chId, factsFromKnownEnd\(\)\);/);
+		// For the terminal it still shows only: a pane given another one while
+		// it waited must not take that one for ended (#929).
+		expect(deadBranch).toMatch(
+			/\} catch \{[\s\S]*?if \(effectiveChannelId\.value === chId\) takeAnswer\(chId, factsFromKnownEnd\(\)\);/,
+		);
 		expect(body(/function takeAnswer\(/)).toContain("hasEnded.value = facts.ended;");
 		expect(SOURCE).toMatch(/ended: hasEnded\.value,/);
 	});
@@ -508,7 +512,7 @@ describe("TerminalPane follows the setting over an end it found (#592)", () => {
 		// takeAnswer hands an end to onTerminalEnded (checked above).
 		const open = body(/async function openChannel\(/);
 		expect(open).toMatch(
-			/if \(isDead\.value\) \{\s*const chId = props\.channelId;\s*try \{\s*await attachAndCover\(chId\);\s*\} catch \{\s*takeAnswer\(chId, factsFromKnownEnd\(\)\);[\s\S]*?\} else \{[\s\S]*?await attachAndCover\(props\.channelId\);\s*\}/,
+			/if \(isDead\.value\) \{\s*const chId = props\.channelId;\s*try \{\s*await attachAndCover\(chId\);\s*\} catch \{[\s\S]*?takeAnswer\(chId, factsFromKnownEnd\(\)\);[\s\S]*?\} else \{[\s\S]*?await attachAndCover\(props\.channelId\);\s*\}/,
 		);
 	});
 

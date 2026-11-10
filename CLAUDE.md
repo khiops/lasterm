@@ -144,8 +144,8 @@ crates are fresh, and it goes by modification time: after another worktree has
 built, a `cargo build` here can compile nothing and only relabel that worktree's
 artifacts as this checkout's (#544). So the script cleans the four crates first
 unless the build it recorded last is intact and matches this checkout, and records
-which checkout built, with a digest of the manifests, `Cargo.lock` and
-`rust-toolchain.toml` it built with. It records nothing when another build wrote
+which checkout built, with a digest of the manifests, `Cargo.lock`,
+`rust-toolchain.toml` and `.cargo/config.toml` it built with. It records nothing when another build wrote
 into these crates while it ran. The setup compares each artifact with the sources
 of the checkout the record names, and refuses a build that predates them, differs
 from this checkout's (#129), was made with other manifests, or that the record
@@ -167,6 +167,7 @@ cd dist/sea && ./lasterm-hub start --port 4100   # serve PWA at https://127.0.0.
 - Hub SEA resolves the agent **co-located** in the same dir (`dist/sea/`) via `sea-agent-resolver.ts`; the agent spawns lazily on first local session.
 - Its native addons are **installed beside it** too, never extracted (#889): it loads `lasterm_hub_lock.node` and `lasterm_tls_identity.node` from its own directory and refuses to start unless each holds the bytes recorded in the `addons.json` it embeds (SECURITY.md § 4.5). Move or copy the executable with them. The desktop bundles them as Tauri resources, and the release publishes the Windows hub as a zip of the three. Nothing is extracted at all: SQLite is `node:sqlite`, inside the embedded Node (#893).
 - Native SEA embeds the host Node — build cross-platform binaries on their target OS (Windows hub on Windows). Rust agent verify must include `cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings` (cfg(windows) lints invisible to Linux clippy).
+- Windows Rust builds link the C runtime statically (`.cargo/config.toml`, #924): a Windows without the Visual C++ Redistributable has no `VCRUNTIME140.dll`. A `RUSTFLAGS` in the environment replaces that flag. `build.yml` runs `node scripts/pe-imports.ts` on each Windows binary it builds and fails on such an import.
 - Config: `~/.config/lasterm` · State: `~/.local/state/lasterm`.
 
 ### Desktop UI tests (Windows)

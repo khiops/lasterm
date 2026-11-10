@@ -319,6 +319,12 @@ jobs:
       # The compiler and its components come from rust-toolchain.toml (#248).
       - run: rustup toolchain install
       - run: rustup target add ${{ matrix.triple }}
+      # For the import check after the build, which Node runs by stripping types.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.os == 'windows'
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
       # Saved from main only (#741). A pull request's cache serves only that pull
       # request, while every pull request restores main's, and saving one from
       # each kept the repository over its 10 GB cache limit. A called workflow
@@ -364,6 +370,14 @@ jobs:
         run: .\scripts\build-agent.ps1
         env:
           LASTERM_TARGET_TRIPLE: ${{ matrix.triple }}
+      # A Windows without the Visual C++ Redistributable has no VCRUNTIME140.dll,
+      # and a binary importing it does not start there (#924). .cargo/config.toml
+      # links the C runtime statically; this fails the build that brings such an
+      # import back, here and in build-hub and build-desktop.
+      - name: No Visual C++ runtime import
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: node scripts/pe-imports.ts dist/sea/lasterm-agent.exe
       # Each artifact is one tar. upload-artifact's zip transport resets file
       # modes, and a tar keeps the executable bit a Linux sidecar needs. The
       # executable is named, never globbed, and every path stays relative: the
@@ -431,6 +445,12 @@ jobs:
         run: |
           $env:LASTERM_BUILD_HASH = (git rev-parse HEAD)
           .\scripts\build-hub.ps1
+      # The addons are what failed to load without the redistributable (#924); the
+      # executable, a copy of Node's, is checked with them. See build-agent.
+      - name: No Visual C++ runtime import
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: node scripts/pe-imports.ts dist/sea/lasterm-hub.exe dist/sea/lasterm_hub_lock.node dist/sea/lasterm_tls_identity.node
       # A binary that has never been run is not known to work. The bundle that
       # loads the SQLite addon at startup broke once and reached a tagged release,
       # because every job until packaging only ever produced the executable.
@@ -622,6 +642,12 @@ jobs:
           } else {
             pnpm -F @lasterm/desktop tauri build --no-bundle --config tauri.prebuilt-frontend.json
           }
+      # tauri-build links the Visual C++ runtime into the desktop on its own, so
+      # it never imported it; checked all the same, as in build-agent (#924).
+      - name: No Visual C++ runtime import
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: node scripts/pe-imports.ts packages/clients/desktop/src-tauri/target/release/lasterm-desktop.exe
       # Uses the real Partner Center identity when the repository variables are
       # set, so the packaged identity is exercised before a tagged release;
       # falls back to the manifest placeholders otherwise — except on a release,

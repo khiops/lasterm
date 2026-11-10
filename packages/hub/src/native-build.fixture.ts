@@ -77,13 +77,15 @@ export const NATIVE_CLEAN_ARGS = [
 ];
 /**
  * What else decides the artifacts, beyond the sources the dep-info files list:
- * the manifests, the lock file, and the compiler. A checkout's differ from the
+ * the manifests, the lock file, the compiler, and the compiler flags of
+ * .cargo/config.toml (the static C runtime, #924). A checkout's differ from the
  * ones the recorded build used, or they changed since, and it is refused.
  */
 export const NATIVE_MANIFESTS = [
 	"Cargo.toml",
 	"Cargo.lock",
 	"rust-toolchain.toml",
+	".cargo/config.toml",
 	...NATIVE_CRATES.map((crate) => `crates/${crate}/Cargo.toml`),
 ];
 /** The record `recordNativeBuild` keeps in the `release` folder. */

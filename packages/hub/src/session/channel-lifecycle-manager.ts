@@ -58,6 +58,7 @@ import {
 import type { StateBroadcaster } from "./state-broadcaster.js";
 
 const SPAWN_TIMEOUT_MS = 10_000;
+export const HOST_NOT_FOUND_MESSAGE = "That host is no longer in this hub's list.";
 
 interface RestartSpawnResult {
 	ok: boolean;
@@ -213,6 +214,16 @@ export class ChannelLifecycleManager {
 				...(reuseChannelId !== undefined && { channelId: reuseChannelId }),
 			} satisfies ErrorMessage);
 			return { channelId: null, errCode: "HOST_BUSY" };
+		}
+		if (!this.ctx.metaDal.getHost(hostId)) {
+			client.send({
+				type: "ERROR",
+				code: "HOST_NOT_FOUND",
+				message: HOST_NOT_FOUND_MESSAGE,
+				hostId,
+				...(reuseChannelId !== undefined && { channelId: reuseChannelId }),
+			} satisfies ErrorMessage);
+			return { channelId: null, errCode: "HOST_NOT_FOUND" };
 		}
 		let quitEpoch: QuitFence;
 		try {
@@ -512,7 +523,7 @@ export class ChannelLifecycleManager {
 	 * still running — its snapshot timer keeps asking an agent that has never
 	 * heard of it, and a SPAWN that names it to bring it back is refused.
 	 */
-	private forgetChannel(channelId: string): void {
+	forgetChannel(channelId: string): void {
 		const ch = this.ctx.channels.get(channelId);
 		if (ch) {
 			for (const clientId of ch.clients) {
@@ -849,6 +860,9 @@ export class ChannelLifecycleManager {
 		if (this.ctx.stoppingAgents.has(hostId)) {
 			return { ok: false, channelId: null, errCode: "HOST_BUSY" };
 		}
+		if (!this.ctx.metaDal.getHost(hostId)) {
+			return { ok: false, channelId: null, errCode: "HOST_NOT_FOUND" };
+		}
 		let quitEpoch: QuitFence;
 		try {
 			quitEpoch = this.sendGuardedSpawn(agent, spawnMsg);
@@ -1113,7 +1127,8 @@ export class ChannelLifecycleManager {
 		return { snapshot, tail, truncated };
 	}
 
-	storeSnapshot(channelId: string, snapshot: unknown, agentLastSeq: number): string {
+	storeSnapshot(channelId: string, snapshot: unknown, agentLastSeq: number): string | undefined {
+		if (!this.ctx.channels.has(channelId)) return;
 		const snapshotJson = JSON.stringify(snapshot);
 		const dataBlob = Buffer.from(snapshotJson);
 		this.ctx.chunker.flush(channelId);
@@ -1184,7 +1199,7 @@ export class ChannelLifecycleManager {
 
 			pending++;
 			const requestId = generateId();
-			if (this.ctx.stoppingAgents.has(hostId)) {
+			if (this.ctx.stoppingAgents.has(hostId) || !this.ctx.metaDal.getHost(hostId)) {
 				pending--;
 				break;
 			}
@@ -1207,8 +1222,14 @@ export class ChannelLifecycleManager {
 				quitEpoch,
 			);
 
+			const stillCurrent = () =>
+				this.ctx.channels.get(channelId) === ch && this.ctx.agents.get(hostId) === agent;
 			const timeout = setTimeout(() => {
 				this.ctx.pendingRequests.delete(requestId);
+				if (!stillCurrent()) {
+					settle();
+					return;
+				}
 				this.ctx.hubLogger?.log("error", "channel-lifecycle: SPAWN timeout", {
 					channelId,
 					requestId,
@@ -1219,7 +1240,7 @@ export class ChannelLifecycleManager {
 			}, SPAWN_TIMEOUT_MS);
 
 			this.ctx.pendingRequests.set(requestId, (incoming: ProtocolMessage) => {
-				if (!isQuitFenceCurrent(this.ctx, quitEpoch)) {
+				if (!isQuitFenceCurrent(this.ctx, quitEpoch) || !stillCurrent()) {
 					clearTimeout(timeout);
 					this.ctx.pendingRequests.delete(requestId);
 					settle();

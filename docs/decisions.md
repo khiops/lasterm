@@ -7,6 +7,65 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## HOST-DELETE — deleting a host ends its terminals once the person was told how many (#910, 2026-11-09)
+
+- **Refuse, count, force.** DELETE host accepts `force=true|false`. Admission is synchronous:
+  absent host (404), invalid force (400), quitting, stopping, an acquisition, terminal start or
+  local daemon attach, uploads counted by `transfersOn(hostId)`, then non-dead tracked terminals
+  (409). That upload count is Disconnect's: a start being prepared, or an upload with an operation
+  in flight, folders being created, or a source present and files queued, sending or verifying.
+  An upload whose remaining files only wait on a conflict answer is not counted; its rows are
+  deleted with the host. No force overrides `TRANSFERS_RUNNING`: the upload preparation cannot
+  be interrupted. This is the exception to UPLOADS' "every gesture that closes a connection …
+  take force".
+- **What the count means.** `terminals` counts this hub's tracked, non-dead terminals for the
+  host. `unreachable`, omitted at zero, equals that count when no agent is connected. They may
+  still run: the previous connection's transport and the host's current daemon setting need not
+  agree. An SSH host can be connected first, which may reach them. A forced retry acts on what
+  exists then; consent is not bound to the earlier number.
+- **One synchronous stretch.** Hold `stoppingAgents` in a `finally`; destroy each counted
+  channel (DESTROY if connected, broadcast killed under its own session, untrack and forget);
+  cancel reconnect timers and attempts; release and close the agent and close the session;
+  forget any remaining channels even without a session; delete dependent rows and the host in
+  a transaction. Drop the host's passphrase, elevation passwords and trusted binary hash, log
+  ids and counts, announce hosts, answer 204. An outstanding bastion answer still reaches its
+  target connection but is not cached under a host whose row is gone.
+- **Delivery is not confirmed.** DESTROY is written, then the connection closes in the same
+  turn. Back-pressure may leave it queued and the close discards it; an agent unable to carry
+  it out keeps its terminal. Stdio EOF makes the agent try `destroy_all`, reporting a shell it
+  cannot stop. A daemon's leftover runs until it stops or a later connection of this hub to
+  that daemon reports it and the hub DESTROYs the unknown terminal. Reaching it requires a
+  host entry, for example the machine added again; deletion removed the old one. A daemon
+  holding terminals exits only with no terminal and no hub. Nothing is sent to unreachable
+  terminals. These caveats also apply to session deletion, which now sends DESTROY first.
+- **Late work.** Every SPAWN send checks the host row. Reconnect SPAWN callbacks act only for
+  the same tracked channel object and the host's current agent; stale callbacks settle silently.
+  Snapshots of forgotten channels write neither spool nor cache index. The dialog first reads
+  the hub's count, then asks for the exact label; requests are bound to that opening and host.
+  CLI `host remove --force` deliberately sends consent directly.
+- **Prior art, read 2026-11-09 for the frozen #910 spec.** [Data] Docker API 1.57 refuses a
+  running container with 409 and force kills/removes it ([Moby API](https://github.com/moby/moby/blob/master/api/swagger.yaml),
+  [docker rm](https://docs.docker.com/reference/cli/docker/container/rm/)). [Data] Zellij 0.45.1
+  (2026-08-28) refuses active session deletion unless forced, then kills and deletes
+  ([sessions.rs](https://github.com/zellij-org/zellij/blob/v0.45.1/zellij-utils/src/sessions.rs)).
+  [Data] Coder v2.39 destroys resources on delete and keeps leaving resources behind under its
+  own `--orphan` ([CLI](https://coder.com/docs/reference/cli/delete)); its v2.38.6 UI
+  (2026-11-03) asks for the workspace name. Lasterm uses one force to ask reachable terminals
+  to end and leave unreachable ones after the 409 counted and named them.
+  [Data] Kubernetes documents asynchronous namespace termination and unreachable pods
+  ([namespaces](https://kubernetes.io/docs/tasks/administer-cluster/namespaces/), 2026-07-18;
+  [pod lifecycle](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/), 2026-10-29).
+  [Opinion] Refusing with a count and forcing after consent fits an object that owns runtime
+  state. [Data] Deleting a launcher in [Tabby v1.0.238](https://github.com/Eugeny/tabby/blob/v1.0.238/tabby-core/src/services/profiles.service.ts)
+  (2026-10-07) or [Windows Terminal](https://github.com/microsoft/terminal/blob/main/src/cascadia/TerminalApp/TerminalPaneContent.cpp)
+  (main, read 2026-11-09) leaves tabs alive.
+  [Data] [Proxmox Qemu.pm](https://git.proxmox.com/?p=qemu-server.git;a=blob;f=PVE/API2/Qemu.pm)
+  (2026-10-29) refuses running VMs and asks for the VMID; offline behavior: DATA GAP.
+  Termius, MobaXterm, Royal TS and SecureCRT offline behavior: DATA GAP. Termius confirmation
+  evidence ([changelog](https://docs.termius.com/), 4.0.18, 2019-02-20) is over 18 months old.
+
+---
+
 ## SPOOL-CHECKPOINTER — spool WAL checkpoints run on a worker thread (#786, 2026-11-09)
 
 - **Measured cause.** On Windows 11, Node 24.22.0 and SQLite 3.53.4, a 1.6 GB spool's

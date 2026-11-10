@@ -47,6 +47,38 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
+describe("host delete consent (#910)", () => {
+	it("sends force=true and preserves the hub's numerical counts", async () => {
+		const store = load();
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+			new Response(
+				JSON.stringify({
+					error: {
+						code: "TERMINALS_WOULD_END",
+						message: "still running",
+						terminals: 2,
+						unreachable: 2,
+					},
+				}),
+				{ status: 409 },
+			),
+		);
+		const answer = await store.deleteHost("pi", { force: true });
+		expect(fetchSpy).toHaveBeenCalledWith(
+			"/api/hosts/pi?force=true",
+			expect.objectContaining({ method: "DELETE" }),
+		);
+		expect(answer).toEqual({
+			ok: false,
+			status: 409,
+			code: "TERMINALS_WOULD_END",
+			message: "still running",
+			terminals: 2,
+			unreachable: 2,
+		});
+	});
+});
+
 describe("the selected host across a reload (#561)", () => {
 	it("comes back on the host the tab was showing", async () => {
 		const before = load();

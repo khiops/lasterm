@@ -178,7 +178,15 @@ describe("host and group routes — every write announced, nothing else", () => 
 		registerHostRoutes(
 			server,
 			metaDal,
-			{ hostIsBeingStopped: () => false, daemonPolicyWouldBeRevoked: () => false },
+			{
+				hostIsBeingStopped: () => false,
+				daemonPolicyWouldBeRevoked: () => false,
+				deleteHost: (id) => {
+					metaDal.deleteCascadeForHost(id);
+					metaDal.deleteHost(id);
+					return { kind: "deleted" };
+				},
+			},
 			announce,
 		);
 		registerHostGroupRoutes(server, metaDal, announce);

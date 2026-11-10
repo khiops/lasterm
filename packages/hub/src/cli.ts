@@ -287,6 +287,15 @@ function loadAuthToken(): string | null {
 
 // ─── HTTP client ───────────────────────────────────────────────────────────────
 
+class ApiRequestError extends Error {
+	constructor(
+		readonly status: number,
+		readonly body: string,
+	) {
+		super(`HTTP ${status}: ${body}`);
+	}
+}
+
 async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
 	const runtimeResult = loadRuntime();
 	if (runtimeResult.kind === "absent") {
@@ -312,7 +321,7 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
 
 	if (!res.ok) {
 		const text = await res.text();
-		throw new Error(`HTTP ${res.status}: ${text}`);
+		throw new ApiRequestError(res.status, text);
 	}
 
 	const ct = res.headers.get("content-type") ?? "";
@@ -1663,7 +1672,7 @@ async function cmdHostList(args: ParsedArgs): Promise<void> {
 
 async function cmdHostRemove(args: ParsedArgs): Promise<void> {
 	if (!args.label) {
-		console.error("Usage: lasterm host remove <label>");
+		console.error("Usage: lasterm host remove <label> [--force]");
 		process.exit(1);
 	}
 
@@ -1675,7 +1684,32 @@ async function cmdHostRemove(args: ParsedArgs): Promise<void> {
 		process.exit(1);
 	}
 
-	await apiRequest("DELETE", `/api/hosts/${encodeURIComponent(String(match.id))}`);
+	try {
+		await apiRequest(
+			"DELETE",
+			`/api/hosts/${encodeURIComponent(String(match.id))}${args.force === true ? "?force=true" : ""}`,
+		);
+	} catch (err) {
+		if (err instanceof ApiRequestError && err.status === 409) {
+			let error: { code?: unknown; terminals?: unknown; unreachable?: unknown } | undefined;
+			try {
+				error = (JSON.parse(err.body) as { error?: typeof error }).error;
+			} catch {
+				/* Keep the HTTP error for a non-JSON refusal. */
+			}
+			if (error?.code === "TERMINALS_WOULD_END" && typeof error.terminals === "number") {
+				const one = error.terminals === 1;
+				const prefix = `${error.terminals} ${one ? "terminal" : "terminals"} on ${args.label} ${one ? "has" : "have"} not ended`;
+				console.error(
+					typeof error.unreachable === "number" && error.unreachable > 0
+						? `${prefix}, and this hub is not connected to ${one ? "its" : "their"} agent: ${one ? "it" : "they"} may keep running. Rerun with --force to remove the host anyway.`
+						: `${prefix}. Rerun with --force to ask ${one ? "its" : "their"} agent to end ${one ? "it" : "them"} and remove the host.`,
+				);
+				return process.exit(1);
+			}
+		}
+		throw err;
+	}
 	console.log(`Host "${args.label}" removed.`);
 }
 
@@ -1756,7 +1790,7 @@ Usage:
               [--ssh-port 22] [--auth agent|key]
               [--key-path ~/.ssh/id_ed25519]
   lasterm host list [--json]                    List all hosts
-  lasterm host remove <label>                   Remove a host
+  lasterm host remove <label> [--force]         Remove a host (--force: even with terminals open)
 
   lasterm agent fetch <os-arch>|--all           Populate the agent binary cache
               [--version x.y.z] [--prune]

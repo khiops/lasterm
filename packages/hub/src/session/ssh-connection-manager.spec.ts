@@ -60,6 +60,7 @@ vi.mock("./ssh-agent.js", async (importOriginal) => {
 function makeCtx(): Pick<
 	SharedSessionContext,
 	| "passphraseCache"
+	| "metaDal"
 	| "promptContexts"
 	| "promptIndex"
 	| "pendingPrompts"
@@ -69,6 +70,7 @@ function makeCtx(): Pick<
 > {
 	return {
 		passphraseCache: new Map(),
+		metaDal: { getHost: (id: string) => ({ id }) } as never,
 		promptContexts: new Map<string, PromptContext>(),
 		promptIndex: new Map<string, string>(),
 		pendingPrompts: new Map() as SharedSessionContext["pendingPrompts"],
@@ -1836,6 +1838,7 @@ describe("SshConnectionManager — handleAuthPromptResponse: promptId route", ()
 	function makePromptCtx(): Pick<
 		SharedSessionContext,
 		| "passphraseCache"
+		| "metaDal"
 		| "promptContexts"
 		| "promptIndex"
 		| "pendingPrompts"
@@ -1844,6 +1847,7 @@ describe("SshConnectionManager — handleAuthPromptResponse: promptId route", ()
 	> {
 		return {
 			passphraseCache: new Map(),
+			metaDal: { getHost: (id: string) => ({ id }) } as never,
 			promptContexts: new Map<string, PromptContext>(),
 			promptIndex: new Map<string, string>(),
 			pendingPrompts: new Map() as SharedSessionContext["pendingPrompts"],

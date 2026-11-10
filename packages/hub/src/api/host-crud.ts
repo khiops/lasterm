@@ -45,7 +45,10 @@ function hostReferenceError(
 export function registerHostCrudRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
-	sessionManager: Pick<SessionManager, "hostIsBeingStopped" | "daemonPolicyWouldBeRevoked">,
+	sessionManager: Pick<
+		SessionManager,
+		"hostIsBeingStopped" | "daemonPolicyWouldBeRevoked" | "deleteHost"
+	>,
 	announce: AnnounceHostsChange = () => {},
 ): void {
 	// GET /api/hosts?limit=N&offset=M
@@ -312,28 +315,30 @@ export function registerHostCrudRoutes(
 	);
 
 	// DELETE /api/hosts/:id
-	server.delete<{ Params: { id: string } }>("/api/hosts/:id", async (request, reply) => {
-		const hostId = request.params.id;
-		// Check existence before cascade to return proper 404
-		const existing = metaDal.getHost(hostId);
-		if (!existing) {
-			return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
-		}
-		if (sessionManager.hostIsBeingStopped(hostId)) {
-			return reply.code(409).send({
-				error: { code: "HOST_BUSY", message: "This host's agent is being stopped." },
-			});
-		}
-		// Cascade-delete dependents: cache_index → channels → sessions
-		// channel_groups has ON DELETE CASCADE in schema but we do it explicitly for safety
-		metaDal.deleteCascadeForHost(hostId);
-		const deleted = metaDal.deleteHost(hostId);
-		if (!deleted) {
-			return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
-		}
-		announce("hosts");
-		return reply.code(204).send();
-	});
+	server.delete<{ Params: { id: string }; Querystring: { force?: string } }>(
+		"/api/hosts/:id",
+		async (request, reply) => {
+			const hostId = request.params.id;
+			// Check existence before cascade to return proper 404
+			const existing = metaDal.getHost(hostId);
+			if (!existing) {
+				return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Host not found" } });
+			}
+			const force = request.query.force;
+			if (force !== undefined && force !== "true" && force !== "false") {
+				return reply
+					.code(400)
+					.send({ error: { code: "VALIDATION_ERROR", message: "force must be true or false." } });
+			}
+			const outcome = sessionManager.deleteHost(hostId, { force: force === "true" });
+			if (outcome.kind === "refused") {
+				const { kind: _kind, ...error } = outcome;
+				return reply.code(409).send({ error });
+			}
+			announce("hosts");
+			return reply.code(204).send();
+		},
+	);
 
 	// POST /api/hosts/:id/duplicate — duplicate a host
 	server.post<{ Params: { id: string } }>("/api/hosts/:id/duplicate", async (request, reply) => {

@@ -45,6 +45,12 @@ export interface HostConnectionAnswer {
 
 /** What the hub answered a host's create, update or duplicate: the host it stored, or its refusal. */
 export type HostSaveAnswer = { readonly ok: true; readonly host: Host } | HubRefusal;
+export type HostDeleteAnswer =
+	| { readonly ok: true }
+	| (HubRefusal & {
+			readonly terminals?: number;
+			readonly unreachable?: number;
+	  });
 
 /** What the hub answered a new host group: the group it stored, or its refusal. */
 export type HostGroupCreateAnswer = { readonly ok: true; readonly group: HostGroup } | HubRefusal;
@@ -641,12 +647,25 @@ export const useHostsStore = defineStore("hosts", () => {
 	 * Delete a host. A refusal comes back with the hub's reason, such as an
 	 * agent being stopped there (#734); a hub that does not answer throws.
 	 */
-	async function deleteHost(id: string): Promise<HubAnswer> {
-		const res = await hubWrite(`${hubBaseUrl()}/api/hosts/${id}`, {
-			method: "DELETE",
-			headers: { Authorization: `Bearer ${authStore.token}` },
-		});
-		if (!res.ok) return hubRefusal(res);
+	async function deleteHost(id: string, options?: { force?: boolean }): Promise<HostDeleteAnswer> {
+		const res = await hubWrite(
+			`${hubBaseUrl()}/api/hosts/${id}${options?.force === true ? "?force=true" : ""}`,
+			{
+				method: "DELETE",
+				headers: { Authorization: `Bearer ${authStore.token}` },
+			},
+		);
+		if (!res.ok) {
+			const body = (await res
+				.clone()
+				.json()
+				.catch(() => ({}))) as { error?: { terminals?: unknown; unreachable?: unknown } };
+			return {
+				...(await hubRefusal(res)),
+				...(typeof body.error?.terminals === "number" && { terminals: body.error.terminals }),
+				...(typeof body.error?.unreachable === "number" && { unreachable: body.error.unreachable }),
+			};
+		}
 		hosts.value = hosts.value.filter((h) => h.id !== id);
 		if (selectedHostId.value === id) {
 			selectedHostId.value = hosts.value[0]?.id ?? null;

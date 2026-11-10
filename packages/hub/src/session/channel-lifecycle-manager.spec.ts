@@ -341,6 +341,7 @@ function makeSpawnCtx(overrides?: {
 
 	const now = new Date().toISOString();
 	const metaDal = {
+		getHost: vi.fn().mockReturnValue({ id: "host-1" }),
 		createChannel: vi.fn(),
 		updateChannelStatus: vi.fn(),
 		getChannel:
@@ -501,6 +502,7 @@ describe("ChannelLifecycleManager — CHANNEL_CREATED broadcast (multi-client sy
 
 		// metaDal.getChannel returns a channel with a custom title
 		const metaDal = {
+			getHost: vi.fn().mockReturnValue({ id: "host-f2" }),
 			createChannel: vi.fn(),
 			updateChannelStatus: vi.fn(),
 			getChannel: vi.fn().mockReturnValue({
@@ -1254,6 +1256,7 @@ describe("#726 storeSnapshot", () => {
 			const updateCacheIndex = vi.fn();
 			const ctx = {
 				spoolDal,
+				channels: new Map([["ch", {}]]),
 				chunker: { flush: vi.fn(), bumpSeq: vi.fn() },
 				metaDal: { updateCacheIndex },
 			} as unknown as SharedSessionContext;

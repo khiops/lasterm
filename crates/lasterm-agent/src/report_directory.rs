@@ -414,13 +414,14 @@ mod powershell_tests {
     /// failed. A location off the file system says nothing.
     #[test]
     fn powershell_keeps_its_prompt_and_says_where_it_is() {
-        // A directory whose name has a space, which OSC 7 escapes.
+        // A directory whose name has a space, which OSC 7 escapes, and, where the
+        // test makes it, a quote, which the script's single-quoted string doubles.
         let (directory, _made) = if cfg!(windows) {
             (std::path::PathBuf::from(r"C:\Program Files"), None)
         } else {
             let made = MadeDirectory::new(
                 std::env::temp_dir()
-                    .join(format!("lasterm report directory {}", std::process::id())),
+                    .join(format!("lasterm report's directory {}", std::process::id())),
             );
             (made.0.clone(), Some(made))
         };

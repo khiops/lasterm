@@ -25,6 +25,7 @@ const biome = join(root, "node_modules", "@biomejs", "biome", "bin", "biome");
 const DECLARED = [
 	"declare const deps: { authToken: string } | undefined;",
 	"declare const previous: { tokenHash: string };",
+	"declare const maybe: { tokenHash: string } | undefined;",
 	"declare function hashToken(token: string): string;",
 	"declare const token: string;",
 	"declare const secret: string;",
@@ -40,6 +41,11 @@ const SECRET_REFUSED: Record<string, string> = {
 	// The comparison #514 removed.
 	identity: "token === deps.authToken",
 	loose: "secret == other",
+	"left-password": "password === other",
+	// The other side a member chain, plain or optional.
+	"member-right": "token === previous.tokenHash",
+	"member-left": "previous.tokenHash !== token",
+	"optional-right": "token === maybe?.tokenHash",
 	passphrase: "passphrase === other",
 	"optional-chain": "deps?.authToken === other",
 	"upper-case": "AUTH_TOKEN === other",

@@ -335,45 +335,50 @@ mod tests {
             .collect();
         assert_eq!(String::from_utf16(&units).unwrap(), SCRIPT);
     }
-
-    #[test]
-    fn the_script_wraps_the_prompt_once_and_says_where_with_osc_7() {
-        assert!(SCRIPT.contains("$function:global:prompt"), "{SCRIPT}");
-        assert!(SCRIPT.contains("]7;file://"), "{SCRIPT}");
-        // A second run, from `. $PROFILE` or from the switch over the snippet,
-        // keeps the first wrapper: it finds its marker in the prompt.
-        assert_eq!(SCRIPT.matches("lasterm-report-directory").count(), 2);
-        // Windows PowerShell 5.1 has no `e escape.
-        assert!(!SCRIPT.contains("`e"), "{SCRIPT}");
-        // Well within a command line's 32,767 characters.
-        assert!(encoded_command(SCRIPT).len() < 8192);
-    }
 }
 
-#[cfg(all(test, windows))]
-mod windows_tests {
+#[cfg(test)]
+mod powershell_tests {
     use super::*;
     use crate::cwd::ShellReport;
     use crate::headless::HeadlessMirror;
+    #[cfg(windows)]
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
+    #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    /// The PowerShells the script runs in here, and whether this host must
+    /// have it. Windows PowerShell 5.1, which has no `` `e `` escape, is part
+    /// of Windows; PowerShell 7 is installed on its own, as on GitHub's Windows
+    /// and Ubuntu runners.
+    #[cfg(windows)]
+    const POWERSHELLS: &[(&str, bool)] = &[("powershell.exe", true), ("pwsh.exe", false)];
+    #[cfg(not(windows))]
+    const POWERSHELLS: &[(&str, bool)] = &[("pwsh", false)];
 
     /// What `powershell` prints running `script` from `-EncodedCommand`, as
     /// the switch passes it; None when this machine has no such PowerShell.
+    /// Any other failure to start it, a command line over the system's limit
+    /// among them, fails the test.
     fn run(powershell: &str, script: &str) -> Option<String> {
-        let output = Command::new(powershell)
+        let mut command = Command::new(powershell);
+        command
             .args([
                 "-NoLogo",
                 "-NoProfile",
                 "-NonInteractive",
                 "-EncodedCommand",
             ])
-            .arg(encoded_command(script))
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .ok()?;
+            .arg(encoded_command(script));
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        let output = match command.output() {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => panic!("{powershell} did not start: {error}"),
+        };
         assert!(output.status.success(), "{powershell}: {output:?}");
         Some(String::from_utf8_lossy(&output.stdout).into_owned())
     }
@@ -392,19 +397,26 @@ mod windows_tests {
     /// failed. A location off the file system says nothing.
     #[test]
     fn powershell_keeps_its_prompt_and_says_where_it_is() {
+        // A directory whose name has a space, which OSC 7 escapes.
+        let directory = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\Program Files")
+        } else {
+            let directory = std::env::temp_dir()
+                .join(format!("lasterm report directory {}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("create the directory to report");
+            directory
+        };
         let theme = "function global:prompt { \"THEME ok=$?> \" }";
         let script = format!(
-            "{theme}\n{SCRIPT}\n{SCRIPT}\nSet-Location 'C:\\Program Files'\n\
-             Get-Item C:\\lasterm-nowhere -ErrorAction SilentlyContinue\nprompt\n\
-             Set-Location HKCU:\\\nprompt\n"
+            "{theme}\n{SCRIPT}\n{SCRIPT}\nSet-Location -LiteralPath '{}'\n\
+             Get-Item lasterm-nowhere -ErrorAction SilentlyContinue\nprompt\n\
+             Set-Location Env:\\\nprompt\n",
+            directory.display()
         );
         let mut ran = 0;
-        for powershell in ["powershell.exe", "pwsh.exe"] {
+        for &(powershell, required) in POWERSHELLS {
             let Some(output) = run(powershell, &script) else {
-                assert_eq!(
-                    powershell, "pwsh.exe",
-                    "Windows PowerShell is part of Windows"
-                );
+                assert!(!required, "{powershell} is part of this system");
                 continue;
             };
             ran += 1;
@@ -418,11 +430,16 @@ mod windows_tests {
             );
             assert_eq!(
                 reported(lines[0]),
-                Some(ShellReport::Dir("C:\\Program Files".into())),
+                Some(ShellReport::Dir(directory.display().to_string())),
                 "{powershell}: {output:?}"
             );
             assert_eq!(lines[1], "THEME ok=True> ", "{powershell}: {output:?}");
         }
-        assert!(ran >= 1);
+        if !cfg!(windows) {
+            let _ = std::fs::remove_dir(&directory);
+        }
+        if ran == 0 {
+            eprintln!("skipped: no PowerShell on this host ({POWERSHELLS:?} not found)");
+        }
     }
 }

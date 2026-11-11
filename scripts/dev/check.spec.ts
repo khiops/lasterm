@@ -76,7 +76,8 @@ function bash(): string {
 /**
  * Writes checkout `name` in `dir`. With `broken`, its probe breaks clippy's
  * needless_return, its desktop crate's conf.txt fails the build script, and
- * its desktop crate's lib.rs is not as rustfmt writes it.
+ * neither its probe, a path dependency of the desktop crate, nor its desktop
+ * crate's lib.rs is as rustfmt writes it.
  */
 function writeCheckout(dir: string, name: string, broken: boolean): void {
 	const files: Record<string, string> = {
@@ -86,7 +87,7 @@ function writeCheckout(dir: string, name: string, broken: boolean): void {
 		[PROBE]: `pub fn checkout() -> &'static str {
     ${broken ? `return "${name}";` : `"${name}"`}
 }
-
+${broken ? "\npub const   PROBE_UNFORMATTED: u8 = 0;\n" : ""}
 #[cfg(test)]
 mod tests {
     #[test]
@@ -221,7 +222,7 @@ describe("check.sh in a checkout that shares its cargo targets", () => {
 			a,
 			env,
 		);
-		// 1: a's clippy and desktop steps fail; 2 would be check.sh refusing to run.
+		// 1: a's fmt, clippy and desktop steps fail; 2 would be check.sh refusing to run.
 		expect(check.status, check.output).toBe(1);
 		const log = (step: string) => readFileSync(join(logs, `${step}.log`), "utf8");
 		const exit = (step: string) =>
@@ -245,22 +246,26 @@ describe("check.sh in a checkout that shares its cargo targets", () => {
 			expect(exit(step), log(step)).not.toBe("0");
 			expect(log(step)).toContain("this checkout's conf.txt is invalid");
 		}
-		// Mutation caught: a desktop-fmt step that passes, fails without
-		// checking, or checks b's crate, which is formatted, shows no diff of a's.
+		// Mutation caught: a desktop-fmt step that passes, rewrites instead of
+		// checking, fails without checking, or checks b's crate, which is
+		// formatted, shows no diff of a's. Without --all, as ci.yml runs it, it
+		// leaves out the path dependencies, a's probe among them.
 		expect(exit("desktop-fmt"), log("desktop-fmt")).toBe("1");
 		expect(log("desktop-fmt")).toContain("Diff in");
 		expect(log("desktop-fmt")).toContain("probe_checkout() -> &'static str {");
+		expect(log("desktop-fmt")).toContain("PROBE_UNFORMATTED");
 	}, 600_000);
 });
 
-describe("check.sh --desktop from a worktree inside the main checkout", () => {
+describe("the desktop crate's manifest, in a worktree inside the main checkout", () => {
 	// Claude's worktrees are there (.claude/worktrees/<name>), and every desktop
-	// step runs cargo in the desktop crate's directory (desktop_cargo). Cargo
-	// first looks for the crate's workspace: past the worktree's root manifest,
-	// which excludes the crate, up to the main checkout's, which then refuses it
-	// as a stray member (#939). The steps themselves compile Tauri, so this runs
-	// that lookup alone, on the real manifest placed in such a layout.
-	it("finds the desktop crate's workspace in the crate itself", () => {
+	// step of check.sh runs cargo in the desktop crate's directory
+	// (desktop_cargo). Cargo first looks for the crate's workspace: past the
+	// worktree's root manifest, which excludes the crate, up to the main
+	// checkout's, which then refuses it as a stray member (#939). The test above
+	// runs check.sh from such a worktree on a crate of its own; this one runs
+	// that lookup on the real manifest, whose crate needs Tauri to build.
+	it("makes the crate its own cargo workspace", () => {
 		const base = cargoTargetDir(process.env, ROOT);
 		mkdirSync(base, { recursive: true });
 		const work = mkdtempSync(join(base, "lasterm-check-spec-"));

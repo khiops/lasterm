@@ -1,253 +1,817 @@
-import { BUNDLED_THEMES } from "@lasterm/shared";
+/**
+ * TerminalPane, mounted whole over its real terminal composable
+ * (TerminalPane.fixture.ts): the hub is a socket the test answers, xterm a
+ * stand-in that takes keys, typing and resizes as xterm does. Each test drives
+ * the pane as a person or the hub does (frames, clicks, keys, the stores it
+ * reads) and checks what they see: the frames it sends, what it emits, its
+ * text, its focus and how its own rules draw it.
+ *
+ * What a pane decides is left to pure functions with specs of their own
+ * (exit-action.spec.ts, pane-cover.spec.ts, useWaitingAnswer.spec.ts,
+ * useWaitForHost.spec.ts, composables/useTerminal.spec.ts). Here, a scenario
+ * turns on each thing the pane tells them, so that one it fails to tell shows.
+ * What happy-dom cannot draw (hover, a click reaching what lies under an
+ * element) is in TerminalPane.browser.spec.ts.
+ */
+import { BUNDLED_THEMES, type Channel } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
-import { describe, expect, it } from "vitest";
-import { contrastRatio, hexToRgb, TEXT_CONTRAST_AA, useThemeStore } from "../stores/theme.js";
-import SOURCE from "./TerminalPane.vue?raw";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { type Ref, ref } from "vue";
+import "../styles/base.css";
+import { useChannelsStore } from "../stores/channels.js";
+import { useConfigStore } from "../stores/config.js";
+import { useHostsStore } from "../stores/hosts.js";
+import { useNotificationStore } from "../stores/notifications.js";
+import { useSessionStore } from "../stores/session.js";
+import { contrastRatio, TEXT_CONTRAST_AA, useThemeStore } from "../stores/theme.js";
+import { useWriteLockStore } from "../stores/writelock.js";
+import {
+	attaches,
+	attachOk,
+	bellSound,
+	button,
+	CLIENT,
+	emitted,
+	freshWindow,
+	HOST,
+	hear,
+	host,
+	lastOutput,
+	mount,
+	mountPane,
+	type PaneProps,
+	paneProfile,
+	paneText,
+	press,
+	refuse,
+	root,
+	S,
+	sent,
+	settle,
+	spawnOk,
+	spawnRefused,
+	spawns,
+	T,
+	terminal,
+	type,
+	xterm,
+} from "./TerminalPane.fixture.js";
 
-/** The z-index a rule declares, read from the component's own style block. */
-function zIndexOf(selector: string): number {
-	const rule = new RegExp(
-		`(^|\\n)[^\\n]*\\${selector}[^{]*\\{[^}]*?z-index:\\s*(-?\\d+)`,
-		"s",
-	).exec(SOURCE);
-	if (!rule?.[2]) throw new Error(`no z-index declared for ${selector}`);
-	return Number(rule[2]);
+/** Another host: the one the rail has selected, or one a spawn is for. */
+const PI = "01HZZZZZZZZZZZZZZZZZZZZZP3";
+/** A terminal on HOST the client knows nothing of yet. */
+const U = "01HZZZZZZZZZZZZZZZZZZZZZU4";
+/** The id App gives a pane that owes its spawn, and the one the hub gives the terminal. */
+const NEW = "pending-1";
+const REAL = "01HZZZZZZZZZZZZZZZZZZZZZR5";
+/** Another window of the same hub. */
+const OTHER_CLIENT = "01HZZZZZZZZZZZZZZZZZZZZCL2";
+
+// ─── The window around the pane ──────────────────────────────────────────────
+
+/** What `performance.now()` says: the clock a pane times its terminal's run with. */
+let now = 0;
+
+/** Whether this window has the focus, as the browser says it. */
+function setWindowFocus(focused: boolean): void {
+	vi.spyOn(document, "hasFocus").mockReturnValue(focused);
+	window.dispatchEvent(new Event(focused ? "focus" : "blur"));
 }
 
+beforeEach(() => {
+	now = 0;
+	vi.spyOn(performance, "now").mockImplementation(() => now);
+	setWindowFocus(true);
+});
+
+/** Time passes. */
+function runFor(ms: number): void {
+	now += ms;
+}
+
+/**
+ * A bundled theme on the document, as the theme store applies it. Before the
+ * pane is mounted: the window's own stores come after.
+ */
+function themed(name: string): void {
+	setActivePinia(createPinia());
+	useThemeStore().applyTheme(BUNDLED_THEMES[name]!);
+}
+
+function listed(id: string, status: Channel["status"], over: Partial<Channel> = {}): Channel {
+	return {
+		id,
+		sessionId: "session-1",
+		cols: 80,
+		rows: 24,
+		status,
+		createdAt: "2026-11-11T00:00:00.000Z",
+		updatedAt: "2026-11-11T00:00:00.000Z",
+		...over,
+	};
+}
+
+/** "Keep ended terminals in the sidebar", as Settings sets it. */
+function keepEnded(): void {
+	const config = useConfigStore();
+	config.uiConfig = { ...config.uiConfig, panes: { ...config.uiConfig.panes, keepEnded: true } };
+}
+
+/** The pane's terminal is the one selected: its tab is shown, and the keyboard is in it. */
+function shown(): void {
+	useChannelsStore().selectChannel(T);
+}
+
+/** This window holds T's write lock. */
+function writer(): void {
+	useWriteLockStore().handleWriteLock(T, CLIENT);
+}
+
+/** The hub reports that T ended. */
+function endIt(endReason?: "killed" | "stopped"): void {
+	useChannelsStore().updateChannelStatus(T, "dead", 0, endReason);
+}
+
+/** "Always do this", clicked on another pane's card, as this window tells its panes. */
+function chosenElsewhere(
+	action: "restart" | "close",
+	scope: "host" | "global",
+	hostId = HOST,
+): void {
+	useConfigStore().announceAlwaysChoice({ action, scope, hostId, channelId: S, at: now });
+}
+
+/** The setting as the pane's profile now resolves it: the reload after a write. */
+function settingNowSays(whenEnded: "ask" | "restart" | "close"): void {
+	const { profile } = paneProfile();
+	profile.value = { ...profile.value, whenEnded };
+}
+
+type Open = Omit<PaneProps, "channel"> & { channel?: Ref<string>; setUp?: () => void };
+
+/** A pane attached to T running. */
+async function openLive({ channel = ref(T), ...opts }: Open = {}): Promise<void> {
+	mountPane(channel, "live", opts);
+	await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+	attachOk(T, "LIVE");
+	await settle();
+}
+
+/** A pane over T, which the list says has ended and the hub's refusal confirms. */
+async function openEnded(opts: Open = {}): Promise<void> {
+	mountPane(opts.channel ?? ref(T), "dead", opts);
+	await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+	refuse(T, lastOutput());
+	await vi.waitFor(() => expect(card()).not.toBeNull());
+}
+
+/** A pane that owes its spawn on `on`, as App opens one for "New terminal". */
+function openNew(on: string, props: Omit<PaneProps, "channel"> = {}): Ref<string | null> {
+	freshWindow();
+	useChannelsStore().registerPendingSpawn(NEW, on);
+	const channel = ref<string | null>(NEW);
+	mount({ channel, ...props });
+	return channel;
+}
+
+// ─── What the pane shows and sends ───────────────────────────────────────────
+
+const card = () => root.querySelector<HTMLElement>(".exit-card");
+const quietLine = () => root.querySelector(".exit-status__text")?.textContent?.trim() ?? null;
+const banner = () => root.querySelector(".detached-banner");
+const errorBox = () => root.querySelector(".terminal-error__box");
+const lockIndicator = () => root.querySelector(".wl-indicator");
+const closes = () => emitted.filter(([event]) => event === "close-pane").map(([, ...args]) => args);
+const inputs = () =>
+	sent.filter((m) => m.type === "INPUT").map((m) => new TextDecoder().decode(m.data as Uint8Array));
+const resizes = () =>
+	sent
+		.filter((m) => m.type === "RESIZE")
+		.map(({ channelId, cols, rows }) => ({ channelId, cols, rows }));
+const alwaysBox = () => card()?.querySelector<HTMLInputElement>('input[type="checkbox"]') ?? null;
+const scopeRadio = (label: string) =>
+	[...(card()?.querySelectorAll<HTMLLabelElement>(".exit-scope-option") ?? [])].find(
+		(l) => l.textContent?.trim() === label,
+	);
+
+/** Wait out the pane's resize debounce, so that a RESIZE it would send has gone. */
+async function resizesSettle(): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, 80));
+	await settle();
+}
+
+/** A pane can measure itself: happy-dom lays nothing out, so every element says it has a size. */
+function paneHasASize(): void {
+	vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(900);
+	vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(500);
+}
+
+// ─── Keys ────────────────────────────────────────────────────────────────────
+
 // What the handler lets through is tested in utils/terminal-keys.spec.ts: the
-// palette's chord never reaches the PTY, Ctrl+K does (#624).
+// palette's chord never reaches the PTY, Ctrl+K does (#624). Here, that xterm
+// asks that handler, and no other of the pane's, for each key typed in it.
 describe("TerminalPane keys", () => {
-	it("gives xterm terminalKeyHandler, and no handler of its own", () => {
-		const calls = [...SOURCE.matchAll(/attachCustomKeyEventHandler\(/g)];
-		expect(calls).toHaveLength(1);
-		expect(SOURCE).toMatch(/attachCustomKeyEventHandler\(\s*terminalKeyHandler\(\{/);
+	it("keeps the palette's chord from the shell, and lets Ctrl+K reach it", async () => {
+		await openLive({ setUp: writer });
+
+		expect(press({ ctrlKey: true, shiftKey: true, key: "P" }, "\u0010")).toBe(false);
+		expect(press({ ctrlKey: true, key: "k" }, "\u000b")).toBe(true);
+
+		expect(inputs()).toEqual(["\u000b"]);
 	});
 });
 
+// ─── Layers ──────────────────────────────────────────────────────────────────
+
 describe("TerminalPane layers", () => {
+	beforeEach(() => {
+		themed("one-half-dark");
+	});
+
+	const zIndex = (selector: string): number => {
+		const el = root.querySelector(selector);
+		if (el === null) throw new Error(`no ${selector} on screen`);
+		return Number(getComputedStyle(el).zIndex);
+	};
+	const tinted = () =>
+		useHostsStore().hosts.push(
+			host(
+				HOST,
+				"pi",
+				JSON.stringify({
+					visualProfile: { tint: { enabled: true, color: "#ff0000", opacity: 10 } },
+				}),
+			),
+		);
+
 	// A pane that cannot spawn or attach says so in `.terminal-error`, and one
 	// still connecting in `.terminal-loading`. Under the terminal's own opaque
 	// background, both were painted out of sight: a failed spawn looked like an
 	// empty terminal, offering the write lock of a channel that did not exist.
-	it("shows what the pane has to say above the terminal", () => {
-		const message = zIndexOf(".terminal-error");
-		expect(message).toBe(zIndexOf(".terminal-loading"));
-		expect(message).toBeGreaterThan(zIndexOf(".terminal-container"));
-		expect(message).toBeGreaterThan(zIndexOf(".tint-overlay"));
+	it("shows that it is connecting above the terminal and its tint", async () => {
+		mountPane(ref(T), "live", { setUp: tinted });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+
+		expect(paneText()).toContain("Connecting…");
+		expect(zIndex(".terminal-loading")).toBeGreaterThan(zIndex(".terminal-container"));
+		expect(zIndex(".terminal-loading")).toBeGreaterThan(zIndex(".tint-overlay"));
+	});
+
+	it("shows a failure above the terminal and its tint", async () => {
+		freshWindow();
+		tinted();
+		useChannelsStore().registerPendingSpawn(NEW, HOST);
+		mount({ channel: ref(NEW) });
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+
+		expect(zIndex(".terminal-error")).toBeGreaterThan(zIndex(".terminal-container"));
+		expect(zIndex(".terminal-error")).toBeGreaterThan(zIndex(".tint-overlay"));
 	});
 
 	// The overlay lets clicks through to the terminal below it, so its own
 	// buttons take them back. Without that the error offered a way out that
-	// could not be clicked.
-	it("takes clicks on the actions the error offers", () => {
-		// Every rule that styles the box, since more than one does.
-		const box = [...SOURCE.matchAll(/\.terminal-error__box[^{]*\{[^}]*\}/gs)]
-			.map((rule) => rule[0])
-			.join("\n");
-		expect(box, "no rule styles the error box").not.toBe("");
-		expect(box).toMatch(/pointer-events:\s*auto/);
+	// could not be clicked. (Clicked for real in TerminalPane.browser.spec.ts.)
+	it("takes clicks on the actions the error offers", async () => {
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+
+		expect(getComputedStyle(root.querySelector(".terminal-error")!).pointerEvents).toBe("none");
+		expect(getComputedStyle(errorBox()!).pointerEvents).toBe("auto");
 	});
 });
 
-describe("TerminalPane spawn size", () => {
-	const spawnBlock =
-		/const realId = await channelsStore\.spawnChannel[\s\S]*?syncChannelSize\(\);/.exec(
-			SOURCE,
-		)?.[0];
+// ─── Spawn size ──────────────────────────────────────────────────────────────
 
+describe("TerminalPane spawn size", () => {
 	// The fit that follows a font arriving late has no channel to tell while the
 	// channel is still being created, and recording its size as though it had
 	// been sent left the PTY a width the window never had: the shell then drew
 	// its prompt wider than the window and the caret fell a line below.
-	it("tells the channel the size the terminal has, once there is a channel", () => {
-		expect(spawnBlock, "the spawn block moved").toBeDefined();
-		expect(spawnBlock).toContain("suppressNextResize(cols, rows)");
-		expect(spawnBlock?.indexOf("attachChannel(realId)")).toBeLessThan(
-			spawnBlock?.indexOf("syncChannelSize()") ?? -1,
-		);
+	it("tells the channel the size the terminal took while it was being created", async () => {
+		paneHasASize();
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ hostId: HOST, cols: 80, rows: 24 });
+
+		// A font arriving while the hub creates it refits the terminal to its pane.
+		xterm.fit = { cols: 100, rows: 30 };
+		terminal().resize(100, 30);
+		spawnOk(REAL);
+		// The hub gives the window that spawned it the write lock.
+		useWriteLockStore().handleWriteLock(REAL, CLIENT);
+
+		await vi.waitFor(() => expect(resizes()).toEqual([{ channelId: REAL, cols: 100, rows: 30 }]));
+	});
+
+	// No RESIZE for the size it was spawned at: it would only redraw the prompt.
+	it("sends no size for a terminal spawned at the size it has", async () => {
+		paneHasASize();
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnOk(REAL);
+		useWriteLockStore().handleWriteLock(REAL, CLIENT);
+		await resizesSettle();
+
+		expect(emitted).toContainEqual(["channel-spawned", NEW, REAL]);
+		expect(resizes()).toEqual([]);
 	});
 });
 
 // What a pane draws and sends is in composables/useTerminal.spec.ts.
 describe("TerminalPane: one size per terminal (#831)", () => {
-	it("decides its terminal's size while its client holds the write lock, and only then", () => {
-		const watcher = /watch\(\s*isWriter,[\s\S]*?\{ immediate: true \},?\s*\);/.exec(SOURCE)?.[0];
-		expect(watcher, "the isWriter watcher moved").toBeDefined();
-		expect(watcher).toContain("setDecidesSize(writerNow)");
+	it("decides its terminal's size while its client holds the write lock, and only then", async () => {
+		paneHasASize();
+		await openLive();
+		await resizesSettle();
+		// Another window decides: the pane draws the terminal at the PTY's size.
+		expect(resizes()).toEqual([]);
+		expect([terminal().cols, terminal().rows]).toEqual([100, 30]);
+
+		useWriteLockStore().handleWriteLock(T, CLIENT);
+		await vi.waitFor(() => expect(resizes()).toEqual([{ channelId: T, cols: 80, rows: 24 }]));
+
+		useWriteLockStore().handleWriteLock(T, OTHER_CLIENT);
+		hear({ type: "CHANNEL_SIZE", channelId: T, cols: 120, rows: 40 });
+		await resizesSettle();
+		expect(resizes()).toHaveLength(1);
+		expect([terminal().cols, terminal().rows]).toEqual([120, 40]);
 	});
 
-	it("gives a terminal drawn at another's size a ground of its own, and lets its pane scroll", () => {
-		const rule = /\.terminal-container\.terminal-container--follows\s*\{[^}]*\}/.exec(SOURCE)?.[0];
-		expect(rule, "no rule styles a pane that follows").toBeDefined();
-		expect(rule).toMatch(/overflow:\s*auto/);
-		expect(rule).toMatch(/background:/);
+	it("gives a terminal drawn at another's size a ground of its own, and lets its pane scroll", async () => {
+		themed("one-half-dark");
+		await openLive();
+		const container = root.querySelector(".terminal-container")!;
+
+		expect(getComputedStyle(container).overflow).toBe("auto");
+		// The theme's host rail, #1e2127, not the terminal's own ground.
+		expect(rgba(getComputedStyle(container).backgroundColor)).toEqual([30, 33, 39, 1]);
 	});
 });
 
-describe("TerminalPane recovery", () => {
-	const errorBlock = /class="terminal-error"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/.exec(SOURCE)?.[0];
+// ─── Recovery ────────────────────────────────────────────────────────────────
 
+describe("TerminalPane recovery", () => {
 	// A pane that failed to spawn or attach had nothing to do but be closed: no
 	// retry, and the reconnect watcher skipped it because it never became ready.
-	it("offers a way out of a failure", () => {
-		expect(errorBlock, "the error block moved").toBeDefined();
-		expect(errorBlock).toContain('@click="onRetry"');
-		expect(errorBlock).toContain('@click="onClosePaneFromOverlay"');
+	it("offers to try again after a failure", async () => {
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()?.textContent).toContain("the shell could not start"));
+
+		button("Retry")?.click();
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(2));
+		expect(errorBox()).toBeNull();
+	});
+
+	it("offers to close the pane after a failure", async () => {
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+
+		button("Close")?.click();
+
+		expect(closes()).toEqual([[NEW]]);
 	});
 
 	// The socket can be replaced while a pane is still opening, which is how one
 	// of these panes ended up waiting out a ten-second timeout for nothing.
-	it("sends a lost attach again, but never a lost spawn", () => {
-		const followUp = /if \(reconnectedWhileOpening[\s\S]{0,200}?\}/.exec(SOURCE)?.[0] ?? "";
-		expect(followUp, "the follow-up retry moved").toContain("onRetry()");
-		// A spawn may have reached the hub with only its answer lost: sending it
-		// again would leave a second terminal nobody asked for.
-		expect(followUp).toContain("pendingHostId.value === null");
+	it("sends an attach lost with its socket again by itself", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+
+		useSessionStore().reconnectCount++;
+		await settle();
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+
+		expect(attaches()).toHaveLength(2);
+		expect(errorBox()).toBeNull();
 	});
 
-	it("tries again on its own when the connection comes back", () => {
-		const watcher = /sessionStore\.reconnectCount,[\s\S]*?\n\);/.exec(SOURCE)?.[0] ?? "";
-		expect(watcher, "the reconnect watcher moved").toContain("reconnectCount");
-		expect(watcher).toMatch(/if \(!ready\.value\) \{[\s\S]*?onRetry\(\)/);
+	// A spawn may have reached the hub with only its answer lost: sending it
+	// again would leave a second terminal nobody asked for.
+	it("never sends a spawn lost with its socket again", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+
+		useSessionStore().reconnectCount++;
+		await settle();
+		await vi.advanceTimersByTimeAsync(15_000);
+		await settle();
+
+		expect(spawns()).toHaveLength(1);
+		expect(errorBox()?.textContent).toContain("SPAWN timeout");
+	});
+
+	it("tries again on its own when the connection comes back", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		expect(errorBox()?.textContent).toContain("ATTACH timeout");
+
+		useSessionStore().reconnectCount++;
+		await settle();
+
+		expect(attaches()).toHaveLength(2);
+		expect(errorBox()).toBeNull();
 	});
 });
 
+// ─── Host ────────────────────────────────────────────────────────────────────
+
+// Tabs are global: a pane whose terminal runs on another host stays on screen
+// while the rail shows a different one. Every pane was handed the selected
+// host, so it resolved the wrong host's profile, and Restart — which is a
+// spawn naming the terminal to bring back — named a host that terminal had
+// never run on, and the hub refused it.
 describe("TerminalPane host", () => {
-	// Tabs are global: a pane whose terminal runs on another host stays on
-	// screen while the rail shows a different one. Every pane was handed the
-	// selected host, so it resolved the wrong host's profile, and Restart —
-	// which is a spawn naming the terminal to bring back — named a host that
-	// terminal had never run on, and the hub refused it.
-	it("reads its host from the channel, not from the rail", () => {
-		expect(SOURCE).toMatch(/channelsStore\.channelHostMap\.get\(channelId\)/);
+	it("restarts a terminal on the host it runs on, not the rail's", async () => {
+		await openEnded({ hostId: PI });
+
+		button("Restart")?.click();
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ hostId: HOST, reuseChannelId: T });
 	});
 
-	it("leaves props.hostId to the pane that has no channel yet", () => {
-		// One use: the last fallback inside paneHostId, after the host its
-		// channel is on and the host its spawn is for (#625).
-		const uses = [...SOURCE.matchAll(/props\.hostId/g)];
-		expect(uses).toHaveLength(1);
+	it("reads its profile for the host its terminal runs on, not the rail's", async () => {
+		await openLive({ hostId: PI });
+
+		expect(paneProfile().hostId.value).toBe(HOST);
 	});
 
-	it("restarts a terminal on the host it runs on", () => {
-		expect(SOURCE).toMatch(/restartChannel\(chId,\s*paneHostId\.value,/);
+	// The rail's host is the last resort, for a pane whose terminal's host it
+	// knows no other way (#625).
+	it("speaks to the rail's host only while it knows of no other", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		freshWindow();
+		mount({ channel: ref(T), hostId: PI });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		refuse(T);
+		// With no host known for its terminal, its setting is never read for it:
+		// the card comes once the pane has waited for it long enough.
+		await vi.advanceTimersByTimeAsync(3_000);
+		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+
+		button("Restart")?.click();
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ hostId: PI, reuseChannelId: T });
+		expect(paneProfile().hostId.value).toBe(PI);
 	});
 
 	// An empty pane's picker, or the palette, can open a terminal on another
 	// host than the one in view (#625): until its channel is known, the pane
 	// speaks to the host its spawn is for, profile and theme included.
-	it("speaks to the host its spawn is for until its channel is known", () => {
-		expect(SOURCE).toMatch(
-			/const spawnHostId: string \| null =[\s\S]*?channelsStore\.consumePendingSpawn\(props\.channelId\)/,
-		);
-		expect(SOURCE).toContain("return spawnHostId ?? props.hostId ?? undefined;");
-		expect(SOURCE).toContain("const pendingHostId = ref<string | null>(spawnHostId);");
-		// Read once, at setup, before anything asks for the pane's host.
-		expect(SOURCE.match(/consumePendingSpawn\(/g)).toHaveLength(1);
+	it("speaks to the host its spawn is for until its channel is known", async () => {
+		openNew(HOST, { hostId: PI });
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+
+		expect(spawns()[0]).toMatchObject({ hostId: HOST });
+		expect(paneProfile().hostId.value).toBe(HOST);
+		// Asked again, as anything it reads changes, it still says so.
+		useChannelsStore().registerChannelHost(S, PI);
+		await settle();
+		expect(paneProfile().hostId.value).toBe(HOST);
+
+		spawnOk(REAL);
+		await settle();
+		expect(paneProfile().hostId.value).toBe(HOST);
 	});
 });
+
+// ─── Restart ─────────────────────────────────────────────────────────────────
 
 describe("TerminalPane restart", () => {
 	// A Pi terminal came back — prompt on screen, write lock held — under an
 	// overlay still saying "Shell exited": the attach at page load had found it
 	// dead, and nothing unsaid that when Restart brought it back.
-	it("stops saying the terminal ended once it is brought back", () => {
-		// A Windows checkout ends its lines with CRLF.
-		const onRestart = /async function onRestart[\s\S]*?\r?\n}\r?\n/.exec(SOURCE)?.[0];
-		expect(onRestart, "onRestart moved").toBeDefined();
-		expect(onRestart).toMatch(/if \(ok\) \{[\s\S]*?hasEnded\.value = false;/);
-		expect(SOURCE).toMatch(
-			/status === 'live' \|\| status === 'born'\) \{\s*hasEnded\.value = false;/,
-		);
+	it("drops the card once its Restart brought the terminal back", async () => {
+		// A terminal no list shows, ended: only the hub's refusal says so.
+		freshWindow();
+		useChannelsStore().registerChannelHost(T, HOST);
+		mount({ channel: ref(T) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		refuse(T);
+		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnOk(T);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+
+		// Before the attach that follows is answered.
+		expect(card()).toBeNull();
+		expect(quietLine()).toBeNull();
+		attachOk(T, "AGAIN");
+		await settle();
+		expect(card()).toBeNull();
+	});
+
+	it("drops the card once the hub says its terminal is starting again", async () => {
+		await openEnded();
+
+		useChannelsStore().updateChannelStatus(T, "born");
+		await settle();
+
+		expect(card()).toBeNull();
+	});
+
+	it("drops the card as soon as the hub says its terminal runs again", async () => {
+		await openEnded();
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await settle();
+
+		// Before the attach that follows is answered.
+		expect(attaches()).toHaveLength(2);
+		expect(card()).toBeNull();
 	});
 
 	// Under way, the card gives way to "Restarting…" (#595): nothing to press
 	// again while it takes its time over SSH.
-	it("shows why a restart failed, and that one is under way", () => {
-		expect(SOURCE).toContain("Could not restart it: {{ restartFailure }}");
-		expect(SOURCE).toContain("restarting: restarting.value,");
+	it("says that a restart is under way, and why one failed", async () => {
+		await openEnded();
+
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		await settle();
+		expect(quietLine()).toBe("Restarting…");
+		expect(card()).toBeNull();
+
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		expect(card()?.textContent).toContain("Could not restart it: the shell could not start");
 	});
 });
 
+// ─── After a Reconnect (#556) ────────────────────────────────────────────────
+
 describe("TerminalPane after a Reconnect (#556)", () => {
-	// One decision for the banner and the overlay, so the pane cannot say "Not
+	// One decision for the banner and the card, so the pane cannot say "Not
 	// connected" over a terminal it knows has ended.
-	it("covers its terminal with what paneCover decides", () => {
-		expect(SOURCE).toMatch(/v-if="cover === 'not-connected'" class="detached-banner"/);
-		// The card, or the line in its place, from the cover (#595).
-		expect(SOURCE).toMatch(/v-if="endedView\.kind === 'card'" class="exit-overlay"/);
-		expect(SOURCE).toMatch(/endedPaneShows\(\{\s*cover: cover\.value,/);
-		expect(SOURCE).toMatch(/status: channelsStore\.statusOf\(effectiveChannelId\.value\)/);
+	it("says Not connected over a terminal answered from memory, and never over one that ended", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		expect(banner()?.textContent).toContain("Not connected.");
+		expect(card()).toBeNull();
+
+		endIt();
+		await settle();
+
+		expect(card()).not.toBeNull();
+		expect(banner()).toBeNull();
 	});
 
 	// The list holds the host in view; the hub's reports cover every other one.
-	it("hears its terminal end whichever host is in view", () => {
-		expect(SOURCE).toMatch(
-			/const isDead = computed\(\(\) => channelsStore\.statusOf\(effectiveChannelId\.value\) === 'dead'\)/,
-		);
+	it("hears its terminal end whichever host is in view", async () => {
+		await openLive({
+			setUp: () => {
+				writer();
+				// The rail is on another host: the list carries none of HOST's terminals.
+				useChannelsStore().activeHostId = PI;
+			},
+		});
+		expect(lockIndicator()).not.toBeNull();
+
+		endIt();
+		await settle();
+		type("ls\r");
+
+		expect(card()).not.toBeNull();
+		expect(lockIndicator()).toBeNull();
+		expect(inputs()).toEqual([]);
 	});
 
-	it("takes the hub's answer to a Reconnect: ended, or gone", () => {
-		// A Windows checkout ends its lines with CRLF.
-		const onReconnect = /async function onReconnect[\s\S]*?\r?\n}\r?\n/.exec(SOURCE)?.[0];
-		expect(onReconnect, "onReconnect moved").toBeDefined();
-		expect(onReconnect).toContain("await attachAndCover(chId, { preserveContent: true })");
-		// What a refusal means is factsFromRefusal's to say (pane-cover.spec.ts).
-		expect(attachAndCover()).toMatch(
-			/const facts = factsFromRefusal\([\s\S]*?\);\s*if \(facts === null\) throw err;\s*takeAnswer\(chId, facts\);/,
-		);
+	it("takes the hub's answer to a Reconnect: ended", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(T, lastOutput());
+		await settle();
+
+		expect(card()?.textContent).toContain("Shell exited");
+		expect(button("Restart")).toBeDefined();
+		expect(banner()).toBeNull();
+		// What it showed stays: the hub's copy is not drawn over it.
+		expect(xterm.events).not.toContain("<reset>");
+		expect(xterm.events).not.toContain("LAST-SCREEN");
+	});
+
+	it("takes the hub's answer to a Reconnect: gone", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId: T });
+		await settle();
+
+		expect(card()?.textContent).toContain("This terminal no longer exists.");
+		expect(button("Restart")).toBeUndefined();
+		expect(button("Close")).toBeDefined();
+		expect(banner()).toBeNull();
 	});
 
 	// Over its banner (#556), and over a terminal that ended and was brought
-	// back from the sidebar or another window, or that it never attached to
-	// because it knew it had ended (#559).
-	it("attaches again when the hub says a terminal it is not attached to is live", () => {
-		const watcher =
-			/channelsStore\.reportOf\(effectiveChannelId\.value\),[\s\S]*?\n\);/.exec(SOURCE)?.[0] ?? "";
-		expect(watcher, "the live-report watcher moved").toContain(
-			"report?.status !== 'live' || attachedLive",
-		);
-		expect(watcher).toMatch(/if \(report\?\.status === 'dead'\) \{\s*attachedLive = false;/);
-		expect(watcher).toContain("onReconnect()");
+	// back from the sidebar or another window (#559).
+	it("attaches again when the hub says the terminal behind its banner is live", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await settle();
+
+		expect(attaches()).toHaveLength(2);
+	});
+
+	it("attaches again when a terminal it saw end is brought back from elsewhere", async () => {
+		await openLive();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "BACK");
+		await settle();
+
+		expect(card()).toBeNull();
+	});
+
+	it("does not attach again when the hub repeats that the terminal it is attached to runs", async () => {
+		await openLive();
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await settle();
+
+		expect(attaches()).toHaveLength(1);
 	});
 });
 
-/** The one function every attach goes through. */
-function attachAndCover(): string {
-	// A Windows checkout ends its lines with CRLF.
-	const body = /async function attachAndCover\([\s\S]*?\r?\n}\r?\n/.exec(SOURCE)?.[0];
-	if (body === undefined) throw new Error("attachAndCover moved");
-	return body;
-}
+// ─── Every attach reads the hub's answer (#559) ──────────────────────────────
 
+// Every attach reads the answer the same way. The one after the socket came
+// back read nothing, and the pane kept the banner, or dropped none, whatever
+// the hub had said. The others: TerminalPane.ended-output.spec.ts.
 describe("TerminalPane covers its terminal with what the hub answers now (#559)", () => {
-	// Every attach reads the answer the same way. The one after the socket came
-	// back read nothing, and the pane kept the banner, or dropped none, whatever
-	// the hub had said.
-	it("sends every attach through attachAndCover", () => {
-		const calls = [...SOURCE.matchAll(/reattachChannel\(/g)];
-		expect(calls, "an attach bypasses attachAndCover").toHaveLength(1);
-		expect(attachAndCover()).toMatch(
-			/result = await reattachChannel\(chId, \{\s*\.\.\.opts,[\s\S]*?stillWanted: \(\) => effectiveChannelId\.value === chId,\s*\}\);/,
-		);
+	it("drops its banner when the hub answers from the terminal once its socket is back", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
 
-		// Over an ending it watched, it keeps its screen (#927).
-		const reconnectWatcher = /sessionStore\.reconnectCount,[\s\S]*?\n\);/.exec(SOURCE)?.[0] ?? "";
-		expect(reconnectWatcher).toContain(
-			"await attachAndCover(chId, endSeenLiveOf === chId ? { keepScreenIfEnded: true } : undefined);",
-		);
-		expect(SOURCE).toContain("await attachAndCover(props.channelId);");
-		expect(SOURCE).toContain("await attachAndCover(newId);");
-		expect(SOURCE).toMatch(/result = await attachAndCover\(chId, \{ preserveContent: true \}\);/);
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE");
+		await settle();
+
+		expect(banner()).toBeNull();
+	});
+
+	it("shows the card when the hub says its terminal ended while its socket was away", async () => {
+		await openLive();
+
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(T);
+		await settle();
+
+		expect(card()).not.toBeNull();
+		expect(errorBox()).toBeNull();
+	});
+
+	it("covers a terminal it is handed with the hub's answer", async () => {
+		const channel = ref(T);
+		await openLive({ channel, setUp: () => useChannelsStore().registerChannelHost(U, HOST) });
+
+		channel.value = U;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(U);
+		await settle();
+
+		expect(card()).not.toBeNull();
+		expect(errorBox()).toBeNull();
+	});
+
+	it("shows the card again when a terminal it restarted ends at once", async () => {
+		freshWindow();
+		useChannelsStore().registerChannelHost(T, HOST);
+		mount({ channel: ref(T) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		refuse(T);
+		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnOk(T);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(T);
+		await settle();
+
+		expect(card()).not.toBeNull();
 	});
 
 	// An answer replaces all the pane knew, not only the part it speaks of.
-	it("takes each answer whole", () => {
-		expect(attachAndCover()).toContain("takeAnswer(chId, factsFromAttachOk(result.cached));");
-		const takeAnswer = /function takeAnswer\([\s\S]*?\r?\n}\r?\n/.exec(SOURCE)?.[0] ?? "";
-		expect(takeAnswer, "takeAnswer moved").toContain("hasEnded.value = facts.ended;");
-		expect(takeAnswer).toContain("isGone.value = facts.gone;");
-		expect(takeAnswer).toContain("isDetached.value = facts.detached;");
+	it("takes each answer whole: from memory, ended, then running", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(T);
+		await settle();
+		expect(card()).not.toBeNull();
+		expect(banner()).toBeNull();
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "LIVE");
+		await settle();
+		expect(card()).toBeNull();
+		expect(banner()).toBeNull();
+	});
+
+	it("takes each answer whole: gone, then another terminal running", async () => {
+		const channel = ref(T);
+		mountPane(channel, "live", { setUp: () => useChannelsStore().registerChannelHost(U, HOST) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId: T });
+		await vi.waitFor(() => expect(card()?.textContent).toContain("no longer exists"));
+
+		channel.value = U;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(U, "U");
+		await settle();
+
+		expect(card()).toBeNull();
+	});
+
+	// A terminal its list says has ended is asked for all the same (#927), and
+	// the hub's answer covers it.
+	it("says a terminal it knew had ended is gone when the hub has no record of it", async () => {
+		mountPane(ref(T), "dead");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+
+		hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId: T });
+		await settle();
+
+		expect(card()?.textContent).toContain("This terminal no longer exists.");
+	});
+
+	it("takes the answer of the new socket it asked again, once its socket was replaced while it waited", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		mountPane(ref(T), "dead");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		useSessionStore().reconnectCount++;
+		await settle();
+		await vi.advanceTimersByTimeAsync(10_000);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+
+		hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId: T });
+		await settle();
+
+		expect(card()?.textContent).toContain("This terminal no longer exists.");
+	});
+
+	it("covers the terminal it was handed while it opened with the hub's answer", async () => {
+		const channel = ref(T);
+		mountPane(channel, "dead", { setUp: () => useChannelsStore().registerChannelHost(U, HOST) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		channel.value = U;
+		await settle();
+		refuse(T);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+
+		refuse(U);
+		await settle();
+
+		expect(card()).not.toBeNull();
+		expect(errorBox()).toBeNull();
 	});
 });
 
@@ -257,22 +821,48 @@ describe("TerminalPane covers its terminal with what the hub answers now (#559)"
 // terminal had ended, and it had kept nothing of that: its cover read the
 // list of the host in view, which no longer carried it.
 describe("TerminalPane over an ended terminal of the host not in view (#594)", () => {
-	it("keeps the end it knew of when it did not attach, whatever list is in view", () => {
-		const open = body(/async function openChannel\(/);
-		const deadBranch = /if \(isDead\.value\) \{[\s\S]*?\} else \{/.exec(open)?.[0] ?? "";
-		expect(deadBranch, "the branch moved").not.toBe("");
-		// It asks the hub, whose CHANNEL_DEAD carries the last output (#927) and
-		// covers it through takeAnswer; with no answer, the end it knew of does:
-		// hasEnded either way, which paneCover reads whatever the status says
-		// (pane-cover.spec.ts).
-		expect(deadBranch).toContain("await attachAndCover(chId);");
-		// For the terminal it still shows only: a pane given another one while
-		// it waited must not take that one for ended (#929).
-		expect(deadBranch).toMatch(
-			/\} catch \{[\s\S]*?if \(effectiveChannelId\.value === chId\) takeAnswer\(chId, factsFromKnownEnd\(\)\);/,
-		);
-		expect(body(/function takeAnswer\(/)).toContain("hasEnded.value = facts.ended;");
-		expect(SOURCE).toMatch(/ended: hasEnded\.value,/);
+	it("keeps the end it knew of when its attach went unanswered, whatever list is in view", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		freshWindow();
+		const channels = useChannelsStore();
+		channels.activeHostId = HOST;
+		channels.channels = [listed(T, "dead", { exitCode: 1 })];
+		channels.registerChannelHost(T, HOST);
+		mount({ channel: ref(T) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		expect(card()).not.toBeNull();
+
+		// The rail moves to the Pi: its list does not carry T.
+		channels.activeHostId = PI;
+		channels.channels = [];
+		await settle();
+
+		expect(card()).not.toBeNull();
+		expect(lockIndicator()).toBeNull();
+	});
+
+	// For the terminal it still shows only: a pane given another one while it
+	// waited must not take that one for ended (#929).
+	it("does not take a terminal it was handed while it waited for the one that ended", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const channel = ref(T);
+		mountPane(channel, "dead", {
+			setUp: () => {
+				useChannelsStore().registerChannelHost(U, HOST);
+				useChannelsStore().updateChannelStatus(U, "live");
+			},
+		});
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+
+		channel.value = U;
+		await settle();
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+
+		expect(attaches()[1]).toMatchObject({ channelId: U });
+		expect(card()).toBeNull();
 	});
 });
 
@@ -280,8 +870,29 @@ describe("TerminalPane lock indicator", () => {
 	// A terminal on another host that has ended is in no list the pane can
 	// read, so `isDead` stays false: the indicator offered "No lock" under an
 	// overlay saying the shell had exited.
-	it("is hidden for a terminal that has ended, whichever way the pane learnt it", () => {
-		expect(SOURCE).toMatch(/:is-dead="isDead \|\| hasEnded \|\| isGone"/);
+	it("is hidden for a terminal the hub said has ended, which no list says", async () => {
+		freshWindow();
+		useChannelsStore().registerChannelHost(T, HOST);
+		mount({ channel: ref(T) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		expect(lockIndicator()).not.toBeNull();
+
+		refuse(T);
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+
+		expect(lockIndicator()).toBeNull();
+	});
+
+	it("is hidden for a terminal the hub has no record of", async () => {
+		freshWindow();
+		useChannelsStore().registerChannelHost(T, HOST);
+		mount({ channel: ref(T) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+
+		hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId: T });
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+
+		expect(lockIndicator()).toBeNull();
 	});
 });
 
@@ -290,141 +901,284 @@ describe("TerminalPane lock indicator", () => {
 // What the setting does is decided in exit-action.ts and tested there. These
 // check that the pane tells it what it sees, and does what it answers.
 
-/** A function's body, from its declaration to its closing brace at column 0. */
-function body(signature: RegExp): string {
-	const found = new RegExp(`${signature.source}[\\s\\S]*?\\r?\\n}\\r?\\n`).exec(SOURCE)?.[0];
-	if (found === undefined) throw new Error(`${signature.source} moved`);
-	return found;
-}
-
 describe("TerminalPane when its terminal ends (#574)", () => {
 	// Only a report heard while attached to it running, on a socket that stayed
-	// up, is an end seen live; every other way of learning it is found.
-	it("tells the end watch what it sees", () => {
-		const reportWatcher =
-			/channelsStore\.reportOf\(effectiveChannelId\.value\),[\s\S]*?\n\);/.exec(SOURCE)?.[0] ?? "";
-		// With what the report says of why it ended (#580).
-		expect(reportWatcher).toContain("onTerminalEnded(endWatch.ended(chId), report.endReason);");
+	// up, is an end seen live; every other way of learning it is found, which the
+	// setting answers only once the pane is on screen (here it is not).
+	it("closes its pane over an end it saw, as the setting says", async () => {
+		xterm.profile = { whenEnded: "close" };
+		await openLive();
 
-		const takeAnswer = body(/function takeAnswer\(/);
-		expect(takeAnswer).toMatch(/if \(attachedLive\) \{\s*endWatch\.attached\(chId\);/);
-		expect(takeAnswer).toMatch(
-			/else if \(facts\.ended\) \{[\s\S]*?onTerminalEnded\(endWatch\.ended\(chId\)\);/,
-		);
-		expect(takeAnswer).toMatch(/else \{\s*endWatch\.lost\(\);/);
+		endIt();
+		await settle();
 
-		// Before any report on the next socket can be read.
-		expect(SOURCE).toMatch(
-			/\(\) => sessionStore\.connected,\s*\(connected\) => \{\s*if \(!connected\) endWatch\.lost\(\);\s*\},\s*\{ flush: 'sync' \}/,
+		expect(closes()).toEqual([[T, { keep: false }]]);
+	});
+
+	it("waits to be seen over an end it found when its attach was refused", async () => {
+		xterm.profile = { whenEnded: "close" };
+		mountPane(ref(T), "dead");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+
+		refuse(T);
+		await settle();
+
+		expect(closes()).toEqual([]);
+		expect(quietLine()).toBe("Closes when this terminal is shown.");
+	});
+
+	it("takes an end reported after its socket went for one it found", async () => {
+		xterm.profile = { whenEnded: "close" };
+		await openLive();
+
+		useSessionStore().connected = false;
+		endIt();
+		await settle();
+
+		expect(closes()).toEqual([]);
+		expect(quietLine()).toBe("Closes when this terminal is shown.");
+	});
+
+	it("takes an end reported over a terminal answered from memory for one it found", async () => {
+		xterm.profile = { whenEnded: "close" };
+		await openLive();
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+
+		endIt();
+		await settle();
+
+		expect(closes()).toEqual([]);
+		expect(quietLine()).toBe("Closes when this terminal is shown.");
+	});
+
+	it("counts from the start of a terminal it spawned", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnOk(T);
+		await settle();
+
+		runFor(1_000);
+		endIt();
+		await settle();
+
+		expect(card()?.textContent).toContain(
+			"It ended right after starting, so it wasn't restarted automatically.",
 		);
 	});
 
-	it("counts from the start of a terminal it spawned or restarted", () => {
-		expect(SOURCE).toMatch(
-			/attachChannel\(realId\);[\s\S]{0,120}endWatch\.starting\(realId\);\s*endWatch\.attached\(realId\);/,
-		);
-		const onRestart = body(/async function onRestart\(/);
-		expect(onRestart.indexOf("endWatch.starting(chId);")).toBeGreaterThan(-1);
-		expect(onRestart.indexOf("endWatch.starting(chId);")).toBeLessThan(
-			onRestart.indexOf("channelsStore.restartChannel("),
+	it("counts from the start of a terminal it restarted", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		// On screen in the window with the focus: the setting restarts what it found.
+		mountPane(ref(T), "dead", { setUp: shown });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		refuse(T);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnOk(T);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "AGAIN");
+		await settle();
+		useChannelsStore().updateChannelStatus(T, "live");
+		await settle();
+
+		runFor(1_000);
+		useChannelsStore().updateChannelStatus(T, "dead", 1);
+		await settle();
+
+		expect(card()?.textContent).toContain(
+			"It ended right after starting, so it wasn't restarted automatically.",
 		);
 	});
 
-	it("does what the setting answers", () => {
-		const onEnded = body(/function onTerminalEnded\(/);
-		expect(onEnded).toContain("reactToEnd(prefs.value, facts)");
-		expect(onEnded).toContain("directProcess: isDirectProcess.value");
-		expect(onEnded).toContain("writer: isWriter.value");
-		// A terminal stopped from elsewhere is never restarted or closed (#580).
-		expect(onEnded).toMatch(
-			/function onTerminalEnded\(end: EndSeen, endReason\?: ChannelEndReason\)/,
+	it("restarts a terminal it watched run long enough, as one nobody asked for", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		await openLive({ setUp: writer });
+
+		runFor(6_000);
+		endIt();
+		await settle();
+
+		expect(spawns()).toEqual([
+			expect.objectContaining({ hostId: HOST, reuseChannelId: T, automatic: true }),
+		]);
+		expect(quietLine()).toBe("Restarting…");
+	});
+
+	it("leaves the end to its card while another window holds the write lock", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		await openLive({ setUp: () => useWriteLockStore().handleWriteLock(T, OTHER_CLIENT) });
+
+		runFor(6_000);
+		endIt();
+		await settle();
+
+		expect(spawns()).toEqual([]);
+		expect(card()?.textContent).toContain(
+			"This window doesn't hold its write lock, so it wasn't restarted from here.",
 		);
-		expect(onEnded).toMatch(/const facts: EndFacts = \{\s*\.\.\.end,/);
-		// The report's reason, else what the hub said of it in the list or at
-		// connect: an end found heard no report (#592).
-		expect(onEnded).toMatch(
-			/writer: isWriter\.value,\s*endReason: endReason \?\? channelsStore\.endReasonOf\(effectiveChannelId\.value\),\s*\};/,
+	});
+
+	it("leaves the end of a terminal that runs a command to its card", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		await openLive({
+			setUp: () => {
+				writer();
+				useChannelsStore().channels = [listed(T, "live", { directProcess: true })];
+			},
+		});
+
+		runFor(6_000);
+		endIt();
+		await settle();
+
+		expect(spawns()).toEqual([]);
+		expect(card()?.textContent).toContain(
+			"It runs a command rather than a shell, so it isn't restarted automatically.",
 		);
-		expect(onEnded).toContain(
-			"if (reaction.kind === 'restart') void onRestart({ bySetting: true });",
-		);
-		expect(onEnded).toContain("else closeEnded(reaction.keep);");
-		expect(SOURCE).toContain(
-			'<p v-if="heldBack !== null && !isGone" class="exit-reason">{{ heldBackText }}</p>',
-		);
+		expect(button("Configure")).toBeDefined();
+	});
+
+	// A terminal stopped from elsewhere is never restarted or closed (#580).
+	it("leaves a terminal stopped from elsewhere to its card", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		await openLive({ setUp: writer });
+
+		runFor(6_000);
+		endIt("killed");
+		await settle();
+
+		expect(spawns()).toEqual([]);
+		expect(card()?.textContent).toContain("It was stopped from elsewhere, so it wasn't restarted.");
+	});
+
+	// The report's reason, else what the hub said of it in the list or at
+	// connect: an end found heard no report (#592).
+	it("says a terminal it found ended was stopped from elsewhere, as the hub said", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		mountPane(ref(T), "dead", {
+			setUp: () => useChannelsStore().updateChannelStatus(T, "dead", 1, "killed"),
+		});
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+
+		refuse(T);
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+
+		expect(card()?.textContent).toContain("It was stopped from elsewhere, so it wasn't restarted.");
 	});
 });
 
 describe("TerminalPane overlay (#574)", () => {
-	const overlay =
-		/<div v-if="endedView\.kind === 'card'" class="exit-overlay"[^>]*>[\s\S]*?\n\t\t<\/div>\n/.exec(
-			SOURCE.replace(/\r\n/g, "\n"),
-		)?.[0] ?? "";
-
 	// No second dialog, and no keep option on it: Close acts at once, and the
 	// "Keep" setting says whether the terminal stays listed.
-	it("closes at once, as the keep setting says", () => {
-		expect(overlay, "the overlay moved").not.toBe("");
-		expect(overlay).toContain(`@click="onOverlayAction('close')"`);
-		expect(overlay).toContain(`@click="onOverlayAction('restart')"`);
-		expect(overlay).not.toContain("Keep");
-		const onAction = body(/function onOverlayAction\(/);
-		expect(onAction).toContain("alwaysScopeOf(alwaysOn.value, alwaysWhere.value),");
-		expect(onAction).toContain("prefs.value.keepEnded,");
-		expect(onAction).toContain("else closeEnded(act.keep);");
-		expect(body(/function closeEnded\(/)).toContain("emit('close-pane', chId, { keep });");
+	it("closes at once, deleting the terminal", async () => {
+		await openEnded();
+		expect(card()?.textContent).not.toContain("Keep");
+
+		button("Close")?.click();
+
+		expect(closes()).toEqual([[T, { keep: false }]]);
+	});
+
+	it("closes at once, keeping the terminal listed when Settings says so", async () => {
+		await openEnded({ setUp: keepEnded });
+
+		button("Close")?.click();
+
+		expect(closes()).toEqual([[T, { keep: true }]]);
 	});
 
 	// "When a terminal ends" is read where Settings cascades it: globally, for
-	// the host, for the terminal.
-	it("reads the setting from the terminal's resolved profile", () => {
-		expect(SOURCE).toContain(
-			"const prefs = computed(() => endedPrefs(configStore.uiConfig.panes, resolvedProfile.value));",
-		);
+	// the host, for the terminal. "Keep" is Settings' own.
+	it("reads the setting from the terminal's resolved profile", async () => {
+		xterm.profile = { whenEnded: "close" };
+		await openLive({ setUp: keepEnded });
+
+		endIt();
+		await settle();
+
+		expect(closes()).toEqual([[T, { keep: true }]]);
 	});
 
-	it('writes the setting where "Always do this" says, for this terminal', () => {
-		const onAction = body(/function onOverlayAction\(/);
-		expect(onAction).toContain(".saveWhenEnded(remember.whenEnded, remember.scope, {");
-		// A Windows checkout ends its lines with CRLF: each line on its own.
-		expect(onAction).toContain("hostId: paneHostId.value ?? null,");
-		expect(onAction).toContain("channelId: effectiveChannelId.value,");
+	it('writes the setting where "Always do this" says, for this terminal and its host', async () => {
+		await openEnded({ hostId: PI });
+		const save = vi.spyOn(useConfigStore(), "saveWhenEnded").mockResolvedValue(true);
+
+		alwaysBox()?.click();
+		scopeRadio("everywhere")?.click();
+		button("Close")?.click();
+
+		expect(save).toHaveBeenCalledWith("close", "global", { hostId: HOST, channelId: T });
+		expect(closes()).toEqual([[T, { keep: false }]]);
+	});
+
+	it('writes nothing while "Always do this" is unchecked', async () => {
+		await openEnded();
+		const save = vi.spyOn(useConfigStore(), "saveWhenEnded").mockResolvedValue(true);
+
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+
+		expect(save).not.toHaveBeenCalled();
 	});
 
 	// One checkbox, labelled by its words, so a click on them and a screen
 	// reader both reach it.
-	it('offers one "Always do this" box', () => {
-		expect(overlay).toMatch(
-			/<label class="exit-option" :for="`\$\{exitId\}-always`">\s*<input :id="`\$\{exitId\}-always`" v-model="alwaysOn" type="checkbox" \/>\s*Always do this\s*<\/label>/,
-		);
-		expect(overlay.match(/type="checkbox"/g)).toHaveLength(1);
+	it('offers one "Always do this" box, which its words check', async () => {
+		await openEnded();
+
+		const boxes = card()?.querySelectorAll('input[type="checkbox"]');
+		expect(boxes).toHaveLength(1);
+		const words = card()?.querySelector<HTMLLabelElement>(`label[for="${alwaysBox()?.id}"]`);
+		expect(words?.textContent?.trim()).toBe("Always do this");
+
+		words?.click();
+
+		expect(alwaysBox()?.checked).toBe(true);
 	});
 
 	// Where it applies is one choice among radios, grouped and named, so that
 	// only one can be chosen and a screen reader says what they are for.
 	// Picking one checks the box: it means nothing otherwise.
-	it("offers where beside it, as one choice, and picking one checks the box", () => {
-		expect(overlay).toMatch(/role="radiogroup"\s*aria-label="Where to always do this"/);
-		expect(overlay).toMatch(
-			/<input\s*v-model="alwaysWhere"\s*type="radio"\s*:name="`\$\{exitId\}-scope`"\s*:value="where\.value"\s*@change="alwaysOn = true"\s*\/>/,
-		);
-		expect(overlay).toContain('v-for="where in ALWAYS_SCOPES"');
-		expect(overlay).toContain(":class=\"{ 'exit-scope--off': !alwaysOn }\"");
+	it("offers where beside it, as one choice, and picking one checks the box", async () => {
+		await openEnded();
+		const group = card()?.querySelector('[role="radiogroup"]');
+		expect(group?.getAttribute("aria-label")).toBe("Where to always do this");
+		const radios = [...(group?.querySelectorAll<HTMLInputElement>('input[type="radio"]') ?? [])];
+		expect(radios.map((r) => r.closest("label")?.textContent?.trim())).toEqual([
+			"this host",
+			"everywhere",
+		]);
+		expect(new Set(radios.map((r) => r.name)).size).toBe(1);
+		expect(group?.classList.contains("exit-scope--off")).toBe(true);
+
+		scopeRadio("everywhere")?.click();
+		await settle();
+
+		expect(alwaysBox()?.checked).toBe(true);
+		expect(radios.map((r) => r.checked)).toEqual([false, true]);
+		expect(group?.classList.contains("exit-scope--off")).toBe(false);
 	});
 
-	it('starts with "Always do this" unchecked, on this host, and gives the keyboard to its card', () => {
-		expect(SOURCE).toContain("alwaysOn.value = false;");
-		expect(SOURCE).toContain("alwaysWhere.value = 'host';");
-		expect(SOURCE).toContain("void nextTick(focusOverlay);");
-		expect(overlay).toMatch(/ref="exitCard"\s*class="exit-card"\s*role="group"\s*tabindex="-1"/);
-		expect(SOURCE).toContain("exitCard.value?.focus();");
+	it('starts with "Always do this" unchecked, on this host, and gives the keyboard to its card', async () => {
+		await openEnded({ setUp: shown });
+		await settle();
+
+		expect(alwaysBox()?.checked).toBe(false);
+		expect(scopeRadio("this host")?.querySelector("input")?.checked).toBe(true);
+		expect(document.activeElement).toBe(card());
 	});
 
 	// The Enter typed after `exit`, or pressed twice, lands on whatever holds the
 	// keyboard when the overlay comes up: a button there would restart the shell.
-	it("gives no button the keyboard", () => {
-		expect(overlay).not.toMatch(/<button[^>]*\bref=/);
-		expect(SOURCE).not.toContain("exitPrimary");
+	it("gives no button the keyboard", async () => {
+		await openEnded({ setUp: shown });
+		await settle();
+
+		expect(document.activeElement?.tagName).not.toBe("BUTTON");
+		expect(card()?.contains(document.activeElement)).toBe(true);
 	});
 });
 
@@ -435,57 +1189,210 @@ describe("TerminalPane overlay (#574)", () => {
 // that the pane feeds them what it knows, and acts as its buttons do.
 
 describe("TerminalPane follows a choice made on another overlay (#586)", () => {
-	it("keeps what about an end holds it back, whatever the setting was", () => {
-		const onEnded = body(/function onTerminalEnded\(/);
-		expect(onEnded).toContain("const held = endHold(facts);");
-		// As the overlay's reason: an end found later keeps what the one seen said.
-		expect(onEnded).toContain("if (held !== null || end.seen === 'live') hold.value = held;");
-		// Before the setting may restart or close the pane.
-		expect(onEnded.indexOf("endHold(facts)")).toBeLessThan(onEnded.indexOf("reactToEnd("));
+	/** T, on screen, seen to end after running `ms` on a socket that stayed up. */
+	async function seenEndingAfter(ms: number, open: Open = {}): Promise<void> {
+		await openLive({
+			...open,
+			setUp: () => {
+				writer();
+				shown();
+				open.setUp?.();
+			},
+		});
+		runFor(ms);
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+	}
+
+	// Restart as the overlay's Restart, nobody asking; nothing written: the
+	// other overlay did.
+	it("restarts once its own setting says what was chosen, writing nothing", async () => {
+		await seenEndingAfter(6_000);
+		const save = vi.spyOn(useConfigStore(), "saveWhenEnded").mockResolvedValue(true);
+
+		chosenElsewhere("restart", "global");
+		await settle();
+		expect(spawns()).toEqual([]);
+		settingNowSays("restart");
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ reuseChannelId: T, automatic: true });
+		expect(save).not.toHaveBeenCalled();
 	});
 
-	it("forgets it with its overlay, or when handed another terminal", () => {
-		expect(SOURCE).toMatch(
-			/watch\(effectiveChannelId, \(\) => \{\s*heldBack\.value = null;\s*hold\.value = null;\s*\}\);/,
-		);
-		expect(SOURCE).toMatch(
-			/watch\(cover, \(now\) => \{\s*if \(now !== 'exited'\) hold\.value = null;\s*\}\);/,
-		);
+	// Close as its Close, which the keep setting says whether to delete.
+	it("closes as its own Close does", async () => {
+		await seenEndingAfter(6_000, { setUp: keepEnded });
+
+		chosenElsewhere("close", "global");
+		settingNowSays("close");
+		await settle();
+
+		expect(closes()).toEqual([[T, { keep: true }]]);
+	});
+
+	it("keeps asking over an end that came right after it connected", async () => {
+		await seenEndingAfter(1_000);
+
+		chosenElsewhere("restart", "global");
+		settingNowSays("restart");
+		await settle();
+
+		expect(spawns()).toEqual([]);
+		expect(card()).not.toBeNull();
+	});
+
+	// As the overlay's reason: an end found later keeps what the one seen said.
+	it("keeps what held back an end it saw when it finds that end again", async () => {
+		await seenEndingAfter(1_000);
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(T);
+		await settle();
+
+		chosenElsewhere("restart", "global");
+		settingNowSays("restart");
+		await settle();
+
+		expect(spawns()).toEqual([]);
+	});
+
+	// Handed one that has ended too, so that its card never goes meanwhile.
+	it("forgets what held back its end when handed another terminal", async () => {
+		const channel = ref(T);
+		await seenEndingAfter(1_000, {
+			channel,
+			setUp: () => {
+				useChannelsStore().registerChannelHost(U, HOST);
+				useChannelsStore().updateChannelStatus(U, "dead", 1);
+			},
+		});
+		channel.value = U;
+		useChannelsStore().selectChannel(U);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(U);
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+
+		chosenElsewhere("restart", "global");
+		settingNowSays("restart");
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ reuseChannelId: U });
+	});
+
+	it("forgets what held back its end once its card goes", async () => {
+		await seenEndingAfter(1_000);
+		// Brought back from elsewhere: the card goes.
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "BACK");
+		await settle();
+		expect(card()).toBeNull();
+		// It ends again while the socket is away, and the pane finds it so.
+		useSessionStore().connected = false;
+		useSessionStore().connected = true;
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		refuse(T);
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+
+		chosenElsewhere("restart", "global");
+		settingNowSays("restart");
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+	});
+
+	it("forgets why its setting held back when handed another terminal", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		const channel = ref(T);
+		await openLive({
+			channel,
+			setUp: () => useChannelsStore().registerChannelHost(U, HOST),
+		});
+		runFor(6_000);
+		endIt();
+		await vi.waitFor(() => expect(card()?.textContent).toContain("doesn't hold its write lock"));
+
+		// U's own setting asks: the card comes up for its end.
+		settingNowSays("ask");
+		channel.value = U;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(U);
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+
+		expect(card()?.textContent).not.toContain("doesn't hold its write lock");
 	});
 
 	// Every pane of the tab shown, not only the selected one.
-	it("is on screen when its tab is the one shown", () => {
-		expect(SOURCE).toContain("const channelsOnScreen = inject(CHANNELS_ON_SCREEN_KEY, null);");
-		expect(SOURCE).toContain(
-			"return channelsOnScreen === null ? isActiveTab.value : channelsOnScreen.value.has(chId);",
-		);
+	it("follows once its tab is the one shown, selected or not", async () => {
+		const onScreen = ref<ReadonlySet<string>>(new Set([S]));
+		await openLive({ onScreen, setUp: writer });
+		runFor(6_000);
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+
+		chosenElsewhere("restart", "global");
+		settingNowSays("restart");
+		await settle();
+		expect(spawns()).toEqual([]);
+
+		onScreen.value = new Set([S, T]);
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
 	});
 
-	it("tells useWaitingAnswer what it knows", () => {
-		const call = /useWaitingAnswer\(\{[\s\S]*?\}\);/.exec(SOURCE)?.[0] ?? "";
-		expect(call, "the call moved").not.toBe("");
-		// Only an ended terminal's overlay, not one gone, nor one restarting.
-		expect(call).toContain(
-			"waiting: computed(() => cover.value === 'exited' && !restarting.value),",
-		);
-		expect(call).toContain("channelId: effectiveChannelId,");
-		expect(call).toContain("hostId: paneHostId,");
-		expect(call).toMatch(/\bhold,/);
-		expect(call).toContain("directProcess: isDirectProcess,");
-		// The setting as its terminal resolves it, read again after each write.
-		expect(call).toContain("whenEnded: computed(() => prefs.value.whenEnded),");
-		expect(call).toMatch(/\binView,/);
-		expect(call).toContain("act: followChoice,");
+	it("follows a choice made for its terminal's host, not the rail's", async () => {
+		await seenEndingAfter(6_000, { hostId: PI });
+
+		chosenElsewhere("restart", "host", PI);
+		settingNowSays("restart");
+		await settle();
+		expect(spawns()).toEqual([]);
+
+		chosenElsewhere("restart", "host", HOST);
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
 	});
 
-	// Restart as the overlay's Restart; Close as its Close, which the keep
-	// setting says whether to delete. Nothing written: the other overlay did.
-	it("acts as the overlay's buttons do", () => {
-		const follow = body(/function followChoice\(/);
-		expect(follow).toContain("overlayChoice(action, null, prefs.value.keepEnded);");
-		expect(follow).toContain("if (act.kind === 'restart') void onRestart({ bySetting: true });");
-		expect(follow).toContain("else closeEnded(act.keep);");
-		expect(follow).not.toContain("saveWhenEnded");
+	// Only an ended terminal's overlay, not one gone.
+	it("never follows over a terminal the hub has no record of", async () => {
+		mountPane(ref(T), "live", { setUp: shown });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId: T });
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+
+		chosenElsewhere("restart", "global");
+		settingNowSays("restart");
+		await settle();
+
+		expect(spawns()).toEqual([]);
+		expect(closes()).toEqual([]);
+	});
+
+	it("never follows over a terminal that runs a command", async () => {
+		await seenEndingAfter(6_000, {
+			setUp: () => {
+				useChannelsStore().channels = [listed(T, "live", { directProcess: true })];
+			},
+		});
+
+		chosenElsewhere("restart", "global");
+		settingNowSays("restart");
+		await settle();
+
+		expect(spawns()).toEqual([]);
+	});
+
+	// The setting as its terminal resolves it, read again after each write.
+	it("keeps asking when its terminal's own setting says otherwise", async () => {
+		await seenEndingAfter(6_000);
+
+		chosenElsewhere("restart", "global");
+		settingNowSays("close");
+		await settle();
+
+		expect(spawns()).toEqual([]);
+		expect(closes()).toEqual([]);
 	});
 });
 
@@ -496,55 +1403,120 @@ describe("TerminalPane follows a choice made on another overlay (#586)", () => {
 // pane hands it every end it finds, once, with what decides it.
 
 describe("TerminalPane follows the setting over an end it found (#592)", () => {
-	// Every way a pane finds its terminal ended goes through onTerminalEnded:
-	// the report watcher and takeAnswer, checked above, and a terminal the list
-	// already says has ended, which the pane does not ask for.
-	it("hands the setting an end it found, only the first word of it", () => {
-		const onEnded = body(/function onTerminalEnded\(/);
-		expect(onEnded).toContain(
-			"if (end.seen === 'found' && end.again !== true) waitingAnswer.endFound(facts.endReason);",
-		);
-		// Over the overlay only, which it shows first.
-		const overlayBranch =
-			/if \(reaction\.kind === 'overlay'\) \{[\s\S]*?return;/.exec(onEnded)?.[0] ?? "";
-		expect(overlayBranch).toContain("waitingAnswer.endFound(facts.endReason);");
+	it("restarts a terminal it found ended, on screen in the window with the focus", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		mountPane(ref(T), "dead", { setUp: shown });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
 
-		// takeAnswer hands an end to onTerminalEnded (checked above).
-		const open = body(/async function openChannel\(/);
-		expect(open).toMatch(
-			/if \(isDead\.value\) \{\s*const chId = props\.channelId;\s*try \{\s*await attachAndCover\(chId\);\s*\} catch \{[\s\S]*?takeAnswer\(chId, factsFromKnownEnd\(\)\);[\s\S]*?\} else \{[\s\S]*?await attachAndCover\(props\.channelId\);\s*\}/,
-		);
+		refuse(T);
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ reuseChannelId: T, automatic: true });
+	});
+
+	// Whatever the list said: here it said the terminal runs.
+	it("restarts a terminal its attach found ended, which the list said runs", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		mountPane(ref(T), "live", { setUp: shown });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+
+		refuse(T);
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ reuseChannelId: T, automatic: true });
+	});
+
+	// Until its profile is read, a pane holds the default, which says "ask".
+	it("waits for its setting to be read for its terminal, saying only that it exited", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		xterm.profileRead = false;
+		mountPane(ref(T), "dead", { setUp: shown });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		refuse(T);
+		await settle();
+		expect(spawns()).toEqual([]);
+		expect(quietLine()).toBe("Shell exited (code 1)");
+
+		paneProfile().read.value = true;
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+	});
+
+	// A setting that cannot be read must not leave the pane without its card;
+	// and only the first word of an end is answered: hearing of it again does not
+	// start the wait over.
+	it("asks once its setting is too long in coming, and keeps asking when it hears of the end again", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		xterm.profileRead = false;
+		mountPane(ref(T), "dead", { setUp: shown });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		refuse(T);
+		await settle();
+		expect(quietLine()).toBe("Shell exited (code 1)");
+
+		await vi.advanceTimersByTimeAsync(3_000);
+		await settle();
+		expect(card()).not.toBeNull();
+
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(T);
+		await settle();
+
+		expect(card()).not.toBeNull();
+		expect(quietLine()).toBeNull();
+	});
+
+	it("waits for its window to have the focus", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		setWindowFocus(false);
+		mountPane(ref(T), "dead", { setUp: shown });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		refuse(T);
+		await settle();
+		expect(spawns()).toEqual([]);
+		expect(quietLine()).toBe("Restarts when this window has the focus.");
+
+		setWindowFocus(true);
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+	});
+
+	// Why the hub ended it can come after the end was found: a kill keeps it asking.
+	it("keeps asking once the hub says the terminal it found ended was killed", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		setWindowFocus(false);
+		mountPane(ref(T), "dead", { setUp: shown });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		refuse(T);
+		await settle();
+
+		useChannelsStore().updateChannelStatus(T, "dead", 1, "killed");
+		await settle();
+		expect(card()).not.toBeNull();
+		setWindowFocus(true);
+		await settle();
+
+		expect(spawns()).toEqual([]);
 	});
 
 	// The restart the setting makes there runs under this pane: it takes the
 	// profile and the bell a pane that attached takes, rather than return first.
-	it("gives a pane over a terminal known to have ended its profile and its bell", () => {
-		const open = body(/async function openChannel\(/);
-		const deadBranch = /if \(isDead\.value\) \{[\s\S]*?\} else \{/.exec(open)?.[0] ?? "";
-		expect(deadBranch, "the branch moved").not.toBe("");
-		expect(deadBranch).not.toContain("return");
-		const afterAttach = open.slice(open.indexOf("await attachAndCover(props.channelId);"));
-		expect(afterAttach).toMatch(
-			/applyProfile\(resolvedProfile\.value\);[\s\S]*?terminal\.value\?\.onBell\(/,
-		);
-	});
+	it("gives a pane over a terminal known to have ended its profile and its bell", async () => {
+		xterm.profile = { bellSound: "system" };
+		await openEnded();
+		expect(terminal().options.bellStyle).toBe("none");
 
-	it("tells it why the hub ended the terminal, whether its setting was read, and whether its window has the focus", () => {
-		const call = /const waitingAnswer = useWaitingAnswer\(\{[\s\S]*?\}\);/.exec(SOURCE)?.[0] ?? "";
-		expect(call, "the call moved").not.toBe("");
-		expect(call).toContain(
-			"endReason: computed(() => channelsStore.endReasonOf(effectiveChannelId.value)),",
-		);
-		// Read for this terminal, on the host the client knows it runs on.
-		expect(call).toMatch(
-			/settingKnown: computed\(\(\) =>\s*settingReadFor\(\s*resolvedFor\.value,\s*effectiveChannelId\.value,[\s\S]*?channelsStore\.channelHostMap\.get\(effectiveChannelId\.value\),\s*\),\s*\),/,
-		);
-		expect(call).toContain("focused: useWindowFocus(),");
-		expect(call).toContain("act: followChoice,");
-		expect(SOURCE).toMatch(
-			/const \{ profile: resolvedProfile, resolvedFor \} = useResolvedProfile\(/,
-		);
-		expect(SOURCE).toContain("import { useWindowFocus } from '../composables/useWindowFocus.js';");
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnOk(T);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "AGAIN");
+		await settle();
+		hear({ type: "OUTPUT", channelId: T, data: new TextEncoder().encode("\u0007") });
+
+		expect(useNotificationStore().bellCounts.get(T)).toBe(1);
+		expect(bellSound).toHaveBeenCalledTimes(1);
 	});
 });
 
@@ -555,60 +1527,99 @@ describe("TerminalPane follows the setting over an end it found (#592)", () => {
 // feeds it what it knows, and shows what it answers.
 
 describe("TerminalPane shows the card only when it asks (#595)", () => {
-	it("feeds endedPaneShows what it knows", () => {
-		const view = /const endedView = computed\(\(\) =>[\s\S]*?\r?\n\);/.exec(SOURCE)?.[0] ?? "";
-		expect(view, "endedView moved").not.toBe("");
-		expect(view).toContain("cover: cover.value,");
-		// Still opening, it says "Connecting…", and has not taken in the end yet.
-		expect(view).toContain("opening: !ready.value,");
-		expect(view).toContain("restarting: restarting.value,");
-		// The end the setting has still to answer, from useWaitingAnswer.
-		expect(view).toContain("found: waitingAnswer.found.value,");
-		expect(view).toContain("settingOverdue: waitingAnswer.settingOverdue.value,");
-		expect(view).toContain("exitMessage: exitMessage.value,");
+	// Still opening, it says "Connecting…", and has not taken in the end yet.
+	it("says only that it is connecting while it opens over an ended terminal", async () => {
+		mountPane(ref(T), "dead");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		await settle();
+
+		expect(paneText()).toContain("Connecting…");
+		expect(card()).toBeNull();
+		expect(quietLine()).toBeNull();
 	});
 
-	it("shows the card when it says so, and the quiet line in its place otherwise", () => {
-		expect(SOURCE).toMatch(/<div v-if="endedView\.kind === 'card'" class="exit-overlay"[^>]*>/);
-		expect(SOURCE).toMatch(
-			/<span v-if="endedView\.kind === 'quiet'" class="exit-status__text">\{\{ endedView\.text \}\}<\/span>/,
-		);
-		// A restart under way no longer shows on the card, which gives way to it.
-		expect(SOURCE).not.toContain(':disabled="restarting"');
+	it("shows the quiet line in place of the card while the setting restarts", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		await openLive({ setUp: writer });
+
+		runFor(6_000);
+		endIt();
+		await settle();
+
+		expect(quietLine()).toBe("Restarting…");
+		expect(card()).toBeNull();
 	});
 
-	// Announced politely, and heard: a live region already in the page when
-	// its text changes.
-	it("tells a screen reader the quiet line, without taking the keyboard", () => {
-		expect(SOURCE).toMatch(
-			/<div class="exit-status">\s*<div class="exit-status__line" role="status">\s*<span v-if="endedView\.kind === 'quiet'"/,
-		);
-		const style = SOURCE.slice(SOURCE.indexOf("<style")).replace(/\r\n/g, "\n");
-		const status = /\n\.exit-status \{([^}]*)\}/.exec(style)?.[1] ?? "";
-		expect(status, "the .exit-status rule moved").toMatch(/pointer-events:\s*none/);
+	// Announced politely, and heard: a live region already in the page when its
+	// text changes. It takes neither the keyboard nor the pointer.
+	it("tells a screen reader the quiet line, without taking the keyboard", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		themed("one-half-dark");
+		await openLive({
+			setUp: () => {
+				writer();
+				shown();
+			},
+		});
+		const region = root.querySelector('[role="status"]');
+		expect(region?.textContent?.trim()).toBe("");
+		const keyboard = document.activeElement;
+
+		runFor(6_000);
+		endIt();
+		await settle();
+
+		expect(region?.isConnected).toBe(true);
+		expect(region?.textContent?.trim()).toBe("Restarting…");
+		expect(document.activeElement).toBe(keyboard);
+		expect(getComputedStyle(root.querySelector(".exit-status")!).pointerEvents).toBe("none");
 	});
 
 	// When the setting turns out to ask, or a restart failed, the card comes up
 	// after the line, and takes the keyboard as it did before.
-	it("gives the keyboard to the card each time it comes up", () => {
-		const watcher =
-			/watch\(\s*\(\) => endedView\.value\.kind === 'card',[\s\S]*?\{ immediate: true \},\s*\);/.exec(
-				SOURCE,
-			)?.[0] ?? "";
-		expect(watcher, "the card watcher moved").not.toBe("");
-		expect(watcher).toContain("alwaysOn.value = false;");
-		expect(watcher).toContain("void nextTick(focusOverlay);");
+	it("gives the keyboard to the card each time it comes up, its box unchecked", async () => {
+		await openEnded({ setUp: shown });
+		vi.spyOn(useConfigStore(), "saveWhenEnded").mockResolvedValue(true);
+		alwaysBox()?.click();
+		scopeRadio("everywhere")?.click();
+
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(quietLine()).toBe("Restarting…"));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		await settle();
+
+		expect(document.activeElement).toBe(card());
+		expect(alwaysBox()?.checked).toBe(false);
+		expect(scopeRadio("this host")?.querySelector("input")?.checked).toBe(true);
 	});
 
 	// An end seen live that the setting restarts: the dead report and the
 	// restart are one step, so the card has no moment to show in.
-	it("starts a live restart before anything is drawn", () => {
-		expect(body(/function onTerminalEnded\(/)).toContain(
-			"if (reaction.kind === 'restart') void onRestart({ bySetting: true });",
-		);
-		const onRestart = body(/async function onRestart\(/);
-		expect(onRestart.indexOf("restarting.value = true;")).toBeGreaterThan(-1);
-		expect(onRestart.indexOf("restarting.value = true;")).toBeLessThan(onRestart.indexOf("await "));
+	it("starts a live restart before anything is drawn", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		await openLive({ setUp: writer });
+		runFor(6_000);
+		const cards: Node[] = [];
+		const record = (records: MutationRecord[]) => {
+			for (const { addedNodes } of records) {
+				for (const node of addedNodes) {
+					if (node instanceof Element && node.matches(".exit-overlay, :has(.exit-overlay)")) {
+						cards.push(node);
+					}
+				}
+			}
+		};
+		const drawing = new MutationObserver(record);
+		drawing.observe(root, { childList: true, subtree: true });
+
+		endIt();
+		await settle();
+		record(drawing.takeRecords());
+		drawing.disconnect();
+
+		expect(spawns()).toHaveLength(1);
+		expect(cards).toEqual([]);
 	});
 });
 
@@ -621,38 +1632,60 @@ describe("TerminalPane shows the card only when it asks (#595)", () => {
 // whose host was disconnected.
 
 describe("TerminalPane over a host its user disconnected (#648)", () => {
-	it("tells the hub which restarts nobody asked for: the setting's and the host's return", () => {
-		expect(body(/async function onRestart\(/)).toMatch(
-			/channelsStore\.restartChannel\(chId, paneHostId\.value, \{\s*automatic: opts\?\.automatic === true \|\| opts\?\.bySetting === true,\s*\}\)/,
-		);
-		expect(body(/function onTerminalEnded\(/)).toContain("void onRestart({ bySetting: true })");
-		expect(body(/function followChoice\(/)).toContain("void onRestart({ bySetting: true })");
-		expect(SOURCE).toContain("restart: () => void onRestart({ automatic: true }),");
+	it("leaves the card's Restart a person's, which connects the host again", async () => {
+		await openEnded();
+
+		button("Restart")?.click();
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).not.toHaveProperty("automatic");
 	});
 
-	it("leaves the card's Restart a person's, which connects the host again", () => {
-		expect(body(/function onOverlayAction\(/)).toContain(
-			"if (act.kind === 'restart') void onRestart();",
+	it("shows its terminal not connected: what it last showed, typing going nowhere", async () => {
+		await openLive({ hostId: PI });
+		expect(banner()).toBeNull();
+
+		useHostsStore().setDisconnectedByUser([PI]);
+		await settle();
+		expect(banner()).toBeNull();
+
+		useHostsStore().setDisconnectedByUser([HOST]);
+		await settle();
+		expect(banner()?.textContent).toContain(
+			"Not connected. This is what this terminal last showed; typing here goes nowhere.",
 		);
 	});
 
-	it("shows its terminal not connected: what it last showed, typing going nowhere", () => {
-		expect(SOURCE).toMatch(
-			/const hostDisconnectedByUser = computed\(\(\) => \{[\s\S]*?hostsStore\.isDisconnectedByUser\(hostId\)/,
-		);
-		expect(SOURCE).toContain("detached: isDetached.value || hostDisconnectedByUser.value,");
+	it("connects that host on its Reconnect, before attaching", async () => {
+		await openLive();
+		useHostsStore().setDisconnectedByUser([HOST]);
+		await settle();
+		let connected: (answer: { ok: boolean; status: number; body: object }) => void = () => {};
+		const connect = vi
+			.spyOn(useHostsStore(), "connectHost")
+			.mockReturnValue(new Promise((resolve) => (connected = resolve)));
+
+		button("Reconnect")?.click();
+		await settle();
+		expect(connect).toHaveBeenCalledWith(HOST);
+		expect(attaches()).toHaveLength(1);
+
+		connected({ ok: true, status: 200, body: {} });
+
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
 	});
 
-	it("connects that host on its Reconnect, before attaching", () => {
-		expect(SOURCE).toContain(
-			'<button class="detached-btn" @click="onReconnectClicked">Reconnect</button>',
-		);
-		const clicked = body(/async function onReconnectClicked\(/);
-		expect(clicked).toContain("hostsStore.isDisconnectedByUser(hostId)");
-		expect(clicked.indexOf("hostsStore.connectHost(hostId)")).toBeGreaterThan(-1);
-		expect(clicked.indexOf("hostsStore.connectHost(hostId)")).toBeLessThan(
-			clicked.indexOf("await onReconnect();"),
-		);
+	it("attaches at once on a Reconnect whose host nobody disconnected", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		const connect = vi.spyOn(useHostsStore(), "connectHost");
+
+		button("Reconnect")?.click();
+
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		expect(connect).not.toHaveBeenCalled();
 	});
 });
 
@@ -663,58 +1696,91 @@ describe("TerminalPane over a host its user disconnected (#648)", () => {
 // check that the pane hands it every restart's outcome, and shows its line.
 
 describe("TerminalPane waits for the host of a restart that found it away (#605)", () => {
-	// Every restart goes through onRestart: the card's, the setting's, a choice
+	/** A pane over T whose Restart found its host away. */
+	async function restartFindsHostAway(open: Open = {}): Promise<void> {
+		await openEnded({
+			...open,
+			setUp: () => {
+				useHostsStore().hosts.push(host(HOST, "pi"));
+				open.setUp?.();
+			},
+		});
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("HOST_UNREACHABLE", "pi cannot be reached", {
+			hostId: HOST,
+			hostStatus: "disconnected",
+		});
+		await settle();
+	}
+
+	it("says which host it waits for", async () => {
+		await restartFindsHostAway();
+
+		expect(quietLine()).toBe("Waiting for pi…");
+		expect(card()).toBeNull();
+	});
+
+	// Every restart goes through one road: the card's, the setting's, a choice
 	// made on another overlay, and the host's return.
-	it("hands the wait every restart's outcome", () => {
-		const onRestart = body(/async function onRestart\(/);
-		expect(onRestart).toContain(
-			"async function onRestart(opts?: { automatic?: boolean; bySetting?: boolean })",
-		);
-		// A new attempt decides afresh, from before anything is awaited.
-		expect(onRestart.indexOf("hostWait.restartStarting();")).toBeGreaterThan(-1);
-		expect(onRestart.indexOf("hostWait.restartStarting();")).toBeLessThan(
-			onRestart.indexOf("await "),
-		);
-		expect(onRestart).toMatch(
-			/if \(!ok\) \{\s*endWatch\.lost\(\);[\s\S]*?hostWait\.restartFailed\(channelsStore\.restartFailures\.get\(chId\), opts\?\.automatic === true\);\s*\}/,
+	it("restarts on the host's return, as one nobody asked for", async () => {
+		await restartFindsHostAway();
+
+		useHostsStore().updateSessionStatus(HOST, "active");
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(2));
+		expect(spawns()[1]).toMatchObject({ reuseChannelId: T, automatic: true });
+	});
+
+	it("waits over its terminal ended only", async () => {
+		await restartFindsHostAway();
+		// Brought back from elsewhere meanwhile.
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "BACK");
+		await settle();
+
+		useHostsStore().updateSessionStatus(HOST, "active");
+		await settle();
+
+		expect(spawns()).toHaveLength(1);
+	});
+
+	// Another restart, here a choice made on another overlay, decides afresh
+	// whether to wait: its terminal ending again at once brings the card back.
+	it("stops waiting for its host once another restart starts", async () => {
+		await restartFindsHostAway({ setUp: shown });
+		expect(quietLine()).toBe("Waiting for pi…");
+
+		chosenElsewhere("restart", "global");
+		settingNowSays("restart");
+		await vi.waitFor(() => expect(spawns()).toHaveLength(2));
+		spawnOk(T);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(T);
+		await settle();
+
+		expect(quietLine()).toBeNull();
+		expect(card()?.textContent).toContain(
+			"It ended right after starting, so it wasn't restarted automatically.",
 		);
 	});
 
-	it("restarts on the host's return as one made on its own, over its terminal ended only", () => {
-		const call = /const hostWait = useWaitForHost\(\{[\s\S]*?\}\);/.exec(SOURCE)?.[0] ?? "";
-		expect(call, "the call moved").not.toBe("");
-		expect(call).toContain("ended: computed(() => cover.value === 'exited'),");
-		expect(call).toContain("channelId: effectiveChannelId,");
-		expect(call).toContain("restart: () => void onRestart({ automatic: true }),");
-		expect(SOURCE).toContain("import { useWaitForHost } from '../composables/useWaitForHost.js';");
-	});
+	// Outside the live region, so that a screen reader hears the line alone. The
+	// line lets clicks through; its Cancel takes them.
+	it("offers Cancel beside the line, which brings the card back with the reason", async () => {
+		themed("one-half-dark");
+		await restartFindsHostAway();
+		const cancel = button("Cancel");
+		expect(cancel).toBeDefined();
+		expect(cancel?.closest('[role="status"]')).toBeNull();
+		expect(getComputedStyle(cancel!).pointerEvents).toBe("auto");
 
-	it("says which host it waits for, and offers Cancel beside the line", () => {
-		const view = /const endedView = computed\(\(\) =>[\s\S]*?\r?\n\);/.exec(SOURCE)?.[0] ?? "";
-		expect(view).toContain("waitingForHost: waitingForHost.value,");
-		expect(SOURCE).toMatch(
-			/const hostId = hostWait\.waitingFor\.value;[\s\S]*?label: hostsStore\.hosts\.find\(\(h\) => h\.id === hostId\)\?\.label/,
-		);
+		cancel?.click();
+		await settle();
 
-		// Outside the live region, so that a screen reader hears the line alone.
-		const status = /<div class="exit-status">[\s\S]*?<\/button>/.exec(SOURCE)?.[0] ?? "";
-		expect(status, "the status block moved").not.toBe("");
-		const region = /role="status">[\s\S]*?<\/div>/.exec(status)?.[0] ?? "";
-		expect(region).not.toContain("<button");
-		expect(status).toMatch(
-			/<button\s+v-if="endedView\.kind === 'quiet' && endedView\.cancel"[\s\S]*?@click="onCancelWaiting"[\s\S]*?>Cancel<\/button>/,
-		);
-		expect(body(/function onCancelWaiting\(/)).toContain("hostWait.cancel();");
-
-		// The line lets clicks through; its Cancel takes them.
-		const style = SOURCE.slice(SOURCE.indexOf("<style")).replace(/\r\n/g, "\n");
-		const cancel = /\n\.exit-status__cancel \{([^}]*)\}/.exec(style)?.[1] ?? "";
-		expect(cancel, "the .exit-status__cancel rule moved").toMatch(/pointer-events:\s*auto/);
-	});
-
-	// The card still says why, once the wait is cancelled or for any other failure.
-	it("shows the reason a restart failed on the card", () => {
-		expect(SOURCE).toContain("channelsStore.restartFailures.get(chId)?.reason;");
+		expect(quietLine()).toBeNull();
+		expect(card()?.textContent).toContain("Could not restart it: pi cannot be reached");
 	});
 });
 
@@ -722,123 +1788,105 @@ describe("TerminalPane waits for the host of a restart that found it away (#605)
 //
 // The card is drawn in the theme's own tokens, so its contrast is the theme's
 // to guarantee. Checked here for every bundled theme, light and dark, against
-// WCAG AA for text (4.5:1), with the colours the component's own rules name.
+// WCAG AA for text (4.5:1), with the colours the card's own rules draw.
 
-describe("TerminalPane overlay card contrast (#574)", () => {
-	const style = SOURCE.slice(SOURCE.indexOf("<style")).replace(/\r\n/g, "\n");
+/** A computed colour as [r, g, b, alpha]; null for none. */
+function rgba(css: string): [number, number, number, number] | null {
+	const hex = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(css.trim());
+	if (hex) return [1, 2, 3].map((i) => Number.parseInt(hex[i]!, 16)).concat(1) as never;
+	const fn = /^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/.exec(css.trim());
+	if (fn) return [Number(fn[1]), Number(fn[2]), Number(fn[3]), Number(fn[4] ?? 1)];
+	return null;
+}
 
-	/** The declarations of the rule for exactly `selector`. */
-	function declarations(selector: string): Map<string, string> {
-		const escaped = selector.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
-		const rule = new RegExp(`\\n${escaped}\\s*\\{([^}]*)\\}`).exec(style);
-		if (!rule?.[1]) throw new Error(`no rule for ${selector}`);
-		const out = new Map<string, string>();
-		for (const line of rule[1].split(";")) {
-			const [prop, ...value] = line.split(":");
-			if (prop && value.length > 0) out.set(prop.trim(), value.join(":").trim());
-		}
-		return out;
+/** What `el`'s text is read on: the nearest ground that is not transparent. */
+function groundOf(el: Element): [number, number, number] {
+	for (let at: Element | null = el; at !== null; at = at.parentElement) {
+		const colour = rgba(getComputedStyle(at).backgroundColor);
+		if (colour === null || colour[3] === 0) continue;
+		if (colour[3] !== 1) throw new Error(`${at.className}: a ground that is not opaque`);
+		return [colour[0], colour[1], colour[2]];
 	}
+	throw new Error(`${el.className}: no ground`);
+}
 
-	/** The colour an expression the rules use stands for, once a theme is applied. */
-	function resolve(expr: string): [number, number, number] | null {
-		const root = document.documentElement.style;
-		if (expr === "transparent") return null;
-		const v = /^var\((--nt-[\w-]+)\)$/.exec(expr);
-		if (v?.[1]) {
-			const hex = root.getPropertyValue(v[1]).trim();
-			if (!/^#[0-9a-fA-F]{6}$/.test(hex)) throw new Error(`${v[1]} is ${hex}, not a solid colour`);
-			return hexToRgb(hex).split(", ").map(Number) as [number, number, number];
-		}
-		const triple = /^rgb\(var\((--nt-[\w-]+-rgb)\)\)$/.exec(expr);
-		if (triple?.[1]) {
-			return root.getPropertyValue(triple[1]).split(",").map(Number) as [number, number, number];
-		}
-		throw new Error(`cannot check the contrast of ${expr}`);
-	}
+function contrastOf(el: Element): number {
+	const text = rgba(getComputedStyle(el).color);
+	if (text === null) throw new Error(`${el.className}: no colour`);
+	return contrastRatio([text[0], text[1], text[2]], groundOf(el));
+}
 
-	/**
-	 * Each piece of text on the card, as the rules that style it from the card
-	 * down: the last colour named wins, and the nearest ground that is not
-	 * transparent is what it is read on.
-	 */
-	const texts: Record<string, string[]> = {
-		message: [".exit-card", ".exit-message"],
-		reason: [".exit-card", ".exit-reason"],
-		checkbox: [".exit-card", ".exit-option"],
-		"where, not chosen": [".exit-card", ".exit-scope-option"],
-		"where, chosen": [".exit-card", ".exit-scope-option", ".exit-scope-option--on"],
-		button: [".exit-card", ".exit-btn"],
-		Restart: [".exit-card", ".exit-btn", ".exit-btn--primary"],
-		// In place of the card, while the setting acts (#595).
-		"quiet line": [".exit-status__text"],
-	};
+describe("TerminalPane overlay card colours (#574)", () => {
+	it("draws the card on an opaque ground of the theme's, under a shadow", async () => {
+		themed("one-half-dark");
+		await openEnded();
+		const style = getComputedStyle(card()!);
 
-	function pair(rules: string[]): { text: string; ground: string } {
-		const decls = rules.map(declarations);
-		const text = decls
-			.map((d) => d.get("color"))
-			.filter((c) => c !== undefined)
-			.at(-1);
-		const ground = decls
-			.map((d) => d.get("background"))
-			.filter((b) => b !== undefined && b !== "transparent")
-			.at(-1);
-		if (text === undefined || ground === undefined) throw new Error(`${rules.join(" ")}: no pair`);
-		return { text, ground };
-	}
-
-	it("draws the card on an opaque ground of the theme's, under a shadow", () => {
-		const card = declarations(".exit-card");
-		expect(card.get("background")).toBe("rgb(var(--nt-bg-rgb))");
-		expect(card.get("color")).toBe("var(--nt-text-strong)");
-		expect(card.get("border")).toBe("1px solid var(--nt-border)");
-		expect(card.get("box-shadow")).toBe("var(--nt-shadow)");
+		expect(rgba(style.backgroundColor)).toEqual([40, 44, 52, 1]);
+		expect(rgba(style.color)).toEqual([220, 223, 228, 1]);
+		expect(rgba(style.borderTopColor)).toEqual([62, 68, 82, 1]);
+		expect(style.boxShadow).toBe("0 4px 24px rgba(0, 0, 0, 0.6)");
 	});
 
 	// What the terminal last printed shows around the card, and can be read,
 	// scrolled and selected there (#927): no scrim, no blur, and the overlay
 	// lets the pointer through to the terminal everywhere but on the card.
-	it("keeps the gone card's scrim over a screen that is not that terminal's", () => {
-		expect(SOURCE).toMatch(/class="exit-overlay" :class="\{ 'exit-overlay--gone': isGone \}"/);
-		const gone = declarations(".exit-overlay--gone");
-		expect(gone.get("background")).toBe("var(--nt-overlay)");
-		expect(gone.get("backdrop-filter")).toBe("blur(2px)");
-		expect(gone.get("pointer-events")).toBe("auto");
+	it("leaves an ended terminal's output readable around the card", async () => {
+		themed("one-half-dark");
+		await openEnded();
+		const overlay = getComputedStyle(root.querySelector(".exit-overlay")!);
+
+		expect(rgba(overlay.backgroundColor)?.[3] ?? 0).toBe(0);
+		expect(["", "none"]).toContain(overlay.backdropFilter);
+		expect(overlay.pointerEvents).toBe("none");
+		expect(getComputedStyle(card()!).pointerEvents).toBe("auto");
 	});
 
-	it("leaves an ended terminal's output readable around the card", () => {
-		const overlay = declarations(".exit-overlay");
-		expect(["transparent", undefined]).toContain(overlay.get("background"));
-		expect(overlay.get("backdrop-filter")).toBeUndefined();
-		expect(overlay.get("pointer-events")).toBe("none");
-		expect(declarations(".exit-card").get("pointer-events")).toBe("auto");
+	it("keeps the gone card's scrim over a screen that is not that terminal's", async () => {
+		themed("one-half-dark");
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId: T });
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		const overlay = getComputedStyle(root.querySelector(".exit-overlay")!);
+
+		expect(rgba(overlay.backgroundColor)).toEqual([0, 0, 0, 0.5]);
+		expect(overlay.backdropFilter).toBe("blur(2px)");
+		expect(overlay.pointerEvents).toBe("auto");
 	});
 
-	// A hover that tinted a button's ground would take its text below the
-	// contrast checked here.
-	it("keeps the colours when a button is hovered", () => {
-		const hovers = [...style.matchAll(/\n(\.exit-[^{\n]*:hover[^{\n]*)\{([^}]*)\}/g)];
-		expect(hovers.length).toBeGreaterThan(0);
-		for (const [, selector, block] of hovers) {
-			expect(block, selector).not.toMatch(/(^|[\s;])(color|background|opacity)\s*:/);
-		}
-	});
-
-	for (const [name, theme] of Object.entries(BUNDLED_THEMES)) {
-		it(`reads at 4.5:1 or better in ${name}`, () => {
-			setActivePinia(createPinia());
-			useThemeStore().applyTheme(theme);
-			for (const [what, rules] of Object.entries(texts)) {
-				const { text, ground } = pair(rules);
-				const fg = resolve(text);
-				const bg = resolve(ground);
-				if (fg === null || bg === null) throw new Error(`${what}: transparent`);
-				const ratio = contrastRatio(fg, bg);
-				expect(ratio, `${what} (${text} on ${ground}): ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(
-					TEXT_CONTRAST_AA,
-				);
+	for (const name of Object.keys(BUNDLED_THEMES)) {
+		it(`reads at 4.5:1 or better in ${name}`, async () => {
+			xterm.profile = { whenEnded: "restart" };
+			themed(name);
+			// Its setting held back by another window's write lock: a reason on the card.
+			await openLive({ setUp: () => useWriteLockStore().handleWriteLock(T, OTHER_CLIENT) });
+			runFor(6_000);
+			endIt();
+			await vi.waitFor(() => expect(card()).not.toBeNull());
+			vi.spyOn(useConfigStore(), "saveWhenEnded").mockResolvedValue(true);
+			// Checked, so that where it applies is drawn at full strength.
+			alwaysBox()?.click();
+			await settle();
+			const texts: Record<string, Element | null | undefined> = {
+				message: card()?.querySelector(".exit-message"),
+				reason: card()?.querySelector(".exit-reason"),
+				checkbox: card()?.querySelector(".exit-option"),
+				"where, chosen": scopeRadio("this host"),
+				"where, not chosen": scopeRadio("everywhere"),
+				button: button("Close"),
+				Restart: button("Restart"),
+			};
+			for (const [what, el] of Object.entries(texts)) {
+				if (el == null) throw new Error(`${what}: not on the card`);
+				expect(contrastOf(el), what).toBeGreaterThanOrEqual(TEXT_CONTRAST_AA);
 			}
+
+			// In place of the card, while it restarts (#595).
+			button("Restart")?.click();
+			await vi.waitFor(() => expect(quietLine()).toBe("Restarting…"));
+			const line = root.querySelector(".exit-status__text")!;
+			expect(contrastOf(line), "quiet line").toBeGreaterThanOrEqual(TEXT_CONTRAST_AA);
 		});
 	}
 });

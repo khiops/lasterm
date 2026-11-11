@@ -161,6 +161,10 @@
 					"style": { "noRestrictedGlobals": "off" }
 				}
 			}
+		},
+		{
+			"includes": ["packages/clients/web/src/components/VacantPane.vue"],
+			"plugins": ["./packages/clients/web/lint/no-literal-colour.grit"]
 		}
 	],
 	"formatter": {

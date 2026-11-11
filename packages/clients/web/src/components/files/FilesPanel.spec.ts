@@ -1,13 +1,15 @@
 /**
  * The files panel (#836): a landmark named for its host, its Files part in that host's colours
  * and its Transfers part the window's, neutral; a retarget to another host that shows and is
- * said once; the pin; the split between the parts; its forms; and its cards on an opaque ground
- * in every bundled theme, whatever the panel's own opacity.
+ * said once; the pin; the split between the parts; its forms; and its cards on an opaque ground,
+ * whatever the panel's own opacity. Their contrast in every bundled theme is checked in a browser
+ * (FilesPanel.browser.spec.ts), which computes the colour-mix() text levels happy-dom does not.
  */
-import { BUNDLED_THEMES, type Host } from "@lasterm/shared";
+import { BUNDLED_THEMES, DEFAULT_PROFILE, type Host } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, reactive } from "vue";
+import "../../styles/base.css";
 
 const mocks = vi.hoisted(() => ({
 	listHostFiles: vi.fn(),
@@ -26,12 +28,9 @@ import { useChannelsStore } from "../../stores/channels.js";
 import { useConfigStore } from "../../stores/config.js";
 import { useFilesPanelStore } from "../../stores/files-panel.js";
 import { useHostsStore } from "../../stores/hosts.js";
-import { contrastRatio, hexToRgb, TEXT_CONTRAST_AA, useThemeStore } from "../../stores/theme.js";
+import { useThemeStore } from "../../stores/theme.js";
 import type { FilesPanelForm } from "../../utils/files-panel.js";
-import BROWSER from "./FilesBrowser.vue?raw";
-import OPTIONS from "./FilesOptions.vue?raw";
 import FilesPanel from "./FilesPanel.vue";
-import PANEL from "./FilesPanel.vue?raw";
 
 const RPI = "01ARZ3NDEKTSV4RRFFQ69G5FR1";
 const AD = "01ARZ3NDEKTSV4RRFFQ69G5FA1";
@@ -149,7 +148,16 @@ afterEach(() => {
 	app = null;
 	root?.remove();
 	vi.useRealTimers();
+	document.documentElement.removeAttribute("style");
+	device().prefersReducedMotion = "no-preference";
 });
+
+/** What happy-dom's window says of the device: whether its user asks for reduced motion. */
+function device(): { prefersReducedMotion: string } {
+	return (
+		window as unknown as { happyDOM: { settings: { device: { prefersReducedMotion: string } } } }
+	).happyDOM.settings.device;
+}
 
 describe("the panel's two parts", () => {
 	it("is a landmark named for its host, an F6 zone, with a Files and a Transfers region", async () => {
@@ -215,10 +223,20 @@ describe("moving the focus to a pane on another host", () => {
 		expect(mocks.listHostFiles.mock.calls.at(-1)?.[0]).toBe(ON_AD);
 	});
 
-	it("draws no ring under reduced motion", () => {
-		expect(PANEL).toMatch(
-			/@media \(prefers-reduced-motion: reduce\) \{\s*\.files-part--retarget \.files-header \{\s*animation: none;/,
-		);
+	it.each([
+		["no-preference", true],
+		["reduce", false],
+	])("draws the ring as it fades, unless motion is reduced: %s", async (motion, rings) => {
+		device().prefersReducedMotion = motion;
+		await mountPanel();
+		const header = (): Element => filesPart().querySelector(".files-header") as Element;
+		expect(getComputedStyle(header()).animation).toBe("");
+		useFilesPanelStore().setFocused(ON_AD);
+		await settle();
+		expect(filesPart().classList).toContain("files-part--retarget");
+		const animation = getComputedStyle(header()).animation;
+		if (rings) expect(animation).toMatch(/^files-retarget\S* 600ms ease-out$/);
+		else expect(animation).toBe("none");
 	});
 
 	it("stays on the pinned terminal, and offers to show it once its tab is not shown", async () => {
@@ -353,100 +371,121 @@ describe("the writer's panel a reader follows", () => {
 //
 // The panel's ground is the terminal list's, at its opacity; whatever asks or warns sits on the
 // exit card's opaque ground, so it reads over a wallpaper, Mica, Acrylic or a see-through window.
-// Checked in every bundled theme, light and dark, against WCAG AA for text (4.5:1), as
-// TerminalPane.spec.ts checks the exit card.
+// Checked here in a dark and a light theme, the panel at 80 % opacity; their contrast in every
+// bundled theme, in FilesPanel.browser.spec.ts.
 
 describe("the panel's grounds and cards", () => {
-	function styleOf(source: string): string {
-		return source.slice(source.indexOf("<style")).replace(/\r\n/g, "\n");
+	interface Drawn {
+		/** The terminal list's ground at 80 %. */
+		docked: string;
+		/** The exit card's: the theme's background, opaque. */
+		opaque: string;
+		text: string;
+		border: string;
+		shadow: string;
 	}
 
-	function declarations(source: string, selector: string): Map<string, string> {
-		const escaped = selector.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
-		const rule = new RegExp(`\\n${escaped}\\s*\\{([^}]*)\\}`).exec(styleOf(source));
-		if (!rule?.[1]) throw new Error(`no rule for ${selector}`);
-		const out = new Map<string, string>();
-		for (const line of rule[1].split(";")) {
-			const [prop, ...value] = line.split(":");
-			if (prop && value.length > 0) out.set(prop.trim(), value.join(":").trim());
-		}
-		return out;
-	}
-
-	function resolve(expr: string): [number, number, number] {
-		const style = document.documentElement.style;
-		const v = /^var\((--nt-[\w-]+)\)$/.exec(expr);
-		if (v?.[1]) {
-			const hex = style.getPropertyValue(v[1]).trim();
-			if (!/^#[0-9a-fA-F]{6}$/.test(hex)) throw new Error(`${v[1]} is ${hex}, not a solid colour`);
-			return hexToRgb(hex).split(", ").map(Number) as [number, number, number];
-		}
-		const triple = /^rgb\(var\((--nt-[\w-]+-rgb)\)\)$/.exec(expr);
-		if (triple?.[1]) {
-			return style.getPropertyValue(triple[1]).split(",").map(Number) as [number, number, number];
-		}
-		throw new Error(`cannot check the contrast of ${expr}`);
-	}
-
-	/** Text and ground, from the rules styling it from the card down: the last named wins. */
-	function pair(source: string, rules: string[]): { text: string; ground: string } {
-		const decls = rules.map((rule) => declarations(source, rule));
-		const text = decls
-			.map((d) => d.get("color"))
-			.filter((c) => c !== undefined && c !== "inherit")
-			.at(-1);
-		const ground = decls
-			.map((d) => d.get("background"))
-			.filter((b) => b !== undefined && b !== "transparent")
-			.at(-1);
-		if (text === undefined || ground === undefined) throw new Error(`${rules.join(" ")}: no pair`);
-		return { text, ground };
-	}
-
-	const TEXTS: [string, string, string[]][] = [
-		["error card", BROWSER, [".files-card"]],
-		["error card's text", BROWSER, [".files-card", ".files-card__text"]],
-		["error card's button", BROWSER, [".files-card", ".files-btn"]],
-		["error card's Connect", BROWSER, [".files-card", ".files-btn", ".files-btn--primary"]],
-		["scope question", OPTIONS, [".files-card", ".files-scope__ask"]],
-		["scope question's drops", OPTIONS, [".files-card", ".files-scope__drops"]],
-		["scope choice", OPTIONS, [".files-card", ".files-btn"]],
-		["scope choice, the host", OPTIONS, [".files-card", ".files-btn", ".files-btn--primary"]],
+	const DRAWN: [string, Drawn][] = [
+		[
+			"one-half-dark",
+			{
+				docked: "rgba(33, 37, 43, 0.8)",
+				opaque: "rgb(40, 44, 52)",
+				text: "#dcdfe4",
+				border: "#3e4452",
+				shadow: "0 4px 24px rgba(0, 0, 0, 0.6)",
+			},
+		],
+		[
+			"solarized-light",
+			{
+				docked: "rgba(238, 232, 213, 0.8)",
+				opaque: "rgb(253, 246, 227)",
+				text: "#5f747b",
+				border: "#d6ceb0",
+				shadow: "0 4px 24px rgba(0, 0, 0, 0.15)",
+			},
+		],
 	];
 
-	it("takes the terminal list's ground and opacity, and an opaque one when floating", () => {
-		expect(declarations(PANEL, ".files-panel").get("background")).toBe(
-			"rgba(var(--nt-sidebar-rgb), var(--nt-sidebar-alpha))",
-		);
-		expect(declarations(PANEL, ".files-panel--overlay").get("background")).toBe(
-			"rgb(var(--nt-bg-rgb))",
-		);
-		expect(declarations(PANEL, ".files-panel--sheet").get("background")).toBe(
-			"rgb(var(--nt-bg-rgb))",
-		);
-	});
-
-	it("draws its cards on the exit card's opaque ground, under a shadow", () => {
-		for (const source of [BROWSER, OPTIONS]) {
-			const card = declarations(source, ".files-card");
-			expect(card.get("background")).toBe("rgb(var(--nt-bg-rgb))");
-			expect(card.get("color")).toBe("var(--nt-text-strong)");
-			expect(card.get("border")).toBe("1px solid var(--nt-border)");
-			expect(card.get("box-shadow")).toBe("var(--nt-shadow)");
-		}
-	});
-
-	for (const [name, theme] of Object.entries(BUNDLED_THEMES)) {
-		it(`reads at 4.5:1 or better on its cards in ${name}`, () => {
-			setActivePinia(createPinia());
-			useThemeStore().applyTheme(theme);
-			for (const [what, source, rules] of TEXTS) {
-				const { text, ground } = pair(source, rules);
-				const ratio = contrastRatio(resolve(text), resolve(ground));
-				expect(ratio, `${what} (${text} on ${ground}): ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(
-					TEXT_CONTRAST_AA,
-				);
-			}
-		});
+	function applyTheme(name: string): void {
+		const theme = useThemeStore();
+		theme.applyTheme(BUNDLED_THEMES[name]!);
+		theme.applyOpacity({ terminal: 100, sidebar: 80, hostRail: 100, tabBar: 100 });
 	}
+
+	it.each(DRAWN)(
+		"takes the terminal list's ground and opacity, and an opaque one when floating: %s",
+		async (theme, drawn) => {
+			applyTheme(theme);
+			for (const [form, ground] of [
+				["docked", drawn.docked],
+				["overlay", drawn.opaque],
+				["sheet", drawn.opaque],
+			] as const) {
+				props.form = form;
+				await mountPanel();
+				expect(getComputedStyle(aside()).backgroundColor, form).toBe(ground);
+				app?.unmount();
+				root.remove();
+			}
+		},
+	);
+
+	it.each(DRAWN)(
+		"draws its cards on the exit card's opaque ground, under a shadow: %s",
+		async (theme, drawn) => {
+			applyTheme(theme);
+			await mountWithCards();
+			const cards = [...root.querySelectorAll(".files-card")];
+			// The listing's failure, and the question an option's change asks.
+			expect(cards.map((card) => card.getAttribute("role"))).toEqual(["alert", "group"]);
+			for (const card of cards) {
+				const style = getComputedStyle(card);
+				expect(style.backgroundColor).toBe(drawn.opaque);
+				expect(style.color).toBe(drawn.text);
+				expect([style.borderTopWidth, style.borderTopStyle, style.borderTopColor]).toEqual([
+					"1px",
+					"solid",
+					drawn.border,
+				]);
+				expect(style.boxShadow).toBe(drawn.shadow);
+			}
+		},
+	);
 });
+
+/**
+ * The panel with both its cards up: the listing failed with the host not connected, and a change
+ * to "Follow the terminal's directory", which this terminal also sets, asks its scope.
+ */
+async function mountWithCards(): Promise<void> {
+	mocks.listHostFiles.mockResolvedValue({ ok: false, code: "HOST_NOT_CONNECTED", message: "x" });
+	const layers = {
+		global: {},
+		host: { transferFollowCwd: true },
+		channel: { transferFollowCwd: true },
+	};
+	mocks.hubFetch.mockImplementation(async (url: string) => {
+		if (!String(url).startsWith("/api/config/cascade")) return new Response("{}", { status: 503 });
+		const resolved = { ...DEFAULT_PROFILE, ...layers.global, ...layers.host, ...layers.channel };
+		return new Response(
+			JSON.stringify({ terminal: { defaults: DEFAULT_PROFILE, ...layers, resolved } }),
+			{ status: 200, headers: { "Content-Type": "application/json" } },
+		);
+	});
+	useFilesPanelStore().setOptionsExpanded(true);
+	await mountPanel();
+	// A response's body is read in a later task.
+	for (let i = 0; i < 8; i++) {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		await nextTick();
+	}
+	const follow = [...root.querySelectorAll<HTMLElement>(".files-option")]
+		.find((row) => row.textContent?.includes("Follow the terminal's directory"))
+		?.querySelector<HTMLInputElement>('input[role="switch"]');
+	if (follow === undefined || follow === null) throw new Error("no Follow switch");
+	follow.checked = !follow.checked;
+	follow.dispatchEvent(new Event("change"));
+	await settle();
+}

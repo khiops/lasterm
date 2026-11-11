@@ -3,13 +3,13 @@
  * back to the font button on close, Esc closes it, Tab stays inside; its two tabs are a tablist,
  * and the installed fonts a listbox that ↑ and ↓ walk.
  */
-import type { SystemFontFamily } from "@lasterm/shared";
+import { BUNDLED_THEMES, type FontFamily, type SystemFontFamily } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, ref } from "vue";
 import { useConfigStore } from "../../stores/config.js";
+import { useThemeStore } from "../../stores/theme.js";
 import FontPicker from "./FontPicker.vue";
-import SOURCE from "./FontPicker.vue?raw";
 
 const SYSTEM: SystemFontFamily[] = [
 	{ family: "Cascadia Mono", monospace: true },
@@ -65,6 +65,7 @@ afterEach(() => {
 	root?.remove();
 	document.body.replaceChildren();
 	vi.restoreAllMocks();
+	document.documentElement.removeAttribute("style");
 });
 
 async function settle(): Promise<void> {
@@ -143,9 +144,45 @@ describe("FontPicker", () => {
 		expect(el(".font-picker-dialog").contains(document.activeElement)).toBe(true);
 	});
 
-	it("draws the keyboard's ring from the theme, on its cards too", () => {
-		expect(SOURCE).toMatch(
-			/\.font-picker-dialog :deep\(:focus-visible\)\s*\{[^}]*outline:\s*2px solid var\(--nt-accent\)/,
-		);
+	// Teleported out of Settings, it does not have the panel's ring: it draws its own, on every
+	// control of both tabs.
+	it.each([
+		["one-half-dark", "2px solid #61afef"],
+		["solarized-light", "2px solid #268bd2"],
+	])("draws the keyboard's ring from the theme, on its cards too: %s", async (theme, ring) => {
+		useThemeStore().applyTheme(BUNDLED_THEMES[theme]!);
+		useConfigStore().fonts = [{ family: "Iosevka Term", files: [] } as unknown as FontFamily];
+		mountPicker("Consolas");
+		show.value = true;
+		await settle();
+		const outline = (control: Element): string => {
+			const style = getComputedStyle(control);
+			return `${style.outlineWidth} ${style.outlineStyle} ${style.outlineColor}`;
+		};
+		const ringed = async (selectors: string[]): Promise<void> => {
+			for (const selector of selectors) {
+				el(selector).focus();
+				// happy-dom keeps computed styles until the DOM changes, and a focus change is not one.
+				const mark = document.createComment("");
+				document.body.append(mark);
+				mark.remove();
+				expect(outline(el(selector)), selector).toBe(ring);
+			}
+		};
+		// The search box marks the keyboard with its border instead.
+		await ringed([
+			".dialog-close",
+			'.font-picker-tab[data-tab="system"]',
+			'.system-font-item[data-family="Consolas"]',
+		]);
+		// Only where the keyboard is.
+		expect(outline(el(".dialog-close"))).not.toBe(ring);
+		el('.font-picker-tab[data-tab="imported"]').click();
+		await settle();
+		await ringed([
+			'.font-picker-tab[data-tab="imported"]',
+			".font-card-select",
+			".font-picker-add-btn",
+		]);
 	});
 });

@@ -3,11 +3,12 @@
  * never reached, with a delete button that showed only under the mouse. Choosing the font is a
  * button now, and the delete button shows whenever the keyboard is on the card.
  */
-import type { FontFamily } from "@lasterm/shared";
+import { BUNDLED_THEMES, type FontFamily } from "@lasterm/shared";
+import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick } from "vue";
+import { useThemeStore } from "../../stores/theme.js";
 import FontCard from "./FontCard.vue";
-import SOURCE from "./FontCard.vue?raw";
 
 const FAMILY = { family: "Iosevka Term", files: [] } as unknown as FontFamily;
 
@@ -18,6 +19,7 @@ afterEach(() => {
 	app?.unmount();
 	app = null;
 	root?.remove();
+	document.documentElement.removeAttribute("style");
 });
 
 function mountCard(selected: boolean) {
@@ -57,12 +59,24 @@ describe("FontCard", () => {
 		expect(select().querySelector("button")).toBeNull();
 	});
 
-	it("shows its delete button whenever the keyboard is on the card, and a ring from the theme", () => {
-		expect(SOURCE).toMatch(
-			/\.font-card:hover \.font-card-delete,\s*\.font-card:focus-within \.font-card-delete\s*\{[^}]*opacity:\s*1/,
-		);
-		expect(SOURCE).toMatch(
-			/\.font-card-select:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--nt-accent\)/,
-		);
+	// Its delete button with the keyboard on the card, or the mouse: FontCard.browser.spec.ts.
+	it.each([
+		["one-half-dark", "2px solid #61afef"],
+		["solarized-light", "2px solid #268bd2"],
+	])("draws the keyboard's ring from the theme: %s", (theme, ring) => {
+		setActivePinia(createPinia());
+		useThemeStore().applyTheme(BUNDLED_THEMES[theme]!);
+		mountCard(false);
+		const outline = (): string => {
+			const style = getComputedStyle(select());
+			return `${style.outlineWidth} ${style.outlineStyle} ${style.outlineColor}`;
+		};
+		expect(outline()).not.toBe(ring);
+		select().focus();
+		// happy-dom keeps computed styles until the DOM changes, and a focus change is not one.
+		const mark = document.createComment("");
+		document.body.append(mark);
+		mark.remove();
+		expect(outline()).toBe(ring);
 	});
 });

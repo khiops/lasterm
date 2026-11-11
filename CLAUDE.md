@@ -27,7 +27,7 @@ Sessions survive client disconnects and device switches; local sessions also sur
 | Monorepo | pnpm workspaces |
 | Package manager | pnpm |
 | Linter/formatter | biome |
-| Test framework | vitest |
+| Test framework | vitest; the `*.browser.spec.ts` web specs in browser mode, through Playwright, on the machine's Edge (Windows) or Chrome |
 | Test pattern | `*.spec.ts` (colocated) |
 | PTY | `async-xpty` — Rust, inside the agent. No Node PTY anywhere |
 | SSH (client + mock server) | ssh2 (Client + Server) |

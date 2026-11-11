@@ -1,70 +1,163 @@
 /**
  * Settings from the keyboard alone, over every category (#637): nothing is left that only the
  * mouse can use. The components that needed more than markup have their own specs (SettingControl,
- * ThemeCard, FontCard, FontPicker, ProfilesSettings, AgentImportModal); these read the rest.
+ * ThemeCard, FontCard, FontPicker, ProfilesSettings, AgentImportModal); these mount the rest and
+ * read what a screen reader is told. That no element of Settings acts on a click out of the
+ * keyboard's reach is Biome's a11y rules over Settings' templates (biome.json).
  */
-import { describe, expect, it } from "vitest";
-import WALLPAPER from "./categories/WallpaperCategory.vue?raw";
-import HOST_OVERRIDES from "./HostOverridesTable.vue?raw";
-import THEME_EDITOR from "./ThemeEditor.vue?raw";
+import {
+	BUNDLED_THEMES,
+	type CascadeResponse,
+	DEFAULT_APPEARANCE,
+	DEFAULT_ELEVATION_CONFIG,
+	DEFAULT_PROFILE,
+	DEFAULT_SSH_CONFIG,
+	type Host,
+	type TerminalProfile,
+	type UiConfig,
+} from "@lasterm/shared";
+import { createPinia, setActivePinia } from "pinia";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type App, type Component, createApp, nextTick } from "vue";
+import { useAuthStore } from "../../stores/auth.js";
+import { useHostsStore } from "../../stores/hosts.js";
+import { useSettingsStore } from "../../stores/settings.js";
+import { useThemeStore } from "../../stores/theme.js";
+import WallpaperCategory from "./categories/WallpaperCategory.vue";
+import HostOverridesTable from "./HostOverridesTable.vue";
+import ThemeEditor from "./ThemeEditor.vue";
 
-/** Every component of Settings, as source. */
-const SOURCES = import.meta.glob<string>(["./*.vue", "./categories/*.vue"], {
-	query: "?raw",
-	import: "default",
-	eager: true,
+/** The hub, as these components ask it: the wallpapers, and a host's profiles. */
+const mocks = vi.hoisted(() => ({ hubFetch: vi.fn() }));
+vi.mock("../../utils/hub-fetch.js", () => ({ hubFetch: mocks.hubFetch }));
+
+function json(body: unknown): Response {
+	return new Response(JSON.stringify(body), {
+		status: 200,
+		headers: { "Content-Type": "application/json" },
+	});
+}
+
+let app: App | null = null;
+let root: HTMLElement;
+
+beforeEach(() => {
+	const pinia = createPinia();
+	setActivePinia(pinia);
+	mocks.hubFetch.mockReset();
+	mocks.hubFetch.mockImplementation(async (url: string) =>
+		url.endsWith("/api/wallpapers")
+			? json({ wallpapers: ["dunes.jpg", "forest.png"] })
+			: json([{ id: "P1", name: "fish", shell: "/usr/bin/fish" }]),
+	);
 });
 
-/** The opening tags of `source`, with their attributes, even when they run over several lines. */
-function openingTags(source: string): string[] {
-	const template = /<template>([\s\S]*)<\/template>/.exec(source)?.[1] ?? "";
-	const tags: string[] = [];
-	const tag = /<([a-zA-Z][\w-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
-	for (let match = tag.exec(template); match !== null; match = tag.exec(template)) {
-		tags.push(match[0]);
-	}
-	return tags;
+afterEach(() => {
+	app?.unmount();
+	app = null;
+	root?.remove();
+});
+
+async function settle(): Promise<void> {
+	for (let i = 0; i < 6; i++) await nextTick();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	await nextTick();
+}
+
+async function mount(component: Component, props: Record<string, unknown> = {}): Promise<void> {
+	root = document.createElement("div");
+	document.body.appendChild(root);
+	app = createApp(component, props);
+	app.mount(root);
+	await settle();
+}
+
+/** A settings cascade where the global layer chose `wallpaper`. */
+function cascadeChoosing(wallpaper: string): CascadeResponse {
+	const global: Partial<TerminalProfile> = { wallpaper };
+	return {
+		terminal: {
+			defaults: DEFAULT_PROFILE,
+			global,
+			host: {},
+			channel: {},
+			resolved: { ...DEFAULT_PROFILE, ...global },
+		},
+		ui: { defaults: {} as UiConfig, global: {}, resolved: {} as UiConfig },
+		appearance: DEFAULT_APPEARANCE,
+		elevation: DEFAULT_ELEVATION_CONFIG,
+		ssh: DEFAULT_SSH_CONFIG,
+	};
 }
 
 describe("Settings from the keyboard", () => {
-	it("reads every component of Settings", () => {
-		expect(Object.keys(SOURCES).length).toBeGreaterThan(20);
+	it("says which wallpaper is chosen, and names each one's delete button", async () => {
+		const settingsStore = useSettingsStore();
+		settingsStore.cascade = cascadeChoosing("forest.png");
+		await mount(WallpaperCategory, { scope: "global" });
+
+		/** Each thumbnail, by the name its image gives it, and whether it says it is pressed. */
+		const thumbnails = () =>
+			[...root.querySelectorAll(".wallpaper-thumb")].map((button) => [
+				button.querySelector("img")?.getAttribute("alt"),
+				button.getAttribute("aria-pressed"),
+			]);
+		expect(thumbnails()).toEqual([
+			["dunes.jpg", "false"],
+			["forest.png", "true"],
+		]);
+		expect(
+			[...root.querySelectorAll(".wallpaper-delete")].map((b) => b.getAttribute("aria-label")),
+		).toEqual(["Delete wallpaper dunes.jpg", "Delete wallpaper forest.png"]);
+
+		settingsStore.cascade = cascadeChoosing("dunes.jpg");
+		await nextTick();
+		expect(thumbnails()).toEqual([
+			["dunes.jpg", "true"],
+			["forest.png", "false"],
+		]);
 	});
 
-	// A div or a span that acts on a click is out of the keyboard's reach. A backdrop's
-	// `@click.self` is not a control: Esc does what it does.
-	it("has no click handler on an element the keyboard cannot reach", () => {
-		const offenders: string[] = [];
-		for (const [file, source] of Object.entries(SOURCES)) {
-			for (const tag of openingTags(source)) {
-				const name = /^<([\w-]+)/.exec(tag)?.[1] ?? "";
-				if (!/^(div|span|li|ul|td|tr|p|img|section|article|header|footer|nav|label)$/.test(name)) {
-					continue;
-				}
-				const clicks = /@(click|dblclick|mousedown)(?!\.self)[.\w]*=/.test(tag);
-				const reachable =
-					/\btabindex=|\brole="(button|switch|option|tab|radio|checkbox|menuitem)"/.test(tag);
-				if (clicks && !reachable) offenders.push(`${file}: ${tag.replace(/\s+/g, " ")}`);
-			}
-		}
-		expect(offenders).toEqual([]);
-	});
+	it("says which of Dark and Light a theme being edited is", async () => {
+		const theme = BUNDLED_THEMES["one-half-dark"];
+		if (theme === undefined) throw new Error("no one-half-dark theme");
+		useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+		await mount(ThemeEditor, { theme });
 
-	it("says which wallpaper is chosen, and names and shows each one's delete button", () => {
-		expect(WALLPAPER).toContain(':aria-pressed="currentWallpaper === wp"');
-		expect(WALLPAPER).toMatch(/:aria-label="`Delete wallpaper \$\{wp\}`"/);
-		expect(WALLPAPER).toMatch(
-			/\.wallpaper-thumb-wrapper:hover \.wallpaper-delete,\s*\.wallpaper-thumb-wrapper:focus-within \.wallpaper-delete\s*\{[^}]*opacity:\s*1/,
+		const group = root.querySelector('[role="group"]');
+		const labelledBy = group?.getAttribute("aria-labelledby") ?? "";
+		expect(document.getElementById(labelledBy)?.textContent).toBe("Type");
+		const pressed = () =>
+			[...(group?.querySelectorAll("button") ?? [])].map((b) => [
+				b.textContent?.trim(),
+				b.getAttribute("aria-pressed"),
+			]);
+		expect(pressed()).toEqual([
+			["Dark", "true"],
+			["Light", "false"],
+		]);
+
+		const light = [...(group?.querySelectorAll("button") ?? [])].find(
+			(b) => b.textContent?.trim() === "Light",
 		);
+		light?.click();
+		await nextTick();
+		expect(pressed()).toEqual([
+			["Dark", "false"],
+			["Light", "true"],
+		]);
 	});
 
-	it("says which of Dark and Light a theme being edited is", () => {
-		expect(THEME_EDITOR).toContain(":aria-pressed=\"draft.type === 'dark'\"");
-		expect(THEME_EDITOR).toContain(":aria-pressed=\"draft.type === 'light'\"");
-		expect(THEME_EDITOR).toContain('role="group" aria-labelledby="te-type-label"');
-	});
+	it("names each host's override", async () => {
+		useAuthStore().token = "token";
+		useHostsStore().hosts = [
+			{ id: "H1", type: "ssh", label: "pi", sshHost: "pi.test" } as Host,
+			{ id: "H2", type: "ssh", label: "nas", sshHost: "nas.test" } as Host,
+		];
+		await mount(HostOverridesTable, { profileId: "P1" });
 
-	it("names each host's override", () => {
-		expect(HOST_OVERRIDES).toMatch(/:aria-label="`Override for \$\{host\.label\}`"/);
+		expect(
+			[...root.querySelectorAll("select.override-select")].map((s) => s.getAttribute("aria-label")),
+		).toEqual(["Override for pi", "Override for nas"]);
 	});
 });

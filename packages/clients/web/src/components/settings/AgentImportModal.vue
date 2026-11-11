@@ -1,6 +1,8 @@
 <template>
 	<Teleport to="body">
+		<!-- biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: the backdrop, not a control; Esc closes the dialog (#637) -->
 		<div v-if="show" class="dialog-overlay" @click.self="emit('close')">
+			<!-- biome-ignore lint/a11y/noNoninteractiveElementInteractions: the dialog's own keys, Esc and Tab kept inside it (#637) -->
 			<div
 				ref="dialogEl"
 				class="agent-import-dialog"

@@ -31,7 +31,7 @@
 			</svg>
 			<span class="key-card-name key-card-name--mono">{{ entry.name }}</span>
 			<div class="key-card-badges">
-				<span v-if="entry.algorithm" class="key-card-badge" :style="algoBadgeStyle(entry.algorithm)">{{ entry.algorithm }}</span>
+				<span v-if="entry.algorithm" :class="['key-card-badge', 'key-card-badge--algo', algoBadgeClass(entry.algorithm)]">{{ entry.algorithm }}</span>
 				<span v-if="entry.encrypted" class="key-card-badge key-card-badge--danger">encrypted</span>
 			</div>
 			<button v-if="!confirmDelete" class="key-card-delete" title="Delete key" @click.stop="confirmDelete = true">
@@ -69,25 +69,14 @@ const emit = defineEmits<{
 
 const confirmDelete = ref(false);
 
-function algoBadgeStyle(algorithm: string): Record<string, string> {
-	let color: string;
+/** The badge's colour, by algorithm: its rule names the theme's variable (#936). */
+function algoBadgeClass(algorithm: string): string {
 	const alg = algorithm.toUpperCase();
-	if (alg.includes("ED25519")) {
-		color = "var(--nt-badge-info)";
-	} else if (alg.includes("ECDSA")) {
-		color = "var(--nt-badge-success)";
-	} else if (alg.includes("RSA")) {
-		color = "var(--nt-badge-warning)";
-	} else if (alg.includes("DSA")) {
-		color = "var(--nt-badge-danger)";
-	} else {
-		color = "var(--nt-fg-muted)";
-	}
-	return {
-		color,
-		background: `color-mix(in srgb, ${color} 13%, transparent)`,
-		borderColor: `color-mix(in srgb, ${color} 30%, transparent)`,
-	};
+	if (alg.includes("ED25519")) return "key-card-badge--ed25519";
+	if (alg.includes("ECDSA")) return "key-card-badge--ecdsa";
+	if (alg.includes("RSA")) return "key-card-badge--rsa";
+	if (alg.includes("DSA")) return "key-card-badge--dsa";
+	return "key-card-badge--other-algo";
 }
 
 function truncateFingerprint(fp: string): string {
@@ -201,6 +190,30 @@ function formatDate(mtime: string): string {
 	white-space: nowrap;
 	text-transform: uppercase;
 	letter-spacing: 0.04em;
+}
+
+/* An algorithm's badge, in the colour its class names. */
+.key-card-badge--algo {
+	--algo-color: var(--nt-fg-muted);
+	color: var(--algo-color);
+	background: color-mix(in srgb, var(--algo-color) 13%, transparent);
+	border-color: color-mix(in srgb, var(--algo-color) 30%, transparent);
+}
+
+.key-card-badge--ed25519 {
+	--algo-color: var(--nt-badge-info);
+}
+
+.key-card-badge--ecdsa {
+	--algo-color: var(--nt-badge-success);
+}
+
+.key-card-badge--rsa {
+	--algo-color: var(--nt-badge-warning);
+}
+
+.key-card-badge--dsa {
+	--algo-color: var(--nt-badge-danger);
 }
 
 .key-card-badge--count {

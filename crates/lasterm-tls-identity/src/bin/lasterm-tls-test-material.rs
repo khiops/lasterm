@@ -75,6 +75,10 @@ fn output_dir() -> Result<PathBuf, Box<dyn Error>> {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "checks the output directory the hub test setup names, not a protected file"
+)]
 fn ensure_empty_directory(path: &Path) -> io::Result<()> {
     if !path.is_dir() {
         return Err(io::Error::new(
@@ -155,10 +159,18 @@ fn write_identity(output_dir: &Path, name: &str, identity: &Identity) -> io::Res
     )
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "writes a test certificate into the output directory, not a protected file"
+)]
 fn write_public(path: &Path, contents: &str) -> io::Result<()> {
     fs::write(path, contents)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "writes a test key into the output directory, not a protected file"
+)]
 fn write_private(path: &Path, contents: &str) -> io::Result<()> {
     let mut file = File::options().write(true).create_new(true).open(path)?;
     file.write_all(contents.as_bytes())?;
@@ -171,6 +183,10 @@ fn write_private(path: &Path, contents: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "writes the test-material manifest into the output directory, not a protected file"
+)]
 fn write_manifest(
     output_dir: &Path,
     authority_spki: &str,

@@ -3,11 +3,12 @@
  * panel's keys reached it: Esc did nothing, and Tab walked out behind it. It is a modal dialog now:
  * the keyboard goes into it, Esc closes it and gives the keyboard back, and Tab stays inside.
  */
+import { BUNDLED_THEMES } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, ref } from "vue";
+import { useThemeStore } from "../../stores/theme.js";
 import AgentImportModal from "./AgentImportModal.vue";
-import SOURCE from "./AgentImportModal.vue?raw";
 
 let app: App | null = null;
 let root: HTMLElement;
@@ -27,6 +28,7 @@ afterEach(() => {
 	app = null;
 	root?.remove();
 	document.body.replaceChildren();
+	document.documentElement.removeAttribute("style");
 });
 
 async function settle(): Promise<void> {
@@ -97,9 +99,38 @@ describe("AgentImportModal", () => {
 		}
 	});
 
-	it("draws the keyboard's ring from the theme", () => {
-		expect(SOURCE).toMatch(
-			/\.agent-import-dialog :deep\(:focus-visible\)\s*\{[^}]*outline:\s*2px solid var\(--nt-accent\)/,
+	// Teleported out of Settings, it does not have the panel's ring: it draws its own, on every control.
+	it.each([
+		["one-half-dark", "2px solid #61afef"],
+		["solarized-light", "2px solid #268bd2"],
+	])("draws the keyboard's ring from the theme: %s", async (theme, ring) => {
+		useThemeStore().applyTheme(BUNDLED_THEMES[theme]!);
+		mountDialog();
+		show.value = true;
+		await settle();
+		const dialog = document.querySelector(".agent-import-dialog") as HTMLElement;
+		const controls = [
+			...dialog.querySelectorAll<HTMLElement>(
+				'button:not(:disabled), select:not(:disabled), input[type="checkbox"], [tabindex="0"]',
+			),
+		];
+		expect(controls.map((el) => el.className || el.tagName)).toEqual(
+			expect.arrayContaining(["dialog-close", "drop-zone", "INPUT"]),
 		);
+		const outline = (el: Element): string => {
+			const style = getComputedStyle(el);
+			return `${style.outlineWidth} ${style.outlineStyle} ${style.outlineColor}`;
+		};
+		for (const control of controls) {
+			control.focus();
+			// happy-dom keeps computed styles until the DOM changes, and a focus change is not one.
+			const mark = document.createComment("");
+			document.body.append(mark);
+			mark.remove();
+			expect(outline(control), control.className || control.tagName).toBe(ring);
+			// Only where the keyboard is.
+			const other = controls.find((el) => el !== control) as HTMLElement;
+			expect(outline(other), `${other.className || other.tagName} unfocused`).not.toBe(ring);
+		}
 	});
 });

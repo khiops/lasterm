@@ -6,7 +6,7 @@ authors = ["Lasterm contributors"]
 license = "AGPL-3.0-only"
 repository = "https://github.com/khiops/lasterm"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.81"
 
 [lib]
 name = "lasterm_desktop_lib"
@@ -47,6 +47,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [dev-dependencies]
 rcgen = "0.14"
+# Its mock runtime, through which the tests invoke commands as the webview does.
+tauri = { version = "2", features = ["test"] }
 
 [profile.release]
 # Keep lto = false (Cargo default) for fast CI builds.

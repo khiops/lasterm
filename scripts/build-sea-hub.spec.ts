@@ -3,15 +3,19 @@
  *
  * Tests for the esbuild bundler (build-sea-hub.ts) and the
  * native addon loader (sea-addon-loader.ts for the hub).
+ *
+ * What the bundle holds is read from the metafile esbuild returns, and what it
+ * does from running it. The executable packaged from it is run by
+ * sea-hub-e2e.spec.ts: its SQLite, its addons and the cache it clears.
  */
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createRequire, isBuiltin } from "node:module";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { compileFunction } from "node:vm";
-import type { BuildOptions } from "esbuild";
-import { build } from "esbuild";
+import { build, type Metafile } from "esbuild";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { readMigrationFiles } from "../packages/hub/src/storage/migration-files.js";
 import { describeOpenDatabases } from "../packages/hub/src/storage/open-databases.fixture.js";
@@ -20,190 +24,108 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(__dirname, "..");
 const OUT_FILE = join(ROOT, "dist", "sea", "lasterm-hub.cjs");
 
+/**
+ * What the bundle may leave to the runtime besides Node's own modules: each is
+ * required inside a try by the package that wants it, which goes on without it.
+ * The executable has no node_modules, so anything else it requires fails there.
+ */
+const OPTIONAL_MODULES = new Set([
+	// ssh2's CPU detection, and its own native crypto, never built here (allowBuilds).
+	"cpu-features",
+	"./crypto/build/Release/sshcrypto.node",
+	// ws's native helpers.
+	"bufferutil",
+	"utf-8-validate",
+]);
+
 // ────────────────────────────────────────────────────────────────────────────
-// Test 1: esbuild bundle produces valid CJS output
+// Test 1: the bundle runs on its own, as the executable runs it
 // ────────────────────────────────────────────────────────────────────────────
 
-describe("esbuild bundle produces valid CJS", () => {
+describe("the bundle build-sea-hub.ts writes", () => {
+	let metafile: Metafile | undefined;
+
 	beforeAll(async () => {
-		// Import build options from the script under test and run the build.
 		const { buildOptions } = await import("./build-sea-hub.js");
 		mkdirSync(join(ROOT, "dist", "sea"), { recursive: true });
-		await build(buildOptions as BuildOptions);
+		// Gone first, so what runs below is this build's output, not an earlier one.
+		rmSync(OUT_FILE, { force: true });
+		({ metafile } = await build({ ...buildOptions, metafile: true }));
 	}, 120_000);
 
-	it("output file exists", () => {
-		expect(existsSync(OUT_FILE)).toBe(true);
+	// Mutations caught: a build that writes nothing where packaging takes it; a
+	// bundle in any format but CommonJS, which Node SEA requires; one that never
+	// calls main(); one that requires a package a directory without node_modules
+	// lacks, as the executable does.
+	it("runs as CommonJS from a directory with no node_modules: agent status --json answers", () => {
+		const dir = mkdtempSync(join(tmpdir(), "lasterm-bundle-"));
+		// Nor a NODE_PATH: the shim pnpm installs for vitest sets one into its store.
+		const env = Object.fromEntries(
+			Object.entries(process.env).filter(([name]) => name.toUpperCase() !== "NODE_PATH"),
+		);
+		try {
+			const bundle = join(dir, "lasterm-hub.cjs");
+			copyFileSync(OUT_FILE, bundle);
+			const result = spawnSync(process.execPath, [bundle, "agent", "status", "--json"], {
+				cwd: dir,
+				env,
+				encoding: "utf8",
+				timeout: 60_000,
+				windowsHide: true,
+			});
+			const said = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`;
+			expect(result.error, said).toBeUndefined();
+			expect(result.status, said).toBe(0);
+			expect(JSON.parse(result.stdout), said).toMatchObject({
+				hub_version: expect.any(String),
+				targets: expect.any(Array),
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+		}
 	});
 
-	it("output file is non-empty", () => {
-		const data = readFileSync(OUT_FILE);
-		expect(data.byteLength).toBeGreaterThan(1024);
-	});
-
-	it("output starts with shebang", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		expect(content.startsWith("#!/usr/bin/env node")).toBe(true);
-	});
-
-	it("output is syntactically valid CJS", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// esbuild CJS bundles always include "use strict" and var declarations.
-		expect(content).toMatch(/"use strict"|var __/);
-	});
-});
-
-// ────────────────────────────────────────────────────────────────────────────
-// Test 2: SQLite is node:sqlite, built into the Node the executable embeds (#893)
-// ────────────────────────────────────────────────────────────────────────────
-
-describe("SQLite comes from node:sqlite", () => {
-	it("requires node:sqlite, which the executable's own Node provides", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// One require for storage/sqlite.ts, one in the spool checkpoint worker's source.
-		expect(content.split('require("node:sqlite")').length - 1).toBe(2);
-	});
-
-	it("bundles no SQLite addon, nor a prelude to extract one", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// Mutation caught: a hub module importing better-sqlite3 again, which
-		// bundles its lib/ and its addon finder, or the SQLite prelude coming back.
-		expect(content).not.toContain('require("better-sqlite3")');
-		expect(content).not.toContain("PREBUILD_PLATFORMS");
-		expect(content).not.toContain("getPrebuildPath");
-		// The addon's name appears once: in the list of what earlier executables
-		// extracted, which retired-addon-cache.ts removes from the cache (#889).
-		// Another mention is the addon coming back.
-		expect(content.split("better_sqlite3.node").length - 1).toBe(1);
-		expect(content).toContain("retireAddonCacheOfEarlierVersions");
-		expect(content).not.toContain("__seaSqliteExports");
+	// Mutations caught: fastify, ssh2, @lasterm/shared, or any other package,
+	// left external, where the executable cannot load it, including one that only
+	// a path the run above does not take requires.
+	it("leaves to the runtime only Node's built-in modules, and modules its packages do without", () => {
+		const left = Object.values(metafile!.outputs)
+			.flatMap((output) => output.imports)
+			.filter((entry) => entry.external && !isBuiltin(entry.path))
+			.map((entry) => entry.path);
+		expect([...new Set(left)].filter((path) => !OPTIONAL_MODULES.has(path))).toEqual([]);
 	});
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test 3: fastify is inlined
-// ────────────────────────────────────────────────────────────────────────────
-
-describe("bundle includes fastify inline", () => {
-	it("fastify is inlined — no external require('fastify')", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// When inlined, there should be no top-level external require("fastify").
-		expect(content).not.toMatch(/require\(["']fastify["']\)/);
-	});
-
-	it("fastify internals appear in the bundle", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// Fastify registers plugins with addPlugin / addHook internally.
-		// Some internal identifier will always appear when inlined.
-		expect(content).toContain("fastify");
-	});
-});
-
-// ────────────────────────────────────────────────────────────────────────────
-// Test 4: @lasterm/shared is inlined
-// ────────────────────────────────────────────────────────────────────────────
-
-describe("bundle includes @lasterm/shared inline", () => {
-	it("@lasterm/shared is inlined — no external require", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		expect(content).not.toContain('require("@lasterm/shared")');
-	});
-
-	it("encodeFrame from @lasterm/shared appears in the bundle", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// encodeFrame is a core export used by the hub agent transport.
-		expect(content).toContain("encodeFrame");
-	});
-
-	it("FrameReader from @lasterm/shared appears in the bundle", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		expect(content).toContain("FrameReader");
-	});
-});
-
-// ────────────────────────────────────────────────────────────────────────────
-// Test 5: ssh2 is inlined
-// ────────────────────────────────────────────────────────────────────────────
-
-describe("bundle includes ssh2 inline", () => {
-	it("ssh2 is inlined — no external require('ssh2')", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		expect(content).not.toMatch(/require\(["']ssh2["']\)/);
-	});
-
-	it("ssh2 internals appear in the bundle", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// ssh2 defines known identifiers when bundled inline.
-		expect(content).toContain("ssh2");
-	});
-});
-
-// ────────────────────────────────────────────────────────────────────────────
-// Test 6: migrations are embedded inline
-// ────────────────────────────────────────────────────────────────────────────
-
-describe("migrations are embedded inline", () => {
-	it("meta migration SQL content appears in the bundle", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// 021-baseline.sql creates the `hosts` table — that DDL must be present.
-		expect(content).toContain("CREATE TABLE hosts");
-	});
-
-	it("spool migration SQL content appears in the bundle", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// 001-initial.sql for spool creates the `chunks` table (PTY output storage).
-		expect(content).toContain("CREATE TABLE chunks");
-	});
-
-	it("migration filenames are embedded in the manifest", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// The manifest JSON contains the filename property for each migration,
-		// whose number the runner compares with schema_version.
-		expect(content).toContain("021-baseline.sql");
-		expect(content).toContain("001-initial.sql");
-	});
-
-	it("bundle does not contain readdirSync or readFileSync calls for migrations", () => {
-		const content = readFileSync(OUT_FILE, "utf8");
-		// The migrations plugin replaces storage/migration-files.ts, which reads
-		// them with readdirSync + readFileSync. Any remaining use in the bundle
-		// must NOT be referencing the migrations directory.
-		expect(content).not.toContain("/migrations/meta");
-		expect(content).not.toContain("/migrations/spool");
-	});
-});
-
-// ────────────────────────────────────────────────────────────────────────────
-// Test 7: the executable opens its databases with storage/db.ts itself (#745)
+// Test 2: the executable opens its databases with storage/db.ts itself (#745)
 // ────────────────────────────────────────────────────────────────────────────
 
 const STORAGE_SOURCE = join(ROOT, "packages", "hub", "src", "storage");
 
 /**
- * A hub module as the executable bundles it, with the build's own options and
- * plugins, then loaded. Left out: the prelude and the call to main(), which
- * belong to the CLI entry. SQLite is node:sqlite, a built-in module, required
- * here as the executable requires it.
+ * A hub module as the executable bundles it, with the build's own options,
+ * plugins and banner, then loaded from a directory of its own, as far from the
+ * sources as the executable is. Left out: the call to main(), which belongs to
+ * the CLI entry. SQLite is node:sqlite, a built-in module, required here as the
+ * executable requires it.
  */
 async function bundleAsTheExecutable<T>(source: string): Promise<T> {
 	const { buildOptions } = await import("./build-sea-hub.js");
-	const result = await build({
-		...buildOptions,
-		entryPoints: [source],
-		write: false,
-		banner: {},
-		footer: {},
-		logLevel: "silent",
-	});
-	const code = result.outputFiles?.[0]?.text;
-	if (code === undefined) throw new Error(`bundling ${source} produced no output`);
-	const module = { exports: {} };
-	compileFunction(code, ["module", "exports", "require"], { filename: `${source}.bundled.cjs` })(
-		module,
-		module.exports,
-		createRequire(source),
-	);
-	return module.exports as T;
+	const dir = mkdtempSync(join(tmpdir(), "lasterm-bundled-"));
+	try {
+		const outfile = join(dir, `${basename(source)}.cjs`);
+		await build({
+			...buildOptions,
+			entryPoints: [source],
+			outfile,
+			footer: {},
+			logLevel: "silent",
+		});
+		return createRequire(import.meta.url)(outfile) as T;
+	} finally {
+		rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+	}
 }
 
 describe("the executable's database module is storage/db.ts (#745)", () => {
@@ -219,6 +141,8 @@ describe("the executable's database module is storage/db.ts (#745)", () => {
 		expect(Object.keys(db!).sort()).toEqual(Object.keys(source).sort());
 	});
 
+	// Mutation caught: a build that leaves the migrations on disk, beside a
+	// module the executable has no directory for.
 	it("reads the migrations embedded when it was built, the files the hub reads from disk", async () => {
 		const embedded = await bundleAsTheExecutable<
 			typeof import("../packages/hub/src/storage/migration-files.js")
@@ -233,7 +157,7 @@ describe("the executable's database module is storage/db.ts (#745)", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// Test 8: hub sea-addon-loader tells a run from source from the executable
+// Test 3: hub sea-addon-loader tells a run from source from the executable
 // ────────────────────────────────────────────────────────────────────────────
 
 describe("hub sea-addon-loader in non-SEA mode", () => {

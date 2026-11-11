@@ -77,7 +77,11 @@ jobs:
           cp dist/sea/lasterm-hub packages/clients/desktop/src-tauri/lasterm-hub-x86_64-unknown-linux-gnu
           # Tauri resources, installed beside the hub (#889).
           cp dist/sea/lasterm_hub_lock.node dist/sea/lasterm_tls_identity.node packages/clients/desktop/src-tauri/
-      # Its cfg(unix) paths, the raise socket among them, run only here.
+      # Its cfg(unix) paths, the raise socket among them, run only here, and only
+      # here does clippy's pathname rule (clippy.toml) reach them (#936).
+      - name: Clippy the desktop crate
+        working-directory: packages/clients/desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
       - name: Test the desktop crate
         working-directory: packages/clients/desktop/src-tauri
         run: cargo test

@@ -315,7 +315,7 @@
 									terminals run over the connection and end with it. Once it is allowed, use
 									Connect or Reconnect in the host's menu. See
 									<a
-										href="https://github.com/khiops/lasterm/blob/main/docs/SSH_SERVER.md#keeping-the-agent-running-79"
+										:href="EXTERNAL_LINKS.keepingTheAgentRunning"
 										target="_blank"
 										rel="noopener noreferrer"
 									>Configuring an SSH server for Lasterm</a>.
@@ -637,6 +637,7 @@ import { useAuthStore } from "../stores/auth.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubUnreachable } from "../utils/hub-answer.js";
 import { hubBaseUrl } from "../utils/hub-url.js";
+import { EXTERNAL_LINKS } from "../utils/external-links.js";
 import { type ReplaceAgentResponse, replaceAgentWithConsent } from "../utils/replace-agent.js";
 import { resolveEmojiShortcode } from "../utils/emoji-shortcodes.js";
 import { iconImageFromFile, isDisplayableIconImage } from "../utils/host-icon.js";

@@ -44,7 +44,7 @@
 						<li>
 							Download the matching agent binary from the
 							<a
-								href="https://github.com/khiops/lasterm/releases/latest"
+								:href="EXTERNAL_LINKS.latestRelease"
 								target="_blank"
 								rel="noopener noreferrer"
 								class="adf-link"
@@ -71,6 +71,7 @@
 import { computed, ref } from 'vue';
 import { useAgentVerifyStore } from '../stores/agent-verify.js';
 import { useChannelsStore } from '../stores/channels.js';
+import { EXTERNAL_LINKS } from '../utils/external-links.js';
 
 const store = useAgentVerifyStore();
 const channelsStore = useChannelsStore();

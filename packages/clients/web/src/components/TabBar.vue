@@ -578,6 +578,9 @@ function onTabDragEnd(): void {
 }
 
 .tab {
+	/* Set from script on a tab whose host is marked; unset otherwise, which
+	   its users answer with the accent. Declared for the linter (#936). */
+	--tab-host-color: initial;
 	display: flex;
 	align-items: center;
 	gap: 4px;

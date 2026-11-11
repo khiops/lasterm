@@ -224,8 +224,13 @@ const RELAY_UPLOAD_QUEUE_CHUNKS: usize = 2;
 const MAX_ACTIVE_RELAY_UPLOADS: usize = 4;
 /// A desktop process has only a handful of concurrent foreground operations.
 /// Refusing the ninth relay bounds their request/response threads and body pipes
-/// instead of retaining work behind a local queue.
+/// instead of retaining work behind a local queue. The web client keeps two of
+/// them free for its WebSocket and the one replacing it, reading this bound from
+/// `ipc-contract.json`, which a test holds equal to it.
 const MAX_ACTIVE_HUB_RELAYS: usize = 8;
+/// What a raw-bytes command answers when its body reached it as JSON: the web
+/// client recognises it by these words, from `ipc-contract.json` (#822).
+const RAW_IPC_REFUSAL: &str = "must use Tauri raw IPC bytes";
 /// This is deliberately no longer than reqwest's complete request timeout. An
 /// abandoned webview can therefore retain at most one response frame for 25 s.
 const HUB_RELAY_ACK_TIMEOUT: Duration = HUB_REQUEST_TIMEOUT;
@@ -730,6 +735,10 @@ impl Drop for DesktopRaiseListener {
         self.stop.store(true, Ordering::Relaxed);
         #[cfg(unix)]
         {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "removes the Unix desktop-raise socket, not a protected file"
+            )]
             if let Err(error) = std::fs::remove_file(&self.path) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     eprintln!(
@@ -1373,6 +1382,10 @@ fn set_taskbar_icon<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
 
 /// The tone the window was last told about, for the launch that comes before
 /// the page can say it again.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reads the non-protected window-tone preference"
+)]
 fn remembered_window_tone() -> bool {
     lasterm_config_dir()
         .ok()
@@ -1385,12 +1398,18 @@ fn remember_window_tone(dark: bool) {
     let Ok(dir) = lasterm_config_dir() else {
         return;
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the non-protected window-tone preference directory"
+    )]
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    // One line on purpose: the protected-path audit matches each filesystem
-    // call against its reviewed spelling line by line.
     let tone = if dark { "dark" } else { "light" };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes the non-protected window-tone preference"
+    )]
     let _ = std::fs::write(dir.join(WINDOW_TONE_FILE), tone);
 }
 
@@ -1409,6 +1428,10 @@ fn apply_window_tone(app: tauri::AppHandle, dark: bool) -> Result<(), String> {
 }
 
 /// The background the window was last asked for, as the web client named it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reads the non-protected window-background preference"
+)]
 fn remembered_window_background() -> String {
     lasterm_config_dir()
         .ok()
@@ -1424,6 +1447,10 @@ fn remember_window_background(effect: &str) {
     let Ok(dir) = lasterm_config_dir() else {
         return;
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the directory of, and writes, the non-protected window-background preference"
+    )]
     if let Err(error) = std::fs::create_dir_all(&dir)
         .and_then(|()| std::fs::write(dir.join(WINDOW_BACKGROUND_FILE), effect))
     {
@@ -1671,6 +1698,10 @@ fn request_desktop_raise(endpoint: &DesktopRaiseEndpoint) -> RaiseRequestResult 
 
 #[cfg(unix)]
 fn bind_desktop_raise_socket(path: &Path) -> Result<UnixListener, String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "removes a stale Unix desktop-raise socket before binding, not a protected file"
+    )]
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1872,6 +1903,10 @@ fn request_desktop_raise(endpoint: &DesktopRaiseEndpoint) -> RaiseRequestResult 
     if unsafe { WaitNamedPipeW(name.as_ptr(), INSTANCE_RAISE_TIMEOUT.as_millis() as u32) } == 0 {
         return RaiseRequestResult::Unanswered;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens the Windows named pipe, not a filesystem object"
+    )]
     let handle = unsafe {
         CreateFileW(
             name.as_ptr(),
@@ -2383,6 +2418,10 @@ fn close_behavior_config_path() -> Result<PathBuf, String> {
 }
 
 fn read_close_behavior_from_path(path: &std::path::Path) -> CloseBehaviorConfigState {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "reads the non-protected close-behavior preference"
+    )]
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2405,6 +2444,10 @@ fn read_close_behavior() -> CloseBehaviorConfigState {
     read_close_behavior_from_path(&path)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "replaces the non-protected close-behavior preference"
+)]
 fn write_close_behavior_to_path(
     path: &std::path::Path,
     behavior: CloseBehavior,
@@ -2425,6 +2468,10 @@ where
     let parent = path
         .parent()
         .ok_or_else(|| "close preference path has no parent directory".to_string())?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the non-protected close-behavior preference directory"
+    )]
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create close preference directory: {error}"))?;
     let contents = serde_json::to_string(&CloseBehaviorConfig {
@@ -2436,6 +2483,10 @@ where
         .and_then(|name| name.to_str())
         .ok_or_else(|| "close preference path has no file name".to_string())?;
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates a non-protected close-behavior temporary file"
+    )]
     let (mut temp_file, temp_path) = (0..32)
         .find_map(|_| {
             let suffix = CLOSE_BEHAVIOR_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -2477,6 +2528,10 @@ where
             .map_err(|error| format!("failed to replace close preference: {error}"))
     });
     if result.is_err() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "cleans a non-protected close-behavior temporary file"
+        )]
         let _ = std::fs::remove_file(&temp_path);
     }
     result
@@ -3856,7 +3911,7 @@ async fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), 
             return Err("multipart relay chunk exceeds the bounded IPC frame size".to_string())
         }
         tauri::ipc::InvokeBody::Json(_) => {
-            return Err("multipart relay chunk must use Tauri raw IPC bytes".to_string())
+            return Err(format!("multipart relay chunk {RAW_IPC_REFUSAL}"))
         }
     };
     let claim = claim_hub_upload_chunk(upload_id)?;
@@ -4519,7 +4574,7 @@ async fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), Strin
         }
         tauri::ipc::InvokeBody::Json(_) => {
             close_hub_ws_relay(relay_id);
-            return Err("WebSocket input must use Tauri raw IPC bytes".to_string());
+            return Err(format!("WebSocket input {RAW_IPC_REFUSAL}"));
         }
     };
     input.try_send(bytes.clone()).map_err(|error| {
@@ -5898,21 +5953,37 @@ async fn pick_and_read_agent_file(
 }
 
 fn read_picked_agent_file(path: PathBuf, max_bytes: u64) -> Result<PickedAgentFile, String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "checks an explicitly user-selected agent file"
+    )]
     let selected_metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| format!("INVALID_PATH: failed to inspect selected file: {}", error))?;
     if selected_metadata.file_type().is_symlink() {
         return Err("SYMLINK_NOT_ALLOWED: selected file must not be a symlink".to_string());
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "resolves an explicitly user-selected agent file"
+    )]
     let canonical_path = path
         .canonicalize()
         .map_err(|error| format!("INVALID_PATH: failed to resolve selected file: {}", error))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "checks the resolved explicitly user-selected agent file"
+    )]
     let canonical_metadata = std::fs::symlink_metadata(&canonical_path)
         .map_err(|error| format!("INVALID_PATH: failed to inspect selected file: {}", error))?;
     if canonical_metadata.file_type().is_symlink() {
         return Err("SYMLINK_NOT_ALLOWED: selected file must not be a symlink".to_string());
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "reads an explicitly user-selected agent file"
+    )]
     let file = std::fs::File::open(&canonical_path)
         .map_err(|error| format!("READ_FAILED: failed to open selected file: {}", error))?;
     let metadata = file
@@ -6000,6 +6071,10 @@ fn launch_hub(app: &tauri::AppHandle) -> Result<u16, String> {
     let log_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("lasterm");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the non-protected hub diagnostic-log directory"
+    )]
     if let Err(error) = std::fs::create_dir_all(&log_dir) {
         eprintln!("[lasterm] cannot create {}: {error}", log_dir.display());
     }
@@ -6487,7 +6562,18 @@ pub fn run() {
         .run(|_app, _event| {});
 }
 
+// The unit tests' binary, and only it, takes the manifest naming Common
+// Controls 6 that build.rs writes: without it, Windows refuses to load a
+// binary holding Tauri's app (build.rs, `write_test_manifest`).
+#[cfg(all(test, target_env = "msvc"))]
+#[link(name = "lasterm_test_manifest", kind = "dylib")]
+extern "C" {}
+
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the tests build their fixtures by pathname, in temporary directories of their own"
+)]
 mod tests {
     use super::*;
     use rcgen::PublicKeyData;
@@ -6496,6 +6582,175 @@ mod tests {
     use std::task::{Context, Poll};
 
     static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+    /// The web client reads these from `ipc-contract.json`: the relay bound, of
+    /// which it keeps two free, and the words of a raw-bytes refusal (#822).
+    #[test]
+    fn the_ipc_contract_the_web_client_reads_is_what_native_enforces() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../ipc-contract.json"))
+                .expect("ipc-contract.json parses");
+        assert_eq!(
+            contract["maxActiveHubRelays"],
+            serde_json::json!(MAX_ACTIVE_HUB_RELAYS)
+        );
+        assert_eq!(
+            contract["rawIpcRefusal"],
+            serde_json::json!(RAW_IPC_REFUSAL)
+        );
+    }
+
+    /// A mock app with the two raw-bytes commands registered, and its webview,
+    /// through whose IPC a test invokes them as the web client does.
+    struct RelayIpc {
+        _app: tauri::App<tauri::test::MockRuntime>,
+        webview: tauri::WebviewWindow<tauri::test::MockRuntime>,
+    }
+
+    impl RelayIpc {
+        fn new() -> Self {
+            let app = tauri::test::mock_builder()
+                .invoke_handler(tauri::generate_handler![
+                    relay_hub_upload_chunk,
+                    relay_hub_ws_send
+                ])
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("build the mock app");
+            let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+                .build()
+                .expect("open the mock webview");
+            Self { _app: app, webview }
+        }
+
+        /// What `command` answers `body`, `header` naming its upload or relay.
+        fn invoke(
+            &self,
+            command: &str,
+            header: (&'static str, u64),
+            body: tauri::ipc::InvokeBody,
+        ) -> Result<(), serde_json::Value> {
+            let mut headers = tauri::http::HeaderMap::new();
+            headers.insert(header.0, header.1.into());
+            let url = if cfg!(windows) {
+                "http://tauri.localhost"
+            } else {
+                "tauri://localhost"
+            };
+            tauri::test::get_ipc_response(
+                &self.webview,
+                tauri::webview::InvokeRequest {
+                    cmd: command.into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: url.parse().unwrap(),
+                    body,
+                    headers,
+                    invoke_key: tauri::test::INVOKE_KEY.to_string(),
+                },
+            )
+            .map(|_| ())
+        }
+    }
+
+    /// A webview whose IPC cannot carry raw bytes sends them as JSON, and the
+    /// web client reloads onto its fallback when it reads the refusal (#822).
+    #[test]
+    fn an_upload_chunk_is_taken_raw_and_bounded_and_refused_otherwise() {
+        use tauri::ipc::InvokeBody::{Json, Raw};
+        let ipc = RelayIpc::new();
+        let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (_response_sender, response) = mpsc::channel();
+        hub_uploads()
+            .lock()
+            .unwrap()
+            .insert(id, test_upload(sender, response, id));
+        let chunk = |body| ipc.invoke("relay_hub_upload_chunk", ("x-lasterm-upload-id", id), body);
+        let piped = || match receiver.try_recv() {
+            Ok(HubUploadFrame::Data(bytes)) => Some(bytes),
+            _ => None,
+        };
+
+        let one = chunk(Raw(vec![7]));
+        let one_piped = piped();
+        let limit = chunk(Raw(vec![8; RELAY_CHUNK_BYTES]));
+        let limit_piped = piped();
+        let json = chunk(Json(serde_json::json!([1, 2, 3])));
+        let empty = chunk(Raw(Vec::new()));
+        let over = chunk(Raw(vec![9; RELAY_CHUNK_BYTES + 1]));
+        let refused_piped = piped();
+        hub_uploads().lock().unwrap().remove(&id);
+
+        assert_eq!(one, Ok(()));
+        assert_eq!(one_piped, Some(vec![7]));
+        assert_eq!(limit, Ok(()));
+        assert!(
+            limit_piped == Some(vec![8; RELAY_CHUNK_BYTES]),
+            "the whole chunk reached the upload"
+        );
+        assert_eq!(
+            json,
+            Err(serde_json::json!(
+                "multipart relay chunk must use Tauri raw IPC bytes"
+            ))
+        );
+        let too_big = serde_json::json!("multipart relay chunk exceeds the bounded IPC frame size");
+        assert_eq!(empty, Err(too_big.clone()));
+        assert_eq!(over, Err(too_big));
+        assert!(refused_piped.is_none(), "a refused chunk reaches nothing");
+    }
+
+    #[test]
+    fn websocket_input_is_taken_raw_and_bounded_and_refused_otherwise_closing_its_relay() {
+        use tauri::ipc::InvokeBody::{Json, Raw};
+        let ipc = RelayIpc::new();
+        // A relay of its own for each body, since a refusal closes it: what the
+        // command answers, what it sent the hub, and whether it closed it.
+        let send = |body| {
+            let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+            let (input, mut input_receiver) = tokio::sync::mpsc::channel(1);
+            let (acknowledgement, _acknowledgement_receiver) = tokio::sync::mpsc::channel(1);
+            let (close, mut close_receiver) = tokio::sync::mpsc::unbounded_channel();
+            hub_ws_relays().lock().unwrap().insert(
+                id,
+                HubWsRelay {
+                    input,
+                    acknowledgement,
+                    outstanding: Arc::new(Mutex::new(None)),
+                    close,
+                },
+            );
+            let answer = ipc.invoke("relay_hub_ws_send", ("x-lasterm-ws-id", id), body);
+            let sent = input_receiver.try_recv().ok();
+            let closed = close_receiver.try_recv().is_ok();
+            hub_ws_relays().lock().unwrap().remove(&id);
+            (answer, sent, closed)
+        };
+
+        assert_eq!(send(Raw(vec![7])), (Ok(()), Some(vec![7]), false));
+        let (answer, sent, closed) = send(Raw(vec![8; HUB_WS_MAX_MESSAGE_BYTES]));
+        assert_eq!((answer, closed), (Ok(()), false));
+        assert!(
+            sent == Some(vec![8; HUB_WS_MAX_MESSAGE_BYTES]),
+            "the whole message reached the hub"
+        );
+        assert_eq!(
+            send(Json(serde_json::json!([1, 2, 3]))),
+            (
+                Err(serde_json::json!(
+                    "WebSocket input must use Tauri raw IPC bytes"
+                )),
+                None,
+                true
+            )
+        );
+        let too_big = serde_json::json!("WebSocket input exceeds the bounded relay message size");
+        assert_eq!(send(Raw(Vec::new())), (Err(too_big.clone()), None, true));
+        assert_eq!(
+            send(Raw(vec![9; HUB_WS_MAX_MESSAGE_BYTES + 1])),
+            (Err(too_big), None, true)
+        );
+    }
 
     /// A process that has exited must read as gone.
     ///

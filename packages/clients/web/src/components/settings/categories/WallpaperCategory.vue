@@ -28,6 +28,7 @@
 				/>
 			</SettingRow>
 
+			<!-- biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: a drop target; Upload wallpaper below is the same from the keyboard -->
 			<div
 				class="wallpaper-grid"
 				@dragenter="onDragEnter"

@@ -113,6 +113,10 @@ impl Writer {
     }
 
     fn reopen(&mut self) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "opens the non-protected hub diagnostic log, hub.log"
+        )]
         let opened = OpenOptions::new()
             .create(true)
             .append(true)
@@ -139,6 +143,10 @@ impl Writer {
     /// access on Windows, which is what lets the rename through, and elsewhere a
     /// rename never minds an open file.
     fn rotate(&mut self) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "moves the non-protected hub diagnostic log aside to hub.log.old"
+        )]
         match std::fs::rename(&self.path, &self.previous) {
             Ok(()) => {
                 self.rotation_failing = false;
@@ -169,6 +177,10 @@ impl Writer {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the tests build their fixtures by pathname, in temporary directories of their own"
+)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};

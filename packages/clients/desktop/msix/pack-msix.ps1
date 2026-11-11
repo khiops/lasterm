@@ -5,7 +5,11 @@ param(
   [string]$PublisherDisplayName,
   [string]$Version,
   [string]$Output,
-  [switch]$SkipBuild
+  [switch]$SkipBuild,
+  # Stages the executable, the sidecars, the manifest and bundle.resources in
+  # out\stage, then stops: no check of the binaries, no package, no Windows SDK.
+  # pack-msix.spec.ts runs the staging this way.
+  [switch]$StageOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -330,12 +334,13 @@ $assetsDir = Join-Path $stageDir "Assets"
 $packageOutDir = Join-Path $scriptDir "out"
 $windowsX64RustTarget = "x86_64-pc-windows-msvc"
 $msixArch = "x64"
-$makeAppx = Resolve-MakeAppx
+if (-not $StageOnly) {
+  $makeAppx = Resolve-MakeAppx
+}
 $desktopBinaryName = "$(Get-CargoPackageName $cargoTomlPath).exe"
 
+$tauriConfig = Get-Content -LiteralPath (Join-Path $srcTauriDir "tauri.conf.json") -Raw | ConvertFrom-Json
 if (-not $Version) {
-  $tauriConfigPath = Join-Path $srcTauriDir "tauri.conf.json"
-  $tauriConfig = Get-Content -LiteralPath $tauriConfigPath -Raw | ConvertFrom-Json
   $Version = $tauriConfig.version
 }
 $appxVersion = Convert-ToAppxVersion $Version
@@ -365,7 +370,6 @@ $mainExe = Resolve-DesktopExecutablePath `
 
 $hubSidecar = Join-Path $srcTauriDir "lasterm-hub-$windowsX64RustTarget.exe"
 $agentSidecar = Join-Path $srcTauriDir "lasterm-agent-$windowsX64RustTarget.exe"
-$hubAddons = @("lasterm_hub_lock.node", "lasterm_tls_identity.node")
 
 Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $stageDir, $assetsDir -Force | Out-Null
@@ -375,16 +379,21 @@ Copy-RequiredFile $mainExe (Join-Path $stageDir $desktopBinaryName)
 Copy-RequiredFile $hubSidecar (Join-Path $stageDir "lasterm-hub.exe")
 Copy-RequiredFile $agentSidecar (Join-Path $stageDir "lasterm-agent.exe")
 Copy-RequiredFile $manifestPath (Join-Path $stageDir "AppxManifest.xml")
-# The hub's native addons, beside it at the package root: the hub loads them
-# from its own directory and refuses any whose bytes differ from what it was
-# built with (#889). Installed under WindowsApps, they are part of the signed
-# package and read-only to every user account.
-foreach ($addon in $hubAddons) {
-  $source = Join-Path $srcTauriDir $addon
-  Copy-RequiredFile $source (Join-Path $stageDir $addon)
+# What Tauri installs beside the executable, its bundle.resources (a file in
+# src-tauri → its path there), staged the same way at the package root: the
+# hub's native addons, which it loads from its own directory, refusing any whose
+# bytes differ from what it was built with (#889). Installed under WindowsApps,
+# they are part of the signed package and read-only to every user account.
+foreach ($resource in $tauriConfig.bundle.resources.PSObject.Properties) {
+  $source = Join-Path $srcTauriDir $resource.Name
+  Copy-RequiredFile $source (Join-Path $stageDir $resource.Value)
   if ((Get-Item -LiteralPath $source).Length -eq 0) {
     throw "$source is empty, a placeholder rather than the hub's addon. Place the files the hub was built with (dist\sea) in src-tauri, as scripts\build-desktop.ps1 does."
   }
+}
+if ($StageOnly) {
+  Write-Host "Staged in $stageDir"
+  return
 }
 
 foreach ($exe in @($desktopBinaryName, "lasterm-hub.exe", "lasterm-agent.exe")) {

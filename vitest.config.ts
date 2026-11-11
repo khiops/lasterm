@@ -1,5 +1,13 @@
 import vue from "@vitejs/plugin-vue";
-import { defineConfig } from "vitest/config";
+import { playwright } from "@vitest/browser-playwright";
+import { configDefaults, defineConfig } from "vitest/config";
+
+/**
+ * The stylesheets a web spec gets: a component's own style block, and any
+ * stylesheet a module imports, so that a mounted component is drawn with its
+ * rules and `getComputedStyle` answers from them (#936).
+ */
+const WEB_STYLES = [/\.css$/, /\.vue\?vue&type=style/];
 
 export default defineConfig({
 	test: {
@@ -10,6 +18,10 @@ export default defineConfig({
 					name: "shared",
 					include: ["packages/shared/**/*.spec.ts"],
 					environment: "node",
+					// Against a hang only, as in the hub's specs: loading a real addon took
+					// over the 10 s hook default while the full suite ran (#936).
+					testTimeout: 30_000,
+					hookTimeout: 30_000,
 				},
 			},
 			{
@@ -32,17 +44,51 @@ export default defineConfig({
 				},
 			},
 			{
-				// Compiles the single-file components a spec mounts; a `?raw`
-				// import still reads the source as text.
+				// Compiles the single-file components a spec mounts.
 				plugins: [vue()],
 				test: {
 					name: "web",
 					include: ["packages/clients/web/**/*.spec.ts"],
+					exclude: [...configDefaults.exclude, "packages/clients/web/**/*.browser.spec.ts"],
 					environment: "happy-dom",
+					// A guard against a hang, as in the hub's specs, not a measure of
+					// speed: a spec that mounts a component over a module it mocks
+					// for that one test loads the component's whole graph again, which
+					// takes over Vitest's default 5 s while the other projects run.
+					testTimeout: 30_000,
+					hookTimeout: 30_000,
 					// Vitest hands a spec an empty module for every stylesheet it does
-					// not include, `?raw` or not. One read as text is read whole, for
-					// the specs that check the theme variables base.css declares (#830).
-					css: { include: [/\.css\?raw$/] },
+					// not include. happy-dom applies the rest: cascade, `var()`,
+					// `:focus-visible`, but no `:hover`, `:focus-within` or layout.
+					css: { include: WEB_STYLES },
+				},
+			},
+			{
+				// What happy-dom does not draw: hover, focus-within, layout, a click
+				// that reaches what is under an element. The browser is the
+				// machine's own (Edge on Windows, Chrome elsewhere): nothing is
+				// downloaded, and a machine without it fails naming it (#936).
+				plugins: [vue()],
+				test: {
+					name: "web-browser",
+					include: ["packages/clients/web/**/*.browser.spec.ts"],
+					css: { include: WEB_STYLES },
+					// A failing spec's screenshot, kept out of the sources.
+					attachmentsDir: "target/vitest/attachments",
+					browser: {
+						enabled: true,
+						headless: true,
+						screenshotDirectory: "target/vitest/screenshots",
+						provider: playwright({
+							launchOptions: {
+								channel: process.platform === "win32" ? "msedge" : "chrome",
+								// Playwright hides scrollbars in a headless browser; the specs
+								// measure the room base.css's scrollbars take (#845, #853).
+								ignoreDefaultArgs: ["--hide-scrollbars"],
+							},
+						}),
+						instances: [{ browser: "chromium" }],
+					},
 				},
 			},
 			{

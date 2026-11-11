@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import LIB_RS from "../../../desktop/src-tauri/src/lib.rs?raw";
+import IPC_CONTRACT from "../../../desktop/src-tauri/ipc-contract.json";
 import {
 	IPC_FALLBACK_RELOAD_KEY,
 	isRawIpcRefusal,
@@ -28,16 +28,12 @@ describe("Tauri's postMessage fallback (#822)", () => {
 		vi.restoreAllMocks();
 	});
 
+	// Native builds both refusals from the words of ipc-contract.json, which its
+	// own test holds equal to what it sends.
 	it("knows every refusal native gives a raw-bytes command whose body came as JSON", () => {
-		const refusals = [...LIB_RS.matchAll(/"([^"]*must use Tauri raw IPC bytes)"/gu)].map(
-			(match) => match[1],
-		);
-
-		expect(refusals.sort()).toEqual([
-			"WebSocket input must use Tauri raw IPC bytes",
-			"multipart relay chunk must use Tauri raw IPC bytes",
-		]);
-		for (const refusal of refusals) expect(isRawIpcRefusal(refusal)).toBe(true);
+		expect(RAW_IPC_REFUSAL).toBe(IPC_CONTRACT.rawIpcRefusal);
+		expect(isRawIpcRefusal(`WebSocket input ${IPC_CONTRACT.rawIpcRefusal}`)).toBe(true);
+		expect(isRawIpcRefusal(`multipart relay chunk ${IPC_CONTRACT.rawIpcRefusal}`)).toBe(true);
 		expect(isRawIpcRefusal(new Error(`hub relay failed: ${RAW_IPC_REFUSAL}`))).toBe(true);
 		expect(isRawIpcRefusal("WebSocket relay input queue is full")).toBe(false);
 	});

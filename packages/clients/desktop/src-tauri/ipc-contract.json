@@ -1,0 +1,4 @@
+{
+	"maxActiveHubRelays": 8,
+	"rawIpcRefusal": "must use Tauri raw IPC bytes"
+}

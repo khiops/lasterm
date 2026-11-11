@@ -1,8 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerAgentRoutes } from "./api/agents.js";
@@ -18,7 +16,9 @@ vi.mock("node:crypto", async (importOriginal) => {
 /**
  * CLAUDE.md: a token is compared in constant time. A plain `===` stops at the
  * first character that differs, so how long it takes tells a guesser how much of
- * the token was right (#514). The hub's one comparison is `tokensEqual`.
+ * the token was right (#514). The hub's one comparison is `tokensEqual`; a plain
+ * equality on a secret's name in a hub source is refused by the linter
+ * (lint/no-plain-secret-comparison.grit).
  */
 
 const PRIMARY_TOKEN = "5a".repeat(32);
@@ -81,79 +81,5 @@ describe("the primary token on the agent routes (#514)", () => {
 		const right = await request(PRIMARY_TOKEN);
 		expect(right.statusCode).toBe(200);
 		expect(timingSafeEqual).toHaveBeenCalledTimes(2);
-	});
-});
-
-// ─── A plain comparison does not come back ────────────────────────────────────
-
-/** A name that holds a secret. */
-const SECRET_NAME = /(?:token|secret|password|passphrase)$/i;
-/** What a secret may be compared with plainly: nothing, or a constant. */
-const NOT_A_SECRET = /^(?:null|undefined|true|false|\d+)$/;
-/**
- * `a === b`, `a !== b` and their loose forms, where each side is a name or a
- * member chain. Neither side is cut out of a longer name, and the right one is
- * not a function being called: `hashToken(token)` is not a token.
- */
-const EQUALITY =
-	/(?<![\w$.?])([\w$][\w$]*(?:\??\.[\w$]+)*)\s*(?:===|!==|==|!=)\s*([\w$][\w$]*(?:\??\.[\w$]+)*)(?![\w$(]|\s*\()/g;
-
-/**
- * Plain equalities that weigh no guess, by file and text, each with the reason.
- * Timing only leaks to whoever supplies one side; here the hub supplies both.
- */
-const NO_GUESS_COMPARED = new Map<string, string>([]);
-
-function lastName(operand: string): string {
-	return operand.split(/\??\./).pop() ?? operand;
-}
-
-/** Each plain equality in `source` that has a secret on one side and not a constant on the other. */
-function plainSecretComparisons(source: string): string[] {
-	const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
-	const found: string[] = [];
-	for (const match of code.matchAll(EQUALITY)) {
-		const [text, left = "", right = ""] = match;
-		const secretCompared =
-			(SECRET_NAME.test(lastName(left)) && !NOT_A_SECRET.test(right)) ||
-			(SECRET_NAME.test(lastName(right)) && !NOT_A_SECRET.test(left));
-		if (secretCompared) found.push(text);
-	}
-	return found;
-}
-
-function hubSources(directory: string): string[] {
-	return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-		const file = join(directory, entry.name);
-		if (entry.isDirectory()) return hubSources(file);
-		const isTestOnly = /\.(?:spec|fixture|setup)\.ts$/.test(entry.name);
-		return entry.name.endsWith(".ts") && !isTestOnly ? [file] : [];
-	});
-}
-
-describe("no hub source compares a token with a plain equality", () => {
-	it("finds none, and would find the one #514 removed", () => {
-		// The pattern this guards against, as it stood in api/agents.ts.
-		expect(
-			plainSecretComparisons(
-				"return deps.authToken !== undefined && deps.authToken !== null && token === deps.authToken;",
-			),
-		).toEqual(["token === deps.authToken"]);
-		expect(plainSecretComparisons("if (previous.tokenHash !== hashToken(primaryToken)) {")).toEqual(
-			[],
-		);
-
-		const root = dirname(fileURLToPath(import.meta.url));
-		const found = hubSources(root).flatMap((file) =>
-			plainSecretComparisons(readFileSync(file, "utf8")).map(
-				(comparison) => `${relative(root, file).replaceAll(sep, "/")}: ${comparison}`,
-			),
-		);
-		const offenders = found.filter((comparison) => !NO_GUESS_COMPARED.has(comparison));
-		expect(offenders, "compare tokens with tokensEqual from auth.ts").toEqual([]);
-		// An exception whose comparison is gone is removed with it.
-		expect(found.filter((comparison) => NO_GUESS_COMPARED.has(comparison))).toEqual([
-			...NO_GUESS_COMPARED.keys(),
-		]);
 	});
 });

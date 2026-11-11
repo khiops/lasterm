@@ -2,8 +2,8 @@
  * Settings › Keybindings shows the app's shortcuts from the table the window and the terminals
  * read (#631, #637): what it says cannot drift from what works.
  */
-import { afterEach, describe, expect, it } from "vitest";
-import { type App, createApp } from "vue";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { type App, type Component, createApp } from "vue";
 import { useShortcutsOverlay } from "../../../composables/useShortcutsOverlay.js";
 import {
 	APP_SHORTCUTS,
@@ -11,10 +11,8 @@ import {
 	outsideTerminalKeys,
 	readSwitchesFrom,
 	shortcutKeys,
-	TAB_NUMBERS,
 } from "../../../utils/app-shortcuts.js";
 import KeybindingsCategory from "./KeybindingsCategory.vue";
-import SOURCE from "./KeybindingsCategory.vue?raw";
 
 let app: App | null = null;
 let root: HTMLElement;
@@ -24,6 +22,8 @@ afterEach(() => {
 	app = null;
 	root?.remove();
 	readSwitchesFrom(() => false);
+	vi.doUnmock("../../../utils/app-shortcuts.js");
+	vi.resetModules();
 });
 
 interface Row {
@@ -37,10 +37,10 @@ interface Row {
 }
 
 /** Each row of the page: its group, its label, and the caps of its keys. */
-function mountRows(): Row[] {
+function mountRows(page: Component = KeybindingsCategory): Row[] {
 	root = document.createElement("div");
 	document.body.appendChild(root);
-	app = createApp(KeybindingsCategory);
+	app = createApp(page);
 	app.mount(root);
 	const caps = (el: Element | null): string[] =>
 		el === null ? [] : [...el.querySelectorAll(":scope > kbd")].map((k) => k.textContent ?? "");
@@ -160,17 +160,45 @@ describe("Settings › Keybindings", () => {
 		});
 	});
 
-	it("names the actions as the table does", () => {
-		expect(SOURCE).toContain("label: APP_SHORTCUT_NAMES[id]");
-		expect(SOURCE).toMatch(/label: APP_SHORTCUT_NAMES\[`tab\.goTo\$\{n\}`\]/);
+	// The page reads each action's name and chord from the table rather than writing them again:
+	// over a table that names and binds every action otherwise, it shows what that table says.
+	it("names the actions and shows their chords as the table does, whatever it says", async () => {
+		vi.resetModules();
+		vi.doMock("../../../utils/app-shortcuts.js", async (importOriginal) => {
+			const table = await importOriginal<typeof import("../../../utils/app-shortcuts.js")>();
+			table.readSwitchesFrom(() => true);
+			const ids = Object.keys(table.APP_SHORTCUT_NAMES) as AppActionId[];
+			return {
+				...table,
+				APP_SHORTCUT_NAMES: Object.fromEntries(ids.map((id) => [id, `Named ${id}`])),
+				shortcutKeys: (id: AppActionId) => ["Bound", id],
+			};
+		});
+		const { default: page } = await import("./KeybindingsCategory.vue");
+		const rows = mountRows(page);
+		for (const [id, [group]] of Object.entries(SHOWN)) {
+			expect(
+				rows.find((row) => row.label === `Named ${id}`),
+				id,
+			).toMatchObject({ group, keys: ["Bound", id] });
+		}
+		expect(rows.filter((row) => row.label.startsWith("Go to"))).toEqual([]);
 	});
 
-	it("reads the chords of the table from the table", () => {
-		expect(TAB_NUMBERS).toHaveLength(9);
-		expect(SOURCE).toMatch(/keys: shortcutKeys\(`tab\.goTo\$\{n\}`\)/);
-		// Settings › Keybindings listed Ctrl+T, Ctrl+W, Ctrl+\ and Ctrl+- that nothing handled (#631).
-		for (const stale of ['["Ctrl", "T"]', '["Ctrl", "W"]', '["Ctrl", "\\\\"]', '["Ctrl", "-"]']) {
-			expect(SOURCE).not.toContain(stale);
-		}
+	// Settings › Keybindings listed Ctrl+T, Ctrl+W, Ctrl+\ and Ctrl+- that nothing handled (#631).
+	it("shows no chord but the table's and the keys inside an area", () => {
+		readSwitchesFrom(() => true);
+		const handled = new Set(
+			(Object.keys(APP_SHORTCUTS) as AppActionId[]).map((id) => shortcutKeys(id).join("+")),
+		);
+		const inAnArea = new Set(["Escape", "Ctrl+Shift+F", "Alt+C", "Alt+R", "Alt+W"]);
+		const rows = mountRows();
+		// The page it searches is the whole one: every chord of the table is on it.
+		const shown = new Set(rows.map((row) => row.keys.join("+")));
+		expect([...handled].filter((keys) => !shown.has(keys))).toEqual([]);
+		const unhandled = rows
+			.filter((row) => !handled.has(row.keys.join("+")) && !inAnArea.has(row.keys.join("+")))
+			.map((row) => `${row.label}: ${row.keys.join("+")}`);
+		expect(unhandled).toEqual([]);
 	});
 });

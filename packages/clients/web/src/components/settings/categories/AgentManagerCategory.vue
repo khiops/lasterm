@@ -86,7 +86,7 @@
 			<div v-if="versionMismatch" class="agent-warning">
 				Desktop, hub, and bundled agent versions do not match. Use the update path tracked in
 				<a
-					href="https://github.com/khiops/lasterm/issues/94"
+					:href="EXTERNAL_LINKS.updatePathIssue"
 					target="_blank"
 					rel="noreferrer"
 				>
@@ -226,6 +226,7 @@ import { useAuthStore } from "../../../stores/auth.js";
 import { useToastStore } from "../../../stores/toast.js";
 import { hubFetch } from "../../../utils/hub-fetch.js";
 import { hubBaseUrl } from "../../../utils/hub-url.js";
+import { EXTERNAL_LINKS } from "../../../utils/external-links.js";
 
 const TARGET_ORDER: { os: HostOs; arch: HostArch }[] = [
 	{ os: "linux", arch: "x64" },

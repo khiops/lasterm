@@ -8,6 +8,7 @@
  * is stood in for by what Settings › Tabs begins with — a row whose control is a switch — then a
  * button and a text field, so that the detail has controls without the hub's data.
  */
+import { BUNDLED_THEMES } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, ref } from "vue";
@@ -15,8 +16,8 @@ import { useChannelsStore } from "../../stores/channels.js";
 import { useConfigStore } from "../../stores/config.js";
 import { useHostsStore } from "../../stores/hosts.js";
 import { useSettingsStore } from "../../stores/settings.js";
+import { useThemeStore } from "../../stores/theme.js";
 import SettingsPanel from "./SettingsPanel.vue";
-import SOURCE from "./SettingsPanel.vue?raw";
 
 /** A category: a row with a real switch, as Settings › Tabs begins, then a button and a text field. */
 const stubCategory = vi.hoisted(() => async () => {
@@ -94,6 +95,7 @@ afterEach(() => {
 	root?.remove();
 	document.body.replaceChildren();
 	vi.restoreAllMocks();
+	document.documentElement.removeAttribute("style");
 });
 
 async function settle(): Promise<void> {
@@ -382,10 +384,35 @@ describe("Settings: opened at a place of its own", () => {
 });
 
 describe("Settings: the focus ring", () => {
-	it("is the theme's accent, on every control of the panel", () => {
-		const ring = /\.settings-panel :deep\(:focus-visible\)\s*\{[^}]*\}/.exec(SOURCE)?.[0] ?? "";
-		expect(ring).toMatch(/outline:\s*2px solid var\(--nt-accent\)/);
-		expect(ring).not.toMatch(/#[0-9a-f]{3,8}\b|rgb\(/i);
+	it.each([
+		["one-half-dark", "2px solid #61afef"],
+		["solarized-light", "2px solid #268bd2"],
+	])("is the theme's accent, on every control of the panel: %s", async (theme, ring) => {
+		useThemeStore().applyTheme(BUNDLED_THEMES[theme]!);
+		mountPanel({ hostAndChannel: true });
+		await open();
+		const outline = (control: Element): string => {
+			const style = getComputedStyle(control);
+			return `${style.outlineWidth} ${style.outlineStyle} ${style.outlineColor}`;
+		};
+		// The menu, the scope tabs, the close button, and a category's own controls.
+		const controls = [
+			'.category-nav [data-category-id="terminal"]',
+			'.scope-tab[data-scope="global"]',
+			".settings-close",
+			".stub-button",
+			".stub-input",
+		];
+		for (const selector of controls) {
+			el(selector).focus();
+			// happy-dom keeps computed styles until the DOM changes, and a focus change is not one.
+			const mark = document.createComment("");
+			document.body.append(mark);
+			mark.remove();
+			expect(outline(el(selector)), selector).toBe(ring);
+		}
+		// Only where the keyboard is.
+		expect(outline(el(".settings-close"))).not.toBe(ring);
 	});
 });
 

@@ -4,12 +4,12 @@
  *
  * The sidebar is mounted with its real stores, fed channels directly.
  */
-import type { Channel, ChannelGroup } from "@lasterm/shared";
+import { BUNDLED_THEMES, type Channel, type ChannelGroup } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick } from "vue";
 import { useChannelsStore } from "../stores/channels.js";
-import ITEM_SOURCE from "./ChannelItem.vue?raw";
+import { useThemeStore } from "../stores/theme.js";
 import ChannelSidebar from "./ChannelSidebar.vue";
 
 const STAMP = "2026-09-28T00:00:00.000Z";
@@ -71,6 +71,7 @@ afterEach(() => {
 	app = null;
 	root?.remove();
 	vi.restoreAllMocks();
+	document.documentElement.removeAttribute("style");
 });
 
 function item(id: string): HTMLElement {
@@ -146,9 +147,23 @@ describe("ChannelSidebar keyboard", () => {
 		expect(openChannel).toHaveBeenCalledExactlyOnceWith("o2");
 	});
 
-	it("draws the keyboard's ring from the theme", () => {
-		const ring = /\.channel-item:focus-visible\s*\{[^}]*\}/.exec(ITEM_SOURCE)?.[0] ?? "";
-		expect(ring).toMatch(/outline:\s*2px solid var\(--nt-accent\)/);
-		expect(ring).not.toMatch(/#[0-9a-f]{3,8}\b|rgb\(/i);
+	it.each([
+		["one-half-dark", "2px solid #61afef"],
+		["solarized-light", "2px solid #268bd2"],
+	])("draws the keyboard's ring from the theme: %s", (theme, ring) => {
+		useThemeStore().applyTheme(BUNDLED_THEMES[theme]!);
+		mountSidebar();
+		const outline = (id: string): string => {
+			const style = getComputedStyle(item(id));
+			return `${style.outlineWidth} ${style.outlineStyle} ${style.outlineColor}`;
+		};
+		expect(outline("o1")).not.toBe(ring);
+		item("o1").focus();
+		// happy-dom keeps computed styles until the DOM changes, and a focus change is not one.
+		const mark = document.createComment("");
+		document.body.append(mark);
+		mark.remove();
+		expect(outline("o1")).toBe(ring);
+		expect(outline("o2")).not.toBe(ring);
 	});
 });

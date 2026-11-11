@@ -1,7 +1,8 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { EXTERNAL_LINKS } from "../web/src/utils/external-links.js";
 
 const DESKTOP_DIR = fileURLToPath(new URL(".", import.meta.url));
 const SRC_TAURI = resolve(DESKTOP_DIR, "src-tauri");
@@ -46,17 +47,14 @@ describe("tauri.conf.json", () => {
 	// The hub loads them from its own directory and refuses to start without
 	// them (#889). Tauri copies a resource to its target path under the
 	// executable's directory, in the build output as in an installer, so these
-	// land beside the hub; the MSIX stages the same files at its root.
+	// land beside the hub; msix/pack-msix.ps1 stages these same resources at the
+	// package root, read from this file.
 	it("installs the hub's addons beside it, as resources at the root", () => {
 		const addons = ["lasterm_hub_lock.node", "lasterm_tls_identity.node"];
 		const bundle = conf.bundle as Record<string, unknown>;
 		expect(bundle.resources).toEqual(Object.fromEntries(addons.map((name) => [name, name])));
 		const ignored = readText("src-tauri/.gitignore").split(/\r?\n/);
-		const msix = readText("msix/pack-msix.ps1");
-		for (const name of addons) {
-			expect(ignored).toContain(`/${name}`);
-			expect(msix).toContain(`"${name}"`);
-		}
+		for (const name of addons) expect(ignored).toContain(`/${name}`);
 	});
 
 	it("frontendDist points to web dist", () => {
@@ -181,15 +179,10 @@ describe("capabilities/default.json", () => {
 		expect(typeof open).toBe("string");
 		const scope = new RegExp(`^${open}$`);
 
-		const webSrc = resolve(DESKTOP_DIR, "../web/src");
-		const links = readdirSync(webSrc, { recursive: true, encoding: "utf-8" })
-			.filter((file) => file.endsWith(".vue"))
-			.flatMap((file) => [
-				...readFileSync(resolve(webSrc, file), "utf-8").matchAll(/\shref="([a-z]+:[^"]*)"/g),
-			])
-			.map((match) => match[1]);
+		// The pages the web client's components link to, the values they bind.
+		const links = Object.entries(EXTERNAL_LINKS);
 		expect(links.length, "the About links at least").toBeGreaterThan(0);
-		for (const link of links) expect(link, "a link the page offers").toMatch(scope);
+		for (const [name, link] of links) expect(link, `the ${name} link`).toMatch(scope);
 
 		for (const refused of [
 			"https://",

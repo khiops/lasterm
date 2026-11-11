@@ -8,7 +8,6 @@ import { BUNDLED_THEMES } from "@lasterm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h } from "vue";
 import ThemeCard from "./ThemeCard.vue";
-import SOURCE from "./ThemeCard.vue?raw";
 
 const THEME = Object.values(BUNDLED_THEMES)[0]!;
 
@@ -68,10 +67,16 @@ describe("ThemeCard", () => {
 		expect(handlers.onSelect).toHaveBeenCalledTimes(1);
 	});
 
-	it("shows its edit button whenever the keyboard is on the card or on it", () => {
-		const shown =
-			/\.theme-card-wrapper:hover \.theme-card-edit,\s*\.theme-card-wrapper:focus-within \.theme-card-edit\s*\{[^}]*opacity:\s*0\.7/;
-		expect(SOURCE).toMatch(shown);
-		expect(SOURCE).toMatch(/\.theme-card-edit:focus-visible\s*\{[^}]*opacity:\s*1/);
+	// With the mouse or the keyboard on the card, it shows at 0.7: ThemeCard.browser.spec.ts.
+	it("shows its edit button at full strength with the keyboard on it", () => {
+		mountCard({ isActive: false, isCustom: true });
+		const button = edit() as HTMLButtonElement;
+		expect(getComputedStyle(button).opacity).toBe("0");
+		button.focus();
+		// happy-dom keeps computed styles until the DOM changes, and a focus change is not one.
+		const mark = document.createComment("");
+		document.body.append(mark);
+		mark.remove();
+		expect(getComputedStyle(button).opacity).toBe("1");
 	});
 });

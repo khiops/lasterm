@@ -2584,6 +2584,10 @@ body,
 }
 
 .app-layout {
+	/* Set from script on this element (layoutStyle), unset until then, which
+	   the columns answer with their defaults. Declared for the linter (#936). */
+	--rail-w: initial;
+	--sidebar-w: initial;
 	display: grid;
 	grid-template-columns: var(--rail-w, 48px) var(--sidebar-w, 200px) 1fr;
 	/* The second row is the key hints' (#639), under the rail and the list only: the terminals

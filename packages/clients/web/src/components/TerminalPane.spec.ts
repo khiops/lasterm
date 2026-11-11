@@ -196,7 +196,7 @@ const scopeRadio = (label: string) =>
 
 /** Wait out the pane's resize debounce, so that a RESIZE it would send has gone. */
 async function resizesSettle(): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, 80));
+	await vi.advanceTimersByTimeAsync(80);
 	await settle();
 }
 
@@ -210,8 +210,12 @@ function paneHasASize(): void {
 
 // What the handler lets through is tested in utils/terminal-keys.spec.ts: the
 // palette's chord never reaches the PTY, Ctrl+K does (#624). Here, that xterm
-// asks that handler, and no other of the pane's, for each key typed in it.
+// asks that handler, and no other of the pane's, for each key event typed in
+// it, with what the pane knows: its search, and the terminal's selection.
 describe("TerminalPane keys", () => {
+	const searchShown = () =>
+		root.querySelector<HTMLElement>('[role="search"]')?.style.display !== "none";
+
 	it("keeps the palette's chord from the shell, and lets Ctrl+K reach it", async () => {
 		await openLive({ setUp: writer });
 
@@ -219,6 +223,55 @@ describe("TerminalPane keys", () => {
 		expect(press({ ctrlKey: true, key: "k" }, "\u000b")).toBe(true);
 
 		expect(inputs()).toEqual(["\u000b"]);
+	});
+
+	// xterm hands its handler keypress and keyup as well as keydown.
+	it("keeps the palette's chord from the shell whichever key event xterm hands on", async () => {
+		await openLive({ setUp: writer });
+		const palette = { ctrlKey: true, shiftKey: true, key: "P" };
+
+		expect(press(palette, "\u0010", "keydown")).toBe(false);
+		expect(press(palette, "\u0010", "keypress")).toBe(false);
+		expect(press(palette, "\u0010", "keyup")).toBe(false);
+	});
+
+	it("opens its search on Ctrl+Shift+F, which the shell never sees", async () => {
+		await openLive({ setUp: writer });
+		expect(searchShown()).toBe(false);
+
+		expect(press({ ctrlKey: true, shiftKey: true, key: "F" }, "\u0006")).toBe(false);
+		await settle();
+
+		expect(searchShown()).toBe(true);
+		expect(inputs()).toEqual([]);
+	});
+
+	it("leaves Escape to its search while the search is open", async () => {
+		await openLive({ setUp: writer });
+		expect(press({ key: "Escape" }, "\u001b")).toBe(true);
+
+		press({ ctrlKey: true, shiftKey: true, key: "F" }, "\u0006");
+		await settle();
+
+		expect(press({ key: "Escape" }, "\u001b")).toBe(false);
+		expect(inputs()).toEqual(["\u001b"]);
+	});
+
+	it("copies a selection on Ctrl+C rather than interrupting the shell", async () => {
+		await openLive({ setUp: writer });
+		expect(press({ ctrlKey: true, key: "c" }, "\u0003")).toBe(true);
+
+		xterm.selection = true;
+
+		expect(press({ ctrlKey: true, key: "c" }, "\u0003")).toBe(false);
+		expect(inputs()).toEqual(["\u0003"]);
+	});
+
+	it("leaves Ctrl+V to the browser's paste", async () => {
+		await openLive({ setUp: writer });
+
+		expect(press({ ctrlKey: true, key: "v" }, "\u0016")).toBe(false);
+		expect(inputs()).toEqual([]);
 	});
 });
 
@@ -867,6 +920,15 @@ describe("TerminalPane over an ended terminal of the host not in view (#594)", (
 });
 
 describe("TerminalPane lock indicator", () => {
+	it("is hidden for a terminal the list says has ended, before the hub answers", async () => {
+		mountPane(ref(T), "dead");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		await settle();
+
+		expect(card()).toBeNull();
+		expect(lockIndicator()).toBeNull();
+	});
+
 	// A terminal on another host that has ended is in no list the pane can
 	// read, so `isDead` stays false: the indicator offered "No lock" under an
 	// overlay saying the shell had exited.
@@ -932,6 +994,22 @@ describe("TerminalPane when its terminal ends (#574)", () => {
 		await openLive();
 
 		useSessionStore().connected = false;
+		endIt();
+		await settle();
+
+		expect(closes()).toEqual([]);
+		expect(quietLine()).toBe("Closes when this terminal is shown.");
+	});
+
+	// Told as it happens, before any report on the next socket can be read: a
+	// socket that went and came back before the pane's watchers run is lost all
+	// the same.
+	it("takes an end reported once its socket went and came back at once for one it found", async () => {
+		xterm.profile = { whenEnded: "close" };
+		await openLive();
+
+		useSessionStore().connected = false;
+		useSessionStore().connected = true;
 		endIt();
 		await settle();
 
@@ -1102,17 +1180,26 @@ describe("TerminalPane overlay (#574)", () => {
 		expect(closes()).toEqual([[T, { keep: true }]]);
 	});
 
-	it('writes the setting where "Always do this" says, for this terminal and its host', async () => {
-		await openEnded({ hostId: PI });
-		const save = vi.spyOn(useConfigStore(), "saveWhenEnded").mockResolvedValue(true);
+	it.each([
+		["Close", "close", "this host", "host"],
+		["Close", "close", "everywhere", "global"],
+		["Restart", "restart", "this host", "host"],
+		["Restart", "restart", "everywhere", "global"],
+	] as const)(
+		'writes what %s does where "Always do this" says, %s, for this terminal and its host (%s, %s)',
+		async (label, whenEnded, where, scope) => {
+			await openEnded({ hostId: PI });
+			const save = vi.spyOn(useConfigStore(), "saveWhenEnded").mockResolvedValue(true);
 
-		alwaysBox()?.click();
-		scopeRadio("everywhere")?.click();
-		button("Close")?.click();
+			alwaysBox()?.click();
+			scopeRadio(where)?.click();
+			button(label)?.click();
 
-		expect(save).toHaveBeenCalledWith("close", "global", { hostId: HOST, channelId: T });
-		expect(closes()).toEqual([[T, { keep: false }]]);
-	});
+			expect(save).toHaveBeenCalledWith(whenEnded, scope, { hostId: HOST, channelId: T });
+			if (label === "Close") expect(closes()).toEqual([[T, { keep: false }]]);
+			else await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		},
+	);
 
 	it('writes nothing while "Always do this" is unchecked', async () => {
 		await openEnded();
@@ -1162,6 +1249,27 @@ describe("TerminalPane overlay (#574)", () => {
 		expect(group?.classList.contains("exit-scope--off")).toBe(false);
 	});
 
+	// The browser groups radios by their name: each card's own, so that two
+	// cards side by side each keep their choice.
+	it("names each card's radios as one group of its own", async () => {
+		mountPane(ref(T), "dead", { beside: ref(S) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(T);
+		refuse(S);
+		await vi.waitFor(() => expect(root.querySelectorAll(".exit-card")).toHaveLength(2));
+
+		const names = [...root.querySelectorAll(".exit-card")].map((c) =>
+			[...c.querySelectorAll<HTMLInputElement>('input[type="radio"]')].map((r) => r.name),
+		);
+		for (const [first, second] of names) {
+			expect(first).not.toBe("");
+			expect(second).toBe(first);
+		}
+		expect(names[0]?.[0]).not.toBe(names[1]?.[0]);
+	});
+
+	// A group the keyboard is given, outside the tab order: Tab goes on to its
+	// buttons.
 	it('starts with "Always do this" unchecked, on this host, and gives the keyboard to its card', async () => {
 		await openEnded({ setUp: shown });
 		await settle();
@@ -1169,6 +1277,8 @@ describe("TerminalPane overlay (#574)", () => {
 		expect(alwaysBox()?.checked).toBe(false);
 		expect(scopeRadio("this host")?.querySelector("input")?.checked).toBe(true);
 		expect(document.activeElement).toBe(card());
+		expect(card()?.getAttribute("role")).toBe("group");
+		expect(card()?.getAttribute("tabindex")).toBe("-1");
 	});
 
 	// The Enter typed after `exit`, or pressed twice, lands on whatever holds the
@@ -1221,7 +1331,17 @@ describe("TerminalPane follows a choice made on another overlay (#586)", () => {
 	});
 
 	// Close as its Close, which the keep setting says whether to delete.
-	it("closes as its own Close does", async () => {
+	it("closes as its own Close does, deleting the terminal", async () => {
+		await seenEndingAfter(6_000);
+
+		chosenElsewhere("close", "global");
+		settingNowSays("close");
+		await settle();
+
+		expect(closes()).toEqual([[T, { keep: false }]]);
+	});
+
+	it("closes as its own Close does, keeping the terminal listed when Settings says so", async () => {
 		await seenEndingAfter(6_000, { setUp: keepEnded });
 
 		chosenElsewhere("close", "global");
@@ -1229,6 +1349,20 @@ describe("TerminalPane follows a choice made on another overlay (#586)", () => {
 		await settle();
 
 		expect(closes()).toEqual([[T, { keep: true }]]);
+	});
+
+	// Only an ended terminal's overlay, not one restarting.
+	it("never follows a choice while its terminal restarts", async () => {
+		await openEnded({ setUp: shown });
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+
+		chosenElsewhere("close", "global");
+		settingNowSays("close");
+		await settle();
+
+		expect(closes()).toEqual([]);
+		expect(spawns()).toHaveLength(1);
 	});
 
 	it("keeps asking over an end that came right after it connected", async () => {
@@ -1437,9 +1571,62 @@ describe("TerminalPane follows the setting over an end it found (#592)", () => {
 		expect(spawns()).toEqual([]);
 		expect(quietLine()).toBe("Shell exited (code 1)");
 
-		paneProfile().read.value = true;
+		paneProfile().read();
 
 		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+	});
+
+	// Read for the terminal it shows now, on the host that terminal runs on: a
+	// profile read for the terminal it showed before, or for the rail's host
+	// before the client knew its terminal's, says nothing of this one's setting.
+	it("waits for its setting to be read for the terminal it was handed", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		const channel = ref(T);
+		await openLive({
+			channel,
+			setUp: () => {
+				shown();
+				useChannelsStore().registerChannelHost(U, HOST);
+			},
+		});
+		paneProfile().readsAtOnce.value = false;
+
+		channel.value = U;
+		useChannelsStore().selectChannel(U);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(U);
+		await settle();
+		expect(paneProfile().resolvedFor.value).toEqual({ hostId: HOST, channelId: T });
+		expect(spawns()).toEqual([]);
+		expect(quietLine()).toBe("Shell exited");
+
+		paneProfile().read();
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ reuseChannelId: U, automatic: true });
+	});
+
+	it("waits for its setting to be read on the host its terminal turns out to run on", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		freshWindow();
+		useChannelsStore().updateChannelStatus(T, "dead", 1);
+		shown();
+		mount({ channel: ref(T), hostId: PI });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		paneProfile().readsAtOnce.value = false;
+		// The client learns where T runs: its profile was read for the rail's host.
+		useChannelsStore().registerChannelHost(T, HOST);
+
+		refuse(T);
+		await settle();
+		expect(paneProfile().resolvedFor.value).toEqual({ hostId: PI, channelId: T });
+		expect(spawns()).toEqual([]);
+		expect(quietLine()).toBe("Shell exited (code 1)");
+
+		paneProfile().read();
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ hostId: HOST, reuseChannelId: T, automatic: true });
 	});
 
 	// A setting that cannot be read must not leave the pane without its card;
@@ -1746,6 +1933,26 @@ describe("TerminalPane waits for the host of a restart that found it away (#605)
 		expect(spawns()).toHaveLength(1);
 	});
 
+	// Handed another terminal that has ended too, it waits for nothing: the
+	// host's return restarts neither.
+	it("stops waiting for the host of a terminal it no longer shows", async () => {
+		const channel = ref(T);
+		await restartFindsHostAway({ channel });
+		expect(quietLine()).toBe("Waiting for pi…");
+
+		channel.value = S;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		refuse(S);
+		await settle();
+		expect(quietLine()).toBeNull();
+		expect(card()).not.toBeNull();
+
+		useHostsStore().updateSessionStatus(HOST, "active");
+		await settle();
+
+		expect(spawns()).toHaveLength(1);
+	});
+
 	// Another restart, here a choice made on another overlay, decides afresh
 	// whether to wait: its terminal ending again at once brings the card back.
 	it("stops waiting for its host once another restart starts", async () => {
@@ -1810,23 +2017,56 @@ function groundOf(el: Element): [number, number, number] {
 	throw new Error(`${el.className}: no ground`);
 }
 
+/**
+ * The contrast of `el`'s text on its ground. Only for text drawn opaque, which
+ * all of the card's is: its colour, and it and every element around it, at
+ * full opacity, else the ratio of its colours says nothing of what is seen.
+ */
 function contrastOf(el: Element): number {
 	const text = rgba(getComputedStyle(el).color);
 	if (text === null) throw new Error(`${el.className}: no colour`);
+	expect(text[3], `${el.className}: its text's alpha`).toBe(1);
+	for (let at: Element | null = el; at !== null; at = at.parentElement) {
+		const opacity = getComputedStyle(at).opacity;
+		expect(opacity === "" ? 1 : Number(opacity), `${at.className}: its opacity`).toBe(1);
+	}
 	return contrastRatio([text[0], text[1], text[2]], groundOf(el));
 }
 
 describe("TerminalPane overlay card colours (#574)", () => {
-	it("draws the card on an opaque ground of the theme's, under a shadow", async () => {
-		themed("one-half-dark");
-		await openEnded();
-		const style = getComputedStyle(card()!);
+	// Each theme's own: a dark theme's shadow is heavier than a light one's.
+	it.each([
+		{
+			theme: "one-half-dark",
+			ground: [40, 44, 52, 1],
+			text: [220, 223, 228, 1],
+			border: [62, 68, 82, 1],
+			shadow: "0 4px 24px rgba(0, 0, 0, 0.6)",
+		},
+		{
+			theme: "one-half-light",
+			ground: [250, 250, 250, 1],
+			text: [56, 58, 66, 1],
+			border: [208, 208, 208, 1],
+			shadow: "0 4px 24px rgba(0, 0, 0, 0.15)",
+		},
+	])(
+		"draws the card on an opaque ground of $theme's, edged and under a shadow",
+		async ({ theme, ground, text, border, shadow }) => {
+			themed(theme);
+			await openEnded();
+			const style = getComputedStyle(card()!);
 
-		expect(rgba(style.backgroundColor)).toEqual([40, 44, 52, 1]);
-		expect(rgba(style.color)).toEqual([220, 223, 228, 1]);
-		expect(rgba(style.borderTopColor)).toEqual([62, 68, 82, 1]);
-		expect(style.boxShadow).toBe("0 4px 24px rgba(0, 0, 0, 0.6)");
-	});
+			expect(rgba(style.backgroundColor)).toEqual(ground);
+			expect(rgba(style.color)).toEqual(text);
+			for (const side of ["Top", "Right", "Bottom", "Left"] as const) {
+				expect(style[`border${side}Width`], side).toBe("1px");
+				expect(style[`border${side}Style`], side).toBe("solid");
+				expect(rgba(style[`border${side}Color`]), side).toEqual(border);
+			}
+			expect(style.boxShadow).toBe(shadow);
+		},
+	);
 
 	// What the terminal last printed shows around the card, and can be read,
 	// scrolled and selected there (#927): no scrim, no blur, and the overlay
@@ -1842,18 +2082,29 @@ describe("TerminalPane overlay card colours (#574)", () => {
 		expect(getComputedStyle(card()!).pointerEvents).toBe("auto");
 	});
 
-	it("keeps the gone card's scrim over a screen that is not that terminal's", async () => {
-		themed("one-half-dark");
-		mountPane(ref(T), "live");
-		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
-		hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId: T });
-		await vi.waitFor(() => expect(card()).not.toBeNull());
-		const overlay = getComputedStyle(root.querySelector(".exit-overlay")!);
+	it.each([
+		{ theme: "one-half-dark", scrim: [0, 0, 0, 0.5] },
+		{ theme: "one-half-light", scrim: [0, 0, 0, 0.3] },
+	])(
+		"keeps the gone card's scrim of $theme over a screen that is not that terminal's",
+		async ({ theme, scrim }) => {
+			themed(theme);
+			mountPane(ref(T), "live");
+			await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+			hear({
+				type: "ERROR",
+				code: "CHANNEL_NOT_FOUND",
+				message: "No such terminal.",
+				channelId: T,
+			});
+			await vi.waitFor(() => expect(card()).not.toBeNull());
+			const overlay = getComputedStyle(root.querySelector(".exit-overlay")!);
 
-		expect(rgba(overlay.backgroundColor)).toEqual([0, 0, 0, 0.5]);
-		expect(overlay.backdropFilter).toBe("blur(2px)");
-		expect(overlay.pointerEvents).toBe("auto");
-	});
+			expect(rgba(overlay.backgroundColor)).toEqual(scrim);
+			expect(overlay.backdropFilter).toBe("blur(2px)");
+			expect(overlay.pointerEvents).toBe("auto");
+		},
+	);
 
 	for (const name of Object.keys(BUNDLED_THEMES)) {
 		it(`reads at 4.5:1 or better in ${name}`, async () => {

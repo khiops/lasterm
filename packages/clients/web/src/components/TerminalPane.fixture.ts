@@ -41,8 +41,12 @@ export interface PaneProfile {
 	hostId: Readonly<Ref<string | null | undefined>>;
 	channelId: Readonly<Ref<string | null | undefined>>;
 	profile: Ref<TerminalProfile>;
-	/** Whether the profile has been read for that host and terminal yet. */
-	read: Ref<boolean>;
+	/** The host and terminal the profile was last read for: null until it is read. */
+	resolvedFor: Ref<{ hostId: string | null; channelId: string | null } | null>;
+	/** Whether a read follows each change of host or terminal, as a request answered at once. */
+	readsAtOnce: Ref<boolean>;
+	/** The profile is read now, for the host and terminal the pane asks about. */
+	read(): void;
 }
 
 const xterm = vi.hoisted(() => ({
@@ -57,8 +61,10 @@ const xterm = vi.hoisted(() => ({
 	queue: [] as Array<() => void>,
 	/** The terminal settings the pane reads. */
 	profile: {} as Record<string, unknown>,
-	/** Whether a pane's profile is read as soon as it asks. */
+	/** Whether a pane's profile is read as soon as it asks, and again whenever it asks anew. */
 	profileRead: true,
+	/** Whether the terminal has text selected. */
+	selection: false,
 	/** Each pane's profile, in the order the panes were set up. */
 	profiles: [] as unknown[],
 	/** The terminals made, in order. */
@@ -131,7 +137,7 @@ vi.mock("@xterm/xterm", () => ({
 			this.keyHandler = handler;
 		}
 		hasSelection(): boolean {
-			return false;
+			return xterm.selection;
 		}
 		focus(): void {
 			this.input.focus();
@@ -194,25 +200,31 @@ vi.mock("../composables/terminal-font.js", () => ({
 // The terminal's settings, read for it at once unless a test says otherwise:
 // "When a terminal ends" asks, its default, so an end the pane finds shows the
 // card (#592, #595). The test sees which host and terminal the pane asked
-// for, and can change the profile or let it be read, as a reload would.
+// for, and can change the profile, or hold its reading back and read it when
+// it says, as a reload would: `resolvedFor` stays the context of the last read,
+// which may be an older host or terminal than the pane asks about now.
 vi.mock("../composables/useResolvedProfile.js", async () => {
 	const { DEFAULT_PROFILE } = await import("@lasterm/shared");
-	const { computed, ref } = await import("vue");
+	const { ref, watch } = await import("vue");
 	return {
 		useResolvedProfile: (
 			hostId: { value: string | null | undefined },
 			channelId: { value: string | null | undefined },
 		) => {
 			const profile = ref({ ...DEFAULT_PROFILE, ...xterm.profile });
-			const read = ref(xterm.profileRead);
-			xterm.profiles.push({ hostId, channelId, profile, read });
-			return {
-				profile,
-				resolvedFor: computed(() =>
-					read.value ? { hostId: hostId.value ?? null, channelId: channelId.value ?? null } : null,
-				),
-				reload: async () => {},
+			const asked = () => ({ hostId: hostId.value ?? null, channelId: channelId.value ?? null });
+			const readsAtOnce = ref(xterm.profileRead);
+			const resolvedFor = ref<{ hostId: string | null; channelId: string | null } | null>(
+				readsAtOnce.value ? asked() : null,
+			);
+			const read = () => {
+				resolvedFor.value = asked();
 			};
+			watch([hostId, channelId], () => {
+				if (readsAtOnce.value) read();
+			});
+			xterm.profiles.push({ hostId, channelId, profile, resolvedFor, readsAtOnce, read });
+			return { profile, resolvedFor, reload: async () => {} };
 		},
 	};
 });
@@ -356,10 +368,12 @@ export interface PaneProps {
 	hostId?: string | null;
 	/** The terminals of the tab shown, as the layout provides them; none: no layout. */
 	onScreen?: Ref<ReadonlySet<string>>;
+	/** A second pane beside it, over this terminal, as a split shows two. */
+	beside?: Ref<string | null>;
 }
 
 /** Mount the pane in the window `freshWindow` set up. */
-export function mount({ channel, hostId = HOST, onScreen }: PaneProps): void {
+export function mount({ channel, hostId = HOST, onScreen, beside }: PaneProps): void {
 	root = document.createElement("div");
 	document.body.appendChild(root);
 	const Parent = defineComponent({
@@ -370,17 +384,18 @@ export function mount({ channel, hostId = HOST, onScreen }: PaneProps): void {
 					computed(() => onScreen.value) as ComputedRef<ReadonlySet<string>>,
 				);
 			}
-			return () =>
+			const pane = (shows: Ref<string | null>) =>
 				h(TerminalPane, {
-					channelId: channel.value,
+					channelId: shows.value,
 					hostId,
 					onClosePane: (...args: unknown[]) => emitted.push(["close-pane", ...args]),
 					onConfigureCommand: (...args: unknown[]) => emitted.push(["configure-command", ...args]),
 					onChannelSpawned: (tempId: string, realId: string) => {
 						emitted.push(["channel-spawned", tempId, realId]);
-						if (channel.value === tempId) channel.value = realId;
+						if (shows.value === tempId) shows.value = realId;
 					},
 				});
+			return () => (beside === undefined ? pane(channel) : [pane(channel), pane(beside)]);
 		},
 	});
 	app = createApp(Parent);
@@ -448,14 +463,20 @@ export function paneProfile(): PaneProfile {
 }
 
 /**
- * A key pressed in the terminal, as xterm takes it: its key handler first, and
- * what it lets through typed into the terminal as `data`. Says whether the
- * handler let it through.
+ * A key event in the terminal, as xterm takes it: its key handler first, and,
+ * for a keydown it lets through, `data` typed into the terminal. xterm hands
+ * its handler keydown, keypress and keyup alike. Says whether the handler let
+ * the event through.
  */
-export function press(init: KeyboardEventInit, data: string): boolean {
+export function press(
+	init: KeyboardEventInit,
+	data: string,
+	event: "keydown" | "keypress" | "keyup" = "keydown",
+): boolean {
 	const term = terminal();
-	const through = term.keyHandler?.(new KeyboardEvent("keydown", init)) ?? true;
-	if (through) for (const listener of [...term.dataListeners]) listener(data);
+	const through = term.keyHandler?.(new KeyboardEvent(event, init)) ?? true;
+	if (through && event === "keydown")
+		for (const listener of [...term.dataListeners]) listener(data);
 	return through;
 }
 
@@ -465,6 +486,11 @@ export function type(data: string): void {
 }
 
 beforeEach(() => {
+	// A test's timers are its own: a request it leaves unanswered times out
+	// within it, or never, rather than ten seconds later in another test, where
+	// its unmounted pane would still call its stores' actions, and each action
+	// makes its own window's stores the active ones.
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 	sent = [];
 	emitted = [];
 	xterm.events.length = 0;
@@ -472,6 +498,7 @@ beforeEach(() => {
 	xterm.queue.length = 0;
 	xterm.profile = {};
 	xterm.profileRead = true;
+	xterm.selection = false;
 	xterm.profiles.length = 0;
 	xterm.terminals.length = 0;
 	xterm.fit = { cols: 80, rows: 24 };

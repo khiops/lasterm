@@ -43,16 +43,30 @@ function sized(): void {
 	root.style.height = "500px";
 }
 
+/** What a click at (x, y) lands on: a point off the page lands on nothing, which fails. */
+function clickAt(x: number, y: number): Element {
+	const hit = document.elementFromPoint(x, y);
+	if (hit === null) throw new Error(`a click at ${x},${y} lands on nothing: off the page`);
+	return hit;
+}
+
 /** What a click at the middle of `el` lands on. */
-function clickAtMiddleOf(el: Element): Element | null {
+function clickAtMiddleOf(el: Element): Element {
 	const box = el.getBoundingClientRect();
-	return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+	return clickAt(box.left + box.width / 2, box.top + box.height / 2);
 }
 
 /** What a click near the bottom-left corner of the pane lands on: well away from any card. */
-function clickNearCorner(): Element | null {
+function clickNearCorner(): Element {
 	const box = root.querySelector(".terminal-pane")!.getBoundingClientRect();
-	return document.elementFromPoint(box.left + 12, box.bottom - 12);
+	return clickAt(box.left + 12, box.bottom - 12);
+}
+
+/** The one element `selector` names in the pane. */
+function one(selector: string): Element {
+	const found = root.querySelector(selector);
+	if (found === null) throw new Error(`no ${selector} in the pane`);
+	return found;
 }
 
 const card = () => root.querySelector(".exit-card");
@@ -80,7 +94,9 @@ describe("TerminalPane failure, drawn", () => {
 		await vi.waitFor(() => expect(button("Retry")).toBeDefined());
 
 		const message = root.querySelector(".terminal-error__box span")!;
-		expect(clickAtMiddleOf(message)?.closest(".terminal-error__box")).not.toBeNull();
+		expect(clickAtMiddleOf(message).closest(".terminal-error__box")).toBe(
+			one(".terminal-error__box"),
+		);
 		expect(clickAtMiddleOf(button("Retry")!)).toBe(button("Retry"));
 		expect(clickAtMiddleOf(button("Close")!)).toBe(button("Close"));
 	});
@@ -92,8 +108,8 @@ describe("TerminalPane exit card, drawn (#927)", () => {
 	it("lets the pointer through to an ended terminal's output around its card", async () => {
 		await openEnded();
 
-		expect(clickNearCorner()?.closest(".terminal-container")).not.toBeNull();
-		expect(clickAtMiddleOf(card()!)?.closest(".exit-card")).not.toBeNull();
+		expect(clickNearCorner().closest(".terminal-container")).toBe(one(".terminal-container"));
+		expect(clickAtMiddleOf(one(".exit-card")).closest(".exit-card")).toBe(one(".exit-card"));
 		expect(clickAtMiddleOf(button("Restart")!)).toBe(button("Restart"));
 	});
 
@@ -106,7 +122,7 @@ describe("TerminalPane exit card, drawn (#927)", () => {
 		hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId: T });
 		await vi.waitFor(() => expect(card()).not.toBeNull());
 
-		expect(clickNearCorner()?.closest(".exit-overlay")).not.toBeNull();
+		expect(clickNearCorner().closest(".exit-overlay")).toBe(one(".exit-overlay"));
 		expect(clickAtMiddleOf(button("Close")!)).toBe(button("Close"));
 	});
 
@@ -124,7 +140,7 @@ describe("TerminalPane exit card, drawn (#927)", () => {
 
 		const line = root.querySelector(".exit-status__text")!;
 		expect(line.textContent).toBe("Waiting for pi…");
-		expect(clickAtMiddleOf(line)?.closest(".terminal-container")).not.toBeNull();
+		expect(clickAtMiddleOf(line).closest(".terminal-container")).toBe(one(".terminal-container"));
 		expect(clickAtMiddleOf(button("Cancel")!)).toBe(button("Cancel"));
 	});
 });

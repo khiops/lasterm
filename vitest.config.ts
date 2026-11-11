@@ -63,9 +63,12 @@ export default defineConfig({
 					name: "web-browser",
 					include: ["packages/clients/web/**/*.browser.spec.ts"],
 					css: { include: WEB_STYLES },
+					// A failing spec's screenshot, kept out of the sources.
+					attachmentsDir: "target/vitest/attachments",
 					browser: {
 						enabled: true,
 						headless: true,
+						screenshotDirectory: "target/vitest/screenshots",
 						provider: playwright({
 							launchOptions: { channel: process.platform === "win32" ? "msedge" : "chrome" },
 						}),

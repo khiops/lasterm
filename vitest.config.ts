@@ -7,7 +7,7 @@ import { configDefaults, defineConfig } from "vitest/config";
  * stylesheet a module imports, so that a mounted component is drawn with its
  * rules and `getComputedStyle` answers from them (#936).
  */
-const WEB_STYLES = [/\.css\?raw$/, /\.css$/, /\.vue\?vue&type=style/];
+const WEB_STYLES = [/\.css$/, /\.vue\?vue&type=style/];
 
 export default defineConfig({
 	test: {
@@ -47,6 +47,12 @@ export default defineConfig({
 					include: ["packages/clients/web/**/*.spec.ts"],
 					exclude: [...configDefaults.exclude, "packages/clients/web/**/*.browser.spec.ts"],
 					environment: "happy-dom",
+					// A guard against a hang, as in the hub's specs, not a measure of
+					// speed: a spec that mounts a component over a module it mocks
+					// for that one test loads the component's whole graph again, which
+					// takes over Vitest's default 5 s while the other projects run.
+					testTimeout: 30_000,
+					hookTimeout: 30_000,
 					// Vitest hands a spec an empty module for every stylesheet it does
 					// not include. happy-dom applies the rest: cascade, `var()`,
 					// `:focus-visible`, but no `:hover`, `:focus-within` or layout.

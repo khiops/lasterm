@@ -7,6 +7,6 @@ export default defineConfig({
 	test: {
 		environment: "happy-dom",
 		// Components drawn with their own rules: see the root config (#936).
-		css: { include: [/\.css\?raw$/, /\.css$/, /\.vue\?vue&type=style/] },
+		css: { include: [/\.css$/, /\.vue\?vue&type=style/] },
 	},
 });

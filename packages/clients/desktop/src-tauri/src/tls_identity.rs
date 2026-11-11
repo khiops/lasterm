@@ -85,6 +85,10 @@ impl ServerCertVerifier for SpkiPinVerifier {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the tests build their fixtures by pathname, in temporary directories of their own"
+)]
 mod tests {
     use super::SpkiPinVerifier;
     use rcgen::{CertificateParams, KeyPair, PublicKeyData};

@@ -314,6 +314,10 @@ mod unix {
         pub fn inspect_existing(&self, name: &LeafName) -> io::Result<Option<LeafMetadata>> {
             let name = c_name(name)?;
             let mut stat = MaybeUninit::<libc::stat>::uninit();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the crate's Unix descriptor-relative metadata primitive"
+            )]
             // SAFETY: the directory descriptor and C string are valid, and stat
             // points to suitably aligned uninitialized storage for fstatat.
             if unsafe {
@@ -357,6 +361,10 @@ mod unix {
             }
             let from = c_name(from)?;
             let to = c_name(to)?;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the crate's Unix descriptor-relative replacement primitive"
+            )]
             // SAFETY: names are NUL-terminated and the descriptors are owned.
             if unsafe {
                 libc::renameat(
@@ -374,6 +382,10 @@ mod unix {
 
         pub fn remove_file(&self, name: &LeafName) -> io::Result<()> {
             let name = c_name(name)?;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the crate's Unix descriptor-relative leaf-removal primitive"
+            )]
             // SAFETY: name is NUL-terminated and the descriptor is owned.
             if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) } != 0 {
                 return Err(io::Error::last_os_error());
@@ -384,6 +396,10 @@ mod unix {
         pub fn hard_link(&self, from: &LeafName, to: &LeafName) -> io::Result<()> {
             let from = c_name(from)?;
             let to = c_name(to)?;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the crate's Unix descriptor-relative link primitive"
+            )]
             // SAFETY: names are NUL-terminated and the descriptor is owned.
             if unsafe {
                 libc::linkat(
@@ -428,6 +444,10 @@ mod unix {
         description: &str,
     ) -> io::Result<i32> {
         let name = c_os_str(name, description)?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the crate's Unix descriptor-relative leaf primitive"
+        )]
         // SAFETY: the directory descriptor and C string remain valid for the call.
         let fd = unsafe { libc::openat(parent, name.as_ptr(), flags, mode) };
         if fd < 0 {
@@ -492,6 +512,10 @@ mod unix {
         })?;
         let leaf = LeafName::new(leaf.as_os_str())?;
         let root = CString::new("/").expect("root has no NUL");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the crate's Unix root-directory primitive"
+        )]
         // SAFETY: root is NUL-terminated; O_DIRECTORY requires the root directory.
         let root_fd = unsafe {
             libc::open(
@@ -517,6 +541,10 @@ mod unix {
     pub fn open_directory(path: &Path, create: bool, mode: u32) -> io::Result<Directory> {
         let names = ancestor_names(path, "protected directory")?;
         let root = CString::new("/").expect("root has no NUL");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the crate's Unix root-directory primitive"
+        )]
         // SAFETY: root is NUL-terminated; O_DIRECTORY requires the root directory.
         let root_fd = unsafe {
             libc::open(
@@ -538,6 +566,10 @@ mod unix {
                         return Err(error);
                     }
                     let c_name = c_os_str(ancestor.as_os_str(), "protected ancestor")?;
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "the crate's Unix descriptor-relative creation of a missing ancestor"
+                    )]
                     // SAFETY: name is NUL-terminated and parent is an owned directory.
                     if unsafe {
                         libc::mkdirat(
@@ -655,6 +687,10 @@ mod windows {
                 &self.path.join(to.as_os_str()),
                 "protected destination path",
             )?;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "atomically replaces the Windows certificate pathname with write-through durability"
+            )]
             // SAFETY: both paths are NUL-terminated and remain live for the call.
             if unsafe {
                 MoveFileExW(
@@ -671,6 +707,10 @@ mod windows {
 
         pub fn remove_file(&self, name: &LeafName) -> io::Result<()> {
             let path = wide_path(&self.path.join(name.as_os_str()), "protected path")?;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "removes Windows temporary leaves by pathname during cleanup"
+            )]
             // SAFETY: path is NUL-terminated and remains live for the call.
             if unsafe { DeleteFileW(path.as_ptr()) } == 0 {
                 return Err(io::Error::last_os_error());
@@ -684,6 +724,10 @@ mod windows {
                 &self.path.join(to.as_os_str()),
                 "protected destination path",
             )?;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "publishes the Windows private-key leaf without replacing an existing key"
+            )]
             // SAFETY: both paths are NUL-terminated and remain live for the call.
             if unsafe { CreateHardLinkW(to.as_ptr(), from.as_ptr(), std::ptr::null()) } == 0 {
                 return Err(io::Error::last_os_error());
@@ -757,6 +801,10 @@ mod windows {
 
     fn open_path(path: &Path, disposition: u32, access: u32, flags: u32) -> io::Result<File> {
         let wide = wide_path(path, "protected path")?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the crate's Windows one-handle protected-leaf primitive"
+        )]
         // SAFETY: wide is NUL-terminated and lives for the call. Delete sharing
         // preserves pathname publication and cleanup while a protected handle is open.
         let handle = unsafe {
@@ -797,6 +845,10 @@ mod windows {
     pub fn open_directory(path: &Path, create: bool, _mode: u32) -> io::Result<Directory> {
         validate_path(path, false)?;
         if create {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "Windows requested-directory creation has no public handle-relative primitive; the boundary comment states this limit"
+            )]
             std::fs::create_dir_all(path)?;
         }
         let file = open_path(
@@ -819,6 +871,10 @@ mod windows {
 pub use windows::{open_directory, open_parent, Directory, LeafMetadata};
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the tests build their fixtures by pathname, in temporary directories of their own"
+)]
 mod tests {
     #[cfg(unix)]
     use super::AncestorName;
@@ -830,418 +886,6 @@ mod tests {
     use std::io;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-    use std::path::PathBuf;
-    use std::process::Command;
-
-    #[derive(Clone, Copy)]
-    struct AllowedCall {
-        source: &'static str,
-        call: &'static str,
-        expected_occurrences: usize,
-        why: &'static str,
-    }
-
-    /// The files the allowlist guards, by name and path in the checkout.
-    const GUARDED_SOURCES: [(&str, &str); 4] = [
-        ("desktop", "packages/clients/desktop/src-tauri/src/lib.rs"),
-        (
-            "desktop-hub-log",
-            "packages/clients/desktop/src-tauri/src/hub_log.rs",
-        ),
-        ("identity", "crates/lasterm-tls-identity/src/lib.rs"),
-        ("protected-fs", "crates/lasterm-protected-fs/src/lib.rs"),
-    ];
-
-    const ALLOWLIST_TEST: &str =
-        "tests::protected_path_plain_pathname_spellings_match_the_reviewed_allowlist";
-
-    /// The checkout whose sources the allowlist reads: the one cargo names when
-    /// it runs the test, never the one this binary was compiled in (#526).
-    /// Checkouts that share a target directory share this binary too, and cargo
-    /// runs one another checkout compiled when this crate's own sources have not
-    /// changed since; a path fixed at compile time then reads that checkout.
-    fn checkout_under_test() -> PathBuf {
-        let manifest = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from).expect(
-            "CARGO_MANIFEST_DIR names the checkout under test: run this through cargo test, which sets it",
-        );
-        manifest
-            .parent()
-            .and_then(|path| path.parent())
-            .expect("protected-fs lives directly under the workspace crates directory")
-            .to_path_buf()
-    }
-
-    /// Runs the allowlist test again, in a child process told that a copy of
-    /// the guarded sources is the checkout under test. The copy's desktop code
-    /// makes one pathname call the allowlist does not know, so the test fails
-    /// there, and names the copy. A path fixed at compile time would read this
-    /// checkout instead, and pass.
-    #[test]
-    fn protected_path_allowlist_reads_the_checkout_named_at_run_time() {
-        let checkout = checkout_under_test();
-        let copy = std::env::temp_dir().join(format!(
-            "lasterm-protected-fs-allowlist-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&copy);
-        for (_, source) in GUARDED_SOURCES {
-            let to = copy.join(source);
-            fs::create_dir_all(to.parent().expect("a guarded source sits in a directory"))
-                .expect("create the copy's directories");
-            fs::copy(checkout.join(source), &to).expect("copy a guarded source");
-        }
-        let desktop = copy.join(GUARDED_SOURCES[0].1);
-        let text = fs::read_to_string(&desktop).expect("read the copied desktop source");
-        let tests = text
-            .rfind("\n#[cfg(test)]")
-            .expect("guarded source has a trailing test module");
-        let planted = format!(
-            "{}\nfn planted() {{ let _ = std::fs::read(\"planted\"); }}\n{}",
-            &text[..tests],
-            &text[tests..],
-        );
-        fs::write(&desktop, planted).expect("plant an unallowlisted call in the copy");
-
-        let run = Command::new(std::env::current_exe().expect("this test binary"))
-            .args(["--exact", ALLOWLIST_TEST])
-            .env(
-                "CARGO_MANIFEST_DIR",
-                copy.join("crates/lasterm-protected-fs"),
-            )
-            .output()
-            .expect("run the allowlist test again");
-        let _ = fs::remove_dir_all(&copy);
-        let report = format!(
-            "{}{}",
-            String::from_utf8_lossy(&run.stdout),
-            String::from_utf8_lossy(&run.stderr)
-        );
-        assert!(
-            !run.status.success(),
-            "the allowlist test passed against a checkout holding an unallowlisted call:\n{report}"
-        );
-        assert!(
-            report.contains(&format!(
-                "unallowlisted protected-path filesystem call in {}",
-                desktop.display()
-            )),
-            "the allowlist test did not read the checkout it was given:\n{report}"
-        );
-    }
-
-    #[test]
-    fn protected_path_plain_pathname_spellings_match_the_reviewed_allowlist() {
-        // This reads source text rather than Rust's resolved AST. It catches plain
-        // pathname calls in these four files, but a call hidden by an alias or a
-        // macro is invisible and still needs review.
-        let allowed = [
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::remove_file(&self.path)",
-                expected_occurrences: 1,
-                why: "removes the Unix desktop-raise socket, not a protected file",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::remove_file(path)",
-                expected_occurrences: 1,
-                why: "removes a stale Unix desktop-raise socket before binding",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "CreateFileW, FlushFileBuffers, OPEN_EXISTING",
-                expected_occurrences: 1,
-                why: "imports the Windows named-pipe client primitive",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "CreateFileW(",
-                expected_occurrences: 1,
-                why: "opens the Windows named pipe, not a filesystem object",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "let contents = match std::fs::read_to_string(path)",
-                expected_occurrences: 1,
-                why: "reads the non-protected close-behavior preference",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::read_to_string(dir.join(WINDOW_BACKGROUND_FILE))",
-                expected_occurrences: 1,
-                why: "reads the non-protected window-background preference",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::create_dir_all(&dir)",
-                expected_occurrences: 2,
-                why: "creates the non-protected window-background and window-tone preference directory",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::read_to_string(dir.join(WINDOW_TONE_FILE))",
-                expected_occurrences: 1,
-                why: "reads the non-protected window-tone preference",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::write(dir.join(WINDOW_TONE_FILE), tone)",
-                expected_occurrences: 1,
-                why: "writes the non-protected window-tone preference",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::write(dir.join(WINDOW_BACKGROUND_FILE), effect)",
-                expected_occurrences: 1,
-                why: "writes the non-protected window-background preference",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::rename(source, target)",
-                expected_occurrences: 1,
-                why: "replaces the non-protected close-behavior preference",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::create_dir_all(parent)",
-                expected_occurrences: 1,
-                why: "creates the non-protected close-behavior preference directory",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "            match std::fs::OpenOptions::new()",
-                expected_occurrences: 1,
-                why: "creates a non-protected close-behavior temporary file",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::remove_file(&temp_path)",
-                expected_occurrences: 1,
-                why: "cleans a non-protected close-behavior temporary file",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::symlink_metadata(&path)",
-                expected_occurrences: 1,
-                why: "checks an explicitly user-selected agent file",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::symlink_metadata(&canonical_path)",
-                expected_occurrences: 1,
-                why: "checks the resolved explicitly user-selected agent file",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "if is_reparse_point || metadata.file_type().is_symlink() || !metadata.is_dir()",
-                expected_occurrences: 1,
-                why: "examines already-read runtime-directory metadata to reject symlinks",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "if metadata.file_type().is_symlink() || !metadata.is_dir()",
-                expected_occurrences: 1,
-                why: "examines already-read runtime-directory metadata to reject symlinks",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "if selected_metadata.file_type().is_symlink()",
-                expected_occurrences: 1,
-                why: "examines already-read explicitly user-selected agent metadata",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "if canonical_metadata.file_type().is_symlink()",
-                expected_occurrences: 1,
-                why: "examines already-read resolved explicitly user-selected agent metadata",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::File::open(&canonical_path)",
-                expected_occurrences: 1,
-                why: "reads an explicitly user-selected agent file",
-            },
-            AllowedCall {
-                source: "desktop",
-                call: "std::fs::create_dir_all(&log_dir)",
-                expected_occurrences: 1,
-                why: "creates the non-protected hub diagnostic-log directory",
-            },
-            AllowedCall {
-                source: "desktop-hub-log",
-                call: "use std::fs::{File, OpenOptions};",
-                expected_occurrences: 1,
-                why: "imports the opener of the non-protected hub diagnostic log",
-            },
-            AllowedCall {
-                source: "desktop-hub-log",
-                call: "let opened = OpenOptions::new()",
-                expected_occurrences: 1,
-                why: "opens the non-protected hub diagnostic log, hub.log",
-            },
-            AllowedCall {
-                source: "desktop-hub-log",
-                call: "std::fs::rename(&self.path, &self.previous)",
-                expected_occurrences: 1,
-                why: "moves the non-protected hub diagnostic log aside to hub.log.old",
-            },
-            AllowedCall {
-                source: "identity",
-                call: "fs::remove_file(path)",
-                expected_occurrences: 1,
-                why: "unsupported-platform temporary cleanup; Unix and Windows use the crate",
-            },
-            AllowedCall {
-                source: "identity",
-                call: "fs::hard_link(&temporary_path, key_path)",
-                expected_occurrences: 1,
-                why: "unsupported-platform private-key publication fallback; Unix and Windows use the crate",
-            },
-            AllowedCall {
-                source: "protected-fs",
-                call: "libc::openat(parent, name.as_ptr(), flags, mode)",
-                expected_occurrences: 1,
-                why: "the crate's Unix descriptor-relative leaf primitive",
-            },
-            AllowedCall {
-                source: "protected-fs",
-                call: "libc::open(",
-                expected_occurrences: 2,
-                why: "the crate's Unix root-directory primitive",
-            },
-            AllowedCall {
-                source: "protected-fs",
-                call: "libc::renameat(",
-                expected_occurrences: 1,
-                why: "the crate's Unix descriptor-relative replacement primitive",
-            },
-            AllowedCall {
-                source: "protected-fs",
-                call: "libc::unlinkat(",
-                expected_occurrences: 1,
-                why: "the crate's Unix descriptor-relative leaf-removal primitive",
-            },
-            AllowedCall {
-                source: "protected-fs",
-                call: "libc::stat",
-                expected_occurrences: 2,
-                why: "the crate's Unix descriptor-relative metadata storage",
-            },
-            AllowedCall {
-                source: "protected-fs",
-                call: "CreateFileW, CreateHardLinkW, DeleteFileW, FileAttributeTagInfo,",
-                expected_occurrences: 1,
-                why: "imports the crate's Windows checked-handle and pathname publication primitives",
-            },
-            AllowedCall {
-                source: "protected-fs",
-                call: "GetFileInformationByHandleEx, MoveFileExW, CREATE_NEW,",
-                expected_occurrences: 1,
-                why: "imports the checked-handle query and pathname replacement primitives",
-            },
-            AllowedCall {
-                source: "protected-fs",
-                call: "CreateFileW(",
-                expected_occurrences: 1,
-                why: "the crate's Windows one-handle protected-leaf primitive",
-            },
-            AllowedCall {
-                source: "protected-fs",
-                call: "MoveFileExW(",
-                expected_occurrences: 1,
-                why: "atomically replaces the Windows certificate pathname with write-through durability",
-            },
-            AllowedCall {
-                source: "protected-fs",
-                call: "DeleteFileW(",
-                expected_occurrences: 1,
-                why: "removes Windows temporary leaves by pathname during cleanup",
-            },
-            AllowedCall {
-                source: "protected-fs",
-                call: "CreateHardLinkW(",
-                expected_occurrences: 1,
-                why: "publishes the Windows private-key leaf without replacing an existing key",
-            },
-            AllowedCall {
-                source: "protected-fs",
-                call: "std::fs::create_dir_all(path)",
-                expected_occurrences: 1,
-                why: "Windows requested-directory creation has no public handle-relative primitive; the boundary comment states this limit",
-            },
-        ];
-        let root = checkout_under_test();
-        let sources = GUARDED_SOURCES.map(|(name, source)| (name, root.join(source)));
-        let patterns = [
-            "fs::read",
-            "fs::read_to_string",
-            "fs::write",
-            "fs::rename",
-            "fs::remove_file",
-            "fs::remove_dir_all",
-            "fs::metadata",
-            "fs::symlink_metadata",
-            "fs::hard_link",
-            "fs::create_dir",
-            "fs::create_dir_all",
-            "fs::set_permissions",
-            "fs::read_dir",
-            "fs::copy",
-            "fs::canonicalize",
-            "File::open",
-            "File::create",
-            "OpenOptions",
-            "libc::open",
-            "libc::unlink",
-            "libc::rename",
-            "libc::stat",
-            "libc::lstat",
-            "CreateFileW",
-            "GetFileAttributesW",
-            "ReplaceFileW",
-            "symlink(",
-            "MoveFileExW",
-            "DeleteFileW",
-            "CreateHardLinkW",
-            "RemoveDirectoryW",
-        ];
-
-        let mut occurrences = vec![0_usize; allowed.len()];
-        for (source_name, path) in sources {
-            let source = fs::read_to_string(&path).expect("read guarded source file");
-            let production = &source[..source
-                .rfind("\n#[cfg(test)]")
-                .expect("guarded source has a trailing test module")];
-            for (line_number, line) in production.lines().enumerate() {
-                let code = line.split("//").next().unwrap_or(line);
-                if patterns.iter().any(|pattern| code.contains(pattern)) {
-                    let allowed_call = allowed.iter().position(|allowed| {
-                        allowed.source == source_name && code.contains(allowed.call)
-                    });
-                    assert!(
-                        allowed_call.is_some(),
-                        "unallowlisted protected-path filesystem call in {}:{}: {}",
-                        path.display(),
-                        line_number + 1,
-                        code.trim(),
-                    );
-                    let allowed_call = allowed_call.expect("checked above");
-                    occurrences[allowed_call] += 1;
-                    assert!(
-                        !allowed[allowed_call].why.is_empty(),
-                        "allowlist entry must explain its permitted pathname call"
-                    );
-                }
-            }
-        }
-        for (allowed, occurrences) in allowed.iter().zip(occurrences) {
-            assert_eq!(
-                occurrences, allowed.expected_occurrences,
-                "allowlisted fingerprint {:?} in {} expected {} occurrence(s), found {occurrences}",
-                allowed.call, allowed.source, allowed.expected_occurrences,
-            );
-        }
-    }
 
     #[test]
     fn verbatim_wide_path_preserves_win32_absolute_path_access() {

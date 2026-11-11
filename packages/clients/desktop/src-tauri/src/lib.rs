@@ -730,6 +730,10 @@ impl Drop for DesktopRaiseListener {
         self.stop.store(true, Ordering::Relaxed);
         #[cfg(unix)]
         {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "removes the Unix desktop-raise socket, not a protected file"
+            )]
             if let Err(error) = std::fs::remove_file(&self.path) {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     eprintln!(
@@ -1373,6 +1377,10 @@ fn set_taskbar_icon<R: tauri::Runtime>(_window: &tauri::WebviewWindow<R>) {}
 
 /// The tone the window was last told about, for the launch that comes before
 /// the page can say it again.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reads the non-protected window-tone preference"
+)]
 fn remembered_window_tone() -> bool {
     lasterm_config_dir()
         .ok()
@@ -1385,12 +1393,18 @@ fn remember_window_tone(dark: bool) {
     let Ok(dir) = lasterm_config_dir() else {
         return;
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the non-protected window-tone preference directory"
+    )]
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    // One line on purpose: the protected-path audit matches each filesystem
-    // call against its reviewed spelling line by line.
     let tone = if dark { "dark" } else { "light" };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "writes the non-protected window-tone preference"
+    )]
     let _ = std::fs::write(dir.join(WINDOW_TONE_FILE), tone);
 }
 
@@ -1409,6 +1423,10 @@ fn apply_window_tone(app: tauri::AppHandle, dark: bool) -> Result<(), String> {
 }
 
 /// The background the window was last asked for, as the web client named it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reads the non-protected window-background preference"
+)]
 fn remembered_window_background() -> String {
     lasterm_config_dir()
         .ok()
@@ -1424,6 +1442,10 @@ fn remember_window_background(effect: &str) {
     let Ok(dir) = lasterm_config_dir() else {
         return;
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the directory of, and writes, the non-protected window-background preference"
+    )]
     if let Err(error) = std::fs::create_dir_all(&dir)
         .and_then(|()| std::fs::write(dir.join(WINDOW_BACKGROUND_FILE), effect))
     {
@@ -1671,6 +1693,10 @@ fn request_desktop_raise(endpoint: &DesktopRaiseEndpoint) -> RaiseRequestResult 
 
 #[cfg(unix)]
 fn bind_desktop_raise_socket(path: &Path) -> Result<UnixListener, String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "removes a stale Unix desktop-raise socket before binding, not a protected file"
+    )]
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1872,6 +1898,10 @@ fn request_desktop_raise(endpoint: &DesktopRaiseEndpoint) -> RaiseRequestResult 
     if unsafe { WaitNamedPipeW(name.as_ptr(), INSTANCE_RAISE_TIMEOUT.as_millis() as u32) } == 0 {
         return RaiseRequestResult::Unanswered;
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "opens the Windows named pipe, not a filesystem object"
+    )]
     let handle = unsafe {
         CreateFileW(
             name.as_ptr(),
@@ -2383,6 +2413,10 @@ fn close_behavior_config_path() -> Result<PathBuf, String> {
 }
 
 fn read_close_behavior_from_path(path: &std::path::Path) -> CloseBehaviorConfigState {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "reads the non-protected close-behavior preference"
+    )]
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2405,6 +2439,10 @@ fn read_close_behavior() -> CloseBehaviorConfigState {
     read_close_behavior_from_path(&path)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "replaces the non-protected close-behavior preference"
+)]
 fn write_close_behavior_to_path(
     path: &std::path::Path,
     behavior: CloseBehavior,
@@ -2425,6 +2463,10 @@ where
     let parent = path
         .parent()
         .ok_or_else(|| "close preference path has no parent directory".to_string())?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the non-protected close-behavior preference directory"
+    )]
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("failed to create close preference directory: {error}"))?;
     let contents = serde_json::to_string(&CloseBehaviorConfig {
@@ -2436,6 +2478,10 @@ where
         .and_then(|name| name.to_str())
         .ok_or_else(|| "close preference path has no file name".to_string())?;
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates a non-protected close-behavior temporary file"
+    )]
     let (mut temp_file, temp_path) = (0..32)
         .find_map(|_| {
             let suffix = CLOSE_BEHAVIOR_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -2477,6 +2523,10 @@ where
             .map_err(|error| format!("failed to replace close preference: {error}"))
     });
     if result.is_err() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "cleans a non-protected close-behavior temporary file"
+        )]
         let _ = std::fs::remove_file(&temp_path);
     }
     result
@@ -5898,21 +5948,37 @@ async fn pick_and_read_agent_file(
 }
 
 fn read_picked_agent_file(path: PathBuf, max_bytes: u64) -> Result<PickedAgentFile, String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "checks an explicitly user-selected agent file"
+    )]
     let selected_metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| format!("INVALID_PATH: failed to inspect selected file: {}", error))?;
     if selected_metadata.file_type().is_symlink() {
         return Err("SYMLINK_NOT_ALLOWED: selected file must not be a symlink".to_string());
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "resolves an explicitly user-selected agent file"
+    )]
     let canonical_path = path
         .canonicalize()
         .map_err(|error| format!("INVALID_PATH: failed to resolve selected file: {}", error))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "checks the resolved explicitly user-selected agent file"
+    )]
     let canonical_metadata = std::fs::symlink_metadata(&canonical_path)
         .map_err(|error| format!("INVALID_PATH: failed to inspect selected file: {}", error))?;
     if canonical_metadata.file_type().is_symlink() {
         return Err("SYMLINK_NOT_ALLOWED: selected file must not be a symlink".to_string());
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "reads an explicitly user-selected agent file"
+    )]
     let file = std::fs::File::open(&canonical_path)
         .map_err(|error| format!("READ_FAILED: failed to open selected file: {}", error))?;
     let metadata = file
@@ -6000,6 +6066,10 @@ fn launch_hub(app: &tauri::AppHandle) -> Result<u16, String> {
     let log_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("lasterm");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the non-protected hub diagnostic-log directory"
+    )]
     if let Err(error) = std::fs::create_dir_all(&log_dir) {
         eprintln!("[lasterm] cannot create {}: {error}", log_dir.display());
     }
@@ -6488,6 +6558,10 @@ pub fn run() {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the tests build their fixtures by pathname, in temporary directories of their own"
+)]
 mod tests {
     use super::*;
     use rcgen::PublicKeyData;

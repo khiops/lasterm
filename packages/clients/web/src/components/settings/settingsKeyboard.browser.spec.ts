@@ -24,6 +24,9 @@ vi.mock("../../utils/hub-fetch.js", () => ({ hubFetch: mocks.hubFetch }));
 let app: App | null = null;
 
 beforeEach(async () => {
+	// The pointer away from where the thumbnails will be, wherever an earlier
+	// spec left it: at the page's centre, below them (#948).
+	await userEvent.unhover(document.body);
 	mocks.hubFetch.mockResolvedValue(
 		new Response(JSON.stringify({ wallpapers: ["dunes.jpg", "forest.png"] }), {
 			status: 200,
@@ -75,11 +78,14 @@ async function opacityOf(button: HTMLElement, expected: string): Promise<void> {
 }
 
 it("hides each delete button while nothing is on its thumbnail", async () => {
-	await opacityOf(wallpaper("dunes.jpg").remove, "0");
-	await opacityOf(wallpaper("forest.png").remove, "0");
+	for (const name of ["dunes.jpg", "forest.png"]) {
+		expect(wallpaper(name).thumb.matches(":hover"), name).toBe(false);
+		await opacityOf(wallpaper(name).remove, "0");
+	}
 });
 
 it("shows the delete button of the thumbnail the keyboard is on, and only that one", async () => {
+	expect(wallpaper("forest.png").thumb.matches(":hover")).toBe(false);
 	wallpaper("dunes.jpg").thumb.focus();
 	await opacityOf(wallpaper("dunes.jpg").remove, "1");
 	await opacityOf(wallpaper("forest.png").remove, "0");

@@ -32,6 +32,9 @@ function reading(el: Element): Record<string, string> {
 // A dimmed or tinted close button would take it below the contrast the toast
 // is checked for (ToastContainer.spec.ts).
 it("keeps the close button at the toast's own colours under the pointer", async () => {
+	// The pointer at the page's centre, away from the toast in its corner,
+	// wherever an earlier spec left it (#948).
+	await userEvent.unhover(document.body);
 	const pinia = createPinia();
 	setActivePinia(pinia);
 	useThemeStore().applyTheme(BUNDLED_THEMES["one-half-dark"]!);
@@ -47,6 +50,7 @@ it("keeps the close button at the toast's own colours under the pointer", async 
 	if (close === null) throw new Error("no close button");
 	const toast = close.closest(".toast-item");
 	if (toast === null) throw new Error("no toast");
+	expect(close.matches(":hover")).toBe(false);
 	const before = reading(close);
 
 	await userEvent.hover(close);

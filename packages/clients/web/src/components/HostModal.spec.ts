@@ -386,6 +386,24 @@ describe("HostModal for an SSH host", () => {
 	});
 });
 
+describe("HostModal on a host whose SSH server refuses socket forwarding (#765)", () => {
+	it("links to the guide to configuring an SSH server for Lasterm", async () => {
+		mountModal(SSH);
+		useHostsStore().rememberSocketForwardingRefused(SSH.id, true);
+		await nextTick();
+
+		const links = [
+			...(el("#panel-connection")?.querySelectorAll<HTMLAnchorElement>("a[href]") ?? []),
+		];
+		expect(links.map((a) => [a.textContent?.trim(), a.getAttribute("href")])).toEqual([
+			[
+				"Configuring an SSH server for Lasterm",
+				"https://github.com/khiops/lasterm/blob/main/docs/SSH_SERVER.md#keeping-the-agent-running-79",
+			],
+		]);
+	});
+});
+
 describe("HostModal on a host served by an agent from before an update (#805)", () => {
 	it("says the hub replaces it once none of its terminals runs there, and what Replace now ends", async () => {
 		mountModal(SSH);

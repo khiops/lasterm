@@ -9,6 +9,7 @@
 	"linter": {
 		"enabled": true,
 		"rules": {
+			"nursery": { "noUndeclaredCustomProperties": "error" },
 			"preset": "recommended",
 			"style": {
 				"noRestrictedImports": {
@@ -140,6 +141,12 @@
 			}
 		},
 		{
+			"includes": ["packages/clients/web/src/**/*.vue", "packages/clients/web/src/**/*.css"],
+			"formatter": { "enabled": false },
+			"assist": { "enabled": false },
+			"linter": { "rules": { "preset": "none", "style": { "noRestrictedGlobals": "off" } } }
+		},
+		{
 			"includes": ["packages/clients/web/src/components/settings/**/*.vue"],
 			"formatter": { "enabled": false },
 			"assist": { "enabled": false },
@@ -167,12 +174,13 @@
 			"**/packages/**/*.tsx",
 			"**/*.ts",
 			"**/*.json",
-			"packages/clients/web/src/components/settings/**/*.vue",
-			"!**/node_modules",
-			"!**/dist",
+			"packages/clients/web/src/**/*.vue",
+			"packages/clients/web/src/**/*.css",
+			"!!**/node_modules",
+			"!!**/dist",
 			"!**/.turbo",
 			"!**/coverage",
-			"!**/target"
+			"!!**/target"
 		]
 	},
 	"html": { "experimentalFullSupportEnabled": true },

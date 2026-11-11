@@ -89,6 +89,10 @@ function requestWrite(): void {
 
 <style scoped>
 .upload-drop {
+	/* Set from script on this element: the terminal's top by the pane, the
+	   host's colour here. Declared, unset, for the linter (#936). */
+	--upload-drop-top: initial;
+	--upload-drop-accent: initial;
 	position: absolute;
 	left: 0;
 	right: 0;

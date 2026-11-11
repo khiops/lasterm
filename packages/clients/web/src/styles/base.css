@@ -127,6 +127,13 @@
 	--nt-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
 }
 
+/* A variable a component reads and an ancestor may set: HostBadge's ring, which
+   the lists it sits in set to their own ground. Declared, unset, at the root,
+   which it is anyway, so that the linter knows it (#936). */
+:root {
+	--host-badge-ring: initial;
+}
+
 /* ── Base body styles ────────────────────────────────────────────────── */
 
 body {

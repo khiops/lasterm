@@ -688,6 +688,15 @@ onMounted(() => {
 /* Sizes come from the badge size, through the --rail-* variables the root
    element sets; colours only from the theme. */
 .host-rail {
+	/* Set from script on this element (railStyle). Declared here, and left
+	   unset, so that the linter knows every variable a rule names (#936). */
+	--rail-badge: initial;
+	--rail-initials: initial;
+	--rail-dot: initial;
+	--rail-squircle: initial;
+	--rail-pill: initial;
+	--rail-gap: initial;
+	--rail-padding: initial;
 	display: flex;
 	flex-direction: column;
 	padding-top: 8px;

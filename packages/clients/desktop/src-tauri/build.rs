@@ -1,22 +1,20 @@
 use std::path::PathBuf;
 
-/// The manifest the unit tests' binary is linked with: it names Common
-/// Controls 6, as the one tauri-build gives the executable does.
-const TEST_MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <dependency>
-    <dependentAssembly>
-      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
-    </dependentAssembly>
-  </dependency>
-</assembly>
-"#;
+/// The Windows manifest of the binaries this crate links: the executable, which
+/// tauri-build embeds it in, and the unit tests, which load Tauri's app too. It
+/// names Common Controls 6. This is tauri-build's own default, kept here so that
+/// both read one file.
+const WINDOWS_MANIFEST: &str = include_str!("windows-app-manifest.xml");
 
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         write_test_manifest();
     }
-    tauri_build::build()
+    let windows = tauri_build::WindowsAttributes::new().app_manifest(WINDOWS_MANIFEST);
+    let attributes = tauri_build::Attributes::new().windows_attributes(windows);
+    if let Err(error) = tauri_build::try_build(attributes) {
+        panic!("{error:#}");
+    }
 }
 
 /// The tests drive commands through Tauri's mock runtime, whose menu code
@@ -25,7 +23,7 @@ fn main() {
 /// embeds its own in the executable alone (`rustc-link-arg-bins`; Cargo's
 /// `rustc-link-arg-tests` reaches `tests/` targets only, not the unit tests).
 ///
-/// So this writes TEST_MANIFEST as a compiled resource file, which link.exe
+/// So this writes WINDOWS_MANIFEST as a compiled resource file, which link.exe
 /// takes as such whatever its name. Named `.lib`, it is what the
 /// `#[cfg(test)] #[link]` in lib.rs names: the unit tests' binary links it,
 /// and nothing else does.
@@ -34,7 +32,7 @@ fn write_test_manifest() {
     let mut res = Vec::new();
     // A resource file opens with an empty entry; then RT_MANIFEST (24), ID 1.
     resource_entry(&mut res, 0, 0, 0, &[]);
-    resource_entry(&mut res, 24, 1, 0x0409, TEST_MANIFEST.as_bytes());
+    resource_entry(&mut res, 24, 1, 0x0409, WINDOWS_MANIFEST.as_bytes());
     #[expect(
         clippy::disallowed_methods,
         reason = "the build's own output directory, which holds no protected file"

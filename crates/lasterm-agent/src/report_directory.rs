@@ -390,6 +390,23 @@ mod powershell_tests {
         mirror.take_shell_cwd()
     }
 
+    /// A directory made for the test, removed when it ends, the unwinding of a
+    /// failed assertion included.
+    struct MadeDirectory(std::path::PathBuf);
+
+    impl MadeDirectory {
+        fn new(path: std::path::PathBuf) -> Self {
+            std::fs::create_dir_all(&path).expect("create the directory to report");
+            Self(path)
+        }
+    }
+
+    impl Drop for MadeDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+
     /// The script, run by a real PowerShell after a prompt theme of its own,
     /// and run twice, as `. $PROFILE` or the switch over the snippet would: the
     /// prompt writes one OSC 7 that the agent reads as this host's directory,
@@ -398,20 +415,22 @@ mod powershell_tests {
     #[test]
     fn powershell_keeps_its_prompt_and_says_where_it_is() {
         // A directory whose name has a space, which OSC 7 escapes.
-        let directory = if cfg!(windows) {
-            std::path::PathBuf::from(r"C:\Program Files")
+        let (directory, _made) = if cfg!(windows) {
+            (std::path::PathBuf::from(r"C:\Program Files"), None)
         } else {
-            let directory = std::env::temp_dir()
-                .join(format!("lasterm report directory {}", std::process::id()));
-            std::fs::create_dir_all(&directory).expect("create the directory to report");
-            directory
+            let made = MadeDirectory::new(
+                std::env::temp_dir()
+                    .join(format!("lasterm report directory {}", std::process::id())),
+            );
+            (made.0.clone(), Some(made))
         };
         let theme = "function global:prompt { \"THEME ok=$?> \" }";
         let script = format!(
             "{theme}\n{SCRIPT}\n{SCRIPT}\nSet-Location -LiteralPath '{}'\n\
              Get-Item lasterm-nowhere -ErrorAction SilentlyContinue\nprompt\n\
              Set-Location Env:\\\nprompt\n",
-            directory.display()
+            // A single-quoted PowerShell string writes a quote as two.
+            directory.display().to_string().replace('\'', "''")
         );
         let mut ran = 0;
         for &(powershell, required) in POWERSHELLS {
@@ -434,9 +453,6 @@ mod powershell_tests {
                 "{powershell}: {output:?}"
             );
             assert_eq!(lines[1], "THEME ok=True> ", "{powershell}: {output:?}");
-        }
-        if !cfg!(windows) {
-            let _ = std::fs::remove_dir(&directory);
         }
         if ran == 0 {
             eprintln!("skipped: no PowerShell on this host ({POWERSHELLS:?} not found)");

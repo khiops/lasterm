@@ -2,15 +2,17 @@
  * check.sh's cargo steps build, test and lint the checkout they run in, whatever
  * another checkout last built into the target directories they share (#862).
  *
- * Two copies of one small repository, `a` and `b`, play two worktrees: the same
- * crates at the same paths, so cargo keeps one record of their builds for both.
- * Each has a workspace crate, `probe`, and a desktop crate built from its own
- * directory into a target of its own, whose build script checks a file of the
- * checkout as tauri-build checks tauri.conf.json. `b` tests and lints both
+ * Two copies of one small repository play the main checkout, `b`, and a
+ * worktree inside it, `a`, where Claude's are (.claude/worktrees, #939): the
+ * same crates at the same paths, so cargo keeps one record of their builds for
+ * both. Each has a workspace crate, `probe`, and a desktop crate built from its
+ * own directory into a target of its own, whose build script checks a file of
+ * the checkout as tauri-build checks tauri.conf.json. `b` tests and lints both
  * after `a`'s files last changed. Then check.sh runs in `a`, with `pnpm` a
  * stub, so that its cargo steps are the only ones doing anything. `a`'s probe
- * names another test than `b`'s and breaks a lint `b`'s keeps, and `a`'s file
- * fails the desktop build script: a step that reused `b`'s build would run
+ * names another test than `b`'s and breaks a lint `b`'s keeps, `a`'s file
+ * fails the desktop build script, and `a`'s desktop crate is not formatted: a
+ * step that reused `b`'s build, or took `b`'s crates for `a`'s, would run
  * `b`'s test, or pass.
  *
  * Everything is made in this repository's cargo target directory, not in the
@@ -73,7 +75,9 @@ function bash(): string {
 
 /**
  * Writes checkout `name` in `dir`. With `broken`, its probe breaks clippy's
- * needless_return, and its desktop crate's conf.txt fails the build script.
+ * needless_return, its desktop crate's conf.txt fails the build script, and
+ * neither its probe, a path dependency of the desktop crate, nor its desktop
+ * crate's lib.rs is as rustfmt writes it.
  */
 function writeCheckout(dir: string, name: string, broken: boolean): void {
 	const files: Record<string, string> = {
@@ -83,7 +87,7 @@ function writeCheckout(dir: string, name: string, broken: boolean): void {
 		[PROBE]: `pub fn checkout() -> &'static str {
     ${broken ? `return "${name}";` : `"${name}"`}
 }
-
+${broken ? "\npub const   PROBE_UNFORMATTED: u8 = 0;\n" : ""}
 #[cfg(test)]
 mod tests {
     #[test]
@@ -92,9 +96,9 @@ mod tests {
     }
 }
 `,
-		// A workspace of its own, as the real desktop crate is outside the main
-		// one: without the table, cargo would look for a workspace above this
-		// directory, up to the repository's own.
+		// A workspace of its own, as the real desktop crate is: without the
+		// table, cargo would look for one above this directory, up to the
+		// repository's own.
 		[join(DESK, "Cargo.toml")]: `[package]
 name = "desk"
 version = "0.0.0"
@@ -113,7 +117,9 @@ probe = { path = "../../../../crates/probe" }
 }
 `,
 		[join(DESK, "conf.txt")]: broken ? "invalid\n" : "valid\n",
-		[join(DESK, "src", "lib.rs")]: `pub fn probe_checkout() -> &'static str {
+		[join(DESK, "src", "lib.rs")]: broken
+			? "pub fn probe_checkout() -> &'static str { probe::checkout() }\n"
+			: `pub fn probe_checkout() -> &'static str {
     probe::checkout()
 }
 `,
@@ -161,7 +167,11 @@ function run(command: string, args: readonly string[], cwd: string, env: NodeJS.
 	// Bounded, since a synchronous wait is beyond the test's own timeout.
 	const result = spawnSync(command, args, { cwd, env, encoding: "utf8", timeout: 240_000 });
 	expect(result.error).toBeUndefined();
-	return { status: result.status, output: `${result.stdout}\n${result.stderr}` };
+	return {
+		status: result.status,
+		stdout: result.stdout,
+		output: `${result.stdout}\n${result.stderr}`,
+	};
 }
 
 describe("check.sh in a checkout that shares its cargo targets", () => {
@@ -170,8 +180,8 @@ describe("check.sh in a checkout that shares its cargo targets", () => {
 		mkdirSync(base, { recursive: true });
 		const work = mkdtempSync(join(base, "lasterm-check-spec-"));
 		tempDirs.push(work);
-		const a = join(work, "a");
 		const b = join(work, "b");
+		const a = join(b, ".claude", "worktrees", "a");
 		const logs = join(work, "logs");
 		const stubs = join(work, "stubs");
 		mkdirSync(stubs);
@@ -179,12 +189,14 @@ describe("check.sh in a checkout that shares its cargo targets", () => {
 		const env = environment(stubs, join(work, "target"), join(work, "desktop-target"));
 		const deskEnv = { ...env, CARGO_TARGET_DIR: join(work, "desktop-target") };
 
-		writeCheckout(a, "a", true);
 		writeCheckout(b, "b", false);
+		expect(run("git", ["init", "--quiet"], b, env).status).toBe(0);
+		const added = run("git", ["worktree", "add", "--quiet", "--orphan", "-b", "a", a], b, env);
+		expect(added.status, added.output).toBe(0);
+		writeCheckout(a, "a", true);
 		// a's files last changed an hour before b built.
 		const hourAgo = new Date(Date.now() - 3_600_000);
 		for (const file of [PROBE, join(DESK, "conf.txt")]) utimesSync(join(a, file), hourAgo, hourAgo);
-		expect(run("git", ["init", "--quiet"], a, env).status).toBe(0);
 		mkdirSync(join(a, "node_modules"));
 
 		// b builds with check.sh's arguments; then plain cargo in a, which is what
@@ -210,7 +222,7 @@ describe("check.sh in a checkout that shares its cargo targets", () => {
 			a,
 			env,
 		);
-		// 1: a's clippy and desktop steps fail; 2 would be check.sh refusing to run.
+		// 1: a's fmt, clippy and desktop steps fail; 2 would be check.sh refusing to run.
 		expect(check.status, check.output).toBe(1);
 		const log = (step: string) => readFileSync(join(logs, `${step}.log`), "utf8");
 		const exit = (step: string) =>
@@ -234,5 +246,49 @@ describe("check.sh in a checkout that shares its cargo targets", () => {
 			expect(exit(step), log(step)).not.toBe("0");
 			expect(log(step)).toContain("this checkout's conf.txt is invalid");
 		}
+		// Mutation caught: a desktop-fmt step that passes, rewrites instead of
+		// checking, fails without checking, or checks b's crate, which is
+		// formatted, shows no diff of a's. Without --all, which ci.yml passes,
+		// it leaves out the path dependencies, a's probe among them.
+		expect(exit("desktop-fmt"), log("desktop-fmt")).toBe("1");
+		expect(log("desktop-fmt")).toContain("Diff in");
+		expect(log("desktop-fmt")).toContain("probe_checkout() -> &'static str {");
+		expect(log("desktop-fmt")).toContain("PROBE_UNFORMATTED");
 	}, 600_000);
+});
+
+describe("the desktop crate's manifest, in a worktree inside the main checkout", () => {
+	// Claude's worktrees are there (.claude/worktrees/<name>), and every desktop
+	// step of check.sh runs cargo in the desktop crate's directory
+	// (desktop_cargo). Cargo first looks for the crate's workspace: past the
+	// worktree's root manifest, which excludes the crate, up to the main
+	// checkout's, which then refuses it as a stray member (#939). The test above
+	// runs check.sh from such a worktree on a crate of its own; this one runs
+	// that lookup on the real manifest, whose crate needs Tauri to build.
+	it("makes the crate its own cargo workspace", () => {
+		const base = cargoTargetDir(process.env, ROOT);
+		mkdirSync(base, { recursive: true });
+		const work = mkdtempSync(join(base, "lasterm-check-spec-"));
+		tempDirs.push(work);
+		const worktree = join(work, ".claude", "worktrees", "w");
+		const crate = join(worktree, DESK);
+		mkdirSync(join(crate, "src"), { recursive: true });
+		// The main checkout's root manifest and the worktree's, as the
+		// repository's without its crates.
+		const root = `[workspace]\nmembers = []\nexclude = ["packages/clients/desktop/src-tauri"]\n`;
+		writeFileSync(join(work, "Cargo.toml"), root);
+		writeFileSync(join(worktree, "Cargo.toml"), root);
+		copyFileSync(join(ROOT, DESK, "Cargo.toml"), join(crate, "Cargo.toml"));
+		writeFileSync(join(crate, "src", "lib.rs"), "");
+		copyFileSync(join(ROOT, "rust-toolchain.toml"), join(work, "rust-toolchain.toml"));
+
+		const found = run(
+			"cargo",
+			["locate-project", "--workspace", "--message-format", "plain"],
+			crate,
+			process.env,
+		);
+		expect(found.status, found.output).toBe(0);
+		expect(found.stdout.trim()).toBe(join(crate, "Cargo.toml"));
+	});
 });

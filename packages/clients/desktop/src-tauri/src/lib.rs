@@ -3901,19 +3901,7 @@ async fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), 
         .and_then(|value| value.to_str().ok())
         .and_then(|value| parse_relay_identifier(value, "multipart relay upload id").ok())
         .ok_or_else(|| "multipart relay chunk is missing its upload id".to_string())?;
-    let bytes = match request.body() {
-        tauri::ipc::InvokeBody::Raw(bytes)
-            if !bytes.is_empty() && bytes.len() <= RELAY_CHUNK_BYTES =>
-        {
-            bytes
-        }
-        tauri::ipc::InvokeBody::Raw(_) => {
-            return Err("multipart relay chunk exceeds the bounded IPC frame size".to_string())
-        }
-        tauri::ipc::InvokeBody::Json(_) => {
-            return Err(format!("multipart relay chunk {RAW_IPC_REFUSAL}"))
-        }
-    };
+    let bytes = upload_chunk_bytes(request.body())?;
     let claim = claim_hub_upload_chunk(upload_id)?;
     // Tauri has already materialised this raw IPC body before entering the
     // command. An oversized body is rejected here without another copy or any
@@ -3922,6 +3910,23 @@ async fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), 
     let deadline = Instant::now() + HUB_REQUEST_TIMEOUT;
     relay_off_main_thread(move || send_hub_upload_chunk_claimed(upload_id, claim, bytes, deadline))
         .await
+}
+
+/// A multipart chunk's bytes, from its IPC body: raw, and one bounded frame at
+/// most. A webview whose IPC cannot carry raw bytes sends them as JSON, and the
+/// web client knows the refusal by its words.
+fn upload_chunk_bytes(body: &tauri::ipc::InvokeBody) -> Result<&Vec<u8>, String> {
+    match body {
+        tauri::ipc::InvokeBody::Raw(bytes)
+            if !bytes.is_empty() && bytes.len() <= RELAY_CHUNK_BYTES =>
+        {
+            Ok(bytes)
+        }
+        tauri::ipc::InvokeBody::Raw(_) => {
+            Err("multipart relay chunk exceeds the bounded IPC frame size".to_string())
+        }
+        tauri::ipc::InvokeBody::Json(_) => Err(format!("multipart relay chunk {RAW_IPC_REFUSAL}")),
+    }
 }
 
 #[cfg(test)]
@@ -4562,21 +4567,7 @@ async fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), Strin
         .get(&relay_id)
         .map(|relay| relay.input.clone())
         .ok_or_else(|| "WebSocket relay is no longer active".to_string())?;
-    let bytes = match request.body() {
-        tauri::ipc::InvokeBody::Raw(bytes)
-            if !bytes.is_empty() && bytes.len() <= HUB_WS_MAX_MESSAGE_BYTES =>
-        {
-            bytes.clone()
-        }
-        tauri::ipc::InvokeBody::Raw(_) => {
-            close_hub_ws_relay(relay_id);
-            return Err("WebSocket input exceeds the bounded relay message size".to_string());
-        }
-        tauri::ipc::InvokeBody::Json(_) => {
-            close_hub_ws_relay(relay_id);
-            return Err(format!("WebSocket input {RAW_IPC_REFUSAL}"));
-        }
-    };
+    let bytes = hub_ws_input_bytes(relay_id, request.body())?;
     input.try_send(bytes.clone()).map_err(|error| {
         close_hub_ws_relay(relay_id);
         match error {
@@ -4588,6 +4579,28 @@ async fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), Strin
             }
         }
     })
+}
+
+/// One WebSocket message for the relay `relay_id` names, from its IPC body:
+/// raw, and bounded. Any other body closes that relay. A webview whose IPC
+/// cannot carry raw bytes sends them as JSON, and the web client knows the
+/// refusal by its words.
+fn hub_ws_input_bytes(relay_id: u64, body: &tauri::ipc::InvokeBody) -> Result<Vec<u8>, String> {
+    match body {
+        tauri::ipc::InvokeBody::Raw(bytes)
+            if !bytes.is_empty() && bytes.len() <= HUB_WS_MAX_MESSAGE_BYTES =>
+        {
+            Ok(bytes.clone())
+        }
+        tauri::ipc::InvokeBody::Raw(_) => {
+            close_hub_ws_relay(relay_id);
+            Err("WebSocket input exceeds the bounded relay message size".to_string())
+        }
+        tauri::ipc::InvokeBody::Json(_) => {
+            close_hub_ws_relay(relay_id);
+            Err(format!("WebSocket input {RAW_IPC_REFUSAL}"))
+        }
+    }
 }
 
 #[tauri::command]
@@ -6590,6 +6603,56 @@ mod tests {
         assert_eq!(
             contract["rawIpcRefusal"],
             serde_json::json!(RAW_IPC_REFUSAL)
+        );
+    }
+
+    /// A webview whose IPC cannot carry raw bytes sends them as JSON, and the
+    /// web client reloads onto its fallback when it reads the refusal (#822).
+    /// The commands hand their body to these functions. Invoking a command
+    /// itself needs Tauri's app, whose menu code imports a Common Controls 6
+    /// function: Windows then refuses to load the test binary, which lacks the
+    /// manifest tauri-build gives the executable alone.
+    #[test]
+    fn an_upload_chunk_sent_as_json_is_refused_in_the_words_the_client_knows() {
+        let json = tauri::ipc::InvokeBody::Json(serde_json::json!([1, 2, 3]));
+        assert_eq!(
+            upload_chunk_bytes(&json),
+            Err("multipart relay chunk must use Tauri raw IPC bytes".to_string())
+        );
+        let raw = tauri::ipc::InvokeBody::Raw(vec![1, 2, 3]);
+        assert_eq!(upload_chunk_bytes(&raw), Ok(&vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn websocket_input_sent_as_json_is_refused_and_closes_its_relay() {
+        let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+        let (input, _input_receiver) = tokio::sync::mpsc::channel(1);
+        let (acknowledgement, _acknowledgement_receiver) = tokio::sync::mpsc::channel(1);
+        let (close, mut close_receiver) = tokio::sync::mpsc::unbounded_channel();
+        hub_ws_relays().lock().unwrap().insert(
+            id,
+            HubWsRelay {
+                input,
+                acknowledgement,
+                outstanding: Arc::new(Mutex::new(None)),
+                close,
+            },
+        );
+        let raw = hub_ws_input_bytes(id, &tauri::ipc::InvokeBody::Raw(vec![1, 2, 3]));
+        let open_after_raw = close_receiver.try_recv().is_err();
+        let json = tauri::ipc::InvokeBody::Json(serde_json::json!([1, 2, 3]));
+        let refusal = hub_ws_input_bytes(id, &json);
+        hub_ws_relays().lock().unwrap().remove(&id);
+        assert_eq!(raw, Ok(vec![1, 2, 3]));
+        assert!(open_after_raw, "a raw message leaves the relay open");
+        assert_eq!(
+            refusal,
+            Err("WebSocket input must use Tauri raw IPC bytes".to_string())
+        );
+        assert_eq!(
+            close_receiver.try_recv(),
+            Ok(()),
+            "the refusal closes the relay"
         );
     }
 

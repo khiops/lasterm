@@ -1,5 +1,13 @@
 import vue from "@vitejs/plugin-vue";
-import { defineConfig } from "vitest/config";
+import { playwright } from "@vitest/browser-playwright";
+import { configDefaults, defineConfig } from "vitest/config";
+
+/**
+ * The stylesheets a web spec gets: a component's own style block, and any
+ * stylesheet a module imports, so that a mounted component is drawn with its
+ * rules and `getComputedStyle` answers from them (#936).
+ */
+const WEB_STYLES = [/\.css\?raw$/, /\.css$/, /\.vue\?vue&type=style/];
 
 export default defineConfig({
 	test: {
@@ -32,17 +40,37 @@ export default defineConfig({
 				},
 			},
 			{
-				// Compiles the single-file components a spec mounts; a `?raw`
-				// import still reads the source as text.
+				// Compiles the single-file components a spec mounts.
 				plugins: [vue()],
 				test: {
 					name: "web",
 					include: ["packages/clients/web/**/*.spec.ts"],
+					exclude: [...configDefaults.exclude, "packages/clients/web/**/*.browser.spec.ts"],
 					environment: "happy-dom",
 					// Vitest hands a spec an empty module for every stylesheet it does
-					// not include, `?raw` or not. One read as text is read whole, for
-					// the specs that check the theme variables base.css declares (#830).
-					css: { include: [/\.css\?raw$/] },
+					// not include. happy-dom applies the rest: cascade, `var()`,
+					// `:focus-visible`, but no `:hover`, `:focus-within` or layout.
+					css: { include: WEB_STYLES },
+				},
+			},
+			{
+				// What happy-dom does not draw: hover, focus-within, layout, a click
+				// that reaches what is under an element. The browser is the
+				// machine's own (Edge on Windows, Chrome elsewhere): nothing is
+				// downloaded, and a machine without it fails naming it (#936).
+				plugins: [vue()],
+				test: {
+					name: "web-browser",
+					include: ["packages/clients/web/**/*.browser.spec.ts"],
+					css: { include: WEB_STYLES },
+					browser: {
+						enabled: true,
+						headless: true,
+						provider: playwright({
+							launchOptions: { channel: process.platform === "win32" ? "msedge" : "chrome" },
+						}),
+						instances: [{ browser: "chromium" }],
+					},
 				},
 			},
 			{

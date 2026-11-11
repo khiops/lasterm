@@ -1,12 +1,14 @@
 <template>
 	<Teleport to="body">
 		<Transition name="settings-fade">
+			<!-- biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: the backdrop, not a control; Esc closes Settings (#637) -->
 			<div
 				v-if="visible"
 				class="settings-overlay"
 				@mousedown.self="$emit('close')"
 			>
 				<Transition name="settings-slide">
+					<!-- biome-ignore lint/a11y/noNoninteractiveElementInteractions: the dialog's own keys, Esc and Tab kept inside it (#637) -->
 					<div
 						v-if="visible"
 						ref="panelEl"

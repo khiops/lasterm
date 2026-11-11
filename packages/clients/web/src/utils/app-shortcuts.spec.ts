@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "vitest";
-import HOST_RAIL from "../components/HostRail.vue?raw";
+import { createPinia } from "pinia";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { createApp } from "vue";
 import {
 	ACTION_SWITCHES,
 	APP_SHORTCUT_NAMES,
@@ -597,10 +598,37 @@ describe("the files panel's chord", () => {
 });
 
 describe("the shortcuts where they are named", () => {
-	it("are what the rail's buttons say, read from the table", () => {
-		expect(HOST_RAIL).toMatch(/`Command palette \(\$\{shortcutLabel\("palette\.open"\)\}\)`/);
-		expect(HOST_RAIL).toMatch(/`Settings \(\$\{shortcutLabel\("settings\.open"\)\}\)`/);
-		expect(HOST_RAIL).not.toMatch(/\b(Ctrl|Alt|Shift)\+/);
-		expect(HOST_RAIL).not.toContain("Ctrl+K");
+	// The host rail mounted over a table that names every chord otherwise: its buttons say what
+	// that table says, and nothing on the rail names a chord of its own.
+	it("are what the rail's buttons say, read from the table", async () => {
+		vi.resetModules();
+		vi.doMock("./app-shortcuts.js", async (importOriginal) => ({
+			...(await importOriginal<typeof import("./app-shortcuts.js")>()),
+			shortcutLabel: (id: AppActionId) => `Chord of ${id}`,
+		}));
+		localStorage.clear();
+		const root = document.createElement("div");
+		document.body.appendChild(root);
+		const { default: HostRail } = await import("../components/HostRail.vue");
+		const app = createApp(HostRail);
+		app.use(createPinia());
+		try {
+			app.mount(root);
+			const title = (label: string): string | null =>
+				root.querySelector(`button[aria-label="${label}"]`)?.getAttribute("title") ?? null;
+			expect(title("Open command palette")).toBe("Command palette (Chord of palette.open)");
+			expect(title("Open settings panel")).toBe("Settings (Chord of settings.open)");
+			const said = [...root.querySelectorAll("*")].flatMap((el) => [
+				el.getAttribute("title") ?? "",
+				el.getAttribute("aria-label") ?? "",
+				el.childElementCount === 0 ? (el.textContent ?? "") : "",
+			]);
+			expect(said.filter((text) => /\b(Ctrl|Alt|Shift)\+/.test(text))).toEqual([]);
+		} finally {
+			app.unmount();
+			root.remove();
+			vi.doUnmock("./app-shortcuts.js");
+			vi.resetModules();
+		}
 	});
 });

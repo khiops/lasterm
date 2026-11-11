@@ -70,7 +70,12 @@ export default defineConfig({
 						headless: true,
 						screenshotDirectory: "target/vitest/screenshots",
 						provider: playwright({
-							launchOptions: { channel: process.platform === "win32" ? "msedge" : "chrome" },
+							launchOptions: {
+								channel: process.platform === "win32" ? "msedge" : "chrome",
+								// Playwright hides scrollbars in a headless browser; the specs
+								// measure the room base.css's scrollbars take (#845, #853).
+								ignoreDefaultArgs: ["--hide-scrollbars"],
+							},
 						}),
 						instances: [{ browser: "chromium" }],
 					},

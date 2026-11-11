@@ -102,7 +102,9 @@
 		</template>
 
 		<!-- ── Delete confirmation ────────────────────────────────────────── -->
+		<!-- biome-ignore lint/a11y/useKeyWithClickEvents lint/a11y/noStaticElementInteractions lint/a11y/noNoninteractiveElementInteractions: the backdrop, not a control; Esc closes the dialog (#637) -->
 		<div v-if="deletingProfile" class="delete-confirm-overlay" @click.self="deletingProfile = null">
+			<!-- biome-ignore lint/a11y/noNoninteractiveElementInteractions: the dialog's own keys, Esc and Tab kept inside it (#637) -->
 			<div
 				ref="confirmEl"
 				class="delete-confirm-dialog"

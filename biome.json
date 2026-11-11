@@ -129,6 +129,22 @@
 					}
 				}
 			}
+		},
+		{
+			"includes": ["packages/clients/web/src/components/settings/**/*.vue"],
+			"formatter": { "enabled": false },
+			"assist": { "enabled": false },
+			"linter": {
+				"rules": {
+					"preset": "none",
+					"a11y": {
+						"noNoninteractiveElementInteractions": "error",
+						"noStaticElementInteractions": "error",
+						"useKeyWithClickEvents": "error"
+					},
+					"style": { "noRestrictedGlobals": "off" }
+				}
+			}
 		}
 	],
 	"formatter": {
@@ -142,6 +158,7 @@
 			"**/packages/**/*.tsx",
 			"**/*.ts",
 			"**/*.json",
+			"packages/clients/web/src/components/settings/**/*.vue",
 			"!**/node_modules",
 			"!**/dist",
 			"!**/.turbo",
@@ -149,6 +166,7 @@
 			"!**/target"
 		]
 	},
+	"html": { "experimentalFullSupportEnabled": true },
 	"javascript": {
 		"formatter": {
 			"quoteStyle": "double",

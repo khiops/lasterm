@@ -2,15 +2,17 @@
  * check.sh's cargo steps build, test and lint the checkout they run in, whatever
  * another checkout last built into the target directories they share (#862).
  *
- * Two copies of one small repository, `a` and `b`, play two worktrees: the same
- * crates at the same paths, so cargo keeps one record of their builds for both.
- * Each has a workspace crate, `probe`, and a desktop crate built from its own
- * directory into a target of its own, whose build script checks a file of the
- * checkout as tauri-build checks tauri.conf.json. `b` tests and lints both
+ * Two copies of one small repository play the main checkout, `b`, and a
+ * worktree inside it, `a`, where Claude's are (.claude/worktrees, #939): the
+ * same crates at the same paths, so cargo keeps one record of their builds for
+ * both. Each has a workspace crate, `probe`, and a desktop crate built from its
+ * own directory into a target of its own, whose build script checks a file of
+ * the checkout as tauri-build checks tauri.conf.json. `b` tests and lints both
  * after `a`'s files last changed. Then check.sh runs in `a`, with `pnpm` a
  * stub, so that its cargo steps are the only ones doing anything. `a`'s probe
- * names another test than `b`'s and breaks a lint `b`'s keeps, and `a`'s file
- * fails the desktop build script: a step that reused `b`'s build would run
+ * names another test than `b`'s and breaks a lint `b`'s keeps, `a`'s file
+ * fails the desktop build script, and `a`'s desktop crate is not formatted: a
+ * step that reused `b`'s build, or took `b`'s crates for `a`'s, would run
  * `b`'s test, or pass.
  *
  * Everything is made in this repository's cargo target directory, not in the
@@ -73,7 +75,8 @@ function bash(): string {
 
 /**
  * Writes checkout `name` in `dir`. With `broken`, its probe breaks clippy's
- * needless_return, and its desktop crate's conf.txt fails the build script.
+ * needless_return, its desktop crate's conf.txt fails the build script, and
+ * its desktop crate's lib.rs is not as rustfmt writes it.
  */
 function writeCheckout(dir: string, name: string, broken: boolean): void {
 	const files: Record<string, string> = {
@@ -113,7 +116,9 @@ probe = { path = "../../../../crates/probe" }
 }
 `,
 		[join(DESK, "conf.txt")]: broken ? "invalid\n" : "valid\n",
-		[join(DESK, "src", "lib.rs")]: `pub fn probe_checkout() -> &'static str {
+		[join(DESK, "src", "lib.rs")]: broken
+			? "pub fn probe_checkout() -> &'static str { probe::checkout() }\n"
+			: `pub fn probe_checkout() -> &'static str {
     probe::checkout()
 }
 `,
@@ -174,8 +179,8 @@ describe("check.sh in a checkout that shares its cargo targets", () => {
 		mkdirSync(base, { recursive: true });
 		const work = mkdtempSync(join(base, "lasterm-check-spec-"));
 		tempDirs.push(work);
-		const a = join(work, "a");
 		const b = join(work, "b");
+		const a = join(b, ".claude", "worktrees", "a");
 		const logs = join(work, "logs");
 		const stubs = join(work, "stubs");
 		mkdirSync(stubs);
@@ -183,12 +188,14 @@ describe("check.sh in a checkout that shares its cargo targets", () => {
 		const env = environment(stubs, join(work, "target"), join(work, "desktop-target"));
 		const deskEnv = { ...env, CARGO_TARGET_DIR: join(work, "desktop-target") };
 
-		writeCheckout(a, "a", true);
 		writeCheckout(b, "b", false);
+		expect(run("git", ["init", "--quiet"], b, env).status).toBe(0);
+		const added = run("git", ["worktree", "add", "--quiet", "--orphan", "-b", "a", a], b, env);
+		expect(added.status, added.output).toBe(0);
+		writeCheckout(a, "a", true);
 		// a's files last changed an hour before b built.
 		const hourAgo = new Date(Date.now() - 3_600_000);
 		for (const file of [PROBE, join(DESK, "conf.txt")]) utimesSync(join(a, file), hourAgo, hourAgo);
-		expect(run("git", ["init", "--quiet"], a, env).status).toBe(0);
 		mkdirSync(join(a, "node_modules"));
 
 		// b builds with check.sh's arguments; then plain cargo in a, which is what
@@ -238,6 +245,11 @@ describe("check.sh in a checkout that shares its cargo targets", () => {
 			expect(exit(step), log(step)).not.toBe("0");
 			expect(log(step)).toContain("this checkout's conf.txt is invalid");
 		}
+		// Mutation caught: a desktop-fmt step that passes, fails without
+		// checking, or checks b's crate, which is formatted, shows no diff of a's.
+		expect(exit("desktop-fmt"), log("desktop-fmt")).toBe("1");
+		expect(log("desktop-fmt")).toContain("Diff in");
+		expect(log("desktop-fmt")).toContain("probe_checkout() -> &'static str {");
 	}, 600_000);
 });
 

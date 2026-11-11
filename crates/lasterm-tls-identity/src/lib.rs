@@ -535,6 +535,10 @@ fn create_key_file(key_path: &Path) -> io::Result<KeyPair> {
             parent.hard_link(&temporary, &key)
         })();
         #[cfg(not(any(unix, windows)))]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "unsupported-platform private-key publication fallback; Unix and Windows use lasterm-protected-fs"
+        )]
         let install_result = fs::hard_link(&temporary_path, key_path);
         match install_result {
             Ok(()) => {
@@ -609,6 +613,10 @@ fn remove_temporary_file(path: &Path, file: TemporaryFile) -> io::Result<()> {
         parent.remove_file(&leaf)
     }
     #[cfg(not(any(unix, windows)))]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "unsupported-platform temporary cleanup; Unix and Windows use lasterm-protected-fs"
+    )]
     {
         fs::remove_file(path)
     }
@@ -865,6 +873,10 @@ fn check_parent_directory(key_path: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the tests build their fixtures by pathname, in temporary directories of their own"
+)]
 mod tests {
     use super::{
         generate_identity, load_or_create_key, publish_certificate, temporary_key_path,

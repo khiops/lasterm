@@ -44,7 +44,7 @@
 					<!-- Links -->
 					<div class="about-links">
 						<a
-							href="https://o2csi.com"
+							:href="EXTERNAL_LINKS.website"
 							target="_blank"
 							rel="noopener noreferrer"
 							class="about-link"
@@ -53,7 +53,7 @@
 							<span class="ext-icon">↗</span>
 						</a>
 						<a
-							href="https://github.com/khiops/lasterm"
+							:href="EXTERNAL_LINKS.repository"
 							target="_blank"
 							rel="noopener noreferrer"
 							class="about-link"
@@ -62,7 +62,7 @@
 							<span class="ext-icon">↗</span>
 						</a>
 						<a
-							href="https://github.com/khiops/lasterm/issues"
+							:href="EXTERNAL_LINKS.issues"
 							target="_blank"
 							rel="noopener noreferrer"
 							class="about-link"
@@ -89,6 +89,7 @@ import { computed, ref, watch } from 'vue';
 import { useAuthStore } from '../stores/auth.js';
 import { hubBaseUrl } from '../utils/hub-url.js';
 import { hubFetch } from '../utils/hub-fetch.js';
+import { EXTERNAL_LINKS } from '../utils/external-links.js';
 
 const BUILD_HASH: string = (import.meta.env['VITE_BUILD_HASH'] as string | undefined) ?? 'dev';
 

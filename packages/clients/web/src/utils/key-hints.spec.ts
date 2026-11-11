@@ -2,7 +2,7 @@
  * The keys that work where the keyboard is (#639): what the strips name and the overlay lists,
  * by the kind of control and the place, with the app's own keys read from the shortcut table.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	APP_SHORTCUT_NAMES,
 	APP_SHORTCUTS,
@@ -24,7 +24,6 @@ import {
 	windowKeyHints,
 	zoneKeyHints,
 } from "./key-hints.js";
-import SOURCE from "./key-hints.ts?raw";
 
 /** An element from its markup, e.g. `<input type="range">`. */
 function element(html: string): Element {
@@ -142,12 +141,44 @@ describe("the key hints and the shortcut table", () => {
 		}
 	});
 
-	it("never write a chord of the table themselves", () => {
-		// The module reads F6 from the table: its source spells no chord of it.
-		const code = SOURCE.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
-		expect(code).not.toMatch(/["'`]F6["'`]/);
-		for (const id of Object.keys(APP_SHORTCUTS) as AppActionId[]) {
-			expect(code, id).not.toContain(`"${shortcutKeys(id).join("+")}"`);
+	// Over a table that binds every action otherwise, the hints and the overlay say what that
+	// table says: they write no chord of it themselves.
+	it("never write a chord of the table themselves", async () => {
+		vi.resetModules();
+		vi.doMock("./app-shortcuts.js", async (importOriginal) => ({
+			...(await importOriginal<typeof import("./app-shortcuts.js")>()),
+			shortcutKeys: (id: AppActionId) => ["Bound", id],
+			outsideTerminalKeys: (id: AppActionId) => (id === "zone.next" ? ["F7"] : null),
+		}));
+		try {
+			const hints = await import("./key-hints.js");
+			for (const zone of ["rail", "sidebar", "tabs"] as const) {
+				expect(hints.keyHintText(hints.zoneKeyHints(zone, false, "other") ?? []), zone).toBe(
+					"F7 next area",
+				);
+			}
+			const overlay = hints.SHORTCUT_GROUPS.flatMap((group) => group.rows);
+			expect(overlay.find((row) => row.key === "area:rail")).toMatchObject({
+				hints: [
+					{ keys: ["←→↑↓"], does: "hosts" },
+					{ keys: ["Enter"], does: "select" },
+					{ keys: ["F7"], does: "next area" },
+				],
+			});
+			expect(overlay.find((row) => row.key === "palette.open")).toMatchObject({
+				chord: ["Bound", "palette.open"],
+				outsideTerminal: null,
+			});
+			expect(overlay.find((row) => row.key === "zone.next")).toMatchObject({
+				chord: ["Bound", "zone.next"],
+				outsideTerminal: ["F7"],
+			});
+			for (const row of overlay) {
+				if (row.kind === "chord") expect(row.chord, row.id).toEqual(["Bound", row.id]);
+			}
+		} finally {
+			vi.doUnmock("./app-shortcuts.js");
+			vi.resetModules();
 		}
 	});
 });

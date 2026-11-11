@@ -68,7 +68,7 @@
 		     to, the line below says so instead: the card is a question (#595).
 		     The card carries its own opaque ground, so what is behind it — the
 		     terminal's content, a wallpaper — never decides whether it reads. -->
-		<div v-if="endedView.kind === 'card'" class="exit-overlay">
+		<div v-if="endedView.kind === 'card'" class="exit-overlay" :class="{ 'exit-overlay--gone': isGone }">
 			<div
 				ref="exitCard"
 				class="exit-card"
@@ -374,6 +374,9 @@ let bellBound = false;
 /** A reconnect landed while this pane was still opening: what it sent went out
  * on a socket that is gone, so the failure to come is not the channel's fault. */
 let reconnectedWhileOpening = false;
+/** A known end covered this pane without an answer, and its socket was replaced
+ * meanwhile: once ready, it asks the new socket for the terminal (#927). */
+let askAgainOnNewSocket = false;
 
 const hostsStore = useHostsStore();
 
@@ -401,6 +404,8 @@ const {
 	awaitFont,
 	attachChannel,
 	reattachChannel,
+	turnMouseReportingOff,
+	bellMuted,
 	applyProfile,
 	suppressNextResize,
 	syncChannelSize,
@@ -553,6 +558,16 @@ let reattaching = false;
  */
 let attachedLive = false;
 
+/**
+ * The terminal whose end this pane saw live (#927): reported while it was
+ * attached, over a socket that stayed up since. Its screen then holds that
+ * terminal's output through its end, more than the spool keeps, so the
+ * re-attach after its socket comes back keeps the screen (`preserveContent`).
+ * Kept across that loss and the refusals that follow; dropped when a terminal
+ * attaches again or the pane's terminal changes.
+ */
+let endSeenLiveOf: string | null = null;
+
 // ---------------------------------------------------------------------------
 // When the terminal ends (#574)
 // ---------------------------------------------------------------------------
@@ -605,6 +620,7 @@ watch(effectiveChannelId, () => {
  * connect (#592).
  */
 function onTerminalEnded(end: EndSeen, endReason?: ChannelEndReason): void {
+	if (end.seen === 'live') endSeenLiveOf = effectiveChannelId.value;
 	const facts: EndFacts = {
 		...end,
 		directProcess: isDirectProcess.value,
@@ -640,6 +656,7 @@ function takeAnswer(chId: string, facts: AttachFacts): void {
 	attachedLive = !facts.ended && !facts.gone && !facts.detached;
 	if (attachedLive) {
 		endWatch.attached(chId);
+		endSeenLiveOf = null;
 		heldBack.value = null;
 	} else if (facts.ended) {
 		// Refused because it has ended: found, not seen happening.
@@ -663,11 +680,15 @@ function takeAnswer(chId: string, facts: AttachFacts): void {
  */
 async function attachAndCover(
 	chId: string,
-	opts?: { preserveContent?: boolean },
+	opts?: { preserveContent?: boolean; keepScreenIfEnded?: boolean },
 ): Promise<AttachResult | null> {
 	let result: AttachResult;
 	try {
-		result = await reattachChannel(chId, opts);
+		result = await reattachChannel(chId, {
+			...opts,
+			// An answer for a terminal this pane has left writes nothing (#927).
+			stillWanted: () => effectiveChannelId.value === chId,
+		});
 	} catch (err) {
 		// Reaching the host and not finding the terminal there is an answer, not
 		// a failure to connect: dropping it left the pane saying "Not connected"
@@ -792,6 +813,9 @@ watch(
 			// this socket, found otherwise (#574), and whether the hub ended it
 			// itself (#580). A report repeating it is not news.
 			if (chId !== null && previous?.status !== 'dead') {
+				// The terminal shown ended: a program it ran may have left xterm
+				// reporting the mouse, which takes the wheel and selection (#927).
+				turnMouseReportingOff();
 				onTerminalEnded(endWatch.ended(chId), report.endReason);
 			}
 		}
@@ -862,6 +886,7 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 		await sessionStore.connect();
 
 		if (props.channelId !== null && props.channelId !== undefined) {
+			const opened = props.channelId;
 			const hostId = pendingHostId.value;
 
 			if (hostId !== null) {
@@ -888,17 +913,27 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 				syncChannelSize();
 				emit('channel-spawned', props.channelId, realId);
 			} else {
-				// A terminal already known to have ended is not asked for: the
-				// hub would answer CHANNEL_DEAD, which is what the overlay says.
-				// Mark ready so the overlay renders immediately. The pane takes
-				// that answer as its own: what told it may be the list of the
-				// host in view, which the rail changes (#594). Found, not seen:
-				// the setting answers it once the pane is on screen (#592). The
-				// pane still takes its profile and its bell below, for the
-				// terminal a restart brings back under it.
+				// A terminal already known to have ended is asked for all the same:
+				// the hub's CHANNEL_DEAD carries what it last printed, which the
+				// pane shows under its card (#927), and an ATTACH never starts it
+				// (#559). The refusal covers it as the end it knew of would: what
+				// told it may be the list of the host in view, which the rail
+				// changes (#594). Found, not seen: the setting answers it once the
+				// pane is on screen (#592). With no answer at all, the end it knew
+				// of covers it, as it did before it asked, and a socket replaced
+				// meanwhile gets the question again below. The pane still takes its
+				// profile and its bell, for the terminal a restart brings back.
 				if (isDead.value) {
-					ready.value = true;
-					takeAnswer(props.channelId, factsFromKnownEnd());
+					const chId = props.channelId;
+					try {
+						await attachAndCover(chId);
+					} catch {
+						// Only while the pane still shows it: one given another
+						// terminal meanwhile attaches that one below (#929).
+						if (effectiveChannelId.value === chId) takeAnswer(chId, factsFromKnownEnd());
+						askAgainOnNewSocket = reconnectedWhileOpening;
+						reconnectedWhileOpening = false;
+					}
 				} else {
 					// Existing channel — reattach (fetch snapshot + tail).
 					// Write-lock state is set by the WRITE_LOCK WS message handler
@@ -913,10 +948,27 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			}
 			ready.value = true;
 			applyProfile(resolvedProfile.value);
+			// The watcher waits for `ready`: a terminal given to this pane while
+			// it opened is attached now (#927).
+			const now = props.channelId;
+			if (now !== null && now !== undefined && now !== opened && now !== internalChannelId.value) {
+				askAgainOnNewSocket = false;
+				endSeenLiveOf = null;
+				void attachAndCover(now).catch((err) => {
+					error.value = err instanceof Error ? err.message : String(err);
+				});
+			} else if (askAgainOnNewSocket) {
+				askAgainOnNewSocket = false;
+				void attachAndCover(opened).catch(() => {
+					// Unanswered again: the card already says it has ended.
+				});
+			}
 			// Register xterm.js BEL handler — fires on \x07 from PTY output
 			if (bellBound) return;
 			bellBound = true;
 			terminal.value?.onBell(() => {
+				// A bell in what the hub kept rang when it was printed (#927).
+				if (bellMuted()) return;
 				const chId = props.channelId;
 				// Increment bell badge (agent BELL WS message not reliable for all shells)
 				if (chId != null && resolvedProfile.value.bellBadge !== false) {
@@ -1009,6 +1061,7 @@ watch(
 	async (newId) => {
 		if (newId !== null && newId !== undefined && ready.value) {
 			if (newId === internalChannelId.value) return;
+			endSeenLiveOf = null;
 			try {
 				error.value = null;
 				await attachAndCover(newId);
@@ -1041,9 +1094,12 @@ watch(
 			return;
 		}
 		if (effectiveChannelId.value) {
+			const chId = effectiveChannelId.value;
 			try {
 				error.value = null;
-				await attachAndCover(effectiveChannelId.value);
+				// Over an ending it watched, the screen holds more than the hub
+				// keeps: it stays as it is if the hub says it still ended (#927).
+				await attachAndCover(chId, endSeenLiveOf === chId ? { keepScreenIfEnded: true } : undefined);
 			} catch (err) {
 				error.value = err instanceof Error ? err.message : String(err);
 			}
@@ -1883,13 +1939,16 @@ function onDragEnd(): void {
 	margin: 4px 0;
 }
 
-/* Exit overlay: a neutral scrim over whatever the pane shows, and on it a card
-   of the theme's own opaque ground. The card's text and its ground are a pair
+/* Exit overlay: a card of the theme's own opaque ground, over the pane, with a
+   neutral scrim only over a terminal the hub has no record of (below). The
+   card's text and its ground are a pair
    the theme guarantees (`--nt-text-strong` is made to read at 4.5:1 on
    `--nt-bg`), so what lies behind — the terminal's content, a wallpaper, a
    translucent terminal — never decides whether it reads. Every colour a rule
    below gives its text is checked against its ground, in every bundled theme,
    by TerminalPane.spec.ts. */
+/* No scrim and no blur: what the terminal last printed stays readable, and
+   the wheel and selection reach it everywhere but on the card (#927). */
 .exit-overlay {
 	position: absolute;
 	inset: 0;
@@ -1897,12 +1956,21 @@ function onDragEnd(): void {
 	align-items: center;
 	justify-content: center;
 	padding: 16px;
-	background: var(--nt-overlay);
-	backdrop-filter: blur(2px);
+	pointer-events: none;
 	z-index: 10;
 }
 
+/* Over a terminal the hub has no record of, the screen is not that terminal's:
+   it keeps the scrim, the blur and the pointer (#927). */
+.exit-overlay--gone {
+	background: var(--nt-overlay);
+	backdrop-filter: blur(2px);
+	pointer-events: auto;
+}
+
+/* The overlay lets pointer events through: the card takes its own back. */
 .exit-card {
+	pointer-events: auto;
 	display: flex;
 	flex-direction: column;
 	align-items: center;

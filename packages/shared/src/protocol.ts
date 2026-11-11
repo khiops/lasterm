@@ -243,6 +243,32 @@ export interface ErrorMessage {
 	 * is, `closed` when it has none (#648).
 	 */
 	hostStatus?: SessionStatus;
+	/**
+	 * Hub → UI, on `CHANNEL_DEAD` answering an ATTACH only: what the terminal
+	 * last printed, as far as the spool still holds it (#927). Absent on every
+	 * other ERROR, and from a hub older than that.
+	 */
+	lastOutput?: EndedOutput;
+}
+
+/**
+ * An ended terminal's last output, for a pane to show under its exit card
+ * (#927): the newest snapshot and the output stored after it, or, with no
+ * snapshot, all its output from the start. What is sent always continues
+ * where it starts — the snapshot, or an empty screen — and fits one message.
+ */
+export interface EndedOutput {
+	snapshot: SnapshotData | null;
+	/** The output after the snapshot, as one element; empty when there is none to send. */
+	tail: Uint8Array[];
+	/** There was output to send and it was not sent: too large, or its snapshot was. */
+	truncated?: true;
+	/**
+	 * The terminal's last size, which the pane draws the replay at. Resizes are
+	 * not stored: output first drawn at another size is redrawn at this one.
+	 */
+	cols: number;
+	rows: number;
 }
 
 /** Agent → Hub (daemon mode): metadata for each alive channel on hub connect/reconnect */

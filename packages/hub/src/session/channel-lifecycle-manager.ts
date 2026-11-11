@@ -16,8 +16,10 @@ import type {
 	ChannelStateMessage,
 	DestroyMessage,
 	ElevationMethod,
+	EndedOutput,
 	ErrorMessage,
 	ProtocolMessage,
+	SnapshotData,
 	UiAttachOkMessage,
 	UiSpawnOkMessage,
 } from "@lasterm/shared";
@@ -1072,6 +1074,19 @@ export class ChannelLifecycleManager {
 	private static readonly MAX_ATTACH_TAIL_BYTES = 128 * 1024;
 
 	/**
+	 * The largest stored snapshot an ended terminal's answer carries (#927).
+	 * With the tail's 128 KiB, the answer stays under the 512 KiB the desktop
+	 * takes in one message; a snapshot stores more than MessagePack sends, since
+	 * JSON escapes every control byte. A dead terminal's snapshot never changes:
+	 * one too large would drop the desktop's connection at every attach of its
+	 * pane, again after every reconnect, for as long as the spool keeps it.
+	 */
+	private static readonly MAX_ENDED_SNAPSHOT_BYTES = 256 * 1024;
+
+	/** Output rows whose sizes one step of an ended terminal's read looks at. */
+	private static readonly ENDED_WALK_ROWS = 512;
+
+	/**
 	 * The output after a snapshot, or nothing when there is too much of it.
 	 *
 	 * Cutting a terminal stream is not like cutting a log. Escape sequences set
@@ -1125,6 +1140,73 @@ export class ChannelLifecycleManager {
 		}
 
 		return { snapshot, tail, truncated };
+	}
+
+	/**
+	 * What an ended terminal last printed, for the CHANNEL_DEAD that answers an
+	 * ATTACH (#927), at `size`, the terminal's last.
+	 *
+	 * The newest snapshot and the output stored after it; with no snapshot, all
+	 * the output from the stream's first seq. Only what continues where it
+	 * starts is sent: output after a snapshot is numbered from the snapshot's
+	 * seq + 1, and a stream from 1, and the GC deletes a channel's rows from its
+	 * lowest seq up, so a missing seq is output the GC took. A fragment would be
+	 * drawn on a screen it was not written for, so the snapshot goes alone, said
+	 * `truncated`, or nothing does.
+	 *
+	 * Sizes are read before data, and the walk stops at the bound: every mount
+	 * and every reconnect of an ended pane makes this read, and its cost must
+	 * follow what it may send, not what the channel stores.
+	 */
+	buildEndedOutput(channelId: string, size: { cols: number; rows: number }): EndedOutput {
+		const spool = this.ctx.spoolDal;
+		const nothing: EndedOutput = { snapshot: null, tail: [], ...size };
+		let snapshot: SnapshotData | null = null;
+		let start = 0;
+		const newest = spool.getNewestSnapshotRef(channelId);
+		if (newest !== undefined) {
+			if (newest.bytes > ChannelLifecycleManager.MAX_ENDED_SNAPSHOT_BYTES) {
+				return { ...nothing, truncated: true };
+			}
+			const chunk = spool.getChunk(newest.id);
+			if (chunk === undefined) return nothing;
+			try {
+				snapshot = JSON.parse(chunk.dataBlob.toString("utf8")) as SnapshotData;
+			} catch {
+				// Output after a screen that cannot be read is a fragment too.
+				return nothing;
+			}
+			start = newest.seq;
+		} else if (spool.getMinSeq(channelId) !== 1) {
+			// No row, or a stream whose start the GC already took.
+			return nothing;
+		}
+
+		let total = 0;
+		let last = start;
+		for (;;) {
+			const rows = spool.listOutputSizesAfter(
+				channelId,
+				last,
+				ChannelLifecycleManager.ENDED_WALK_ROWS,
+			);
+			for (const row of rows) {
+				total += row.bytes;
+				if (row.seq !== last + 1 || total > ChannelLifecycleManager.MAX_ATTACH_TAIL_BYTES) {
+					return { snapshot, tail: [], truncated: true, ...size };
+				}
+				last = row.seq;
+			}
+			if (rows.length < ChannelLifecycleManager.ENDED_WALK_ROWS) break;
+		}
+		if (last === start) return { snapshot, tail: [], ...size };
+		// One element: MessagePack frames each, and many small chunks would
+		// weigh up to three times their bytes.
+		return {
+			snapshot,
+			tail: [new Uint8Array(spool.readOutput(channelId, start, last))],
+			...size,
+		};
 	}
 
 	storeSnapshot(channelId: string, snapshot: unknown, agentLastSeq: number): string | undefined {

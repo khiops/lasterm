@@ -227,10 +227,15 @@ describe("TerminalPane covers its terminal with what the hub answers now (#559)"
 	it("sends every attach through attachAndCover", () => {
 		const calls = [...SOURCE.matchAll(/reattachChannel\(/g)];
 		expect(calls, "an attach bypasses attachAndCover").toHaveLength(1);
-		expect(attachAndCover()).toContain("result = await reattachChannel(chId, opts);");
+		expect(attachAndCover()).toMatch(
+			/result = await reattachChannel\(chId, \{\s*\.\.\.opts,[\s\S]*?stillWanted: \(\) => effectiveChannelId\.value === chId,\s*\}\);/,
+		);
 
+		// Over an ending it watched, it keeps its screen (#927).
 		const reconnectWatcher = /sessionStore\.reconnectCount,[\s\S]*?\n\);/.exec(SOURCE)?.[0] ?? "";
-		expect(reconnectWatcher).toContain("await attachAndCover(effectiveChannelId.value);");
+		expect(reconnectWatcher).toContain(
+			"await attachAndCover(chId, endSeenLiveOf === chId ? { keepScreenIfEnded: true } : undefined);",
+		);
 		expect(SOURCE).toContain("await attachAndCover(props.channelId);");
 		expect(SOURCE).toContain("await attachAndCover(newId);");
 		expect(SOURCE).toMatch(/result = await attachAndCover\(chId, \{ preserveContent: true \}\);/);
@@ -256,9 +261,16 @@ describe("TerminalPane over an ended terminal of the host not in view (#594)", (
 		const open = body(/async function openChannel\(/);
 		const deadBranch = /if \(isDead\.value\) \{[\s\S]*?\} else \{/.exec(open)?.[0] ?? "";
 		expect(deadBranch, "the branch moved").not.toBe("");
-		// As the hub's CHANNEL_DEAD would have: hasEnded, which paneCover reads
-		// whatever the status says (pane-cover.spec.ts).
-		expect(deadBranch).toContain("takeAnswer(props.channelId, factsFromKnownEnd());");
+		// It asks the hub, whose CHANNEL_DEAD carries the last output (#927) and
+		// covers it through takeAnswer; with no answer, the end it knew of does:
+		// hasEnded either way, which paneCover reads whatever the status says
+		// (pane-cover.spec.ts).
+		expect(deadBranch).toContain("await attachAndCover(chId);");
+		// For the terminal it still shows only: a pane given another one while
+		// it waited must not take that one for ended (#929).
+		expect(deadBranch).toMatch(
+			/\} catch \{[\s\S]*?if \(effectiveChannelId\.value === chId\) takeAnswer\(chId, factsFromKnownEnd\(\)\);/,
+		);
 		expect(body(/function takeAnswer\(/)).toContain("hasEnded.value = facts.ended;");
 		expect(SOURCE).toMatch(/ended: hasEnded\.value,/);
 	});
@@ -345,7 +357,7 @@ describe("TerminalPane when its terminal ends (#574)", () => {
 
 describe("TerminalPane overlay (#574)", () => {
 	const overlay =
-		/<div v-if="endedView\.kind === 'card'" class="exit-overlay">[\s\S]*?\n\t\t<\/div>\n/.exec(
+		/<div v-if="endedView\.kind === 'card'" class="exit-overlay"[^>]*>[\s\S]*?\n\t\t<\/div>\n/.exec(
 			SOURCE.replace(/\r\n/g, "\n"),
 		)?.[0] ?? "";
 
@@ -500,7 +512,7 @@ describe("TerminalPane follows the setting over an end it found (#592)", () => {
 		// takeAnswer hands an end to onTerminalEnded (checked above).
 		const open = body(/async function openChannel\(/);
 		expect(open).toMatch(
-			/if \(isDead\.value\) \{\s*ready\.value = true;\s*takeAnswer\(props\.channelId, factsFromKnownEnd\(\)\);\s*\} else \{[\s\S]*?await attachAndCover\(props\.channelId\);\s*\}/,
+			/if \(isDead\.value\) \{\s*const chId = props\.channelId;\s*try \{\s*await attachAndCover\(chId\);\s*\} catch \{[\s\S]*?takeAnswer\(chId, factsFromKnownEnd\(\)\);[\s\S]*?\} else \{[\s\S]*?await attachAndCover\(props\.channelId\);\s*\}/,
 		);
 	});
 
@@ -557,7 +569,7 @@ describe("TerminalPane shows the card only when it asks (#595)", () => {
 	});
 
 	it("shows the card when it says so, and the quiet line in its place otherwise", () => {
-		expect(SOURCE).toMatch(/<div v-if="endedView\.kind === 'card'" class="exit-overlay">/);
+		expect(SOURCE).toMatch(/<div v-if="endedView\.kind === 'card'" class="exit-overlay"[^>]*>/);
 		expect(SOURCE).toMatch(
 			/<span v-if="endedView\.kind === 'quiet'" class="exit-status__text">\{\{ endedView\.text \}\}<\/span>/,
 		);
@@ -782,8 +794,25 @@ describe("TerminalPane overlay card contrast (#574)", () => {
 		expect(card.get("color")).toBe("var(--nt-text-strong)");
 		expect(card.get("border")).toBe("1px solid var(--nt-border)");
 		expect(card.get("box-shadow")).toBe("var(--nt-shadow)");
-		// The scrim behind stays neutral.
-		expect(declarations(".exit-overlay").get("background")).toBe("var(--nt-overlay)");
+	});
+
+	// What the terminal last printed shows around the card, and can be read,
+	// scrolled and selected there (#927): no scrim, no blur, and the overlay
+	// lets the pointer through to the terminal everywhere but on the card.
+	it("keeps the gone card's scrim over a screen that is not that terminal's", () => {
+		expect(SOURCE).toMatch(/class="exit-overlay" :class="\{ 'exit-overlay--gone': isGone \}"/);
+		const gone = declarations(".exit-overlay--gone");
+		expect(gone.get("background")).toBe("var(--nt-overlay)");
+		expect(gone.get("backdrop-filter")).toBe("blur(2px)");
+		expect(gone.get("pointer-events")).toBe("auto");
+	});
+
+	it("leaves an ended terminal's output readable around the card", () => {
+		const overlay = declarations(".exit-overlay");
+		expect(["transparent", undefined]).toContain(overlay.get("background"));
+		expect(overlay.get("backdrop-filter")).toBeUndefined();
+		expect(overlay.get("pointer-events")).toBe("none");
+		expect(declarations(".exit-card").get("pointer-events")).toBe("auto");
 	});
 
 	// A hover that tinted a button's ground would take its text below the

@@ -70,6 +70,14 @@ function deleted(hub: { rest: Array<{ method: string; path: string }> }): string
 		.map((c) => c.path.slice("/api/channels/".length));
 }
 
+/** What the window sent a terminal's program, one INPUT frame an entry, decoded. */
+function typed(hub: FakeHub, channelId: string): string[] {
+	return hub
+		.frames("INPUT")
+		.filter((frame) => frame.channelId === channelId)
+		.map((frame) => new TextDecoder().decode(frame.data as Uint8Array));
+}
+
 /** Whether the sidebar lists a terminal. */
 function listed(channelId: string): boolean {
 	return document.querySelector(`.channel-sidebar [data-channel-id="${channelId}"]`) !== null;
@@ -399,6 +407,73 @@ describe("an empty pane's host, and a new tab", () => {
 		expect(hostInView()).toBe("alpha");
 	});
 
+	/** Choose a detached terminal in the empty pane's picker, by its title. */
+	async function pickTerminal(title: string): Promise<void> {
+		const row = [...document.querySelectorAll<HTMLElement>('.vacant-pane [role="option"]')].find(
+			(option) => option.querySelector(".picker-terminal-title")?.textContent?.trim() === title,
+		);
+		if (row === undefined) throw new Error(`no terminal "${title}" in the picker`);
+		row.click();
+		await settle();
+	}
+
+	/** The terminals the empty pane's picker offers to put back, by title. */
+	function terminalsOffered(): string[] {
+		return [...document.querySelectorAll(".vacant-pane .picker-terminal-title")].map(
+			(el) => el.textContent?.trim() ?? "",
+		);
+	}
+
+	/** The titles of the panes the tab shown holds. */
+	function titlesShown(): string[] {
+		return [
+			...document.querySelectorAll(".pane-tab-container:not([style*='none']) .pane-title"),
+		].map((el) => el.textContent?.trim() ?? "");
+	}
+
+	// A terminal that runs, shown in no pane, is put back in the empty one: nothing is spawned.
+	it("fills an empty pane with a detached terminal of the host in view", async () => {
+		const { hub } = await mountWindow({
+			hosts: [ALPHA, BRAVO],
+			channels: [live("T1")],
+			layout: { tabs: [{ id: "TAB1", root: vacant("V1") }] },
+		});
+
+		await pickTerminal("T1");
+
+		expect(titlesShown()).toEqual(["T1"]);
+		expect(hub.frames("SPAWN")).toEqual([]);
+		expect(hostInView()).toBe("alpha");
+	});
+
+	it("fills an empty pane with a detached terminal and keeps its host in view with a per-host bar", async () => {
+		const { hub } = await mountWindow({
+			hosts: [ALPHA, BRAVO],
+			channels: [live("T1"), live("T2")],
+			ui: { tabs: { scope: "perHost" } },
+			layout: { tabs: [{ id: "TAB1", root: split("vertical", term("T2", "P2"), vacant("V1")) }] },
+		});
+
+		await pickTerminal("T1");
+
+		expect(titlesShown()).toEqual(["T2", "T1"]);
+		expect(hub.frames("SPAWN")).toEqual([]);
+		expect(hostInView()).toBe("alpha");
+	});
+
+	// So filling a pane never takes a terminal of another host than the one in view: there is no
+	// other host to bring into view (hostToBringIntoView answers null for the host in view).
+	it("offers to put back only the detached terminals of the host in view", async () => {
+		await mountWindow({
+			hosts: [ALPHA, BRAVO],
+			channels: [live("T1"), live("T9", HOST_B)],
+			ui: { tabs: { scope: "perHost" } },
+			layout: { tabs: [{ id: "TAB1", root: vacant("V1") }] },
+		});
+
+		expect(terminalsOffered()).toEqual(["T1"]);
+	});
+
 	it("opens an empty pane in a new tab from the tab bar's + where the bar shows every host", async () => {
 		const { hub } = await mountWindow({
 			channels: [live("T1")],
@@ -553,13 +628,14 @@ describe("the window's shortcuts", () => {
 	// Where the key was typed decides whether F6 is a chord: in a terminal it is the program's,
 	// and only Ctrl+F6 moves between the zones (utils/app-shortcuts.spec.ts, #637).
 	it("leaves F6 to the program in a terminal", async () => {
-		await oneTerminal();
+		const { hub } = await oneTerminal();
 		const input = focusPane("P1");
 
 		const event = await press("F6");
 
 		expect(event.defaultPrevented).toBe(false);
 		expect(document.activeElement).toBe(input);
+		expect(typed(hub, "T1")).toEqual(["\u001b[17~"]);
 	});
 
 	it("moves to the next zone on F6 outside a terminal", async () => {
@@ -608,13 +684,55 @@ describe("the window's shortcuts", () => {
 	});
 
 	it("leaves Ctrl+K to the shell", async () => {
-		await oneTerminal();
+		const { hub } = await oneTerminal();
 		focusPane("P1");
 
 		const event = await press("k", { ctrl: true });
 
 		expect(event.defaultPrevented).toBe(false);
 		expect(dialogs()).toEqual([]);
+		expect(typed(hub, "T1")).toEqual(["\u000b"]);
+	});
+
+	// What a terminal's key handler lets through, xterm sends its program; the chords of the table
+	// it keeps (utils/terminal-keys.ts), whatever the window did with them. Each chord here is one
+	// xterm turns into input; Ctrl+, (settings.open) is left out, xterm sends nothing for it.
+	it.each([
+		["palette.open", "P", { ctrl: true, shift: true }],
+		["help.shortcuts", "/", { ctrl: true }],
+		["tab.new", "T", { ctrl: true, shift: true }],
+		["tab.next", "Tab", { ctrl: true }],
+		["tab.previous", "Tab", { ctrl: true, shift: true }],
+		["tab.goTo1", "1", { ctrl: true, alt: true, code: "Digit1" }],
+		["tab.goTo2", "2", { ctrl: true, alt: true, code: "Digit2" }],
+		["tab.goTo3", "3", { ctrl: true, alt: true, code: "Digit3" }],
+		["tab.goTo4", "4", { ctrl: true, alt: true, code: "Digit4" }],
+		["tab.goTo5", "5", { ctrl: true, alt: true, code: "Digit5" }],
+		["tab.goTo6", "6", { ctrl: true, alt: true, code: "Digit6" }],
+		["tab.goTo7", "7", { ctrl: true, alt: true, code: "Digit7" }],
+		["tab.goTo8", "8", { ctrl: true, alt: true, code: "Digit8" }],
+		["tab.goTo9", "9", { ctrl: true, alt: true, code: "Digit9" }],
+		["pane.splitRight", "+", { alt: true, shift: true, code: "Equal" }],
+		["pane.splitDown", "_", { alt: true, shift: true, code: "Minus" }],
+		["pane.close", "W", { ctrl: true, shift: true }],
+		["pane.focusLeft", "ArrowLeft", { alt: true, code: "ArrowLeft" }],
+		["pane.focusRight", "ArrowRight", { alt: true, code: "ArrowRight" }],
+		["pane.focusUp", "ArrowUp", { alt: true, code: "ArrowUp" }],
+		["pane.focusDown", "ArrowDown", { alt: true, code: "ArrowDown" }],
+		["pane.resizeLeft", "ArrowLeft", { alt: true, shift: true, code: "ArrowLeft" }],
+		["pane.resizeRight", "ArrowRight", { alt: true, shift: true, code: "ArrowRight" }],
+		["pane.resizeUp", "ArrowUp", { alt: true, shift: true, code: "ArrowUp" }],
+		["pane.resizeDown", "ArrowDown", { alt: true, shift: true, code: "ArrowDown" }],
+		["zone.next", "F6", { ctrl: true }],
+		["zone.previous", "F6", { ctrl: true, shift: true }],
+		["files.toggle", "E", { ctrl: true, shift: true }],
+	] as const)("keeps the chord of %s from the shell", async (_id, key, mods) => {
+		const { hub } = await oneTerminal({ ui: { experimental: { fileTransfer: true } } });
+		focusPane("P1");
+
+		await press(key, mods);
+
+		expect(typed(hub, "T1")).toEqual([]);
 	});
 });
 
@@ -683,17 +801,26 @@ describe("each action of the shortcut table, on its chord", () => {
 		"tab.goTo8": goTo(8, 9, "T8"),
 		// The ninth is the last tab, however many there are.
 		"tab.goTo9": goTo(9, 0, "T10"),
+		// The pane holding the keyboard, P2, not the tab's active one, P1.
 		"pane.splitRight": async () => {
 			await threeTabs();
-			focusPane("P1");
+			focusPane("P2");
 			await press("+", { alt: true, shift: true, code: "Equal" });
-			expect(splitAround("P1")).toEqual({ direction: "vertical", halves: [["P1"], ["empty"]] });
+			expect(splitAround("P2")).toEqual({ direction: "vertical", halves: [["P2"], ["empty"]] });
+			expect(splitAround("P1")).toEqual({
+				direction: "vertical",
+				halves: [["P1"], ["P2", "empty", "P3"]],
+			});
 		},
 		"pane.splitDown": async () => {
 			await threeTabs();
-			focusPane("P1");
+			focusPane("P2");
 			await press("_", { alt: true, shift: true, code: "Minus" });
-			expect(splitAround("P1")).toEqual({ direction: "horizontal", halves: [["P1"], ["empty"]] });
+			expect(splitAround("P2")).toEqual({ direction: "horizontal", halves: [["P2"], ["empty"]] });
+			expect(splitAround("P1")).toEqual({
+				direction: "vertical",
+				halves: [["P1"], ["P2", "empty", "P3"]],
+			});
 		},
 		"pane.close": async () => {
 			const { hub } = await threeTabs();
@@ -783,11 +910,11 @@ describe("each action of the shortcut table, on its chord", () => {
 
 	it("splits a terminal from its pane's menu as its chord does", async () => {
 		await threeTabs();
-		await rightClick(pane("P1")?.querySelector(".terminal-pane"));
+		await rightClick(pane("P2")?.querySelector(".terminal-pane"));
 
-		await click("Split Right", pane("P1") ?? document);
+		await click("Split Right", pane("P2") ?? document);
 
-		expect(splitAround("P1")).toEqual({ direction: "vertical", halves: [["P1"], ["empty"]] });
+		expect(splitAround("P2")).toEqual({ direction: "vertical", halves: [["P2"], ["empty"]] });
 	});
 
 	it("splits the tab's terminal from the tab's menu", async () => {
@@ -891,6 +1018,11 @@ describe("the palette's rows for the window's actions", () => {
 // App.browser.spec.ts.
 describe("the key hints of the window's zones", () => {
 	const strips = () => [...document.querySelectorAll(".key-hint-strip")];
+	/** Each hint of the one strip, its keys then what they do. */
+	const hints = () =>
+		[...(strips()[0]?.querySelectorAll(".key-hint") ?? [])].map(
+			(hint) => hint.textContent?.replace(/\s+/g, " ").trim() ?? "",
+		);
 
 	it("name the keys of the rail while the keyboard is in it, in one strip", async () => {
 		await oneTerminal();
@@ -900,7 +1032,7 @@ describe("the key hints of the window's zones", () => {
 
 		expect(zoneWithKeyboard()).toBe("rail");
 		expect(strips()).toHaveLength(1);
-		expect(strips()[0]?.textContent).toContain("hosts");
+		expect(hints()).toEqual(["←→↑↓ hosts", "Enter select", "F6 next area"]);
 	});
 
 	it("name the keys of the terminal list while the keyboard is in it", async () => {
@@ -912,7 +1044,18 @@ describe("the key hints of the window's zones", () => {
 
 		expect(zoneWithKeyboard()).toBe("sidebar");
 		expect(strips()).toHaveLength(1);
-		expect(strips()[0]?.textContent).toContain("terminals");
+		expect(hints()).toEqual(["↑↓ terminals", "Enter open", "F6 next area"]);
+	});
+
+	it("name the keys of the tab bar while the keyboard is in it", async () => {
+		await oneTerminal();
+		focusPane("P1");
+
+		await press("F6", { ctrl: true, shift: true });
+
+		expect(zoneWithKeyboard()).toBe("tabs");
+		expect(strips()).toHaveLength(1);
+		expect(hints()).toEqual(["←→ tabs", "Enter open", "Delete close", "F6 next area"]);
 	});
 });
 
@@ -1190,13 +1333,14 @@ describe("the files panel in the window", () => {
 
 	// The shortcut table reads the switch from the UI config: off, the chord is the terminal's.
 	it("leaves Ctrl+Shift+E to the terminal while file transfer is off", async () => {
-		await oneTerminal();
+		const { hub } = await oneTerminal();
 		focusPane("P1");
 
 		const event = await press("E", { ctrl: true, shift: true });
 
 		expect(event.defaultPrevented).toBe(false);
 		expect(panel()).toBeNull();
+		expect(typed(hub, "T1")).toEqual(["\u0005"]);
 	});
 
 	// The panes and the panel share the row under the tab bar; the panes keep their zone.

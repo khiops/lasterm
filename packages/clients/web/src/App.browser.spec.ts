@@ -42,6 +42,9 @@ const live = (id: string, writer?: string): ChannelRow => ({
 	...(writer !== undefined && { writer }),
 });
 
+/** A box's place and size, as numbers `toEqual` compares. */
+const placeOf = (rect: DOMRect): number[] => [rect.x, rect.y, rect.width, rect.height];
+
 const box = (selector: string): DOMRect => {
 	const el = document.querySelector(selector);
 	if (el === null) throw new Error(`no ${selector}`);
@@ -77,7 +80,7 @@ describe("the key hints of the window's zones", () => {
 		expect(strip.height).toBeGreaterThan(0);
 		// Its row is as tall as its line, no taller.
 		expect(strip.height).toBe(box(".zone-key-hints .key-hint-strip__line").height);
-		expect(main).toEqual(before);
+		expect(placeOf(main)).toEqual(placeOf(before));
 		expect(strip.top).toBeGreaterThanOrEqual(rail.bottom);
 		expect(strip.top).toBeGreaterThanOrEqual(list.bottom);
 		expect(strip.left).toBe(rail.left);
@@ -109,10 +112,10 @@ describe("the files panel's form", () => {
 		expect(box(".pane-area").width).toBeCloseTo(area - 300, 0);
 	});
 
-	// T1, which another window writes, in the middle pane of three.
+	// T1, which another window writes, in the middle column of three, above P4.
 	it("floats the writer's panel a reader follows over that terminal's pane, and resizes nothing", async () => {
 		const { hub } = await mountWindow({
-			channels: [live("T2"), live("T1", "client-other"), live("T3")],
+			channels: [live("T2"), live("T1", "client-other"), live("T4"), live("T3")],
 			ui: ON,
 			layout: {
 				tabs: [
@@ -121,7 +124,11 @@ describe("the files panel's form", () => {
 						root: split(
 							"vertical",
 							term("T2", "P1"),
-							split("vertical", term("T1", "P2"), term("T3", "P3")),
+							split(
+								"vertical",
+								split("horizontal", term("T1", "P2"), term("T4", "P4")),
+								term("T3", "P3"),
+							),
 							0.33,
 						),
 						activePane: "P2",
@@ -144,6 +151,9 @@ describe("the files panel's form", () => {
 		expect(panel.left).toBeGreaterThanOrEqual(followed?.left ?? Number.NaN);
 		expect(panel.right).toBeLessThanOrEqual(followed?.right ?? Number.NaN);
 		expect(panel.top).toBeGreaterThanOrEqual(header?.bottom ?? Number.NaN);
+		expect(panel.bottom).toBeLessThanOrEqual(followed?.bottom ?? Number.NaN);
+		expect(panel.width).toBeGreaterThan(0);
+		expect(panel.height).toBeGreaterThan(0);
 	});
 
 	// Only a docked panel has an edge to drag; its width is `[layout] transfer_panel_width`.
@@ -153,6 +163,7 @@ describe("the files panel's form", () => {
 			ui: ON,
 			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
 		});
+		const area = box(".pane-area").width;
 		focusPane("P1");
 		await press("E", { ctrl: true, shift: true });
 		const edge = document.querySelector(".files-resize-handle");
@@ -165,5 +176,22 @@ describe("the files panel's form", () => {
 
 		const saved = hub.calls("PUT", "/api/config/ui").map((call) => call.body);
 		expect(saved).toEqual([{ layout: { transferPanelWidth: 340 } }]);
+		expect(box("#files-panel").width).toBe(340);
+		expect(box(".pane-area").width).toBeCloseTo(area - 340, 0);
+	});
+
+	it("opens at the width it was left at", async () => {
+		await mountWindow({
+			channels: [live("T1")],
+			ui: { ...ON, layout: { transferPanelWidth: 340 } },
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+		});
+		const area = box(".pane-area").width;
+		focusPane("P1");
+
+		await press("E", { ctrl: true, shift: true });
+
+		expect(box("#files-panel").width).toBe(340);
+		expect(box(".pane-area").width).toBeCloseTo(area - 340, 0);
 	});
 });

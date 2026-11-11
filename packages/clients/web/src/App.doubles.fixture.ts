@@ -342,9 +342,45 @@ export function hub(): FakeHub {
 export const wsClientModule = { createWsClient: () => hub().socket };
 
 /**
+/** The arrows' final letters in xterm's sequences. */
+const ARROWS: Readonly<Record<string, string>> = {
+	ArrowUp: "A",
+	ArrowDown: "B",
+	ArrowRight: "C",
+	ArrowLeft: "D",
+};
+
+/**
+ * What xterm sends its program for a key typed, for the keys the window's chords use: a character
+ * as typed, ESC before it with Alt, the control character for Ctrl with a letter (or `/`), and
+ * the CSI sequences for Tab, F6 and the arrows with their modifiers. Null for a key xterm sends
+ * nothing for here, such as Ctrl with a comma, or a modifier alone.
+ */
+export function xtermInput(event: KeyboardEvent): string | null {
+	const mod = 1 + (event.shiftKey ? 1 : 0) + (event.altKey ? 2 : 0) + (event.ctrlKey ? 4 : 0);
+	const arrow = ARROWS[event.key];
+	if (arrow !== undefined) return mod === 1 ? `\u001b[${arrow}` : `\u001b[1;${mod}${arrow}`;
+	if (event.key === "F6") return mod === 1 ? "\u001b[17~" : `\u001b[17;${mod}~`;
+	if (event.key === "Tab") return event.shiftKey ? "\u001b[Z" : "\t";
+	if (event.key === "Enter") return "\r";
+	if (event.key === "Escape") return "\u001b";
+	if (event.key.length !== 1) return null;
+	if (event.ctrlKey && !event.altKey) {
+		if (/^[a-z]$/i.test(event.key)) {
+			return String.fromCharCode(event.key.toUpperCase().charCodeAt(0) - 64);
+		}
+		return event.key === "/" ? "\u001f" : null;
+	}
+	return event.altKey ? `\u001b${event.key}` : event.key;
+}
+
+/**
  * Stands in for `@xterm/xterm`. It opens as xterm does, a `.xterm` element holding the hidden
- * textarea that takes the keyboard, so that a pane can be focused, and hands each key typed there
- * to the pane's key handler first, as xterm does; it draws nothing and sends nothing.
+ * textarea that takes the keyboard, so that a pane can be focused. Each key typed there goes to
+ * the pane's key handler first, as in xterm, and what the handler lets through goes to the
+ * terminal's `onData` listeners as xterm would send it (`xtermInput`). Like xterm, it does not
+ * look at whether the page took the key (`defaultPrevented`): only the handler keeps a key from
+ * the program. It draws nothing.
  */
 export const xtermModule = {
 	Terminal: class {
@@ -355,6 +391,7 @@ export const xtermModule = {
 		element: HTMLElement | undefined;
 		textarea: HTMLTextAreaElement | undefined;
 		keyHandler: ((event: KeyboardEvent) => boolean) | null = null;
+		dataListeners: Array<(data: string) => void> = [];
 		buffer = { active: { viewportY: 0, baseY: 0, length: 0 } };
 		_core = { _renderService: { dimensions: { css: { cell: { width: 9, height: 17 } } } } };
 		constructor(options: Record<string, unknown>) {
@@ -368,14 +405,23 @@ export const xtermModule = {
 			element.className = "xterm";
 			const textarea = document.createElement("textarea");
 			textarea.className = "xterm-helper-textarea";
-			textarea.addEventListener("keydown", (event) => this.keyHandler?.(event));
+			textarea.addEventListener("keydown", (event) => {
+				if (this.keyHandler !== null && !this.keyHandler(event)) return;
+				const data = xtermInput(event);
+				if (data !== null) for (const listener of this.dataListeners) listener(data);
+			});
 			element.appendChild(textarea);
 			parent.appendChild(element);
 			this.element = element;
 			this.textarea = textarea;
 		}
-		onData() {
-			return { dispose() {} };
+		onData(listener: (data: string) => void) {
+			this.dataListeners.push(listener);
+			return {
+				dispose: () => {
+					this.dataListeners = this.dataListeners.filter((l) => l !== listener);
+				},
+			};
 		}
 		onResize() {
 			return { dispose() {} };

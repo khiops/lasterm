@@ -1,6 +1,7 @@
 {
 	"$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
 	"assist": { "actions": { "source": { "organizeImports": "on" } } },
+	"html": { "experimentalFullSupportEnabled": true },
 	"vcs": {
 		"enabled": true,
 		"clientKind": "git",
@@ -129,6 +130,16 @@
 					}
 				}
 			}
+		},
+		{
+			"includes": ["**/*.vue"],
+			"formatter": { "enabled": false },
+			"assist": { "enabled": false },
+			"linter": { "rules": { "preset": "none" } }
+		},
+		{
+			"includes": ["packages/clients/web/src/components/VacantPane.vue"],
+			"plugins": ["./packages/clients/web/lint/no-literal-colour.grit"]
 		}
 	],
 	"formatter": {
@@ -142,6 +153,7 @@
 			"**/packages/**/*.tsx",
 			"**/*.ts",
 			"**/*.json",
+			"packages/clients/web/src/components/VacantPane.vue",
 			"!**/node_modules",
 			"!**/dist",
 			"!**/.turbo",

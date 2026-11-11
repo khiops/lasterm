@@ -1,0 +1,20 @@
+// A stylesheet that draws only in the theme's colours names a --nt-* variable for each of them,
+// never a colour of its own: a hex colour, or a colour function given numbers (#625).
+// biome.json applies it to the styles that make that promise.
+language css
+
+or {
+	CssColor() as $colour where {
+		register_diagnostic(
+			span=$colour,
+			message="A colour of its own here: name the theme's --nt-* variable instead."
+		)
+	},
+	CssFunction() as $call where {
+		$call <: r"(?i)(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\(\s*[\d.][\s\S]*",
+		register_diagnostic(
+			span=$call,
+			message="A colour of its own here: name the theme's --nt-* variable instead."
+		)
+	}
+}

@@ -1,9 +1,11 @@
 import { BUNDLED_THEMES } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
-import { describe, expect, it } from "vitest";
-import { contrastRatio, hexToRgb, TEXT_CONTRAST_AA, useThemeStore } from "../stores/theme.js";
-import BASE from "../styles/base.css?raw";
-import SOURCE from "./ToastContainer.vue?raw";
+import { afterEach, describe, expect, it } from "vitest";
+import { type App, createApp, h, nextTick } from "vue";
+import "../styles/base.css";
+import { useThemeStore } from "../stores/theme.js";
+import { useToastStore } from "../stores/toast.js";
+import ToastContainer from "./ToastContainer.vue";
 
 // ─── A toast reads in every theme (#830) ─────────────────────────────────────
 //
@@ -11,126 +13,116 @@ import SOURCE from "./ToastContainer.vue?raw";
 // ground, and each level's rule then replaced that ground with a 12% tint of
 // its colour: whatever lay behind showed through, in every theme. They now take
 // the exit card's ground and text, and mark their level in its border and its
-// icon. Checked here, from the component's own rules, for every bundled theme,
-// light and dark.
-
-/** WCAG 2.1 SC 1.4.11, for what is not text: a border. */
-const NON_TEXT_CONTRAST = 3;
+// icon. Checked here on mounted toasts, drawn with the component's rules and
+// base.css: before a theme is applied (base.css's own values) and in a dark and
+// a light theme, so a colour neither declares nor follows shows. Their contrast
+// in every bundled theme is checked in a browser (ToastContainer.browser.spec.ts),
+// which computes the colour-mix() text levels happy-dom does not.
 
 const LEVELS = ["error", "warning", "info"] as const;
+type Level = (typeof LEVELS)[number];
 
-const style = SOURCE.slice(SOURCE.indexOf("<style")).replace(/\r\n/g, "\n");
-
-/** The declarations of the rule for exactly `selector`. */
-function declarations(selector: string): Map<string, string> {
-	const escaped = selector.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
-	const rule = new RegExp(`\\n${escaped}\\s*\\{([^}]*)\\}`).exec(style);
-	if (!rule?.[1]) throw new Error(`no rule for ${selector}`);
-	const out = new Map<string, string>();
-	for (const line of rule[1].split(";")) {
-		const [prop, ...value] = line.split(":");
-		if (prop && value.length > 0) out.set(prop.trim(), value.join(":").trim());
-	}
-	return out;
+interface Drawn {
+	ground: string;
+	text: string;
+	shadow: string;
+	level: Record<Level, string>;
 }
 
-/** The colour an expression the rules use stands for, once a theme is applied. */
-function resolve(expr: string): [number, number, number] {
-	const root = document.documentElement.style;
-	const v = /^var\((--nt-[\w-]+)\)$/.exec(expr);
-	if (v?.[1]) {
-		const hex = root.getPropertyValue(v[1]).trim();
-		if (!/^#[0-9a-fA-F]{6}$/.test(hex)) throw new Error(`${v[1]} is ${hex}, not a solid colour`);
-		return hexToRgb(hex).split(", ").map(Number) as [number, number, number];
-	}
-	const triple = /^rgb\(var\((--nt-[\w-]+-rgb)\)\)$/.exec(expr);
-	if (triple?.[1]) {
-		return root.getPropertyValue(triple[1]).split(",").map(Number) as [number, number, number];
-	}
-	throw new Error(`cannot check the contrast of ${expr}`);
-}
+/** What each is drawn in, read off base.css and the theme files, and off the theme store's
+ * readable text for the two whose pair falls short (`--nt-text-strong`, `--nt-status-*`). */
+const DRAWN: Record<string, Drawn> = {
+	"base.css alone": {
+		ground: "rgb(30, 30, 46)",
+		text: "#cdd6f4",
+		shadow: "0 4px 24px rgba(0, 0, 0, 0.6)",
+		level: { error: "#f38ba8", warning: "#f9e2af", info: "#89b4fa" },
+	},
+	"one-half-dark": {
+		ground: "rgb(40, 44, 52)",
+		text: "#dcdfe4",
+		shadow: "0 4px 24px rgba(0, 0, 0, 0.6)",
+		level: { error: "#e17079", warning: "#e5c07b", info: "#61afef" },
+	},
+	"solarized-light": {
+		ground: "rgb(253, 246, 227)",
+		text: "#5f747b",
+		shadow: "0 4px 24px rgba(0, 0, 0, 0.15)",
+		level: { error: "#d5312e", warning: "#8f6c00", info: "#2076b3" },
+	},
+};
 
-/** The variables base.css declares: what exists before a theme is applied. */
-const DECLARED = new Set([...BASE.matchAll(/^\s*(--nt-[\w-]+)\s*:/gm)].map((m) => m[1] ?? ""));
+let app: App | null = null;
 
-/** The variables the component names. */
-const NAMED = [...new Set([...SOURCE.matchAll(/var\(\s*(--nt-[\w-]+)/g)].map((m) => m[1] ?? ""))];
-
-function apply(theme: (typeof BUNDLED_THEMES)[string]): void {
+afterEach(() => {
+	app?.unmount();
+	app = null;
+	document.body.replaceChildren();
 	document.documentElement.removeAttribute("style");
-	setActivePinia(createPinia());
-	useThemeStore().applyTheme(theme);
+});
+
+/** A toast of each level, drawn under `theme` (none: base.css's values), past its entrance. */
+async function mountToasts(theme: string): Promise<Map<Level, HTMLElement>> {
+	const pinia = createPinia();
+	setActivePinia(pinia);
+	const bundled = BUNDLED_THEMES[theme];
+	if (bundled !== undefined) useThemeStore().applyTheme(bundled);
+	const root = document.createElement("div");
+	document.body.appendChild(root);
+	app = createApp({ render: () => h(ToastContainer) });
+	app.use(pinia);
+	app.mount(root);
+	for (const level of LEVELS) useToastStore().show(level, `A toast at ${level}`, 60_000);
+	await nextTick();
+	// A toast enters transparent; its transition classes go two frames later.
+	await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+	const toasts = new Map<Level, HTMLElement>();
+	for (const level of LEVELS) {
+		const toast = document.querySelector<HTMLElement>(`.toast-item--${level}`);
+		if (toast === null) throw new Error(`no ${level} toast`);
+		toasts.set(level, toast);
+	}
+	return toasts;
 }
 
-describe("ToastContainer theme (#830)", () => {
-	it("names only variables base.css declares", () => {
-		expect(NAMED.length).toBeGreaterThan(0);
-		for (const name of NAMED) {
-			expect(DECLARED.has(name), `${name} is declared nowhere`).toBe(true);
+/** Drawn at full strength: no opacity of its own. */
+function opaque(el: Element): boolean {
+	return ["", "1"].includes(getComputedStyle(el).opacity);
+}
+
+describe.each(Object.entries(DRAWN))("a toast, %s (#830)", (theme, drawn) => {
+	it("is drawn on the theme's opaque ground, in its text, under its shadow", async () => {
+		for (const toast of (await mountToasts(theme)).values()) {
+			const style = getComputedStyle(toast);
+			expect(style.backgroundColor).toBe(drawn.ground);
+			expect(style.color).toBe(drawn.text);
+			expect(style.boxShadow).toBe(drawn.shadow);
+			expect(opaque(toast)).toBe(true);
 		}
 	});
 
-	it("names only variables each theme sets", () => {
-		for (const [themeName, theme] of Object.entries(BUNDLED_THEMES)) {
-			apply(theme);
-			const root = document.documentElement.style;
-			for (const name of NAMED) {
-				expect(root.getPropertyValue(name), `${name} in ${themeName}`).not.toBe("");
-			}
-		}
-	});
-
-	it("draws a toast on the theme's opaque ground, in its text, under its shadow", () => {
-		const item = declarations(".toast-item");
-		expect(item.get("background")).toBe("rgb(var(--nt-bg-rgb))");
-		expect(item.get("color")).toBe("var(--nt-text-strong)");
-		expect(item.get("box-shadow")).toBe("var(--nt-shadow)");
-		expect(item.has("opacity")).toBe(false);
-	});
-
-	it("marks a level in its border and its icon, never with a fill", () => {
-		for (const level of LEVELS) {
-			const rule = declarations(`.toast-item--${level}`);
-			expect(rule.get("border-color")).toBe(`var(--nt-status-${level})`);
-			expect(rule.has("background")).toBe(false);
-			expect(rule.has("color")).toBe(false);
-			expect(rule.has("opacity")).toBe(false);
-			expect(declarations(`.toast-item--${level} .toast-icon`).get("color")).toBe(
-				`var(--nt-status-${level})`,
+	it("marks its level in its border and its icon, never with a fill", async () => {
+		for (const [level, toast] of await mountToasts(theme)) {
+			const style = getComputedStyle(toast);
+			expect(style.borderTopColor, `${level} border`).toBe(drawn.level[level]);
+			expect(getComputedStyle(toast.querySelector(".toast-icon") as Element).color).toBe(
+				drawn.level[level],
 			);
+			// The same ground and text as every other level.
+			expect(style.backgroundColor, `${level} ground`).toBe(drawn.ground);
+			expect(style.color, `${level} text`).toBe(drawn.text);
 		}
 	});
 
-	// A dimmed or tinted close button would take it below what it was checked for.
-	it("keeps the close button at the toast's own colours", () => {
-		const close = declarations(".toast-close");
-		expect(close.get("color")).toBe("inherit");
-		expect(close.has("opacity")).toBe(false);
-		const hover = declarations(".toast-close:hover");
-		for (const prop of ["color", "background", "opacity"]) {
-			expect(hover.has(prop), `.toast-close:hover sets ${prop}`).toBe(false);
+	// A dimmed or tinted close button would take it below what it was checked
+	// for. Under the pointer: ToastContainer.browser.spec.ts.
+	it("keeps the close button at the toast's own colours", async () => {
+		for (const toast of (await mountToasts(theme)).values()) {
+			const close = toast.querySelector(".toast-close") as HTMLElement;
+			expect(close.getAttribute("aria-label")).toBe("Dismiss");
+			expect(getComputedStyle(close).color).toBe(drawn.text);
+			expect(["none", "transparent", ""]).toContain(getComputedStyle(close).backgroundColor);
+			expect(opaque(close)).toBe(true);
 		}
 	});
-
-	for (const [name, theme] of Object.entries(BUNDLED_THEMES)) {
-		it(`reads in ${name}`, () => {
-			apply(theme);
-			const item = declarations(".toast-item");
-			const ground = resolve(item.get("background") ?? "");
-			const text = contrastRatio(resolve(item.get("color") ?? ""), ground);
-			expect(text, `text: ${text.toFixed(2)}`).toBeGreaterThanOrEqual(TEXT_CONTRAST_AA);
-			for (const level of LEVELS) {
-				const border = resolve(declarations(`.toast-item--${level}`).get("border-color") ?? "");
-				const icon = resolve(declarations(`.toast-item--${level} .toast-icon`).get("color") ?? "");
-				const borderRatio = contrastRatio(border, ground);
-				const iconRatio = contrastRatio(icon, ground);
-				expect(borderRatio, `${level} border: ${borderRatio.toFixed(2)}`).toBeGreaterThanOrEqual(
-					NON_TEXT_CONTRAST,
-				);
-				expect(iconRatio, `${level} icon: ${iconRatio.toFixed(2)}`).toBeGreaterThanOrEqual(
-					TEXT_CONTRAST_AA,
-				);
-			}
-		});
-	}
 });

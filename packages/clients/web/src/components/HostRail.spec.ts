@@ -6,17 +6,35 @@
  * The rail is mounted with its real stores, fed hosts directly. Only the
  * calls that would reach the hub are stood in for.
  */
-import type { Host, HostGroup, HostRailBadgeSize } from "@lasterm/shared";
+import { BUNDLED_THEMES, type Host, type HostGroup, type HostRailBadgeSize } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, ref } from "vue";
 import { useHostsStore } from "../stores/hosts.js";
+import { useThemeStore } from "../stores/theme.js";
 import { useToastStore } from "../stores/toast.js";
 import { shortcutLabel } from "../utils/app-shortcuts.js";
 import HostRail from "./HostRail.vue";
-import SOURCE from "./HostRail.vue?raw";
 
 const STAMP = "2026-09-28T00:00:00.000Z";
+
+/** A dark and a light theme, by name. */
+const DARK = "one-half-dark";
+const LIGHT = "solarized-light";
+
+/** The outline drawn around `el`: width, style and colour. */
+function outlineOf(el: Element): string {
+	const style = getComputedStyle(el);
+	return `${style.outlineWidth} ${style.outlineStyle} ${style.outlineColor}`;
+}
+
+/** happy-dom keeps computed styles until the DOM changes, and a focus change is not one: a node
+ * added and removed makes it draw again. */
+function restyle(): void {
+	const mark = document.createComment("");
+	document.body.append(mark);
+	mark.remove();
+}
 
 function host(id: string, fields: Partial<Host> = {}): Host {
 	return {
@@ -86,6 +104,7 @@ afterEach(() => {
 	app = null;
 	root?.remove();
 	vi.restoreAllMocks();
+	document.documentElement.removeAttribute("style");
 });
 
 // ─── Reading the rail ────────────────────────────────────────────────────────
@@ -209,9 +228,20 @@ describe("HostRail selection", () => {
 		expect(root.querySelector(".selection-pill")).toBeNull();
 	});
 
-	it("draws the ring from the rail's colour and the foreground", () => {
-		const ring = /\.badge\.badge--ring\s*\{[^}]*\}/.exec(SOURCE)?.[0] ?? "";
-		expect(ring).toMatch(/0 0 0 2px var\(--nt-host-rail\),\s*0 0 0 4px var\(--nt-fg\)/);
+	// A gap in the rail's colour, then the foreground: each theme's own.
+	it.each([
+		[DARK, "0 0 0 2px #1e2127, 0 0 0 4px #dcdfe4"],
+		[LIGHT, "0 0 0 2px #e6dfcb, 0 0 0 4px #657b83"],
+	])("draws the ring from the rail's colour and the foreground: %s", async (theme, ring) => {
+		useThemeStore().applyTheme(BUNDLED_THEMES[theme]!);
+		const { hostsStore } = mountRail({ columns: 3 });
+		hostsStore.selectHost("b");
+		await nextTick();
+		// happy-dom keeps the line breaks between the shadows.
+		const shadow = (id: string): string =>
+			getComputedStyle(badge(id).querySelector(".badge") as Element).boxShadow.replace(/\s+/g, " ");
+		expect(shadow("b")).toBe(ring);
+		expect(shadow("c")).toBe("");
 	});
 });
 
@@ -254,8 +284,10 @@ describe("HostRail local badge (#656)", () => {
 
 describe("HostRail group headers", () => {
 	it("are centred", () => {
-		const rule = /\n\.group-header\s*\{[^}]*\}/.exec(SOURCE)?.[0] ?? "";
-		expect(rule).toMatch(/justify-content:\s*center/);
+		mountRail({ columns: 1 });
+		for (const name of ["Prod", "Ungrouped"]) {
+			expect(getComputedStyle(header(name)).justifyContent, name).toBe("center");
+		}
 	});
 
 	it("in a grid, have a hairline on each side and the host count", () => {
@@ -671,9 +703,16 @@ describe("HostRail keyboard", () => {
 		outside.remove();
 	});
 
-	it("draws the keyboard's ring from the theme", () => {
-		const ring = /\.badge-wrapper:focus-visible\s*\{[^}]*\}/.exec(SOURCE)?.[0] ?? "";
-		expect(ring).toMatch(/outline:\s*2px solid var\(--nt-accent\)/);
-		expect(ring).not.toMatch(/#[0-9a-f]{3,8}\b|rgb\(/i);
+	it.each([
+		[DARK, "2px solid #61afef"],
+		[LIGHT, "2px solid #268bd2"],
+	])("draws the keyboard's ring from the theme: %s", (theme, ring) => {
+		useThemeStore().applyTheme(BUNDLED_THEMES[theme]!);
+		mountRail({ columns: 3 });
+		expect(outlineOf(badge("b"))).not.toBe(ring);
+		badge("a").focus();
+		restyle();
+		expect(outlineOf(badge("a"))).toBe(ring);
+		expect(outlineOf(badge("b"))).not.toBe(ring);
 	});
 });

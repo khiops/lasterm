@@ -4,10 +4,12 @@
  * passed it over. It now covers its track, is a switch, and shows the theme's ring on the track.
  * Every control is named by its row's label.
  */
+import { BUNDLED_THEMES } from "@lasterm/shared";
+import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, ref } from "vue";
+import { useThemeStore } from "../../stores/theme.js";
 import SettingControl from "./SettingControl.vue";
-import SOURCE from "./SettingControl.vue?raw";
 import SettingRow from "./SettingRow.vue";
 
 let app: App | null = null;
@@ -17,6 +19,7 @@ afterEach(() => {
 	app?.unmount();
 	app = null;
 	root?.remove();
+	document.documentElement.removeAttribute("style");
 });
 
 /** A row of Settings holding one control, as the categories draw them. */
@@ -45,10 +48,30 @@ function mountRow(type: "toggle" | "select" | "text", initial: unknown) {
 const switchInput = (): HTMLInputElement =>
 	root.querySelector('input[type="checkbox"]') as HTMLInputElement;
 
-/** The CSS rule for `selector`, from the component's own style block. */
-function rule(selector: string): string {
-	const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	return new RegExp(`${escaped}\\s*\\{[^}]*\\}`).exec(SOURCE)?.[0] ?? "";
+/** A dark and a light theme, with the keyboard's ring each draws: their accent. */
+const RINGS = [
+	["one-half-dark", "2px solid #61afef"],
+	["solarized-light", "2px solid #268bd2"],
+] as const;
+
+function applyTheme(name: string): void {
+	setActivePinia(createPinia());
+	useThemeStore().applyTheme(BUNDLED_THEMES[name]!);
+}
+
+/** The outline drawn around `el`: width, style and colour. */
+function outlineOf(el: Element): string {
+	const style = getComputedStyle(el);
+	return `${style.outlineWidth} ${style.outlineStyle} ${style.outlineColor}`;
+}
+
+/** The keyboard on `el`. happy-dom keeps computed styles until the DOM changes, and a focus
+ * change is not one: a node added and removed makes it draw again. */
+function keyboardOn(el: HTMLElement): void {
+	el.focus();
+	const mark = document.createComment("");
+	document.body.append(mark);
+	mark.remove();
 }
 
 describe("the switch", () => {
@@ -95,20 +118,19 @@ describe("the switch", () => {
 		expect(updates).not.toHaveBeenCalled();
 	});
 
-	it("has a box: the checkbox covers the track, invisible", () => {
-		const input = rule(".control-toggle input");
-		expect(input).toMatch(/inset:\s*0/);
-		expect(input).toMatch(/width:\s*100%/);
-		expect(input).toMatch(/height:\s*100%/);
-		expect(input).toMatch(/opacity:\s*0/);
-		expect(input).not.toMatch(/width:\s*0[;\s]/);
-		expect(rule(".control-toggle")).toMatch(/position:\s*relative/);
-	});
+	// Its box, and a click on the track reaching it: SettingControl.browser.spec.ts.
 
-	it("shows the keyboard's place on its track, in the theme's accent", () => {
-		const ring = rule(".control-toggle input:focus-visible + .toggle-track");
-		expect(ring).toMatch(/outline:\s*2px solid var\(--nt-accent\)/);
-	});
+	it.each(RINGS)(
+		"shows the keyboard's place on its track, in the theme's accent: %s",
+		(theme, ring) => {
+			applyTheme(theme);
+			mountRow("toggle", false);
+			const track = root.querySelector(".toggle-track") as HTMLElement;
+			expect(outlineOf(track)).not.toBe(ring);
+			keyboardOn(switchInput());
+			expect(outlineOf(track)).toBe(ring);
+		},
+	);
 });
 
 describe("the other controls", () => {

@@ -4,19 +4,20 @@
  *
  * The bar is mounted with its real stores; it is given its tabs as App.vue gives them.
  */
+import { BUNDLED_THEMES } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type App, createApp, h, nextTick, ref } from "vue";
+import { type App, type Component, createApp, h, nextTick, ref } from "vue";
+import { useThemeStore } from "../stores/theme.js";
 import { shortcutLabel } from "../utils/app-shortcuts.js";
 import TabBar from "./TabBar.vue";
-import SOURCE from "./TabBar.vue?raw";
 
 let app: App | null = null;
 let root: HTMLElement;
 const activeTabIndex = ref(0);
 const visibleTabIds = ref<ReadonlySet<string> | null>(null);
 
-function mountBar(tabIds: string[], active = 0) {
+function mountBar(tabIds: string[], active = 0, bar: Component = TabBar) {
 	activeTabIndex.value = active;
 	const selectTab = vi.fn((index: number) => {
 		activeTabIndex.value = index;
@@ -26,7 +27,7 @@ function mountBar(tabIds: string[], active = 0) {
 	document.body.appendChild(root);
 	app = createApp({
 		render: () =>
-			h(TabBar, {
+			h(bar, {
 				tabs: tabIds.map((id) => ({ id })),
 				activeTabIndex: activeTabIndex.value,
 				getTabLabel: (id: string) => `Label ${id}`,
@@ -52,6 +53,7 @@ afterEach(() => {
 	app = null;
 	root?.remove();
 	vi.restoreAllMocks();
+	document.documentElement.removeAttribute("style");
 });
 
 function tab(id: string): HTMLElement {
@@ -168,10 +170,24 @@ describe("TabBar keyboard", () => {
 		expect(focused()).toBe("t0");
 	});
 
-	it("draws the keyboard's ring from the theme", () => {
-		const ring = /\.tab:focus-visible\s*\{[^}]*\}/.exec(SOURCE)?.[0] ?? "";
-		expect(ring).toMatch(/outline:\s*2px solid var\(--nt-accent\)/);
-		expect(ring).not.toMatch(/#[0-9a-f]{3,8}\b|rgb\(/i);
+	it.each([
+		["one-half-dark", "2px solid #61afef"],
+		["solarized-light", "2px solid #268bd2"],
+	])("draws the keyboard's ring from the theme: %s", (theme, ring) => {
+		useThemeStore().applyTheme(BUNDLED_THEMES[theme]!);
+		mountBar(["t0", "t1"]);
+		const outline = (id: string): string => {
+			const style = getComputedStyle(tab(id));
+			return `${style.outlineWidth} ${style.outlineStyle} ${style.outlineColor}`;
+		};
+		expect(outline("t0")).not.toBe(ring);
+		tab("t0").focus();
+		// happy-dom keeps computed styles until the DOM changes, and a focus change is not one.
+		const mark = document.createComment("");
+		document.body.append(mark);
+		mark.remove();
+		expect(outline("t0")).toBe(ring);
+		expect(outline("t1")).not.toBe(ring);
 	});
 });
 
@@ -218,7 +234,36 @@ describe("TabBar tooltips", () => {
 		expect(close?.getAttribute("title")).toBe("Close tab");
 	});
 
-	it("write no chord of their own", () => {
-		expect(SOURCE).not.toMatch(/\b(Ctrl|Alt|Shift)\+/);
+	// The table relabelled: the bar says the new labels, and no chord is left that it wrote itself.
+	it("write no chord of their own", async () => {
+		vi.resetModules();
+		vi.doMock("../utils/app-shortcuts.js", async (importOriginal) => ({
+			...(await importOriginal<typeof import("../utils/app-shortcuts.js")>()),
+			shortcutLabel: (id: string) => `[${id}]`,
+		}));
+		try {
+			const relabelled = (await import("./TabBar.vue")).default;
+			mountBar(
+				Array.from({ length: 10 }, (_, i) => `t${i}`),
+				0,
+				relabelled,
+			);
+			const said = [root, ...root.querySelectorAll("*")].flatMap((el) => [
+				el.getAttribute("title") ?? "",
+				el.getAttribute("aria-label") ?? "",
+			]);
+			said.push(root.textContent ?? "");
+			for (const text of said) expect(text).not.toMatch(/\b(Ctrl|Alt|Shift)\+/);
+			expect(tooltip("t0")).toBe(
+				"Label t0 — [tab.goTo1]\n[tab.next] / [tab.previous]: next / previous tab",
+			);
+			expect(tooltip("t9").split("\n")[0]).toBe("Label t9 — [tab.goTo9]");
+			expect(root.querySelector(".tab-bar__add--main")?.getAttribute("title")).toBe(
+				"New terminal ([tab.new])",
+			);
+		} finally {
+			vi.doUnmock("../utils/app-shortcuts.js");
+			vi.resetModules();
+		}
 	});
 });

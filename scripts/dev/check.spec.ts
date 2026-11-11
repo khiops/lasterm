@@ -248,8 +248,8 @@ describe("check.sh in a checkout that shares its cargo targets", () => {
 		}
 		// Mutation caught: a desktop-fmt step that passes, rewrites instead of
 		// checking, fails without checking, or checks b's crate, which is
-		// formatted, shows no diff of a's. Without --all, as ci.yml runs it, it
-		// leaves out the path dependencies, a's probe among them.
+		// formatted, shows no diff of a's. Without --all, which ci.yml passes,
+		// it leaves out the path dependencies, a's probe among them.
 		expect(exit("desktop-fmt"), log("desktop-fmt")).toBe("1");
 		expect(log("desktop-fmt")).toContain("Diff in");
 		expect(log("desktop-fmt")).toContain("probe_checkout() -> &'static str {");

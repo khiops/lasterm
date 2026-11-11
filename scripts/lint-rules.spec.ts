@@ -21,6 +21,64 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const root = join(import.meta.dirname, "..");
 const biome = join(root, "node_modules", "@biomejs", "biome", "bin", "biome");
 
+/** What every planted hub file declares, so that each holds one comparison. */
+const DECLARED = [
+	"declare const deps: { authToken: string } | undefined;",
+	"declare const previous: { tokenHash: string };",
+	"declare function hashToken(token: string): string;",
+	"declare const token: string;",
+	"declare const secret: string;",
+	"declare const password: string;",
+	"declare const passphrase: string;",
+	"declare const AUTH_TOKEN: string;",
+	"declare const other: string;",
+	"declare const count: number;",
+].join("\n");
+
+/** Comparisons the secret rule refuses, by case: each file of the hub holds one. */
+const SECRET_REFUSED: Record<string, string> = {
+	// The comparison #514 removed.
+	identity: "token === deps.authToken",
+	"right-side": "deps.authToken !== token",
+	loose: "secret == other",
+	"loose-right": "other != password",
+	passphrase: "passphrase === other",
+	"optional-chain": "deps?.authToken === other",
+	"upper-case": "AUTH_TOKEN === other",
+};
+
+/** Comparisons it lets through: a call, a type, a constant, a name that is no secret. */
+const SECRET_ALLOWED: Record<string, string> = {
+	call: "previous.tokenHash !== hashToken(token)",
+	typeof: 'typeof token === "string"',
+	null: "token !== null",
+	undefined: "token === undefined",
+	boolean: "token === true",
+	number: "token !== 0",
+	"no-secret": "count === other",
+};
+
+/** The empty pane's colour rules, one a line from line 3 of its style block. */
+const COLOURS = [
+	".hex { color: #ff0000; }",
+	".rgb { color: rgb(1, 2, 3); }",
+	".rgba { color: rgba(1, 2, 3, 0.5); }",
+	".hsl { color: hsl(10 20% 30%); }",
+	".hsla { color: hsla(10, 20%, 30%, 0.5); }",
+	".hwb { color: hwb(10 20% 30%); }",
+	".lab { color: lab(50% 40 59.5); }",
+	".lch { color: lch(52% 72 50); }",
+	".oklab { color: oklab(0.4 0.1 0.1); }",
+	".oklch { color: oklch(0.6 0.1 50); }",
+	".color { color: color(srgb 1 0 0); }",
+	// The theme's colours, which it may name in any of these forms.
+	".theme { color: var(--nt-text); }",
+	".theme-rgb { background: rgb(var(--nt-bg-rgb)); }",
+	".theme-mix { background: color-mix(in srgb, var(--nt-text) 50%, transparent); }",
+];
+/** The lines of COLOURS a colour of its own is on: all but the theme's three. */
+const OWN_COLOUR_LINES = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+
 /** The planted files, by path from the probe's root. */
 const PLANTED: Record<string, string> = {
 	"packages/clients/web/src/main.ts": [
@@ -30,32 +88,21 @@ const PLANTED: Record<string, string> = {
 		'import "./components/VacantPane.vue";',
 		"",
 	].join("\n"),
-	// The comparison #514 removed, on either side, with each operator.
-	"packages/hub/src/secret.ts": [
-		"declare const deps: { authToken: string };",
-		"declare const other: string;",
-		"export const a = (token: string) => token === deps.authToken;",
-		"export const b = (token: string) => deps.authToken !== token;",
-		"export const c = (secret: string) => secret == other;",
-		"export const d = (password: string) => other != password;",
-		"",
-	].join("\n"),
-	// What may be compared plainly: a constant, a call, a type, a name that is no secret.
-	"packages/hub/src/fine.ts": [
-		"declare const previous: { tokenHash: string };",
-		"declare function hashToken(token: string): string;",
-		"export const a = (token: string) => previous.tokenHash !== hashToken(token);",
-		'export const b = (token: unknown) => typeof token === "string";',
-		"export const c = (token: string | null) => token !== null;",
-		"export const d = (token?: string) => token === undefined;",
-		"export const e = (count: number, other: number) => count === other;",
-		"",
-	].join("\n"),
-	// The rule is the hub's sources': not its specs, not the web client.
-	"packages/hub/src/secret.spec.ts":
-		"export const a = (token: string, b: string) => token === b;\n",
-	"packages/clients/web/src/secret.ts":
-		"export const a = (token: string, b: string) => token === b;\n",
+	...Object.fromEntries(
+		Object.entries({ ...SECRET_REFUSED, ...SECRET_ALLOWED }).map(([name, comparison]) => [
+			`packages/hub/src/${name in SECRET_REFUSED ? "secret" : "fine"}-${name}.ts`,
+			`${DECLARED}\nexport const compared = ${comparison};\n`,
+		]),
+	),
+	// The rule is the hub's sources': not its specs, fixtures or setup, nor the web client.
+	...Object.fromEntries(
+		[
+			"packages/hub/src/secret.spec.ts",
+			"packages/hub/src/secret.fixture.ts",
+			"packages/hub/src/secret.setup.ts",
+			"packages/clients/web/src/secret.ts",
+		].map((path) => [path, `${DECLARED}\nexport const compared = token === other;\n`]),
+	),
 	// A variable nothing declares, in a stylesheet and in a component; one base.css declares.
 	"packages/clients/web/src/styles/probe.css":
 		".a { color: var(--nt-nope); }\n.b { color: var(--nt-text); }\n",
@@ -67,21 +114,28 @@ const PLANTED: Record<string, string> = {
 	"packages/clients/web/src/components/settings/Fine.vue":
 		'<template><button type="button" @click="go">x</button></template>\n<script setup lang="ts">\nfunction go(): void {}\n</script>\n',
 	// Colours of its own in the empty pane, and the theme's; another component is not held to it.
-	"packages/clients/web/src/components/VacantPane.vue":
-		'<template><div class="a">x</div></template>\n<style scoped>\n.a { color: #ff0000; }\n.b { background: rgb(1, 2, 3); }\n.c { color: var(--nt-text); }\n</style>\n',
+	"packages/clients/web/src/components/VacantPane.vue": `<template><div class="hex">x</div></template>\n<style scoped>\n${COLOURS.join("\n")}\n</style>\n`,
 	"packages/clients/web/src/components/Other.vue":
 		'<template><div class="a">x</div></template>\n<style scoped>\n.a { color: #ff0000; }\n</style>\n',
 };
 
 interface Diagnostic {
 	category: string;
-	location?: { path?: string; span?: [number, number] };
+	severity?: string;
+	location?: { path?: string; start?: { line: number } };
 	message?: string;
 }
 
+interface Found {
+	path: string;
+	rule: string;
+	severity: string;
+	line: number;
+	message: string;
+}
+
 let probe: string;
-let found: Array<[string, string]>;
-let descriptions: string[];
+let found: Found[];
 
 beforeAll(() => {
 	probe = mkdtempSync(join(tmpdir(), "lasterm-lint-rules-"));
@@ -116,27 +170,54 @@ beforeAll(() => {
 	}
 	const diagnostics = (JSON.parse(report) as { diagnostics: Diagnostic[] }).diagnostics;
 	found = diagnostics
-		.map((d): [string, string] => [(d.location?.path ?? "").replaceAll("\\", "/"), d.category])
-		.sort((a, b) => `${a[0]} ${a[1]}`.localeCompare(`${b[0]} ${b[1]}`));
-	descriptions = diagnostics.map((d) => d.message ?? "");
+		.map((d) => ({
+			path: (d.location?.path ?? "").replaceAll("\\", "/"),
+			rule: d.category,
+			severity: d.severity ?? "",
+			line: d.location?.start?.line ?? 0,
+			message: d.message ?? "",
+		}))
+		// `==` and `!=` are also the recommended noDoubleEquals', not these rules' to answer.
+		.filter((d) => d.rule !== "lint/suspicious/noDoubleEquals")
+		.sort((a, b) => `${a.path} ${a.rule} ${a.line}`.localeCompare(`${b.path} ${b.rule} ${b.line}`));
 }, 60_000);
 
 afterAll(() => {
 	rmSync(probe, { recursive: true, force: true });
 });
 
-const at = (file: string) => found.filter(([path]) => path === file).map(([, rule]) => rule);
+/** The rules that answered a file, in order. */
+const at = (file: string) => found.filter((d) => d.path === file).map((d) => d.rule);
 
 describe("the lint rules that replaced scans of the sources (#936)", () => {
-	it("refuses a secret compared with a plain equality in the hub, and only there", () => {
-		// `==` and `!=` are also the recommended noDoubleEquals', not this rule's to answer.
-		const own = (file: string) =>
-			at(file).filter((rule) => rule !== "lint/suspicious/noDoubleEquals");
-		expect(own("packages/hub/src/secret.ts")).toEqual(["plugin", "plugin", "plugin", "plugin"]);
-		expect(descriptions.filter((d) => d.includes("use tokensEqual from auth.ts"))).toHaveLength(4);
-		expect(own("packages/hub/src/fine.ts")).toEqual([]);
-		expect(own("packages/hub/src/secret.spec.ts")).toEqual([]);
-		expect(own("packages/clients/web/src/secret.ts")).toEqual([]);
+	it("refuses each form of a secret compared with a plain equality in the hub", () => {
+		for (const name of Object.keys(SECRET_REFUSED)) {
+			expect(at(`packages/hub/src/secret-${name}.ts`), name).toEqual(["plugin"]);
+		}
+		expect(
+			found.filter((d) => d.message.includes("use tokensEqual from auth.ts")).map((d) => d.path),
+		).toEqual(
+			Object.keys(SECRET_REFUSED)
+				.map((name) => `packages/hub/src/secret-${name}.ts`)
+				.sort(),
+		);
+	});
+
+	it("lets through a call, a type, a constant, and a name that is no secret", () => {
+		for (const name of Object.keys(SECRET_ALLOWED)) {
+			expect(at(`packages/hub/src/fine-${name}.ts`), name).toEqual([]);
+		}
+	});
+
+	it("leaves the hub's specs, fixtures and setup, and the web client, to themselves", () => {
+		for (const path of [
+			"packages/hub/src/secret.spec.ts",
+			"packages/hub/src/secret.fixture.ts",
+			"packages/hub/src/secret.setup.ts",
+			"packages/clients/web/src/secret.ts",
+		]) {
+			expect(at(path), path).toEqual([]);
+		}
 	});
 
 	it("refuses a CSS variable nothing declares, in a stylesheet and in a component", () => {
@@ -146,7 +227,7 @@ describe("the lint rules that replaced scans of the sources (#936)", () => {
 		expect(at("packages/clients/web/src/components/Probe.vue")).toEqual([
 			"lint/nursery/noUndeclaredCustomProperties",
 		]);
-		expect(descriptions).toContain("The custom property --nt-nope is not defined.");
+		expect(found.map((d) => d.message)).toContain("The custom property --nt-nope is not defined.");
 	});
 
 	it("refuses in Settings a click the keyboard cannot reach", () => {
@@ -158,12 +239,20 @@ describe("the lint rules that replaced scans of the sources (#936)", () => {
 		expect(at("packages/clients/web/src/components/settings/Fine.vue")).toEqual([]);
 	});
 
-	it("refuses a colour of its own in the empty pane, and only there", () => {
-		expect(at("packages/clients/web/src/components/VacantPane.vue")).toEqual(["plugin", "plugin"]);
+	it("refuses each form of a colour of its own in the empty pane, and only there", () => {
+		const vacant = found.filter(
+			(d) => d.path === "packages/clients/web/src/components/VacantPane.vue",
+		);
+		expect(vacant.map((d) => d.rule)).toEqual(OWN_COLOUR_LINES.map(() => "plugin"));
+		expect(vacant.map((d) => d.line).sort((a, b) => a - b)).toEqual(OWN_COLOUR_LINES);
 		expect(at("packages/clients/web/src/components/Other.vue")).toEqual([]);
 	});
 
-	it("reports nothing else", () => {
-		expect(found.filter(([, rule]) => rule !== "lint/suspicious/noDoubleEquals")).toHaveLength(11);
+	// A rule turned to a warning would let `pnpm lint` pass.
+	it("reports each of these as an error, and nothing else", () => {
+		expect(found.map((d) => d.severity)).toEqual(found.map(() => "error"));
+		expect(found).toHaveLength(
+			Object.keys(SECRET_REFUSED).length + 2 + 3 + OWN_COLOUR_LINES.length,
+		);
 	});
 });

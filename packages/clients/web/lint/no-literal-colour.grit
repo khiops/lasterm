@@ -11,7 +11,8 @@ or {
 		)
 	},
 	CssFunction() as $call where {
-		$call <: r"(?i)(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\(\s*[\d.][\s\S]*",
+		// Numbers first, or, for color(), its colour space and then numbers.
+		$call <: r"(?i)(?:(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(\s*[-+]?[\d.]|color\(\s*[\w-]+\s+[-+]?[\d.])[\s\S]*",
 		register_diagnostic(
 			span=$call,
 			message="A colour of its own here: name the theme's --nt-* variable instead."

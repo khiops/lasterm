@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/khiops/lasterm/compare/v0.16.0...v0.17.0) (2026-11-11)
+
+
+### Features
+
+* **web:** show an ended terminal's last output under its exit card ([#927](https://github.com/khiops/lasterm/issues/927)) ([#934](https://github.com/khiops/lasterm/issues/934)) ([096f259](https://github.com/khiops/lasterm/commit/096f259fb5e079e0da2650e7a502a2acc93495ae))
+
 ## [0.16.0](https://github.com/khiops/lasterm/compare/v0.15.3...v0.16.0) (2026-11-10)
 
 

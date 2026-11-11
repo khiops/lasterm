@@ -8,6 +8,11 @@ repository = "https://github.com/khiops/lasterm"
 edition = "2021"
 rust-version = "1.81"
 
+# A workspace of its own. Without this table, cargo looks for one in the
+# directories above, and from a checkout inside another, as a worktree under
+# the main checkout is, takes the outer checkout's and refuses this crate (#939).
+[workspace]
+
 [lib]
 name = "lasterm_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

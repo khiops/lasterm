@@ -92,9 +92,9 @@ mod tests {
     }
 }
 `,
-		// A workspace of its own, as the real desktop crate is outside the main
-		// one: without the table, cargo would look for a workspace above this
-		// directory, up to the repository's own.
+		// A workspace of its own, as the real desktop crate is: without the
+		// table, cargo would look for one above this directory, up to the
+		// repository's own.
 		[join(DESK, "Cargo.toml")]: `[package]
 name = "desk"
 version = "0.0.0"
@@ -161,7 +161,11 @@ function run(command: string, args: readonly string[], cwd: string, env: NodeJS.
 	// Bounded, since a synchronous wait is beyond the test's own timeout.
 	const result = spawnSync(command, args, { cwd, env, encoding: "utf8", timeout: 240_000 });
 	expect(result.error).toBeUndefined();
-	return { status: result.status, output: `${result.stdout}\n${result.stderr}` };
+	return {
+		status: result.status,
+		stdout: result.stdout,
+		output: `${result.stdout}\n${result.stderr}`,
+	};
 }
 
 describe("check.sh in a checkout that shares its cargo targets", () => {
@@ -235,4 +239,39 @@ describe("check.sh in a checkout that shares its cargo targets", () => {
 			expect(log(step)).toContain("this checkout's conf.txt is invalid");
 		}
 	}, 600_000);
+});
+
+describe("check.sh --desktop from a worktree inside the main checkout", () => {
+	// Claude's worktrees are there (.claude/worktrees/<name>), and every desktop
+	// step runs cargo in the desktop crate's directory (desktop_cargo). Cargo
+	// first looks for the crate's workspace: past the worktree's root manifest,
+	// which excludes the crate, up to the main checkout's, which then refuses it
+	// as a stray member (#939). The steps themselves compile Tauri, so this runs
+	// that lookup alone, on the real manifest placed in such a layout.
+	it("finds the desktop crate's workspace in the crate itself", () => {
+		const base = cargoTargetDir(process.env, ROOT);
+		mkdirSync(base, { recursive: true });
+		const work = mkdtempSync(join(base, "lasterm-check-spec-"));
+		tempDirs.push(work);
+		const worktree = join(work, ".claude", "worktrees", "w");
+		const crate = join(worktree, DESK);
+		mkdirSync(join(crate, "src"), { recursive: true });
+		// The main checkout's root manifest and the worktree's, as the
+		// repository's without its crates.
+		const root = `[workspace]\nmembers = []\nexclude = ["packages/clients/desktop/src-tauri"]\n`;
+		writeFileSync(join(work, "Cargo.toml"), root);
+		writeFileSync(join(worktree, "Cargo.toml"), root);
+		copyFileSync(join(ROOT, DESK, "Cargo.toml"), join(crate, "Cargo.toml"));
+		writeFileSync(join(crate, "src", "lib.rs"), "");
+		copyFileSync(join(ROOT, "rust-toolchain.toml"), join(work, "rust-toolchain.toml"));
+
+		const found = run(
+			"cargo",
+			["locate-project", "--workspace", "--message-format", "plain"],
+			crate,
+			process.env,
+		);
+		expect(found.status, found.output).toBe(0);
+		expect(found.stdout.trim()).toBe(join(crate, "Cargo.toml"));
+	});
 });

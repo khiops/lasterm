@@ -74,7 +74,7 @@ onUnmounted(() => {
 				</svg>
 				<svg v-else width="10" height="10" viewBox="0 0 10 10">
 					<rect x="2.5" y="0.5" width="7" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1" />
-					<rect x="0.5" y="2.5" width="7" height="7" rx="1" fill="var(--nt-bg, #1e1e2e)" stroke="currentColor" stroke-width="1" />
+					<rect class="titlebar-restore-front" x="0.5" y="2.5" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1" />
 				</svg>
 			</button>
 			<button class="titlebar-btn titlebar-btn-close" aria-label="Close" @click.stop="closeWindow">
@@ -148,6 +148,11 @@ onUnmounted(() => {
 	color: var(--nt-fg-muted, #888);
 	cursor: pointer;
 	transition: background 0.1s;
+}
+
+/* The restore icon's front square, filled with the bar's ground over the one behind it. */
+.titlebar-restore-front {
+	fill: var(--nt-bg, #1e1e2e);
 }
 
 .titlebar-btn:hover {

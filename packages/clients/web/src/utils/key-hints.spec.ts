@@ -148,7 +148,8 @@ describe("the key hints and the shortcut table", () => {
 		vi.doMock("./app-shortcuts.js", async (importOriginal) => ({
 			...(await importOriginal<typeof import("./app-shortcuts.js")>()),
 			shortcutKeys: (id: AppActionId) => ["Bound", id],
-			outsideTerminalKeys: (id: AppActionId) => (id === "zone.next" ? ["F7"] : null),
+			outsideTerminalKeys: (id: AppActionId) =>
+				id === "zone.next" ? ["F7"] : id === "zone.previous" ? ["Shift", "F7"] : null,
 		}));
 		try {
 			const hints = await import("./key-hints.js");
@@ -156,8 +157,20 @@ describe("the key hints and the shortcut table", () => {
 				expect(hints.keyHintText(hints.zoneKeyHints(zone, false, "other") ?? []), zone).toBe(
 					"F7 next area",
 				);
+				expect(hints.zoneKeyHints(zone, true, "other")?.at(-1), zone).toEqual({
+					keys: ["F7"],
+					does: "next area",
+				});
 			}
 			const overlay = hints.SHORTCUT_GROUPS.flatMap((group) => group.rows);
+			// Every area's row ends on the table's key for the next area.
+			for (const area of ["area:rail", "area:sidebar", "area:tabs"]) {
+				const row = overlay.find((r) => r.key === area);
+				expect(row?.kind === "keys" ? row.hints.at(-1) : row, area).toEqual({
+					keys: ["F7"],
+					does: "next area",
+				});
+			}
 			expect(overlay.find((row) => row.key === "area:rail")).toMatchObject({
 				hints: [
 					{ keys: ["←→↑↓"], does: "hosts" },
@@ -173,9 +186,17 @@ describe("the key hints and the shortcut table", () => {
 				chord: ["Bound", "zone.next"],
 				outsideTerminal: ["F7"],
 			});
+			const outside: Partial<Record<string, string[]>> = {
+				"zone.next": ["F7"],
+				"zone.previous": ["Shift", "F7"],
+			};
 			for (const row of overlay) {
-				if (row.kind === "chord") expect(row.chord, row.id).toEqual(["Bound", row.id]);
+				if (row.kind !== "chord") continue;
+				expect(row.chord, row.id).toEqual(["Bound", row.id]);
+				expect(row.outsideTerminal, row.id).toEqual(outside[row.id] ?? null);
 			}
+			// The table names no F6: nothing they show does.
+			expect(JSON.stringify(overlay)).not.toContain("F6");
 		} finally {
 			vi.doUnmock("./app-shortcuts.js");
 			vi.resetModules();

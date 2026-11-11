@@ -192,7 +192,11 @@ describe("Settings › Keybindings", () => {
 			(Object.keys(APP_SHORTCUTS) as AppActionId[]).map((id) => shortcutKeys(id).join("+")),
 		);
 		const inAnArea = new Set(["Escape", "Ctrl+Shift+F", "Alt+C", "Alt+R", "Alt+W"]);
-		const unhandled = mountRows()
+		const rows = mountRows();
+		// The page it searches is the whole one: every chord of the table is on it.
+		const shown = new Set(rows.map((row) => row.keys.join("+")));
+		expect([...handled].filter((keys) => !shown.has(keys))).toEqual([]);
+		const unhandled = rows
 			.filter((row) => !handled.has(row.keys.join("+")) && !inAnArea.has(row.keys.join("+")))
 			.map((row) => `${row.label}: ${row.keys.join("+")}`);
 		expect(unhandled).toEqual([]);

@@ -48,6 +48,7 @@ const SECRET_REFUSED: Record<string, string> = {
 	"right-secret": "other === secret",
 	"right-loose": "other != password",
 	"right-passphrase": "other === passphrase",
+	"right-member": "other === deps.authToken",
 	"right-optional-chain": "other === deps?.authToken",
 	"right-upper-case": "other === AUTH_TOKEN",
 };

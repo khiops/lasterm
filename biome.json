@@ -31,6 +31,15 @@
 	},
 	"overrides": [
 		{
+			"includes": [
+				"packages/hub/src/**/*.ts",
+				"!**/*.spec.ts",
+				"!**/*.fixture.ts",
+				"!**/*.setup.ts"
+			],
+			"plugins": ["./lint/no-plain-secret-comparison.grit"]
+		},
+		{
 			"includes": ["packages/clients/desktop/src-tauri/tauri.conf.json"],
 			"formatter": {
 				"enabled": false

@@ -39,22 +39,35 @@ const DECLARED = [
 const SECRET_REFUSED: Record<string, string> = {
 	// The comparison #514 removed.
 	identity: "token === deps.authToken",
-	"right-side": "deps.authToken !== token",
 	loose: "secret == other",
-	"loose-right": "other != password",
 	passphrase: "passphrase === other",
 	"optional-chain": "deps?.authToken === other",
 	"upper-case": "AUTH_TOKEN === other",
+	// A secret on the right only, in each of those forms.
+	"right-token": "other !== token",
+	"right-secret": "other === secret",
+	"right-loose": "other != password",
+	"right-passphrase": "other === passphrase",
+	"right-optional-chain": "other === deps?.authToken",
+	"right-upper-case": "other === AUTH_TOKEN",
 };
 
 /** Comparisons it lets through: a call, a type, a constant, a name that is no secret. */
 const SECRET_ALLOWED: Record<string, string> = {
-	call: "previous.tokenHash !== hashToken(token)",
+	"hash-of-it": "previous.tokenHash !== hashToken(token)",
+	"call-right": "token === hashToken(other)",
+	"call-left": "hashToken(other) !== token",
 	typeof: 'typeof token === "string"',
 	null: "token !== null",
+	"null-left": "null === token",
 	undefined: "token === undefined",
-	boolean: "token === true",
+	"undefined-left": "undefined !== token",
+	true: "token === true",
+	"true-left": "true === token",
+	false: "token === false",
+	"false-left": "false !== token",
 	number: "token !== 0",
+	"number-left": "0 !== token",
 	"no-secret": "count === other",
 };
 

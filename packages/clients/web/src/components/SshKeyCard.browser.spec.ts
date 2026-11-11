@@ -54,6 +54,7 @@ describe("SshKeyCard's algorithm badge", () => {
 	])("grounds and borders %s in its theme colour", (algorithm, rgb) => {
 		const style = badge(algorithm);
 		expect(style.backgroundColor).toBe(`color(srgb ${rgb} / 0.13)`);
+		expect([style.borderTopWidth, style.borderTopStyle]).toEqual(["1px", "solid"]);
 		expect(style.borderTopColor).toBe(`color(srgb ${rgb} / 0.3)`);
 	});
 });

@@ -55,7 +55,9 @@ it("keeps the close button at the toast's own colours under the pointer", async 
 	expect(reading(close)).toEqual(before);
 	expect(reading(close).color).toBe(getComputedStyle(toast).color);
 	// What hover does draw: its outline, in the toast's own colour.
-	expect(getComputedStyle(close).borderTopColor).toBe(getComputedStyle(toast).color);
+	const outline = getComputedStyle(close);
+	expect([outline.borderTopWidth, outline.borderTopStyle]).toEqual(["1px", "solid"]);
+	expect(outline.borderTopColor).toBe(getComputedStyle(toast).color);
 });
 
 // ─── Contrast (#830) ─────────────────────────────────────────────────────────
@@ -113,6 +115,10 @@ describe("a toast's contrast (#830)", () => {
 						TEXT_CONTRAST_AA,
 					);
 				}
+				expect([style.borderTopWidth, style.borderTopStyle], `${level} border`).toEqual([
+					"1px",
+					"solid",
+				]);
 				const border = contrastRatio(solid(style.borderTopColor, `${level} border`), ground);
 				expect(border, `${level} border: ${border.toFixed(2)}`).toBeGreaterThanOrEqual(
 					NON_TEXT_CONTRAST,

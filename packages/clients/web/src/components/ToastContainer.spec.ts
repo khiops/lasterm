@@ -105,6 +105,10 @@ describe.each(Object.entries(DRAWN))("a toast, %s (#830)", (theme, drawn) => {
 		for (const [level, toast] of await mountToasts(theme)) {
 			const style = getComputedStyle(toast);
 			expect(style.borderTopColor, `${level} border`).toBe(drawn.level[level]);
+			expect([style.borderTopWidth, style.borderTopStyle], `${level} border`).toEqual([
+				"1px",
+				"solid",
+			]);
 			expect(getComputedStyle(toast.querySelector(".toast-icon") as Element).color).toBe(
 				drawn.level[level],
 			);

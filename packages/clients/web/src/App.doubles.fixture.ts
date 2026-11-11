@@ -341,7 +341,6 @@ export function hub(): FakeHub {
 /** Stands in for `services/ws-client.js`: the window's socket is the hub's. */
 export const wsClientModule = { createWsClient: () => hub().socket };
 
-/**
 /** The arrows' final letters in xterm's sequences. */
 const ARROWS: Readonly<Record<string, string>> = {
 	ArrowUp: "A",
@@ -351,10 +350,13 @@ const ARROWS: Readonly<Record<string, string>> = {
 };
 
 /**
- * What xterm sends its program for a key typed, for the keys the window's chords use: a character
- * as typed, ESC before it with Alt, the control character for Ctrl with a letter (or `/`), and
- * the CSI sequences for Tab, F6 and the arrows with their modifiers. Null for a key xterm sends
- * nothing for here, such as Ctrl with a comma, or a modifier alone.
+ * What xterm 6.0.0 sends its program for a key typed, off macOS and Windows, for the keys the
+ * window's chords use (`evaluateKeyboardEvent` in xterm's src/common/input/Keyboard.ts): a
+ * character as typed, ESC before it with Alt (`:325-332`), the control character for Ctrl with a
+ * letter and no other modifier (`:308-310`), and the CSI sequences for Tab, F6 and the arrows with
+ * their modifiers (`:91-99`, `:113-163`, `:257-263`). Null where xterm sends nothing: Ctrl with
+ * Shift and a letter, Ctrl with `/` or `,` (the Ctrl branch at `:308` maps neither), a modifier
+ * alone. Its keypress path refuses Ctrl too (src/browser/CoreBrowserTerminal.ts `:1165-1167`).
  */
 export function xtermInput(event: KeyboardEvent): string | null {
 	const mod = 1 + (event.shiftKey ? 1 : 0) + (event.altKey ? 2 : 0) + (event.ctrlKey ? 4 : 0);
@@ -366,10 +368,8 @@ export function xtermInput(event: KeyboardEvent): string | null {
 	if (event.key === "Escape") return "\u001b";
 	if (event.key.length !== 1) return null;
 	if (event.ctrlKey && !event.altKey) {
-		if (/^[a-z]$/i.test(event.key)) {
-			return String.fromCharCode(event.key.toUpperCase().charCodeAt(0) - 64);
-		}
-		return event.key === "/" ? "\u001f" : null;
+		if (event.shiftKey || !/^[a-z]$/i.test(event.key)) return null;
+		return String.fromCharCode(event.key.toUpperCase().charCodeAt(0) - 64);
 	}
 	return event.altKey ? `\u001b${event.key}` : event.key;
 }

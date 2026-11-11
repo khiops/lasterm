@@ -62,6 +62,8 @@ const ended = (id: string, hostId = HOST_A): ChannelRow => ({
 });
 const ALPHA: HostRow = { id: HOST_A, label: "alpha", type: "local" };
 const BRAVO: HostRow = { id: HOST_B, label: "bravo", type: "ssh", sort_order: 1, connected: true };
+/** Bravo with no session yet, as in a window just opened: its first SPAWN connects it. */
+const BRAVO_AWAY: HostRow = { id: HOST_B, label: "bravo", type: "ssh", sort_order: 1 };
 
 /** The DELETEs the window sent for terminals, by id. */
 function deleted(hub: { rest: Array<{ method: string; path: string }> }): string[] {
@@ -461,8 +463,9 @@ describe("an empty pane's host, and a new tab", () => {
 		expect(hostInView()).toBe("alpha");
 	});
 
-	// So filling a pane never takes a terminal of another host than the one in view: there is no
-	// other host to bring into view (hostToBringIntoView answers null for the host in view).
+	// A detached terminal put back is the host in view's: that fill brings no other host into
+	// view. Another host's terminal fills a pane when the picker connects that host: its own SPAWN
+	// opens the terminal, which then fills the pane as a detached one would (useHostPicker.ts).
 	it("offers to put back only the detached terminals of the host in view", async () => {
 		await mountWindow({
 			hosts: [ALPHA, BRAVO],
@@ -472,6 +475,55 @@ describe("an empty pane's host, and a new tab", () => {
 		});
 
 		expect(terminalsOffered()).toEqual(["T1"]);
+	});
+
+	// With the bar showing one host's tabs, the tab in front filled with a terminal of a host it
+	// connected, and none left of the host in view, would leave the bar: that host comes into view.
+	it("brings into view the host it connects to fill an empty pane where the bar shows one host's tabs", async () => {
+		const { hub } = await mountWindow({
+			hosts: [ALPHA, BRAVO_AWAY],
+			ui: { tabs: { scope: "perHost" } },
+			layout: { tabs: [{ id: "TAB1", root: vacant("V1") }] },
+		});
+
+		await pickHost("bravo");
+
+		await vi.waitFor(() => expect(hostInView()).toBe("bravo"));
+		expect(hub.frames("SPAWN")).toHaveLength(1);
+		expect(hub.frames("SPAWN")[0]).toMatchObject({ hostId: HOST_B });
+	});
+
+	it("leaves the host in view when it connects another to fill an empty pane where the bar shows every host", async () => {
+		const { hub } = await mountWindow({
+			hosts: [ALPHA, BRAVO_AWAY],
+			layout: { tabs: [{ id: "TAB1", root: vacant("V1") }] },
+		});
+
+		await pickHost("bravo");
+
+		await vi.waitFor(() => expect(emptyPaneShown()).toBeNull());
+		await settle();
+		expect(hub.frames("SPAWN")).toHaveLength(1);
+		expect(hub.frames("SPAWN")[0]).toMatchObject({ hostId: HOST_B });
+		expect(hostInView()).toBe("alpha");
+	});
+
+	it("leaves the host in view when it connects another to fill a pane beside one of its terminals", async () => {
+		const { hub } = await mountWindow({
+			hosts: [ALPHA, BRAVO_AWAY],
+			channels: [live("T1")],
+			ui: { tabs: { scope: "perHost" } },
+			layout: { tabs: [{ id: "TAB1", root: split("vertical", term("T1", "P1"), vacant("V1")) }] },
+		});
+
+		await pickHost("bravo");
+
+		await vi.waitFor(() => expect(emptyPaneShown()).toBeNull());
+		await settle();
+		expect(titlesShown()).toHaveLength(2);
+		expect(hub.frames("SPAWN")).toHaveLength(1);
+		expect(hub.frames("SPAWN")[0]).toMatchObject({ hostId: HOST_B });
+		expect(hostInView()).toBe("alpha");
 	});
 
 	it("opens an empty pane in a new tab from the tab bar's + where the bar shows every host", async () => {
@@ -696,11 +748,10 @@ describe("the window's shortcuts", () => {
 
 	// What a terminal's key handler lets through, xterm sends its program; the chords of the table
 	// it keeps (utils/terminal-keys.ts), whatever the window did with them. Each chord here is one
-	// xterm turns into input; Ctrl+, (settings.open) is left out, xterm sends nothing for it.
+	// xterm turns into input. Left out, those it sends nothing for even let through (xtermInput):
+	// Ctrl+Shift+P, T, W and E (palette.open, tab.new, pane.close, files.toggle), Ctrl+/
+	// (help.shortcuts) and Ctrl+, (settings.open). Their actions are run on their chords above.
 	it.each([
-		["palette.open", "P", { ctrl: true, shift: true }],
-		["help.shortcuts", "/", { ctrl: true }],
-		["tab.new", "T", { ctrl: true, shift: true }],
 		["tab.next", "Tab", { ctrl: true }],
 		["tab.previous", "Tab", { ctrl: true, shift: true }],
 		["tab.goTo1", "1", { ctrl: true, alt: true, code: "Digit1" }],
@@ -714,7 +765,6 @@ describe("the window's shortcuts", () => {
 		["tab.goTo9", "9", { ctrl: true, alt: true, code: "Digit9" }],
 		["pane.splitRight", "+", { alt: true, shift: true, code: "Equal" }],
 		["pane.splitDown", "_", { alt: true, shift: true, code: "Minus" }],
-		["pane.close", "W", { ctrl: true, shift: true }],
 		["pane.focusLeft", "ArrowLeft", { alt: true, code: "ArrowLeft" }],
 		["pane.focusRight", "ArrowRight", { alt: true, code: "ArrowRight" }],
 		["pane.focusUp", "ArrowUp", { alt: true, code: "ArrowUp" }],
@@ -725,7 +775,6 @@ describe("the window's shortcuts", () => {
 		["pane.resizeDown", "ArrowDown", { alt: true, shift: true, code: "ArrowDown" }],
 		["zone.next", "F6", { ctrl: true }],
 		["zone.previous", "F6", { ctrl: true, shift: true }],
-		["files.toggle", "E", { ctrl: true, shift: true }],
 	] as const)("keeps the chord of %s from the shell", async (_id, key, mods) => {
 		const { hub } = await oneTerminal({ ui: { experimental: { fileTransfer: true } } });
 		focusPane("P1");
@@ -1331,16 +1380,16 @@ describe("the files panel in the window", () => {
 		expect(panel()).toBeNull();
 	});
 
-	// The shortcut table reads the switch from the UI config: off, the chord is the terminal's.
+	// The shortcut table reads the switch from the UI config: off, the chord is the terminal's, as
+	// it was before the panel (xterm itself sends nothing for Ctrl+Shift+E).
 	it("leaves Ctrl+Shift+E to the terminal while file transfer is off", async () => {
-		const { hub } = await oneTerminal();
+		await oneTerminal();
 		focusPane("P1");
 
 		const event = await press("E", { ctrl: true, shift: true });
 
 		expect(event.defaultPrevented).toBe(false);
 		expect(panel()).toBeNull();
-		expect(typed(hub, "T1")).toEqual(["\u0005"]);
 	});
 
 	// The panes and the panel share the row under the tab bar; the panes keep their zone.

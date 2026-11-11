@@ -28,6 +28,7 @@ import type {
 	ChannelEndReason,
 	ChannelSizeMessage,
 	ElevationMethod,
+	EndedOutput,
 	EnvMode,
 	ErrorMessage,
 	Host,
@@ -1774,22 +1775,36 @@ export class SessionManager {
 		// came back — so a reload restarted terminals nobody had asked for, and a
 		// pane mounted after a CHANNEL_EXIT offered to reconnect to a shell that
 		// no longer existed.
+		//
+		// What it ended on goes with the answer (#927): the pane shows it under
+		// its exit card. Reading the spool is all this adds; the terminal is
+		// neither attached nor started.
 		if (channel === undefined || channel.status === "dead") {
-			const dead =
-				channel !== undefined || this.ctx.metaDal.getChannel(channelId)?.status === "dead";
-			const code = dead ? "CHANNEL_DEAD" : "CHANNEL_NOT_FOUND";
-			const errorMsg: ErrorMessage = {
-				type: "ERROR",
-				code,
-				// The id is in the field beside this and in the log. A sentence
-				// carrying it says nothing to the person reading it, and says it
-				// in twenty-six characters of noise.
-				message:
-					code === "CHANNEL_DEAD"
-						? "This terminal has ended."
-						: "This terminal no longer exists — it may have been deleted from another window.",
-				channelId,
-			};
+			const recorded = this.ctx.metaDal.getChannel(channelId);
+			const kept = recorded?.status === "dead" ? recorded : undefined;
+			const ended = channel ?? kept;
+			const errorMsg: ErrorMessage =
+				ended === undefined
+					? {
+							type: "ERROR",
+							code: "CHANNEL_NOT_FOUND",
+							message:
+								"This terminal no longer exists — it may have been deleted from another window.",
+							channelId,
+						}
+					: {
+							type: "ERROR",
+							code: "CHANNEL_DEAD",
+							// The id is in the field beside this and in the log. A sentence
+							// carrying it says nothing to the person reading it, and says it
+							// in twenty-six characters of noise.
+							message: "This terminal has ended.",
+							channelId,
+							// Only for a terminal meta.db still holds: one deleted is
+							// being purged, and nothing reads its output any more,
+							// even while this hub still holds it in memory.
+							...(kept !== undefined && this.endedOutputOf(channelId, ended)),
+						};
 			client.send(errorMsg);
 			return false;
 		}
@@ -1961,6 +1976,7 @@ export class SessionManager {
 					code: "CHANNEL_DEAD",
 					message: "This terminal is no longer running on its host.",
 					channelId,
+					...this.endedOutputOf(channelId, channel),
 				} satisfies ErrorMessage);
 				return false;
 			}
@@ -1984,6 +2000,33 @@ export class SessionManager {
 			client.send(attachOk);
 		}
 		return true;
+	}
+
+	/**
+	 * What an ended terminal last printed, for its CHANNEL_DEAD (#927), or
+	 * nothing when the spool cannot be read: the refusal goes all the same, as
+	 * an older hub's, since delivering it must depend on nothing it did not
+	 * depend on before. The failure is logged with the terminal's id and the
+	 * error's code, never any output.
+	 */
+	private endedOutputOf(
+		channelId: string,
+		size: { cols: number; rows: number },
+	): { lastOutput?: EndedOutput } {
+		try {
+			return {
+				lastOutput: this.lifecycle.buildEndedOutput(channelId, {
+					cols: size.cols,
+					rows: size.rows,
+				}),
+			};
+		} catch (err) {
+			this.ctx.hubLogger?.log("warn", "could not read an ended terminal's last output", {
+				channelId,
+				code: (err as { code?: unknown } | null)?.code ?? "unknown",
+			});
+			return {};
+		}
 	}
 
 	/**

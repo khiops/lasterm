@@ -181,6 +181,53 @@ export class SpoolDAL {
 		).get(channelId) as { seq: number; bytes: number } | undefined;
 	}
 
+	/**
+	 * A channel's newest snapshot — its id, seq and the size it stores — without
+	 * its data. It goes by kind, so it visits the channel's snapshots only, one
+	 * or two once the GC has passed, where a walk down the seqs would read every
+	 * output row of a channel that has none (#927).
+	 */
+	getNewestSnapshotRef(channelId: string): { id: string; seq: number; bytes: number } | undefined {
+		return this.statement(
+			`SELECT id, seq, LENGTH(data_blob) AS bytes FROM chunks INDEXED BY idx_chunks_channel_kind
+			 WHERE channel_id = ? AND kind = 'snapshot' ORDER BY seq DESC LIMIT 1`,
+		).get(channelId) as { id: string; seq: number; bytes: number } | undefined;
+	}
+
+	/** A channel's lowest stored seq, of any kind; one index seek. */
+	getMinSeq(channelId: string): number | undefined {
+		const row = this.statement(
+			`SELECT seq FROM chunks INDEXED BY idx_chunks_channel_seq
+			 WHERE channel_id = ? ORDER BY seq LIMIT 1`,
+		).get(channelId) as { seq: number } | undefined;
+		return row?.seq;
+	}
+
+	/**
+	 * Up to `limit` output chunks of a channel after `afterSeq`, oldest first,
+	 * with the size each stores. Like `listChunkSizesBefore`, it never loads
+	 * the data.
+	 */
+	listOutputSizesAfter(
+		channelId: string,
+		afterSeq: number,
+		limit: number,
+	): Array<{ seq: number; bytes: number }> {
+		return this.statement(
+			`SELECT seq, LENGTH(data_blob) AS bytes FROM chunks INDEXED BY idx_chunks_channel_seq
+			 WHERE channel_id = ? AND seq > ? AND kind = 'output' ORDER BY seq LIMIT ?`,
+		).all(channelId, afterSeq, limit) as Array<{ seq: number; bytes: number }>;
+	}
+
+	/** The output a channel stored with a seq in (`afterSeq`, `throughSeq`], in seq order, as one buffer. */
+	readOutput(channelId: string, afterSeq: number, throughSeq: number): Buffer {
+		const rows = this.statement(
+			`SELECT data_blob FROM chunks INDEXED BY idx_chunks_channel_seq
+			 WHERE channel_id = ? AND seq > ? AND seq <= ? AND kind = 'output' ORDER BY seq`,
+		).all(channelId, afterSeq, throughSeq) as Array<{ data_blob: Uint8Array }>;
+		return Buffer.concat(rows.map((row) => row.data_blob));
+	}
+
 	/** The first channel with chunks whose id sorts after `after`; one index seek. */
 	nextChannelId(after: string): string | undefined {
 		const row = this.statement(

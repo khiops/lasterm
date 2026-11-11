@@ -549,8 +549,9 @@ its row in meta.db, then answers as it always did. Its chunks follow, deleted as
 orphan's and followed by step 3, without waiting for the next pass (`SpoolGarbageCollector.purge`).
 Passes and purges run one at a time, in the order asked: two side by side would each take a slice in
 the same turn of the event loop. So the answer comes before the output is gone. The channel is
-listed nowhere, and nothing reads its output any more: an ATTACH to a channel that is dead or
-unknown never reads the spool. The spool shrinks over the next seconds, or once the pass already
+listed nowhere, and nothing reads its output any more: an ATTACH to a channel meta.db no longer
+holds never reads the spool. (An ATTACH to an ended channel meta.db still holds reads its last
+output from the spool, to show it under the pane's exit card, PROTOCOL.md § 4.2, #927.) The spool shrinks over the next seconds, or once the pass already
 running has ended. If the hub stops first, the next pass finds what is left
 orphaned (2a). A purge used to delete a channel's whole history in one statement, inside the
 request: up to 1.5 GB for one channel on a spool grown before #785 (#786).

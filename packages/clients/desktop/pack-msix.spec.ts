@@ -3,8 +3,10 @@
  * executable, its bundle.resources, lands at the package root (#889, #936).
  *
  * The script finds its inputs from its own directory, so a copy of it runs in
- * a fixture tree with -SkipBuild -StageOnly: nothing is built or packed, and
- * no Windows SDK is needed. It runs in PowerShell 7, as the release does.
+ * a fixture tree with -SkipBuild -StageOnly: nothing is built or packed. It
+ * runs in PowerShell 7, as the release does, out of reach of any Windows SDK:
+ * PATH names an empty directory and ProgramFiles(x86) is unset, the two places
+ * the script looks for one.
  */
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -50,11 +52,27 @@ function fixture(resources: Record<string, Buffer>, targets: Record<string, stri
 	return root;
 }
 
+/** PowerShell 7's absolute path, found on this PATH, so that the script can run with another. */
+function pwsh(): string {
+	const where = spawnSync("where.exe", ["pwsh"], { encoding: "utf8" });
+	const path = where.stdout?.split(/\r?\n/)[0];
+	if (where.status !== 0 || !path) {
+		throw new Error(`pwsh (PowerShell 7) runs pack-msix.ps1, as the release does: ${where.stderr}`);
+	}
+	return path;
+}
+
 /** Runs the fixture's script to its staging: `staged`, or the message it stopped with. */
 function stage(root: string): { status: number | null; output: string } {
 	const script = join(root, "msix", "pack-msix.ps1").replace(/'/g, "''");
+	const env: NodeJS.ProcessEnv = {};
+	for (const [name, value] of Object.entries(process.env)) {
+		if (!["path", "programfiles(x86)"].includes(name.toLowerCase())) env[name] = value;
+	}
+	env.PATH = join(root, "no-tools");
+	mkdirSync(env.PATH);
 	const run = spawnSync(
-		"pwsh",
+		pwsh(),
 		[
 			"-NoProfile",
 			"-NonInteractive",
@@ -63,17 +81,15 @@ function stage(root: string): { status: number | null; output: string } {
 			"-Command",
 			`try { & '${script}' -SkipBuild -StageOnly; 'staged' } catch { 'refused: ' + $_.Exception.Message; exit 1 }`,
 		],
-		{ encoding: "utf8", timeout: TIMEOUT_MS },
+		{ encoding: "utf8", env, timeout: TIMEOUT_MS },
 	);
-	if (run.error) {
-		throw new Error(`pwsh (PowerShell 7) runs pack-msix.ps1, as the release does: ${run.error}`);
-	}
+	if (run.error) throw run.error;
 	return { status: run.status, output: `${run.stdout}${run.stderr}` };
 }
 
 describe.skipIf(process.platform !== "win32")("pack-msix.ps1 -StageOnly", () => {
 	it(
-		"stages each of bundle.resources at its target in the package root, with its bytes",
+		"stages the executables, the manifest and each of bundle.resources at its target, with their bytes",
 		() => {
 			const hubLock = Buffer.from("the hub lock addon");
 			const tlsIdentity = Buffer.from("the TLS identity addon");
@@ -90,6 +106,10 @@ describe.skipIf(process.platform !== "win32")("pack-msix.ps1 -StageOnly", () => 
 			expect(run.output).toMatch(/^staged$/m);
 			expect(run.status, run.output).toBe(0);
 			const staged = join(root, "msix", "out", "stage");
+			expect(readFileSync(join(staged, "fixture-desktop.exe"), "utf8")).toBe("desktop");
+			expect(readFileSync(join(staged, "lasterm-hub.exe"), "utf8")).toBe("hub");
+			expect(readFileSync(join(staged, "lasterm-agent.exe"), "utf8")).toBe("agent");
+			expect(readFileSync(join(staged, "AppxManifest.xml"), "utf8")).toBe("<Package />");
 			expect(readFileSync(join(staged, "lasterm_hub_lock.node"))).toEqual(hubLock);
 			expect(readFileSync(join(staged, "lasterm_tls_identity.node"))).toEqual(tlsIdentity);
 		},

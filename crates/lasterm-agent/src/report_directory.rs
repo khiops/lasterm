@@ -5,11 +5,11 @@
 //! has the agent start the shell with `-NoExit -EncodedCommand <script>`: the
 //! script runs after the user's `$PROFILE`, keeps the `prompt` that profile
 //! defined, and has it write OSC 7 first, which [`crate::headless`] parses.
-//! The script is the snippet the README gives for `$PROFILE`, byte for byte.
+//! The README links this script for users to paste into `$PROFILE`.
 
 use crate::environment::Platform;
 
-/// The script, as the README gives it for `$PROFILE`.
+/// The script, which the README links for `$PROFILE`.
 pub(crate) const SCRIPT: &str = include_str!("report-directory.ps1");
 
 /// The arguments a shell starts with, once the hub has said whether its

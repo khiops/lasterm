@@ -703,8 +703,8 @@ agent keeps it and where it came from:
      `at_prompt` and `foreground` are not read.
    - PowerShell (`pwsh`, `powershell`, on either system) is never read: `Set-Location` leaves its
      process directory where it started, so the read would be wrong, not missing. Without a shell
-     report it is `null`, never its start directory; its prompt can report it, with the README's
-     snippet in `$PROFILE` or the launch profile's `report_directory` (§ 3.2, #839).
+     report it is `null`, never its start directory; its prompt can report it, with
+     `report-directory.ps1` in `$PROFILE` or the launch profile's `report_directory` (§ 3.2, #839).
    - `null` when the process cannot tell: its directory deleted, a process the agent may not read
      (an elevated shell), a terminal that has ended.
 3. **`start`**: the directory the agent started the terminal in, before any read, for a program

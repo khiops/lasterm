@@ -349,7 +349,7 @@ it is, at every prompt. There are two ways, for PowerShell 7 (`pwsh`) and Window
 
 **The switch: Report its directory.** In Settings › Profiles, a profile whose shell is `pwsh` or
 `powershell` has a **Report its directory** box, off by default. When it is on, a Windows host
-starts that PowerShell with `-NoExit -EncodedCommand` and the snippet below. The snippet runs after
+starts that PowerShell with `-NoExit -EncodedCommand` and the script below. The script runs after
 your `$PROFILE`, keeps the prompt it set (a prompt theme's included), and has it write the directory
 first. It also applies when the terminal restarts, and on remote Windows hosts, whose agent must be
 as recent as the hub. It changes nothing when the profile's arguments run a command or a file
@@ -358,33 +358,9 @@ nothing for other shells or on Linux hosts.
 
 **The snippet, in `$PROFILE`.** This needs no switch, and it works in every terminal that loads the
 profile, PowerShell 7 on Linux included. Open the profile with `notepad $PROFILE` (create it first
-with `New-Item -Force $PROFILE` if it does not exist), and paste this at the end, after anything that
-sets your prompt:
-
-```powershell
-# lasterm: report the current directory at every prompt.
-# Windows PowerShell 5.1 and PowerShell 7. Keep it at the end of $PROFILE, after
-# anything that sets your prompt: it keeps that prompt, and writes OSC 7 before it.
-& {
-    $inner = $function:prompt
-    if ("$inner" -like '*lasterm-report-directory*') { return } # wrapped already
-    if (-not $inner) { $inner = {} }
-    $esc = [char]27
-    $hostName = [System.Net.Dns]::GetHostName()
-    $function:global:prompt = {
-        # lasterm-report-directory: your prompt, after OSC 7 file://<host>/<path>
-        $shown = @(& $inner)
-        $location = $executionContext.SessionState.Path.CurrentLocation
-        if ($location.Provider.Name -eq 'FileSystem') {
-            $path = $location.ProviderPath.Replace([IO.Path]::DirectorySeparatorChar, '/')
-            $uri = @(foreach ($part in $path.Split('/')) { [Uri]::EscapeDataString($part) }) -join '/'
-            if (-not $uri.StartsWith('/')) { $uri = '/' + $uri }
-            $Host.UI.Write("$esc]7;file://$hostName$uri$esc\")
-        }
-        $shown
-    }.GetNewClosure()
-}
-```
+with `New-Item -Force $PROFILE` if it does not exist), and paste the contents of
+[`report-directory.ps1`](crates/lasterm-agent/src/report-directory.ps1) at the end, after anything
+that sets your prompt. It is the very script the switch runs.
 
 Windows PowerShell and PowerShell 7 have a profile each: paste it into both if you use both. Run
 `. $PROFILE` to load it into the shell you are in. It wraps the prompt once, even when the profile

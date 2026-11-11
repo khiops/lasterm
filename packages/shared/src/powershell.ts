@@ -3,7 +3,7 @@
  *
  * `Set-Location` moves PowerShell's location but not its process directory, so
  * an agent cannot read where it is (#834). PowerShell says it on every prompt
- * instead: with the snippet the README gives for `$PROFILE`, or with a launch
+ * instead: with the script the README links for `$PROFILE`, or with a launch
  * profile's `reportDirectory`, which has a Windows agent start the shell with
  * that same snippet.
  */

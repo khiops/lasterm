@@ -1431,8 +1431,8 @@ A launch profile with **Report its directory** (`report_directory`, #839) has it
 where it is at every prompt, which its process cannot tell: `Set-Location` moves PowerShell's
 location, not its process directory (#834). The hub sends it in the SPAWN of each of the profile's
 terminals, restarts included; a Windows agent starts a `pwsh` or `powershell` whose arguments run
-nothing of their own with `-NoExit -EncodedCommand` and the README's snippet, which wraps the prompt
-the user's `$PROFILE` set so that it writes OSC 7 first (PROTOCOL.md § 3.2). The same snippet can go
+nothing of their own with `-NoExit -EncodedCommand` and `report-directory.ps1`, which wraps the prompt
+the user's `$PROFILE` set so that it writes OSC 7 first (PROTOCOL.md § 3.2). The same script can go
 in `$PROFILE` instead, on any host. Off by default.
 
 Native effect resolution:

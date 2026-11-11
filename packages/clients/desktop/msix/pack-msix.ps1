@@ -5,7 +5,11 @@ param(
   [string]$PublisherDisplayName,
   [string]$Version,
   [string]$Output,
-  [switch]$SkipBuild
+  [switch]$SkipBuild,
+  # Stages the executable, the sidecars, the manifest and bundle.resources in
+  # out\stage, then stops: no check of the binaries, no package, no Windows SDK.
+  # pack-msix.spec.ts runs the staging this way.
+  [switch]$StageOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -330,7 +334,9 @@ $assetsDir = Join-Path $stageDir "Assets"
 $packageOutDir = Join-Path $scriptDir "out"
 $windowsX64RustTarget = "x86_64-pc-windows-msvc"
 $msixArch = "x64"
-$makeAppx = Resolve-MakeAppx
+if (-not $StageOnly) {
+  $makeAppx = Resolve-MakeAppx
+}
 $desktopBinaryName = "$(Get-CargoPackageName $cargoTomlPath).exe"
 
 $tauriConfig = Get-Content -LiteralPath (Join-Path $srcTauriDir "tauri.conf.json") -Raw | ConvertFrom-Json
@@ -384,6 +390,10 @@ foreach ($resource in $tauriConfig.bundle.resources.PSObject.Properties) {
   if ((Get-Item -LiteralPath $source).Length -eq 0) {
     throw "$source is empty, a placeholder rather than the hub's addon. Place the files the hub was built with (dist\sea) in src-tauri, as scripts\build-desktop.ps1 does."
   }
+}
+if ($StageOnly) {
+  Write-Host "Staged in $stageDir"
+  return
 }
 
 foreach ($exe in @($desktopBinaryName, "lasterm-hub.exe", "lasterm-agent.exe")) {

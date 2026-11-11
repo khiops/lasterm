@@ -32,9 +32,12 @@ import {
 } from "./TerminalPane.fixture.js";
 
 // The theme sets its tokens on the document, whichever window's stores do it.
-beforeEach(() => {
+// The pointer rests at the page's centre, wherever an earlier test left it,
+// such as on a button this one reads before hovering it (#948).
+beforeEach(async () => {
 	setActivePinia(createPinia());
 	useThemeStore().applyTheme(BUNDLED_THEMES["one-half-dark"]!);
+	await userEvent.unhover(document.body);
 });
 
 /** The pane's box: a pane's size, inside the page the browser shows. */
@@ -160,6 +163,7 @@ describe("TerminalPane buttons under the pointer", () => {
 
 		for (const label of ["Restart", "Close"]) {
 			const el = button(label)!;
+			expect(el.matches(":hover"), label).toBe(false);
 			const before = reading(el);
 			await userEvent.hover(el);
 
@@ -182,6 +186,7 @@ describe("TerminalPane buttons under the pointer", () => {
 		await vi.waitFor(() => expect(button("Cancel")).toBeDefined());
 		await settle();
 		const cancel = button("Cancel")!;
+		expect(cancel.matches(":hover")).toBe(false);
 		const before = reading(cancel);
 		const strong = getComputedStyle(root.querySelector(".exit-status__text")!).color;
 

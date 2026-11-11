@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import LIB_RS from "../../../desktop/src-tauri/src/lib.rs?raw";
+import IPC_CONTRACT from "../../../desktop/src-tauri/ipc-contract.json";
 import {
 	hubFetch,
 	RELAY_SLOTS,
@@ -724,11 +724,10 @@ describe("hubFetch relay slots", () => {
 		expect(relaySlotUsage()).toEqual({ inUse: 0, waiting: 0 });
 	});
 
+	// Native's bound, which its own test holds equal to ipc-contract.json.
 	it("leaves native room for the hub socket and the one replacing it", () => {
-		const native = /const MAX_ACTIVE_HUB_RELAYS: usize = (\d+);/.exec(LIB_RS)?.[1];
-		expect(native, "the native bound moved or was renamed").toBeDefined();
 		// The WebSocket holds a relay for its whole life, and a reconnecting one
 		// can hold a second while the old one tears down.
-		expect(RELAY_SLOTS).toBeLessThanOrEqual(Number(native) - 2);
+		expect(RELAY_SLOTS).toBeLessThanOrEqual(IPC_CONTRACT.maxActiveHubRelays - 2);
 	});
 });

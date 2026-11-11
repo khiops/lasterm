@@ -224,8 +224,13 @@ const RELAY_UPLOAD_QUEUE_CHUNKS: usize = 2;
 const MAX_ACTIVE_RELAY_UPLOADS: usize = 4;
 /// A desktop process has only a handful of concurrent foreground operations.
 /// Refusing the ninth relay bounds their request/response threads and body pipes
-/// instead of retaining work behind a local queue.
+/// instead of retaining work behind a local queue. The web client keeps two of
+/// them free for its WebSocket and the one replacing it, reading this bound from
+/// `ipc-contract.json`, which a test holds equal to it.
 const MAX_ACTIVE_HUB_RELAYS: usize = 8;
+/// What a raw-bytes command answers when its body reached it as JSON: the web
+/// client recognises it by these words, from `ipc-contract.json` (#822).
+const RAW_IPC_REFUSAL: &str = "must use Tauri raw IPC bytes";
 /// This is deliberately no longer than reqwest's complete request timeout. An
 /// abandoned webview can therefore retain at most one response frame for 25 s.
 const HUB_RELAY_ACK_TIMEOUT: Duration = HUB_REQUEST_TIMEOUT;
@@ -3856,7 +3861,7 @@ async fn relay_hub_upload_chunk(request: tauri::ipc::Request<'_>) -> Result<(), 
             return Err("multipart relay chunk exceeds the bounded IPC frame size".to_string())
         }
         tauri::ipc::InvokeBody::Json(_) => {
-            return Err("multipart relay chunk must use Tauri raw IPC bytes".to_string())
+            return Err(format!("multipart relay chunk {RAW_IPC_REFUSAL}"))
         }
     };
     let claim = claim_hub_upload_chunk(upload_id)?;
@@ -4519,7 +4524,7 @@ async fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), Strin
         }
         tauri::ipc::InvokeBody::Json(_) => {
             close_hub_ws_relay(relay_id);
-            return Err("WebSocket input must use Tauri raw IPC bytes".to_string());
+            return Err(format!("WebSocket input {RAW_IPC_REFUSAL}"));
         }
     };
     input.try_send(bytes.clone()).map_err(|error| {
@@ -6496,6 +6501,23 @@ mod tests {
     use std::task::{Context, Poll};
 
     static INSTANCE_TEST_COUNTER: AtomicU16 = AtomicU16::new(0);
+
+    /// The web client reads these from `ipc-contract.json`: the relay bound, of
+    /// which it keeps two free, and the words of a raw-bytes refusal (#822).
+    #[test]
+    fn the_ipc_contract_the_web_client_reads_is_what_native_enforces() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../ipc-contract.json"))
+                .expect("ipc-contract.json parses");
+        assert_eq!(
+            contract["maxActiveHubRelays"],
+            serde_json::json!(MAX_ACTIVE_HUB_RELAYS)
+        );
+        assert_eq!(
+            contract["rawIpcRefusal"],
+            serde_json::json!(RAW_IPC_REFUSAL)
+        );
+    }
 
     /// A process that has exited must read as gone.
     ///

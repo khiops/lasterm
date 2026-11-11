@@ -12,6 +12,12 @@ import type { WsClient } from "./session-manager.js";
 import { attemptSshTest, SshConnectionManager } from "./ssh-connection-manager.js";
 import { probeTestConnectPlatform } from "./test-connect-platform.js";
 
+/**
+ * How long a wait for what the hub sends may take: a guard against a hang. Vitest's
+ * 1 s default ran out while the full suite loaded the machine (#936).
+ */
+const WAIT = { timeout: 10_000 };
+
 const { privateKey: HOST_KEY } = generateKeyPairSync("rsa", {
 	modulusLength: 2048,
 	publicKeyEncoding: { type: "pkcs1", format: "pem" },
@@ -185,7 +191,7 @@ async function answerAuthPrompt(
 			.filter((message) => message.type === "AUTH_PROMPT")[index];
 		if (!asked) throw new Error("not asked yet");
 		return asked as { hostId: string; promptId: string; deliveryEpoch: number; message: string };
-	});
+	}, WAIT);
 	mgr.handleAuthPromptResponse("c1", {
 		hostId: prompt.hostId,
 		secret,
@@ -207,7 +213,7 @@ async function hostVerifyPrompt(client: { send: Mock }) {
 			firstConnect?: boolean;
 			hostname?: string;
 		};
-	});
+	}, WAIT);
 }
 
 describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 }, () => {
@@ -417,7 +423,7 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 				const asked = authPrompts()[index];
 				if (!asked) throw new Error("not asked yet");
 				return asked as { promptId: string; deliveryEpoch: number; message: string };
-			});
+			}, WAIT);
 			mgr.handleAuthPromptResponse("c1", {
 				hostId: "saved-host",
 				secret,
@@ -735,7 +741,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			.find((m) => m.type === "TEST_CONNECT_OK" || m.type === "TEST_CONNECT_FAIL");
 	}
 	async function ended(f: Awaited<ReturnType<typeof fixture>>) {
-		await vi.waitFor(() => expect(f.connections.every((c) => c.ended)).toBe(true));
+		await vi.waitFor(() => expect(f.connections.every((c) => c.ended)).toBe(true), WAIT);
 	}
 	it("refuses a pinned revoked bastion without opening a route", async () => {
 		const f = await fixture({ revokedJump: true });
@@ -1067,7 +1073,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			const m = f.client.send.mock.calls.map(([m]) => m).find((m) => m.type === "AUTH_PROMPT");
 			expect(m).toBeDefined();
 			return m;
-		});
+		}, WAIT);
 		expect(auth.hostId).toBe("jump");
 		f.mgr.handleAuthPromptResponse("c1", {
 			hostId: "jump",
@@ -1092,7 +1098,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			const m = f.client.send.mock.calls.map(([m]) => m).find((m) => m.type === "AUTH_PROMPT");
 			expect(m).toBeDefined();
 			return m;
-		});
+		}, WAIT);
 		f.mgr.handleAuthPromptResponse("c1", {
 			hostId: "jump",
 			secret: null,

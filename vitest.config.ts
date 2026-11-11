@@ -18,6 +18,10 @@ export default defineConfig({
 					name: "shared",
 					include: ["packages/shared/**/*.spec.ts"],
 					environment: "node",
+					// Against a hang only, as in the hub's specs: loading a real addon took
+					// over the 10 s hook default while the full suite ran (#936).
+					testTimeout: 30_000,
+					hookTimeout: 30_000,
 				},
 			},
 			{

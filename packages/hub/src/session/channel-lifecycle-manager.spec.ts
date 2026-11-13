@@ -1204,7 +1204,7 @@ describe("#674 SPAWN send fences", () => {
 				resolvedLaunchProfileId: undefined,
 				cols: 80,
 				rows: 24,
-				suppressClientError: true,
+				withheldErrorCode: "ELEVATION_PASSWORD_REQUIRED",
 				...(reuseChannelId !== undefined && { reuseChannelId }),
 			});
 			expect(result).toEqual({ channelId: null, errCode: "HOST_BUSY" });

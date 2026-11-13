@@ -5452,8 +5452,8 @@ describe("SessionManager — elevation support", () => {
 	// profile. It starts the profile it was first started from, as the hub's
 	// own restart does: its environment as the profile says it now; its shell,
 	// arguments, directory, mode and elevation as the terminal was started.
-	// The profile is edited on each of those after the terminal starts, and
-	// both ways of bringing it back send the agent the same SPAWN.
+	// The profile is edited on each of those after the terminal starts, or
+	// deleted, and both ways of bringing it back send the agent the same SPAWN.
 	const startedAs = {
 		"an elevated shell": {
 			profile: { mode: "shell", elevated: true },
@@ -5469,15 +5469,46 @@ describe("SessionManager — elevation support", () => {
 			elevationMethod: undefined,
 			spawn: { directProcess: true },
 		},
+		"an elevated process": {
+			profile: { mode: "process", elevated: true },
+			editedTo: { mode: "shell", elevated: false },
+			elevationMethod: "doas",
+			spawn: {
+				directProcess: true,
+				elevated: true,
+				elevationMethod: "doas",
+				elevationSecret: "hunter2",
+			},
+		},
+	} as const;
+	// What the profile gives: its environment and its switch as it says them
+	// now; a deleted one gives neither.
+	const profileSays = {
+		edited: { env: { DEPLOY_ENV: "prod" }, reportDirectory: true },
+		deleted: { env: {} },
 	} as const;
 	it.each([
-		["an elevated shell", "its shell and arguments, as a window listing it sends them", true],
-		["an elevated shell", "its id alone, as a window that does not list it sends it", false],
-		["a process of its own, not elevated", "its shell and arguments", true],
-		["a process of its own, not elevated", "its id alone", false],
+		[
+			"an elevated shell",
+			"edited",
+			"its shell and arguments, as a window listing it sends them",
+			true,
+		],
+		[
+			"an elevated shell",
+			"edited",
+			"its id alone, as a window that does not list it sends it",
+			false,
+		],
+		["a process of its own, not elevated", "edited", "its shell and arguments", true],
+		["a process of its own, not elevated", "edited", "its id alone", false],
+		["an elevated process", "edited", "its shell and arguments", true],
+		["an elevated process", "edited", "its id alone", false],
+		["an elevated process", "deleted", "its shell and arguments", true],
+		["an elevated process", "deleted", "its id alone", false],
 	] as const)(
-		"brings %s back from %s with the SPAWN a restart sends (#858)",
-		async (started, _, listed) => {
+		"brings %s whose profile was %s back from %s with the SPAWN a restart sends (#858)",
+		async (started, afterwards, _, listed) => {
 			const { profile, editedTo, elevationMethod, spawn } = startedAs[started];
 			const localHostId = await sm.ensureLocalHost();
 			const dal = new MetaDAL(dbManager.meta);
@@ -5485,6 +5516,7 @@ describe("SessionManager — elevation support", () => {
 				name: "Staging admin",
 				shell: "/usr/bin/fish",
 				args: ["--private"],
+				cwd: "/srv/staging",
 				env: { DEPLOY_ENV: "staging" },
 				...profile,
 				supportedOs: "any",
@@ -5504,13 +5536,17 @@ describe("SessionManager — elevation support", () => {
 					.prepare("UPDATE channels SET elevation_method = ? WHERE id = ?")
 					.run(elevationMethod, channelId);
 			}
-			dal.updateLaunchProfile(profileId, {
-				shell: "/usr/bin/zsh",
-				args: ["--login"],
-				cwd: "/opt/elsewhere",
-				env: { DEPLOY_ENV: "prod" },
-				...editedTo,
-			});
+			if (afterwards === "deleted") {
+				expect(dal.deleteLaunchProfile(profileId)).toBe(true);
+			} else {
+				dal.updateLaunchProfile(profileId, {
+					shell: "/usr/bin/zsh",
+					args: ["--login"],
+					cwd: "/opt/elsewhere",
+					env: { DEPLOY_ENV: "prod" },
+					...editedTo,
+				});
+			}
 			const agent = mockLocalAgents.at(-1);
 			const spawns = () =>
 				(agent?.send.mock.calls ?? [])
@@ -5539,11 +5575,11 @@ describe("SessionManager — elevation support", () => {
 				channelId,
 				shell: "/usr/bin/fish",
 				args: ["--private"],
+				cwd: "/srv/staging",
 				cols: 80,
 				rows: 24,
-				env: { DEPLOY_ENV: "prod" },
 				envMode: "inherit",
-				reportDirectory: true,
+				...profileSays[afterwards],
 				...spawn,
 			};
 			const [restarted, broughtBack] = spawns().slice(before);

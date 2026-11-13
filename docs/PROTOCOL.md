@@ -918,8 +918,8 @@ environment and `report_directory` of the launch profile it was started from, as
 them now, and its own shell, arguments, directory, mode and elevation, the last with the method it
 was elevated with, as it was started. The fields the request names win as ever; one that names a
 shell names its arguments with it, none meaning none. A terminal with no profile, or whose profile
-was deleted, starts the host's default profile only when neither the request nor the terminal
-names a shell.
+was deleted, gets no profile's environment, and keeps its mode and elevation all the same; it
+starts the host's default profile only when neither the request nor the terminal names a shell.
 
 A SPAWN that names itself with `request_id` gets it back in the SPAWN_OK and in every ERROR that
 answers it, the refusal of a field it carries included, and in nothing else (#777). A window's

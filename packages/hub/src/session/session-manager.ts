@@ -1490,26 +1490,29 @@ export class SessionManager {
 						: undefined) ??
 					ownProfile ??
 					(resolvedShell === undefined ? defaultProfile : undefined);
-				// The method a terminal brought back was elevated with, when it is
-				// elevated again as it was.
-				let ownElevationMethod: ElevationMethod | undefined;
 				if (profile) {
-					if (profile === ownProfile) {
-						// As a restart starts it: its own shell, arguments, directory,
-						// mode and elevation, as it was started; its profile gives its
-						// environment, as the profile says it now.
-						resolvedDirectProcess = msg.directProcess ?? reused?.directProcess === true;
-						resolvedElevated = msg.elevated ?? reused?.elevationMethod !== undefined;
-						if (msg.elevated === undefined) ownElevationMethod = reused?.elevationMethod;
-					} else {
+					// A terminal brought back keeps the shell, arguments and directory
+					// it has of its own, as a restart sends them: its profile gives its
+					// environment, as the profile says it now.
+					if (profile !== ownProfile) {
 						resolvedShell = msg.shell ?? profile.shell;
 						resolvedArgs = msg.args ?? profile.args ?? [];
 						resolvedCwd = msg.cwd ?? profile.cwd ?? resolvedCwd;
-						resolvedDirectProcess = msg.directProcess ?? profile.mode === "process";
-						resolvedElevated = msg.elevated ?? profile.elevated;
 					}
 					resolvedEnv = { ...(profile.env ?? {}), ...(msg.env ?? {}) };
+					resolvedDirectProcess = msg.directProcess ?? profile.mode === "process";
+					resolvedElevated = msg.elevated ?? profile.elevated;
 					resolvedLaunchProfileId = profile.id;
+				}
+				// A terminal brought back naming no profile keeps its mode and its
+				// elevation as it was started, as a restart reads them, whether its
+				// profile still exists or not; elevated, it is elevated with the
+				// method it was elevated with.
+				let ownElevationMethod: ElevationMethod | undefined;
+				if (reused !== undefined && msg.launchProfileId === undefined) {
+					resolvedDirectProcess = msg.directProcess ?? reused.directProcess === true;
+					resolvedElevated = msg.elevated ?? reused.elevationMethod !== undefined;
+					ownElevationMethod = reused.elevationMethod;
 				}
 
 				// ── Elevation checks ──────────────────────────────────────────────────

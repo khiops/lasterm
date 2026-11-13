@@ -34,11 +34,11 @@ let root: HTMLElement;
 const visible = ref(true);
 const selectedHost = ref("pi");
 
-function mountModal() {
+function mountModal(hostId = "pi") {
 	const pinia = createPinia();
 	setActivePinia(pinia);
 	useHostsStore().hosts = [{ ...PI }, { ...PI, id: "nas", label: "NAS" }];
-	selectedHost.value = "pi";
+	selectedHost.value = hostId;
 	visible.value = true;
 	const onDeleted = vi.fn();
 	const onClose = vi.fn();
@@ -149,27 +149,28 @@ describe("DeleteHostModal hub consent (#910)", () => {
 			{ status: 409 },
 		);
 	}
-	// One row per form of D7's wording, the hub's counts as it sends them.
+	// One row per form of D7's wording, the hub's counts as it sends them, for
+	// a host whose label ("NAS") is not its id ("nas").
 	it.each([
 		[
 			2,
 			0,
-			"2 terminals on pi have not ended. Lasterm will ask their agent to end them, without waiting for it to confirm.",
+			"2 terminals on NAS have not ended. Lasterm will ask their agent to end them, without waiting for it to confirm.",
 		],
 		[
 			1,
 			0,
-			"1 terminal on pi has not ended. Lasterm will ask its agent to end it, without waiting for it to confirm.",
+			"1 terminal on NAS has not ended. Lasterm will ask its agent to end it, without waiting for it to confirm.",
 		],
 		[
 			1,
 			1,
-			"1 terminal on pi has not ended, and Lasterm is not connected to its agent: nothing can be sent to it, and it may keep running. Connecting pi first may let Lasterm reach it.",
+			"1 terminal on NAS has not ended, and Lasterm is not connected to its agent: nothing can be sent to it, and it may keep running. Connecting NAS first may let Lasterm reach it.",
 		],
 		[
 			3,
 			3,
-			"3 terminals on pi have not ended, and Lasterm is not connected to their agent: nothing can be sent to them, and they may keep running. Connecting pi first may let Lasterm reach them.",
+			"3 terminals on NAS have not ended, and Lasterm is not connected to their agent: nothing can be sent to them, and they may keep running. Connecting NAS first may let Lasterm reach them.",
 		],
 	])(
 		"V4 asks the hub first and confirms its count: terminals=%i, unreachable=%i",
@@ -178,22 +179,26 @@ describe("DeleteHostModal hub consent (#910)", () => {
 				.spyOn(globalThis, "fetch")
 				.mockResolvedValueOnce(counted(terminals, unreachable))
 				.mockResolvedValueOnce(new Response(null, { status: 204 }));
-			const { onClose } = mountModal();
+			const { onClose } = mountModal("nas");
 			expect(input()).toBeNull();
 			expect(button().disabled).toBe(false);
 			await clickDelete();
-			expect(fetchSpy.mock.calls[0]?.[0]).toBe("/api/hosts/pi");
+			expect(fetchSpy.mock.calls[0]?.[0]).toBe("/api/hosts/nas");
 			expect(document.body.querySelector(".warning-text")?.textContent).toBe(warning);
+			expect(document.body.querySelector(".warning-text + p")?.textContent).toBe(
+				"Type NAS to confirm:",
+			);
 			expect(button().disabled).toBe(true);
-			input()!.value = "PI";
+			// The id, which is the label in another case: not the label.
+			input()!.value = "nas";
 			input()!.dispatchEvent(new Event("input"));
 			await nextTick();
 			expect(button().disabled).toBe(true);
-			input()!.value = "pi";
+			input()!.value = "NAS";
 			input()!.dispatchEvent(new Event("input"));
 			await nextTick();
 			await clickDelete();
-			expect(fetchSpy.mock.calls[1]?.[0]).toBe("/api/hosts/pi?force=true");
+			expect(fetchSpy.mock.calls[1]?.[0]).toBe("/api/hosts/nas?force=true");
 			expect(onClose).toHaveBeenCalledOnce();
 		},
 	);

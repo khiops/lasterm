@@ -744,7 +744,7 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 		},
 	);
 
-	it.each(["new-spawn", "lost", "adopted"])(
+	it.each(["new-spawn", "new-spawn, old answer early", "lost", "adopted"])(
 		"R10 keeps the terminal after the old connection is %s",
 		async (mode) => {
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
@@ -786,6 +786,17 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 					}
 				}
 				heard.length = 0;
+				if (mode === "new-spawn, old answer early") {
+					// D4b: the replaced connection's answer, before its own timeout,
+					// speaks of a terminal the new connection holds now.
+					const track = vi.spyOn(ctx.scheduler, "trackChannel");
+					const chunk = vi.spyOn(ctx.chunker, "trackChannel");
+					agent.emit("message", { type: "SPAWN_OK", requestId: old.requestId, channelId, pid: 1 });
+					expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([]);
+					expect(track).not.toHaveBeenCalled();
+					expect(chunk).not.toHaveBeenCalled();
+					expect(ctx.pendingRequests.has(old.requestId!)).toBe(false);
+				}
 				await vi.advanceTimersByTimeAsync(10_001);
 				agent.emit("message", { type: "SPAWN_OK", requestId: old.requestId, channelId, pid: 1 });
 				expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([]);

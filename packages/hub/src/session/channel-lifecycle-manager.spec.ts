@@ -1257,7 +1257,8 @@ describe("#726 storeSnapshot", () => {
 			const ctx = {
 				spoolDal,
 				channels: new Map([["ch", {}]]),
-				chunker: { flush: vi.fn(), bumpSeq: vi.fn() },
+				// What a chunker that tracks no channel answers.
+				chunker: { flush: vi.fn(), bumpSeq: vi.fn(), getNextSeq: () => 1 },
 				metaDal: { updateCacheIndex },
 			} as unknown as SharedSessionContext;
 			const lifecycle = new ChannelLifecycleManager(ctx, {} as StateBroadcaster);
@@ -1269,8 +1270,8 @@ describe("#726 storeSnapshot", () => {
 				uncompressedLen: 4,
 			});
 
-			lifecycle.storeSnapshot("ch", { serialized: "one", cols: 80, rows: 24 }, 0);
-			const last = lifecycle.storeSnapshot("ch", { serialized: "two", cols: 80, rows: 24 }, 0);
+			lifecycle.storeSnapshot("ch", { serialized: "one", cols: 80, rows: 24 });
+			const last = lifecycle.storeSnapshot("ch", { serialized: "two", cols: 80, rows: 24 });
 
 			const chunks = spoolDal.getChunksByChannel("ch");
 			expect(chunks.map((c) => [c.seq, c.kind])).toEqual([

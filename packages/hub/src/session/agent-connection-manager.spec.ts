@@ -282,6 +282,7 @@ describe("quit-protected revival capabilities", () => {
 			meta.markHostSessionDisconnected = vi.fn();
 			meta.markHostChannelsOrphan = vi.fn();
 			meta.updateChannelStatus = vi.fn();
+			meta.sweepSessions = vi.fn(() => ({ closed: 0, deleted: 0 }));
 			(built.ctx as unknown as Record<string, unknown>).configResolver = {
 				sshConfig: { trustKnownHosts: false, remoteDaemon: opts.remoteDaemon },
 			};

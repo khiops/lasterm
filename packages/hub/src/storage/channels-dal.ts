@@ -183,6 +183,22 @@ export class ChannelsDAL {
 	}
 
 	/**
+	 * Every channel of a host, whichever of its sessions holds it, in one
+	 * statement (#911): by session, oldest first, then by channel, oldest first.
+	 */
+	listChannelsOnHost(hostId: string): Channel[] {
+		const rows = this.db
+			.prepare(
+				`SELECT c.* FROM channels c
+				 JOIN sessions s ON c.session_id = s.id
+				 WHERE s.host_id = ?
+				 ORDER BY s.created_at ASC, c.created_at ASC`,
+			)
+			.all(hostId) as ChannelRow[];
+		return rows.map(rowToChannel);
+	}
+
+	/**
 	 * Record a channel's status, and why it ended when the hub ended it
 	 * itself: `killed` or `stopped` (#592).
 	 *
@@ -308,6 +324,9 @@ export class ChannelsDAL {
 			args?: string[];
 			cwd?: string | null;
 			directProcess?: boolean;
+			/** Elevated with this method, or null for not elevated. */
+			elevationMethod?: string | null;
+			launchProfileId?: string | null;
 		},
 	): boolean {
 		const sets: string[] = [];
@@ -333,6 +352,15 @@ export class ChannelsDAL {
 		if (config.directProcess !== undefined) {
 			sets.push("direct_process = @directProcess");
 			params.directProcess = config.directProcess ? 1 : 0;
+		}
+		if (config.elevationMethod !== undefined) {
+			sets.push("elevated = @elevated", "elevation_method = @elevationMethod");
+			params.elevated = config.elevationMethod === null ? 0 : 1;
+			params.elevationMethod = config.elevationMethod;
+		}
+		if (config.launchProfileId !== undefined) {
+			sets.push("launch_profile_id = @launchProfileId");
+			params.launchProfileId = config.launchProfileId;
 		}
 
 		if (sets.length === 0) return false;

@@ -915,8 +915,8 @@ SSH host's does (#802).
 A SPAWN with `reuse_channel_id` that names no launch profile, as a window's Restart of an ended
 terminal sends it, starts that terminal as `POST /api/channels/:id/restart` does (#858): the
 environment and `report_directory` of the launch profile it was started from, as the profile says
-them now, and its own shell, arguments, directory, mode and elevation, the last with the method it
-was elevated with, as it was started. The fields the request names win as ever; one that names a
+them now, and its own shell, arguments, directory, size, mode and elevation, the last with the
+method it was elevated with, as it was started. The fields the request names win as ever; one that names a
 shell names its arguments with it, none meaning none. A terminal with no profile, or whose profile
 was deleted, gets no profile's environment, and keeps its mode and elevation all the same; it
 starts the host's default profile only when neither the request nor the terminal names a shell.

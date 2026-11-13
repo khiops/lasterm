@@ -146,6 +146,9 @@ interface ReusedTerminal {
 	directProcess?: boolean;
 	/** The method it was elevated with, when it was started elevated. */
 	elevationMethod?: ElevationMethod;
+	/** Its size, as a restart sends it. */
+	cols: number;
+	rows: number;
 }
 
 export interface WsClient {
@@ -1000,6 +1003,8 @@ export class SessionManager {
 						existing.channel.elevationMethod !== undefined && {
 							elevationMethod: existing.channel.elevationMethod as ElevationMethod,
 						}),
+					cols: existing.channel.cols,
+					rows: existing.channel.rows,
 				};
 			} else {
 				// Spawning a stranger instead would put a terminal on screen that
@@ -1438,8 +1443,9 @@ export class SessionManager {
 					hostId,
 				});
 				const requestId = generateId();
-				const cols = msg.cols ?? 80;
-				const rows = msg.rows ?? 24;
+				// A terminal brought back keeps its size unless the request names one.
+				const cols = msg.cols ?? reused?.cols ?? 80;
+				const rows = msg.rows ?? reused?.rows ?? 24;
 
 				// ── Launch profile resolution ─────────────────────────────────────────
 				// A terminal brought back with neither a shell nor a profile named

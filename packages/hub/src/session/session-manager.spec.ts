@@ -5451,7 +5451,7 @@ describe("SessionManager — elevation support", () => {
 	// shell and arguments when its list carries them, and never a launch
 	// profile. It starts the profile it was first started from, as the hub's
 	// own restart does: its environment as the profile says it now; its shell,
-	// arguments, directory, mode and elevation as the terminal was started.
+	// arguments, directory, size, mode and elevation as the terminal was started.
 	// The profile is edited on each of those after the terminal starts, or
 	// deleted, and both ways of bringing it back send the agent the same SPAWN.
 	const startedAs = {
@@ -5529,6 +5529,8 @@ describe("SessionManager — elevation support", () => {
 				type: "SPAWN",
 				hostId: localHostId,
 				launchProfileId: profileId,
+				cols: 132,
+				rows: 43,
 			});
 			if (channelId === null) throw new Error("expected a channel");
 			if (elevationMethod !== undefined) {
@@ -5576,8 +5578,8 @@ describe("SessionManager — elevation support", () => {
 				shell: "/usr/bin/fish",
 				args: ["--private"],
 				cwd: "/srv/staging",
-				cols: 80,
-				rows: 24,
+				cols: 132,
+				rows: 43,
 				envMode: "inherit",
 				...profileSays[afterwards],
 				...spawn,

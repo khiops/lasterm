@@ -5,6 +5,7 @@ import path, { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { utils } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { generateEd25519KeyPair } from "../ssh/ssh2-key.fixture.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 
 // --- Mock agents so no real PTY / SSH is spawned ----------------------------
@@ -68,22 +69,6 @@ function buildMultipart(
 			"content-type": `multipart/form-data; boundary=${boundary}`,
 		},
 	};
-}
-
-// Generate a real ED25519 key using ssh2. About one key in 300 that ssh2
-// generates is malformed: ssh2.utils.parseKey and ssh-keygen both reject it,
-// so the route answers INVALID_KEY where a test expects success or DUPLICATE.
-// Keep generating until ssh2 can read the key back.
-function generateEd25519Key(): Buffer {
-	// eslint-disable-next-line @typescript-eslint/no-require-imports
-	const ssh2mod = require("ssh2") as typeof import("ssh2");
-	for (let attempt = 0; attempt < 20; attempt++) {
-		const kp = ssh2mod.utils.generateKeyPairSync("ed25519");
-		// ssh2 returns { private, public } (not privateKey/publicKey)
-		const key = Buffer.from((kp as unknown as { private: string }).private);
-		if (!(ssh2mod.utils.parseKey(key) instanceof Error)) return key;
-	}
-	throw new Error("ssh2 produced no parseable ED25519 key in 20 attempts");
 }
 
 function expectedFingerprint(privateKey: Buffer): string {
@@ -152,7 +137,7 @@ describe("SSH key endpoints", () => {
 		});
 
 		it("returns key metadata for a valid ED25519 key", async () => {
-			const keyBuf = generateEd25519Key();
+			const keyBuf = Buffer.from(generateEd25519KeyPair().private);
 			writeFileSync(join(sshDir, "id_ed25519"), keyBuf);
 
 			server = await makeServer();
@@ -182,7 +167,7 @@ describe("SSH key endpoints", () => {
 
 		it("lists subdirectories with item count", async () => {
 			mkdirSync(join(sshDir, "work"), { recursive: true });
-			const keyBuf = generateEd25519Key();
+			const keyBuf = Buffer.from(generateEd25519KeyPair().private);
 			writeFileSync(join(sshDir, "work", "id_ed25519"), keyBuf);
 
 			server = await makeServer();
@@ -215,7 +200,7 @@ describe("SSH key endpoints", () => {
 		});
 
 		it("skips symlinks", async () => {
-			const keyBuf = generateEd25519Key();
+			const keyBuf = Buffer.from(generateEd25519KeyPair().private);
 			const realKey = join(sshDir, "id_ed25519");
 			writeFileSync(realKey, keyBuf);
 			symlinkSync(realKey, join(sshDir, "sym_key"));
@@ -264,7 +249,7 @@ describe("SSH key endpoints", () => {
 		it("navigates into a valid subdirectory", async () => {
 			const subDir = join(sshDir, "work");
 			mkdirSync(subDir, { recursive: true });
-			const keyBuf = generateEd25519Key();
+			const keyBuf = Buffer.from(generateEd25519KeyPair().private);
 			writeFileSync(join(subDir, "id_ed25519"), keyBuf);
 
 			server = await makeServer();
@@ -293,7 +278,7 @@ describe("SSH key endpoints", () => {
 
 	describe("POST /api/ssh-keys", () => {
 		it("uploads a valid ED25519 key and returns metadata", async () => {
-			const keyBuf = generateEd25519Key();
+			const keyBuf = Buffer.from(generateEd25519KeyPair().private);
 			const { payload, headers } = buildMultipart("id_ed25519", keyBuf);
 
 			server = await makeServer();
@@ -348,7 +333,7 @@ describe("SSH key endpoints", () => {
 		});
 
 		it("rejects a duplicate filename", async () => {
-			const keyBuf = generateEd25519Key();
+			const keyBuf = Buffer.from(generateEd25519KeyPair().private);
 			writeFileSync(join(sshDir, "id_ed25519"), keyBuf);
 			const { payload, headers } = buildMultipart("id_ed25519", keyBuf);
 
@@ -366,7 +351,7 @@ describe("SSH key endpoints", () => {
 		// Windows has no owner-only mode bits; stat reports 0o666 there whatever
 		// chmod asked for, so the property this test checks is POSIX-only.
 		it.skipIf(process.platform === "win32")("sets file permissions to 0o600", async () => {
-			const keyBuf = generateEd25519Key();
+			const keyBuf = Buffer.from(generateEd25519KeyPair().private);
 			const { payload, headers } = buildMultipart("id_ed25519_perms", keyBuf);
 
 			server = await makeServer();
@@ -384,7 +369,7 @@ describe("SSH key endpoints", () => {
 			// @fastify/busboy normalises '../evil_key' to 'evil_key' before our code runs.
 			// Our sanitizeFilename then accepts the clean name, and containedPath keeps
 			// the file inside sshDir — so the traversal is fully neutralised.
-			const keyBuf = generateEd25519Key();
+			const keyBuf = Buffer.from(generateEd25519KeyPair().private);
 			const { payload, headers } = buildMultipart("../evil_key", keyBuf);
 
 			server = await makeServer();
@@ -406,7 +391,7 @@ describe("SSH key endpoints", () => {
 		// The client sends `dir` before the file: @fastify/multipart only hands the
 		// route the fields that precede it (#768).
 		it("stores the key in the subfolder that dir names", async () => {
-			const keyBuf = generateEd25519Key();
+			const keyBuf = Buffer.from(generateEd25519KeyPair().private);
 			const { payload, headers } = buildMultipart("id_ed25519", keyBuf, { dir: "work" });
 
 			server = await makeServer();
@@ -417,7 +402,7 @@ describe("SSH key endpoints", () => {
 		});
 
 		it("rejects a dir that leaves the key folder", async () => {
-			const keyBuf = generateEd25519Key();
+			const keyBuf = Buffer.from(generateEd25519KeyPair().private);
 			const sibling = `${path.basename(sshDir)}-escape`;
 			const { payload, headers } = buildMultipart("id_ed25519", keyBuf, { dir: `../${sibling}` });
 
@@ -434,7 +419,7 @@ describe("SSH key endpoints", () => {
 
 	describe("DELETE /api/ssh-keys", () => {
 		it("deletes an existing key and returns 204", async () => {
-			const keyBuf = generateEd25519Key();
+			const keyBuf = Buffer.from(generateEd25519KeyPair().private);
 			writeFileSync(join(sshDir, "id_ed25519"), keyBuf);
 
 			server = await makeServer();
@@ -483,7 +468,7 @@ describe("SSH key endpoints", () => {
 		it("deletes a key in a subdirectory", async () => {
 			const subDir = join(sshDir, "work");
 			mkdirSync(subDir, { recursive: true });
-			const keyBuf = generateEd25519Key();
+			const keyBuf = Buffer.from(generateEd25519KeyPair().private);
 			writeFileSync(join(subDir, "id_ed25519"), keyBuf);
 
 			server = await makeServer();

@@ -5589,6 +5589,84 @@ describe("SessionManager — elevation support", () => {
 			expect(broughtBack).toEqual(expected);
 		},
 	);
+
+	// What a request names when it brings a terminal back is recorded with the
+	// rest: the next restart starts the terminal as that start left it.
+	it("records the start a bring-back names, so the next restart starts it the same (#858)", async () => {
+		const localHostId = await sm.ensureLocalHost();
+		const dal = new MetaDAL(dbManager.meta);
+		const launch = { supportedOs: "any", iconType: "auto" } as const;
+		const adminId = dal.createLaunchProfile({
+			name: "Staging admin",
+			shell: "/usr/bin/fish",
+			args: ["--private"],
+			cwd: "/srv/staging",
+			env: { DEPLOY_ENV: "staging" },
+			mode: "process",
+			elevated: true,
+			sortOrder: 0,
+			reportDirectory: true,
+			...launch,
+		}).id;
+		const plainId = dal.createLaunchProfile({
+			name: "Plain",
+			shell: "/bin/sh",
+			env: { OTHER: "yes" },
+			mode: "shell",
+			elevated: false,
+			sortOrder: 1,
+			...launch,
+		}).id;
+		sm.addClient(makeAutoRespondClient("c-858", [], "hunter2"));
+		const channelId = await sm.handleSpawn("c-858", {
+			type: "SPAWN",
+			hostId: localHostId,
+			launchProfileId: adminId,
+			cols: 132,
+			rows: 43,
+		});
+		if (channelId === null) throw new Error("expected a channel");
+		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+		const entry = ctx.channels.get(channelId);
+		if (entry) entry.status = "dead";
+		dal.updateChannelStatus(channelId, "dead");
+		const agent = mockLocalAgents.at(-1);
+		const lastSpawn = () =>
+			(agent?.send.mock.calls ?? [])
+				.map(([message]) => message as AgentSpawnMessage)
+				.filter((message) => message.type === "SPAWN")
+				.at(-1);
+
+		expect(
+			await sm.handleSpawn("c-858", {
+				type: "SPAWN",
+				hostId: localHostId,
+				reuseChannelId: channelId,
+				launchProfileId: plainId,
+				elevated: false,
+				directProcess: false,
+			}),
+		).toBe(channelId);
+		const broughtBack = lastSpawn();
+		expect(await sm.restartChannel(channelId, "c-858")).toBe(true);
+		const restarted = lastSpawn();
+
+		// The plain profile's shell, none of the admin profile's arguments, the
+		// terminal's own directory and size, neither a process nor elevated.
+		const expected = {
+			type: "SPAWN",
+			requestId: expect.any(String),
+			channelId,
+			shell: "/bin/sh",
+			cwd: "/srv/staging",
+			cols: 132,
+			rows: 43,
+			env: { OTHER: "yes" },
+			envMode: "inherit",
+		};
+		expect(broughtBack).toEqual(expected);
+		expect(restarted).toEqual(expected);
+	});
 });
 
 // ─── Concurrent-SPAWN coalescing tests ───────────────────────────────────────

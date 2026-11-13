@@ -30,6 +30,7 @@ import {
 } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, type Mock, vi } from "vitest";
 import { fingerprintOf } from "../ssh/fingerprint.js";
+import { generateEd25519KeyPair } from "../ssh/ssh2-key.fixture.js";
 import { targetRoute } from "../ssh-route.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { ConfiguredKeyAgent, configuredPublicKey } from "./key-agent-signer.js";
@@ -65,13 +66,13 @@ function parsed(key: string | Buffer, passphrase?: string): ParsedKey {
 	return Array.isArray(result) ? result[0] : result;
 }
 
-const HOST_KEY = utils.generateKeyPairSync("ed25519").private;
+const HOST_KEY = generateEd25519KeyPair().private;
 const HOST_FINGERPRINT = fingerprintOf(parsed(HOST_KEY).getPublicSSH());
 
 const KEY_DIR = makeTempDir("lasterm-key-agent-signer-");
 
 /** The configured key: an encrypted `openssh-key-v1` file, and no `.pub` beside it. */
-const OPENSSH = utils.generateKeyPairSync("ed25519", {
+const OPENSSH = generateEd25519KeyPair({
 	passphrase: PASSPHRASE,
 	cipher: "aes256-ctr",
 	rounds: 4,
@@ -101,11 +102,11 @@ const PEM_NO_PUB_PATH = join(KEY_DIR, "id_rsa_alone.pem");
 writeFileSync(PEM_NO_PUB_PATH, PEM_PRIVATE_TEXT, { mode: 0o600 });
 
 /** A key the agent holds that the host is not configured with. */
-const OTHER_PRIVATE = parsed(utils.generateKeyPairSync("ed25519").private);
+const OTHER_PRIVATE = parsed(generateEd25519KeyPair().private);
 const OTHER_PUBLIC = OTHER_PRIVATE.getPublicSSH();
 
 /** A key file that needs no passphrase. */
-const PLAIN = utils.generateKeyPairSync("ed25519");
+const PLAIN = generateEd25519KeyPair();
 const PLAIN_KEY_PATH = join(KEY_DIR, "id_plain");
 writeFileSync(PLAIN_KEY_PATH, PLAIN.private, { mode: 0o600 });
 const PLAIN_PRIVATE = parsed(PLAIN.private);

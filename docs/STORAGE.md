@@ -202,6 +202,12 @@ CREATE INDEX idx_sessions_host   ON sessions(host_id);
 CREATE INDEX idx_sessions_status ON sessions(status);
 ```
 
+A session row lasts as long as the hub holds that session. After that, the next hub start
+deletes it, unless a channel row names it: a dead terminal's host is found through its session.
+Each hub start sweeps the table once it has restored the terminals still running (#911): every
+session the hub does not hold is closed, then every closed session no channel names is deleted.
+`GET /api/sessions` lists the sessions that are not closed; `?all=true` lists every row.
+
 ### 3.4 channels
 
 ```sql
@@ -750,6 +756,14 @@ Channel created (BORN)
   │
   └─ Its rows deleted from meta.db at once; its chunks right after a purge,
      at the next GC pass after a host is deleted, in GC's bounded batches
+
+Session closed
+  │
+  ├─ Its row kept while a channel row names it (§ 3.3)
+  │
+  A hub start
+  │
+  └─ Its row deleted by the first start at which no channel row names it
 ```
 
 ## 12. Logs

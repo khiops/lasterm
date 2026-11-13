@@ -183,6 +183,22 @@ export class ChannelsDAL {
 	}
 
 	/**
+	 * Every channel of a host, whichever of its sessions holds it, in one
+	 * statement (#911): by session, oldest first, then by channel, oldest first.
+	 */
+	listChannelsOnHost(hostId: string): Channel[] {
+		const rows = this.db
+			.prepare(
+				`SELECT c.* FROM channels c
+				 JOIN sessions s ON c.session_id = s.id
+				 WHERE s.host_id = ?
+				 ORDER BY s.created_at ASC, c.created_at ASC`,
+			)
+			.all(hostId) as ChannelRow[];
+		return rows.map(rowToChannel);
+	}
+
+	/**
 	 * Record a channel's status, and why it ended when the hub ended it
 	 * itself: `killed` or `stopped` (#592).
 	 *

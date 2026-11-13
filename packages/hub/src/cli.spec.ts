@@ -2416,9 +2416,11 @@ describe("session list (#905)", () => {
 			{ cert: tls.pinned.cert, key: tls.pinned.key },
 			(request, response) => {
 				requests.push({ method: request.method ?? "", url: request.url ?? "" });
-				if (request.url === "/api/sessions" || request.url === "/api/hosts") {
+				const listsSessions =
+					request.url === "/api/sessions" || request.url === "/api/sessions?all=true";
+				if (listsSessions || request.url === "/api/hosts") {
 					response.writeHead(200, { "content-type": "application/json" });
-					response.end(JSON.stringify(request.url === "/api/sessions" ? sessions : HOSTS));
+					response.end(JSON.stringify(listsSessions ? sessions : HOSTS));
 				} else {
 					response.writeHead(404);
 					response.end();
@@ -2511,6 +2513,39 @@ describe("session list (#905)", () => {
 		const { output, requests } = await sessionList([], []);
 		expect(output).toEqual(["No active sessions."]);
 		expect(requests).toEqual([{ method: "GET", url: "/api/sessions" }]);
+	});
+
+	// Mutation: --all not passed on, and the hub is asked for the open sessions
+	// only (GET /api/sessions).
+	it("session list --all asks the hub for every session it keeps (#911)", async () => {
+		const table = await sessionList(["--all"]);
+		expect(table.output).toEqual([
+			row("ID", "HOST", "STATE", "CREATED"),
+			`${"-".repeat(26)}  ${"-".repeat(20)}  ${"-".repeat(12)}  -------`,
+			row("01JCQ8S0000000000000000001", "local", "active", "2026-11-09T10:00:00.000Z"),
+			row("01JCQ8S0000000000000000002", "pi2222", "detached", "2026-11-09T10:02:00.000Z"),
+			row(
+				"01JCQ8S0000000000000000003",
+				"01JCQ8H0000000000000000009",
+				"closed",
+				"2026-11-09T10:04:00.000Z",
+			),
+		]);
+		expect(table.requests).toEqual([
+			{ method: "GET", url: "/api/sessions?all=true" },
+			{ method: "GET", url: "/api/hosts" },
+		]);
+
+		const json = await sessionList(["--all", "--json"]);
+		expect(json.output).toEqual([JSON.stringify(SESSIONS)]);
+		expect(json.requests).toEqual([{ method: "GET", url: "/api/sessions?all=true" }]);
+	});
+
+	// Mutation: the default message ("No active sessions.") with --all.
+	it("session list --all says there are no sessions when the hub keeps none (#911)", async () => {
+		const { output, requests } = await sessionList(["--all"], []);
+		expect(output).toEqual(["No sessions."]);
+		expect(requests).toEqual([{ method: "GET", url: "/api/sessions?all=true" }]);
 	});
 });
 

@@ -2201,7 +2201,7 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/sessions` | ● | `Session[]` (query: `?host_id=X`) |
+| GET | `/api/sessions` | ● | `Session[]`, the sessions that are not closed, oldest first (query: `?host_id=X`). `?all=true` lists every session the hub keeps, closed ones included (STORAGE.md § 3.3); `all` other than `true` or `false` → 400 `VALIDATION_ERROR` |
 | GET | `/api/sessions/:id` | ● | `Session` (includes channels) |
 | DELETE | `/api/sessions/:id` | ● | `?force=true\|false` → 204 (close). While uploads to the session's remote host run (§ 4.19), 409 `TRANSFERS_WOULD_STOP` `{ transfers }` and nothing is done, until `force=true`, which interrupts them; any other `force` 400 `VALIDATION_ERROR`. Sends DESTROY for each non-dead terminal when its agent is connected, before closing or stopping that connection (#910; the delivery caveats of Host deletion apply). Its terminals end `killed` (§ 4.7) and the hub lets go of the host's agent: a daemon older than the hub, which then holds none of its terminals, gets STOP without `force` (§ 3.17, #805), and the next terminal there starts the current agent |
 

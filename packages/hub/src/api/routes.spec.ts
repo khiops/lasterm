@@ -1,14 +1,17 @@
+import type { ChannelStatus, SessionStatus } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "../server.fixture.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
+import { MetaDAL } from "../storage/meta.js";
 import {
 	type ChunkSeed,
 	countChunks,
 	seedChunks,
 	watchEventLoop,
 } from "../storage/spool.fixture.js";
+import { Statement } from "../storage/sqlite.js";
 import { getTestTls } from "../test-tls.fixture.js";
 import { validateCreateHost } from "./hosts.js";
 
@@ -2558,5 +2561,152 @@ describe("POST /api/hosts/import — remote daemon choice", () => {
 		});
 		const after = await server.inject({ method: "GET", url: "/api/hosts" });
 		expect(after.json()).toEqual(before.json());
+	});
+});
+
+// ─── A host's terminals across its sessions (#911) ───────────────────────────
+
+describe("a host's terminals across its sessions (#911)", () => {
+	let dal: MetaDAL;
+
+	beforeEach(() => {
+		dal = new MetaDAL(dbs.meta);
+	});
+
+	function host(label: string): string {
+		return dal.createHost({ type: "ssh", label, sshHost: `pi@${label}.local` }).id;
+	}
+
+	function session(id: string, hostId: string, status: SessionStatus, createdAt?: string): void {
+		dal.createSession({ id, hostId, status });
+		if (createdAt !== undefined) {
+			dbs.meta.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run(createdAt, id);
+		}
+	}
+
+	function channel(id: string, sessionId: string, status: ChannelStatus, createdAt?: string): void {
+		dal.createChannel({ id, sessionId, status, shell: "bash" });
+		if (createdAt !== undefined) {
+			dbs.meta.prepare("UPDATE channels SET created_at = ? WHERE id = ?").run(createdAt, id);
+		}
+	}
+
+	const S1 = "01K911SESSION0000000000S01";
+	const S2 = "01K911SESSION0000000000S02";
+	const S3 = "01K911SESSION0000000000S03";
+	const C0 = "01K911CHANNEL00000000000C0";
+	const C1 = "01K911CHANNEL00000000000C1";
+	const C2 = "01K911CHANNEL00000000000C2";
+	const C3 = "01K911CHANNEL00000000000C3";
+
+	/**
+	 * Host H: S1 closed, created first, holding C1; S2 active holding C0, older
+	 * than C1 and restarted onto S2, and C2. Host K: S3 holding C3.
+	 */
+	function twoHosts(statuses: { c0: ChannelStatus; c1: ChannelStatus; c2: ChannelStatus }) {
+		const h = host("h");
+		const k = host("k");
+		session(S1, h, "closed", "2026-11-13T10:00:01.000Z");
+		channel(C1, S1, statuses.c1, "2026-11-13T10:00:02.000Z");
+		session(S2, h, "active", "2026-11-13T10:00:03.000Z");
+		channel(C0, S2, statuses.c0, "2026-11-13T10:00:00.000Z");
+		channel(C2, S2, statuses.c2, "2026-11-13T10:00:04.000Z");
+		session(S3, k, "active", "2026-11-13T10:00:05.000Z");
+		channel(C3, S3, "dead", "2026-11-13T10:00:06.000Z");
+		return { h, k };
+	}
+
+	// Mutations: order by the channels' creation alone ([C0, C1, C2]); join
+	// without the host filter (C3 listed).
+	it("GET /api/channels?host_id lists the host's terminals in session order, then their own (#911)", async () => {
+		const { h } = twoHosts({ c0: "live", c1: "dead", c2: "live" });
+
+		const res = await server.inject({ method: "GET", url: `/api/channels?host_id=${h}` });
+
+		expect(res.statusCode).toBe(200);
+		expect(
+			res.json<Array<{ id: string; host_id: string }>>().map((c) => [c.id, c.host_id]),
+		).toEqual([
+			[C1, h],
+			[C0, h],
+			[C2, h],
+		]);
+	});
+
+	// Mutations: join without the host filter (C3 deleted, purged 3); list the
+	// current session only (C1 kept, purged 1); delete a closed session when its
+	// last channel goes (S1 missing from the listing).
+	it("DELETE /api/channels/dead with a host_id deletes that host's dead terminals across its sessions (#911)", async () => {
+		const { h } = twoHosts({ c0: "dead", c1: "dead", c2: "live" });
+
+		const res = await server.inject({
+			method: "DELETE",
+			url: "/api/channels/dead",
+			payload: { host_id: h },
+		});
+
+		expect(res.statusCode).toBe(200);
+		expect(res.json()).toEqual({ ok: true, purged: 2 });
+		expect([C0, C1, C2, C3].map((id) => dal.getChannel(id)?.status ?? "gone")).toEqual([
+			"gone",
+			"gone",
+			"live",
+			"dead",
+		]);
+		const kept = await server.inject({ method: "GET", url: `/api/sessions?host_id=${h}&all=true` });
+		expect(kept.json<Array<{ id: string; status: string }>>().map((s) => [s.id, s.status])).toEqual(
+			[
+				[S1, "closed"],
+				[S2, "active"],
+			],
+		);
+	});
+
+	// Mutations: either route left on one channel query per session (H2's count
+	// 22 higher); a channel statement prepared once and run per session (22
+	// higher); the sessions that hold a channel, then one query each (2 higher).
+	it("a host's terminals are listed and purged at a cost its past sessions do not change (#911)", async () => {
+		const h1 = host("h1");
+		session("01K911SESSION000000000H1S1", h1, "active");
+		for (const n of [1, 2, 3])
+			channel(`01K911CHANNEL0000000000H1C${n}`, "01K911SESSION000000000H1S1", "live");
+		const h2 = host("h2");
+		for (const [n, status] of [
+			[1, "disconnected"],
+			[2, "disconnected"],
+			[3, "active"],
+		] as const) {
+			session(`01K911SESSION000000000H2S${n}`, h2, status);
+			channel(`01K911CHANNEL0000000000H2C${n}`, `01K911SESSION000000000H2S${n}`, "live");
+		}
+		for (let n = 10; n < 30; n++) session(`01K911SESSION00000000H2X${n}`, h2, "closed");
+
+		/** Statements executed while `request` runs, through the wrapper every hub query uses. */
+		async function executions(request: () => Promise<unknown>): Promise<number> {
+			const spies = [
+				vi.spyOn(Statement.prototype, "run"),
+				vi.spyOn(Statement.prototype, "get"),
+				vi.spyOn(Statement.prototype, "all"),
+			];
+			try {
+				await request();
+				return spies.reduce((sum, spy) => sum + spy.mock.calls.length, 0);
+			} finally {
+				for (const spy of spies) spy.mockRestore();
+			}
+		}
+		const list = (h: string) => () =>
+			server.inject({ method: "GET", url: `/api/channels?host_id=${h}` });
+		const purge = (h: string) => async () => {
+			const res = await server.inject({
+				method: "DELETE",
+				url: "/api/channels/dead",
+				payload: { host_id: h },
+			});
+			expect(res.json()).toEqual({ ok: true, purged: 0 });
+		};
+
+		expect(await executions(list(h2))).toBe(await executions(list(h1)));
+		expect(await executions(purge(h2))).toBe(await executions(purge(h1)));
 	});
 });

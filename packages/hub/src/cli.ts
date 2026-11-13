@@ -1714,14 +1714,15 @@ async function cmdHostRemove(args: ParsedArgs): Promise<void> {
 }
 
 async function cmdSessionList(args: ParsedArgs): Promise<void> {
-	const result = await apiRequest("GET", "/api/sessions");
+	// Without --all the hub lists the sessions that are not closed (#911).
+	const result = await apiRequest("GET", args.all ? "/api/sessions?all=true" : "/api/sessions");
 	const sessions = result as Array<Record<string, unknown>>;
 	if (args.json) {
 		console.log(JSON.stringify(sessions));
 		return;
 	}
 	if (!sessions.length) {
-		console.log("No active sessions.");
+		console.log(args.all ? "No sessions." : "No active sessions.");
 		return;
 	}
 	const hosts = (await apiRequest("GET", "/api/hosts")) as Array<Record<string, unknown>>;
@@ -1798,7 +1799,7 @@ Usage:
   lasterm agent import <binary> <manifest>       Verify and cache an agent binary
               --os OS --arch ARCH --version x.y.z --attest [--force]
 
-  lasterm session list [--json]                 List active sessions
+  lasterm session list [--all] [--json]         List active sessions (--all: closed ones too)
 
   lasterm pair                                  Generate pairing code
   lasterm pair --code XXXXXX                    Verify pairing code

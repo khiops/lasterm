@@ -1707,7 +1707,7 @@ detached daemon, or deploys and runs it over SSH.
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| Runtime | Node.js ≥ 24 LTS | Hub (the agent is a standalone Rust binary and needs no Node) |
+| Runtime | Node.js ≥ 26 LTS | Hub (the agent is a standalone Rust binary and needs no Node) |
 | Language | TypeScript (strict) | All packages |
 | Monorepo | pnpm workspaces | Package management |
 | PTY | `async-xpty` (Rust) | Terminal spawn/resize — in the agent; no Node PTY exists |

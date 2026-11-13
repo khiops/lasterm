@@ -8,8 +8,10 @@
  *
  * - A missing parameter throws. `node:sqlite` binds NULL in its place, silently.
  * - A parameter is a number, a string, a bigint, a Buffer, null, or undefined
- *   for NULL. `node:sqlite` on Node 24 refuses undefined, and binds a boolean
- *   as 1 or 0; both are settled here, before it sees them.
+ *   for NULL, and a boolean is refused; both are settled here, before
+ *   `node:sqlite` sees them. It binds a boolean as 1 or 0, and since 26.10
+ *   undefined as NULL itself, but its types (`SQLInputValue`) still exclude
+ *   undefined, so the mapping stays.
  * - Named parameters come in one plain object, keyed without their `@`, and a
  *   key the SQL does not name is ignored.
  * - A row is a plain object, and a BLOB a Buffer over the bytes read, not a copy.

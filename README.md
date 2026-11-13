@@ -165,7 +165,7 @@ host as usual. See [`docs/SPEC.md` §5.5b](docs/SPEC.md).
 
 ### Prerequisites
 
-- Node.js >= 24 LTS
+- Node.js >= 26 LTS (the repository pins one exact version in `.nvmrc` and `mise.toml`)
 - pnpm 12.4.1, the version `packageManager` in `package.json` pins (corepack provides it)
 - Rust 1.98.0, as `rust-toolchain.toml` pins, for the agent and the hub's native addons
 - Git, and bash: on Windows, Git for Windows, whose bash runs `scripts/dev/check.sh` and its spec

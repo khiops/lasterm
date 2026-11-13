@@ -209,7 +209,7 @@ export const buildOptions: BuildOptions = {
 	entryPoints: [HUB_ENTRY],
 	bundle: true,
 	platform: "node",
-	target: "node24",
+	target: "node26",
 	format: "cjs",
 	outfile: OUT_FILE,
 	sourcemap: false,

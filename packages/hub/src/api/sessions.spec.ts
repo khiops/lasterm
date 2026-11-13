@@ -1,6 +1,7 @@
 import type { AgentChannelStateMessage, HelloMessage, ProtocolMessage } from "@lasterm/shared";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HUB_VERSION } from "../build-version.js";
 import { ConfigResolver } from "../config.js";
 import type { ChannelLifecycleManager } from "../session/channel-lifecycle-manager.js";
 import { captureQuitFence } from "../session/quit-fence.js";
@@ -134,13 +135,16 @@ type FakeSshAgent = SshAgent & {
 	execOnHost: ReturnType<typeof vi.fn>;
 };
 
-/** What a daemon says it can do. */
+/** What a daemon at this hub's version says it can do. */
 const DAEMON_HELLO: HelloMessage = {
 	type: "HELLO",
 	version: 1,
-	agentVersion: "0.1.0",
+	agentVersion: HUB_VERSION,
 	capabilities: ["multiplex", "resize", "snapshot", "launch-profiles", "env-modes", "hub-identity"],
 };
+
+/** A daemon older than this hub, which the hub stops once it holds nothing there (#805). */
+const OUTDATED_DAEMON_HELLO: HelloMessage = { ...DAEMON_HELLO, agentVersion: "0.1.0" };
 
 let dbs: DatabaseManager;
 let sm: SessionManager;
@@ -416,6 +420,54 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		expect(agent.sent).toEqual([]);
 	});
 
+	// D2's other forms: several terminals, and a local host, which has nothing
+	// to connect first.
+	it.each([
+		[
+			"ssh",
+			2,
+			false,
+			"2 terminals on this host have not ended. Send force=true to ask their agent to end them and delete the host.",
+		],
+		[
+			"ssh",
+			2,
+			true,
+			"2 terminals on this host have not ended, and this hub is not connected to their agent: nothing can be sent to them, and they may keep running. Connecting the host first may reach them; or send force=true to delete it anyway.",
+		],
+		[
+			"local",
+			1,
+			true,
+			"1 terminal on this host has not ended, and this hub is not connected to its agent: nothing can be sent to it, and it may keep running. Send force=true to delete it anyway.",
+		],
+		[
+			"local",
+			2,
+			true,
+			"2 terminals on this host have not ended, and this hub is not connected to their agent: nothing can be sent to them, and they may keep running. Send force=true to delete it anyway.",
+		],
+	] as const)(
+		"D2 tells a %s host's terminals=%i, unreachable=%s, in their own form",
+		async (type, terminals, unreachable, message) => {
+			if (type === "local")
+				hostId = new MetaDAL(dbs.meta).createHost({ type: "local", label: "this machine" }).id;
+			const agent = connectedAgent();
+			const { ctx } = liveTerminalsOn(agent, terminals);
+			if (unreachable) ctx.agents.delete(hostId);
+			const response = await remove();
+			expect(response.statusCode).toBe(409);
+			expect(response.json().error).toEqual({
+				code: "TERMINALS_WOULD_END",
+				terminals,
+				...(unreachable && { unreachable: terminals }),
+				message,
+			});
+			expect(agent.sent).toEqual([]);
+			expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+		},
+	);
+
 	it.each(["deleteCascadeForHost", "deleteHost"] as const)(
 		"R12 releases the marker when %s throws",
 		async (method) => {
@@ -434,8 +486,14 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		},
 	);
 
-	it("V3 session deletion sends DESTROY before closing its daemon connection", async () => {
+	// A current daemon's connection is closed, an outdated one is stopped (#805):
+	// the DESTROYs go first either way (#923).
+	it.each([
+		["at this hub's version", DAEMON_HELLO, "close"],
+		["older than this hub", OUTDATED_DAEMON_HELLO, "STOP"],
+	])("V3 session deletion sends DESTROY before ending a daemon %s", async (_, hello, end) => {
 		const agent = connectedAgent();
+		agent.helloMessage = hello;
 		const { channelIds } = liveTerminalsOn(agent, 2);
 		const order: string[] = [];
 		agent.send.mockImplementation((msg: ProtocolMessage) =>
@@ -448,14 +506,13 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		expect(
 			(await server.inject({ method: "DELETE", url: `/api/sessions/${SESSION_ID}` })).statusCode,
 		).toBe(204);
-		expect(order).toEqual([...channelIds, "STOP"]);
+		expect(order).toEqual([...channelIds, end]);
 	});
 });
 
 describe("terminal work arriving after deletion or a lost connection (#910)", () => {
 	function fixture() {
 		const agent = connectedAgent();
-		agent.helloMessage = { ...DAEMON_HELLO, agentVersion: "0.15.3" };
 		const f = liveTerminalOn(agent);
 		const lifecycle = (sm as unknown as { lifecycle: ChannelLifecycleManager }).lifecycle;
 		return { ...f, agent, lifecycle, dal: new MetaDAL(dbs.meta) };
@@ -681,11 +738,14 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 						const request = next.sent.find((m) => m.type === "SPAWN")!;
 						if (request.type !== "SPAWN") throw new Error("expected SPAWN");
 						if (!request.requestId) throw new Error("expected request id");
-						ctx.pendingRequests.get(request.requestId)?.({
-							type: "SPAWN_OK",
-							requestId: request.requestId,
-							channelId,
-						});
+						const answer = ctx.pendingRequests.get(request.requestId);
+						if (!answer) throw new Error("expected the second SPAWN to wait for its answer");
+						heard.length = 0;
+						answer({ type: "SPAWN_OK", requestId: request.requestId, channelId });
+						// R10 (c): the connection the host now has speaks for the terminal.
+						expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([
+							{ type: "CHANNEL_STATE", channelId, sessionId: SESSION_ID, status: "live" },
+						]);
 					}
 				}
 				heard.length = 0;

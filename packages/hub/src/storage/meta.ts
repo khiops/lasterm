@@ -240,6 +240,14 @@ export class MetaDAL {
 		return this.sessions.listSessions(hostId);
 	}
 
+	listOpenSessions(hostId?: string): Session[] {
+		return this.sessions.listOpenSessions(hostId);
+	}
+
+	sweepSessions(heldIds: readonly string[]): { closed: number; deleted: number } {
+		return this.sessions.sweepSessions(heldIds);
+	}
+
 	updateSessionStatus(id: string, status: SessionStatus): void {
 		this.sessions.updateSessionStatus(id, status);
 	}
@@ -284,6 +292,10 @@ export class MetaDAL {
 		return this.channels.listChannels(sessionId);
 	}
 
+	listChannelsOnHost(hostId: string): Channel[] {
+		return this.channels.listChannelsOnHost(hostId);
+	}
+
 	/** `endReason` with `dead` only, when the hub ended it itself (#592). */
 	updateChannelStatus(
 		id: string,
@@ -320,13 +332,7 @@ export class MetaDAL {
 
 	updateChannelConfig(
 		channelId: string,
-		config: {
-			icon?: string | null;
-			shell?: string | null;
-			args?: string[];
-			cwd?: string | null;
-			directProcess?: boolean;
-		},
+		config: Parameters<ChannelsDAL["updateChannelConfig"]>[1],
 	): boolean {
 		return this.channels.updateChannelConfig(channelId, config);
 	}

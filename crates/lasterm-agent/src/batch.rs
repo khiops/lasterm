@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 
 use crate::flow::{Flow, Flows, InTransit};
 use crate::framing::encode_frame;
-use crate::handler::iso_now;
+use crate::handler::{iso_now, FrameSender, Outgoing};
 use crate::owner::OwnerId;
 use crate::protocol::AgentToHub;
 
@@ -32,16 +32,39 @@ pub struct EventFrame {
     pub charge: InTransit,
 }
 
+/// A channel's ATTACH_OK or SNAPSHOT_RES, rendered by its reader (#931).
+///
+/// It is a reply: it goes to the connection that asked, and is charged to
+/// nothing (#553). It travels the channel's pipeline all the same, so that it
+/// reaches that connection after the output its screen holds and before the
+/// output read after it.
+pub struct ReplyFrame {
+    pub channel_id: String,
+    pub frame: Vec<u8>,
+    /// The connection that asked.
+    pub to: FrameSender,
+}
+
+impl ReplyFrame {
+    /// Queue it on the connection that asked. Nothing to do once that one is
+    /// gone: nobody waits for it there.
+    pub fn send(self) {
+        let _ = self.to.send(Outgoing::reply(self.frame));
+    }
+}
+
 /// What a channel's reader task sends towards the hub.
 ///
 /// Output and events travel the same pipeline, so both reach the connection
 /// their hub has when they are sent, not the connection that spawned the
 /// channel (#549), and in the order the reader sent them. Each carries its
 /// channel's owner, which is fixed at SPAWN: an exit still knows where it goes
-/// after its channel is gone from the manager (#127).
+/// after its channel is gone from the manager (#127). A snapshot reply takes
+/// the same pipeline, to the connection that asked for it (#931).
 pub enum ChannelEvent {
     Output(OutputEvent),
     Frame(EventFrame),
+    Reply(ReplyFrame),
 }
 
 /// Sender half of the pipeline every channel reader writes to, and the flow
@@ -85,15 +108,25 @@ pub struct BatchedOutput {
 pub enum BatchedEvent {
     Output(BatchedOutput),
     Frame(EventFrame),
+    Reply(ReplyFrame),
+}
+
+/// Where a frame that left the batch loop goes.
+pub enum Delivery {
+    /// To the current connection of the hub that owns its channel.
+    Owner(RoutedFrame),
+    /// To the connection that asked for it.
+    Asker(ReplyFrame),
 }
 
 impl BatchedEvent {
-    /// The frame to write to the hub, with its channel and its charge. OUTPUT
-    /// is stamped with the time it leaves; an event was encoded by the reader
-    /// that saw it.
-    pub fn into_routed(self) -> std::io::Result<RoutedFrame> {
+    /// The frame to write to the hub, with its channel and its charge, or the
+    /// reply for the connection that asked. OUTPUT is stamped with the time it
+    /// leaves; an event or a reply was encoded by the reader that made it.
+    pub fn into_delivery(self) -> std::io::Result<Delivery> {
         match self {
-            BatchedEvent::Output(b) => Ok(RoutedFrame {
+            BatchedEvent::Reply(reply) => Ok(Delivery::Asker(reply)),
+            BatchedEvent::Output(b) => Ok(Delivery::Owner(RoutedFrame {
                 frame: encode_frame(&AgentToHub::Output {
                     channel_id: b.channel_id.clone(),
                     seq: b.seq,
@@ -103,13 +136,13 @@ impl BatchedEvent {
                 owner: b.owner,
                 channel_id: b.channel_id,
                 charge: b.charge,
-            }),
-            BatchedEvent::Frame(event) => Ok(RoutedFrame {
+            })),
+            BatchedEvent::Frame(event) => Ok(Delivery::Owner(RoutedFrame {
                 owner: event.owner,
                 channel_id: event.channel_id,
                 frame: event.frame,
                 charge: Some(event.charge),
-            }),
+            })),
         }
     }
 }
@@ -189,13 +222,7 @@ impl Batcher {
                 }
             }
             ChannelEvent::Frame(event) => {
-                let held = self
-                    .buffers
-                    .get_mut(&event.channel_id)
-                    .and_then(|buf| buf.take(&event.channel_id));
-                if let Some(batch) = held {
-                    let _ = tx.send(BatchedEvent::Output(batch));
-                }
+                self.release(&event.channel_id, tx);
                 // Its exit is a channel's last word: keeping an empty buffer
                 // for it would grow the map by one per terminal ever run.
                 if event.ends_channel {
@@ -203,6 +230,23 @@ impl Batcher {
                 }
                 let _ = tx.send(BatchedEvent::Frame(event));
             }
+            // The output its screen holds goes first; what the reader reads
+            // after it is buffered behind it (#931).
+            ChannelEvent::Reply(reply) => {
+                self.release(&reply.channel_id, tx);
+                let _ = tx.send(BatchedEvent::Reply(reply));
+            }
+        }
+    }
+
+    /// Send what `channel_id` has buffered, now.
+    fn release(&mut self, channel_id: &str, tx: &mpsc::UnboundedSender<BatchedEvent>) {
+        let held = self
+            .buffers
+            .get_mut(channel_id)
+            .and_then(|buf| buf.take(channel_id));
+        if let Some(batch) = held {
+            let _ = tx.send(BatchedEvent::Output(batch));
         }
     }
 
@@ -219,8 +263,9 @@ impl Batcher {
 ///
 /// Receives `ChannelEvent`s from PTY reader tasks. Output accumulates per
 /// channel and is flushed every 16 ms or when a channel buffer exceeds 4 KB.
-/// An event about a channel first flushes that channel's buffered output, then
-/// goes out: a channel's output never arrives after its CHANNEL_EXIT.
+/// An event or a snapshot reply about a channel first flushes that channel's
+/// buffered output, then goes out: a channel's output never arrives after its
+/// CHANNEL_EXIT, nor after a snapshot that already shows it.
 pub async fn batch_loop(
     mut rx: mpsc::UnboundedReceiver<ChannelEvent>,
     tx: mpsc::UnboundedSender<BatchedEvent>,
@@ -287,6 +332,9 @@ mod tests {
             Some(BatchedEvent::Frame(event)) => {
                 panic!("expected OUTPUT, got an event for {}", event.channel_id)
             }
+            Some(BatchedEvent::Reply(reply)) => {
+                panic!("expected OUTPUT, got a reply for {}", reply.channel_id)
+            }
             None => panic!("expected OUTPUT, got nothing"),
         }
     }
@@ -296,6 +344,9 @@ mod tests {
             Some(BatchedEvent::Frame(event)) => event,
             Some(BatchedEvent::Output(batch)) => {
                 panic!("expected an event, got OUTPUT for {}", batch.channel_id)
+            }
+            Some(BatchedEvent::Reply(reply)) => {
+                panic!("expected an event, got a reply for {}", reply.channel_id)
             }
             None => panic!("expected an event, got nothing"),
         }

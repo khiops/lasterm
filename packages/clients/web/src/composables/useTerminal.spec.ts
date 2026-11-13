@@ -601,7 +601,8 @@ describe("an ended terminal's last output (#927)", () => {
 		quick.refuse("T", output({ snapshot: null, tail: [bytes("T-OUT")] }));
 		await second;
 
-		expect(await first).toBe("CHANNEL_DEAD");
+		// Asking for S settled the attach for T at once: nothing it got is written (#929).
+		expect(await first).toBe("ATTACH_SUPERSEDED");
 		expect(xterm.events).toEqual(["<reset>", "S-OUT", MOUSE_OFF]);
 	});
 
@@ -609,7 +610,7 @@ describe("an ended terminal's last output (#927)", () => {
 		const moved = pane();
 		const code = await moved.attachEnded("T", output(), { stillWanted: () => false });
 
-		expect(code).toBe("CHANNEL_DEAD");
+		expect(code).toBe("ATTACH_SUPERSEDED");
 		expect(xterm.events).toEqual([]);
 	});
 

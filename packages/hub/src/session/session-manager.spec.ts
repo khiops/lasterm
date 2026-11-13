@@ -37,6 +37,8 @@ import { seedShellProfiles } from "./shell-profile-seed.js";
 let localSpawnCount = 0;
 let sshSpawnCount = 0;
 let nextLocalSpawnChannelIdOverride: string | null = null;
+/** Set before a test to have the next local SPAWN refused with this SPAWN_ERR. */
+let nextLocalSpawnError: { code: string; message: string } | null = null;
 let nextLocalAttachNotFoundChannelId: string | null = null;
 let localChannelStateWaitCount = 0;
 let nextLocalChannelStateFailure: Error | null = null;
@@ -85,6 +87,14 @@ vi.mock("./agent-launcher.js", () => {
 					(spawnMsg.channelId as string | undefined) ??
 					nextLocalChannelId();
 				nextLocalSpawnChannelIdOverride = null;
+				const refusal = nextLocalSpawnError;
+				if (refusal !== null) {
+					nextLocalSpawnError = null;
+					setImmediate(() => {
+						this.emit("message", { type: "SPAWN_ERR", requestId: spawnMsg.requestId, ...refusal });
+					});
+					return;
+				}
 				// Two-step elevation: if elevated=true but no elevationSecret, return SPAWN_ERR
 				if (spawnMsg.elevated === true && !spawnMsg.elevationSecret) {
 					setImmediate(() => {
@@ -158,6 +168,7 @@ vi.mock("./agent-launcher.js", () => {
 
 afterEach(() => {
 	nextLocalSpawnChannelIdOverride = null;
+	nextLocalSpawnError = null;
 	nextLocalAttachNotFoundChannelId = null;
 	nextLocalChannelStateFailure = null;
 });
@@ -5431,6 +5442,31 @@ describe("SessionManager — elevation support", () => {
 		const sessions = dal.listSessions(localHostId);
 		const channels = sessions.flatMap((s) => dal.listChannels(s.id));
 		expect(channels).toHaveLength(0);
+	});
+
+	it("#958: an elevated spawn refused for another reason than a missing password reports it at once", async () => {
+		const localHostId = await sm.ensureLocalHost();
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-958", received));
+		nextLocalSpawnError = { code: "ELEVATION_FAILED", message: "gsudo not found" };
+
+		const result = await sm.handleSpawn("c-958", {
+			type: "SPAWN",
+			hostId: localHostId,
+			elevated: true,
+			requestId: "01JD2Z0K8V9X7Q3M5N4P6R8T0W",
+		});
+
+		expect(result).toBeNull();
+		expect(received.filter((m) => m.type === "AUTH_PROMPT")).toEqual([]);
+		expect(received.filter((m) => m.type === "ERROR")).toEqual([
+			{
+				type: "ERROR",
+				code: "ELEVATION_FAILED",
+				message: "gsudo not found",
+				requestId: "01JD2Z0K8V9X7Q3M5N4P6R8T0W",
+			},
+		]);
 	});
 
 	it("D4: closeSession clears pending elevation prompt and rejects late response without caching", async () => {

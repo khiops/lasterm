@@ -58,9 +58,10 @@ describe("spool checkpoint worker (#786)", () => {
 				},
 				{ timeout: 5000 },
 			);
-			// A worker that already failed holds close() back by nothing: its stop
-			// settles at once. The bound times that alone, not the final checkpoints,
-			// which take the disk's time (#978: over 2 s on a loaded Windows runner).
+			// A worker that already failed holds close() back by nothing: its stop(),
+			// the only wait in close(), settles at once. The bound times that alone,
+			// not the final checkpoints, which take the disk's time (#978: over 2 s on
+			// a loaded Windows runner).
 			const checkpointer = dbs.checkpointerForTests;
 			expect(checkpointer).toBeDefined();
 			const start = performance.now();

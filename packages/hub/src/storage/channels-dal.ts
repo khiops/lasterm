@@ -324,6 +324,9 @@ export class ChannelsDAL {
 			args?: string[];
 			cwd?: string | null;
 			directProcess?: boolean;
+			/** Elevated with this method, or null for not elevated. */
+			elevationMethod?: string | null;
+			launchProfileId?: string | null;
 		},
 	): boolean {
 		const sets: string[] = [];
@@ -349,6 +352,15 @@ export class ChannelsDAL {
 		if (config.directProcess !== undefined) {
 			sets.push("direct_process = @directProcess");
 			params.directProcess = config.directProcess ? 1 : 0;
+		}
+		if (config.elevationMethod !== undefined) {
+			sets.push("elevated = @elevated", "elevation_method = @elevationMethod");
+			params.elevated = config.elevationMethod === null ? 0 : 1;
+			params.elevationMethod = config.elevationMethod;
+		}
+		if (config.launchProfileId !== undefined) {
+			sets.push("launch_profile_id = @launchProfileId");
+			params.launchProfileId = config.launchProfileId;
 		}
 
 		if (sets.length === 0) return false;

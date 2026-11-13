@@ -1046,6 +1046,217 @@ async fn a_channel_delivers_all_its_output_before_its_exit() {
     agent.kill().await.ok();
 }
 
+/// A snapshot and the output around it reach the hub in the order the screen
+/// took them (#931). The output a snapshot holds arrives before it, and what
+/// arrives after it is output it does not hold: `last_seq` is the seq of the
+/// last read it holds. OUTPUT used to wait up to 16 ms in the batch loop while
+/// ATTACH_OK and SNAPSHOT_RES went around it, so a snapshot could hold a line
+/// its OUTPUT brought again after it, and a pane wrote the line twice.
+///
+/// Each round's shell prints a line, waits for one, then prints another. The
+/// test asks for snapshots one answer at a time, alternating ATTACH and
+/// SNAPSHOT_REQ, sends the line once a snapshot shows the first, and goes on
+/// until one shows the second and for 300 ms more: output then comes on both
+/// sides of a snapshot. Ten rounds, since the old order was lost only when a
+/// batch went out between a read and the next snapshot.
+#[tokio::test]
+async fn a_snapshot_reaches_the_hub_between_the_output_it_holds_and_the_output_after_it() {
+    let mut agent = spawn_agent().await;
+    let mut stdout = agent.stdout.take().unwrap();
+    let mut stdin = agent.stdin.take().unwrap();
+    let _hello = read_frame_timeout(&mut stdout, 5).await;
+
+    for round in 0..10 {
+        let channel_id = format!("snapshot-order-{round}");
+        let first = format!("snapshot-marker-{round}-a");
+        let second = format!("snapshot-marker-{round}-b");
+        // The command line spells the markers otherwise, so that only the
+        // command's output holds them: not an echo, not a window title.
+        let command = if cfg!(windows) {
+            format!(
+                "echo snapshot-mark^er-{round}-a& set /p line=& echo snapshot-mark^er-{round}-b& ping -n 3 127.0.0.1 >nul"
+            )
+        } else {
+            format!(
+                "echo snapshot-mark\"\"er-{round}-a; read line; echo snapshot-mark\"\"er-{round}-b; sleep 2"
+            )
+        };
+        write_frame(
+            &mut stdin,
+            &msgmap(vec![
+                ("type", sv("SPAWN")),
+                ("request_id", sv(&format!("req-{channel_id}"))),
+                ("channel_id", sv(&channel_id)),
+                ("shell", sv(test_shell().0)),
+                (
+                    "args",
+                    rmpv::Value::Array(vec![sv(test_shell().1), sv(&command)]),
+                ),
+                ("cols", iv(80)),
+                ("rows", iv(24)),
+                ("env_mode", sv("inherit")),
+            ]),
+        )
+        .await;
+
+        let ask = |asked: u32| {
+            if asked.is_multiple_of(2) {
+                msgmap(vec![
+                    ("type", sv("ATTACH")),
+                    ("channel_id", sv(&channel_id)),
+                    ("request_id", sv(&format!("attach-{round}-{asked}"))),
+                ])
+            } else {
+                msgmap(vec![
+                    ("type", sv("SNAPSHOT_REQ")),
+                    ("channel_id", sv(&channel_id)),
+                ])
+            }
+        };
+        let mut seen: Vec<Seen> = Vec::new();
+        let mut asked: u32 = 0;
+        let mut line_sent = false;
+        let mut second_shown: Option<std::time::Instant> = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{channel_id}: no snapshot showed {second:?} within 10 s"
+            );
+            let frame = read_frame_timeout(&mut stdout, 10).await;
+            if frame["channel_id"].as_str() != Some(channel_id.as_str()) {
+                continue;
+            }
+            match frame["type"].as_str() {
+                Some("SPAWN_OK") => {}
+                Some("OUTPUT") => {
+                    let rmpv::Value::Binary(data) = &frame["data"] else {
+                        panic!("OUTPUT without data");
+                    };
+                    seen.push(Seen::Output {
+                        seq: frame["seq"].as_u64().expect("OUTPUT seq"),
+                        data: data.clone(),
+                    });
+                    continue;
+                }
+                Some("ATTACH_OK") | Some("SNAPSHOT_RES") => {
+                    let screen = frame["snapshot"]["serialized"]
+                        .as_str()
+                        .expect("snapshot text")
+                        .to_string();
+                    if !line_sent && screen.contains(&first) {
+                        let line: &[u8] = if cfg!(windows) { b"go\r" } else { b"go\n" };
+                        write_frame(
+                            &mut stdin,
+                            &msgmap(vec![
+                                ("type", sv("INPUT")),
+                                ("channel_id", sv(&channel_id)),
+                                ("data", rmpv::Value::Binary(line.to_vec())),
+                            ]),
+                        )
+                        .await;
+                        line_sent = true;
+                    }
+                    if second_shown.is_none() && screen.contains(&second) {
+                        second_shown = Some(std::time::Instant::now());
+                    }
+                    seen.push(Seen::Snapshot {
+                        last_seq: frame["last_seq"].as_u64().expect("last_seq"),
+                        screen,
+                    });
+                }
+                Some("CHANNEL_EXIT") => panic!("{channel_id} ended before the test was done"),
+                _ => continue,
+            }
+            // Well past one batch interval after the last line was first
+            // shown: anything held back would be here by now.
+            if second_shown.is_some_and(|at| at.elapsed() > Duration::from_millis(300)) {
+                break;
+            }
+            write_frame(&mut stdin, &ask(asked)).await;
+            asked += 1;
+        }
+        write_frame(
+            &mut stdin,
+            &msgmap(vec![
+                ("type", sv("DESTROY")),
+                ("channel_id", sv(&channel_id)),
+            ]),
+        )
+        .await;
+
+        assert_snapshots_split_the_output(&channel_id, &seen, &[&first, &second]);
+    }
+
+    agent.kill().await.ok();
+}
+
+/// One frame of a channel, in the order it arrived.
+enum Seen {
+    Output { seq: u64, data: Vec<u8> },
+    Snapshot { last_seq: u64, screen: String },
+}
+
+/// What #931 asks of a channel's frames: output came after some snapshot (so
+/// the bound below is tested); no snapshot shows a marker before an OUTPUT
+/// brought it (the duplicate); the OUTPUT before each snapshot has a seq up to
+/// its `last_seq`, and the OUTPUT after it a greater one.
+fn assert_snapshots_split_the_output(channel_id: &str, seen: &[Seen], markers: &[&str]) {
+    let first_snapshot = seen
+        .iter()
+        .position(|item| matches!(item, Seen::Snapshot { .. }))
+        .unwrap_or_else(|| panic!("{channel_id}: no snapshot came"));
+    assert!(
+        seen[first_snapshot..]
+            .iter()
+            .any(|item| matches!(item, Seen::Output { .. })),
+        "{channel_id}: no OUTPUT came after a snapshot"
+    );
+    for (at, item) in seen.iter().enumerate() {
+        let Seen::Snapshot { screen, .. } = item else {
+            continue;
+        };
+        let before: Vec<u8> = seen[..at]
+            .iter()
+            .filter_map(|earlier| match earlier {
+                Seen::Output { data, .. } => Some(data.as_slice()),
+                Seen::Snapshot { .. } => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        for marker in markers {
+            if screen.contains(marker) {
+                assert!(
+                    String::from_utf8_lossy(&before).contains(marker),
+                    "{channel_id}: a snapshot showed {marker:?} before the OUTPUT that printed it"
+                );
+            }
+        }
+    }
+    for (at, item) in seen.iter().enumerate() {
+        let Seen::Snapshot { last_seq, .. } = item else {
+            continue;
+        };
+        for earlier in &seen[..at] {
+            if let Seen::Output { seq, .. } = earlier {
+                assert!(
+                    seq <= last_seq,
+                    "{channel_id}: OUTPUT {seq} came before a snapshot whose last_seq is {last_seq}"
+                );
+            }
+        }
+        for later in &seen[at + 1..] {
+            if let Seen::Output { seq, .. } = later {
+                assert!(
+                    seq > last_seq,
+                    "{channel_id}: OUTPUT {seq} came after a snapshot whose last_seq is {last_seq}"
+                );
+            }
+        }
+    }
+}
+
 /// SC-28: Closing stdin (EOF) causes the agent to exit with code 0 (graceful shutdown).
 #[tokio::test]
 async fn test_stdin_eof_graceful_shutdown() {

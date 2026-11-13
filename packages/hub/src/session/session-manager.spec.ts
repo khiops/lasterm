@@ -2085,9 +2085,9 @@ describe("SessionManager", () => {
 		type Emitter = { emit: (event: string, message: ProtocolMessage) => void };
 
 		/** A live terminal, and another window's ATTACH on it that its agent has not answered. */
-		async function attachWaiting() {
-			sm.addClient(makeClient("c-typing", []));
-			const channelId = await sm.handleSpawn("c-typing", { type: "SPAWN", hostId: "local" });
+		async function attachWaiting(manager: SessionManager = sm) {
+			manager.addClient(makeClient("c-typing", []));
+			const channelId = await manager.handleSpawn("c-typing", { type: "SPAWN", hostId: "local" });
 			if (channelId === null) throw new Error("expected a local channel");
 			const agent = mockLocalAgents.at(-1);
 			if (agent === undefined) throw new Error("expected the local agent");
@@ -2101,8 +2101,8 @@ describe("SessionManager", () => {
 			});
 
 			const received: ProtocolMessage[] = [];
-			sm.addClient(makeClient("c-pane", received));
-			const attached = sm.handleAttach("c-pane", channelId);
+			manager.addClient(makeClient("c-pane", received));
+			const attached = manager.handleAttach("c-pane", channelId);
 			await vi.waitFor(() => expect(asked).toHaveLength(1));
 			const [attach] = asked;
 			if (attach === undefined) throw new Error("expected an ATTACH");
@@ -2212,6 +2212,252 @@ describe("SessionManager", () => {
 
 			expect(received).toEqual([{ type: "INPUT_DROPPED", channelId }]);
 			expect(elsewhere).toEqual([]);
+		});
+
+		// What the agent sends after its ATTACH_OK is output the snapshot does not
+		// hold (#931). One read can carry both, and the hub handles every frame of
+		// a read before anything it awaited resumes: the pane, which writes OUTPUT
+		// only once its ATTACH_OK has come, must still get them in that order, and
+		// the spool must keep that output after the snapshot. An agent from before
+		// request ids is matched by channel, and gets the same.
+		describe("and the output the agent sends after its ATTACH_OK (#931)", () => {
+			const after = new Uint8Array(Buffer.from("printed after the snapshot"));
+
+			function output(channelId: string, data: Uint8Array): ProtocolMessage {
+				return { type: "OUTPUT", channelId, seq: 1, ts: "2026-11-13T12:00:00.000Z", data };
+			}
+
+			/** One read: the agent's answer, then what the terminal printed after its snapshot. */
+			function answerThenPrint(agent: Emitter, channelId: string, requestId?: string): void {
+				agent.emit("message", attachOk(channelId, requestId));
+				agent.emit("message", output(channelId, after));
+			}
+
+			function ctxOf(manager: SessionManager) {
+				return (manager as unknown as { ctx: import("./session-context.js").SharedSessionContext })
+					.ctx;
+			}
+
+			const matchings = [
+				["with the ATTACH's request id", true],
+				["matched by channel, from an agent without request ids", false],
+			] as const;
+
+			it.each(matchings)("reaches the pane after its ATTACH_OK, %s", async (_, named) => {
+				const { channelId, agent, attach, attached, received } = await attachWaiting();
+
+				answerThenPrint(agent, channelId, named ? attach.requestId : undefined);
+
+				expect(await attached).toBe(true);
+				expect(
+					received.filter((m) => m.type === "ATTACH_OK" || m.type === "OUTPUT").map((m) => m.type),
+				).toEqual(["ATTACH_OK", "OUTPUT"]);
+			});
+
+			it.each(matchings)(
+				"is stored after the snapshot, as the tail an attach from the spool replays, %s",
+				async (_, named) => {
+					const { channelId, agent, attach, attached } = await attachWaiting();
+
+					answerThenPrint(agent, channelId, named ? attach.requestId : undefined);
+					await attached;
+
+					ctxOf(sm).chunker.flush(channelId);
+					const spool = new SpoolDAL(dbManager.spool);
+					const snapshot = spool.getLatestSnapshot(channelId);
+					expect(JSON.parse(snapshot?.dataBlob.toString("utf8") ?? "null")).toMatchObject({
+						serialized: "<live>",
+					});
+					const tail = spool
+						.getChunksByChannel(channelId, { kind: "output", afterSeq: snapshot?.seq ?? 0 })
+						.map((chunk) => chunk.dataBlob.toString("utf8"));
+					expect(tail).toEqual(["printed after the snapshot"]);
+				},
+			);
+
+			// The spool is the hub's: the agent's last_seq counts its own reads.
+			describe("the spool's numbering", () => {
+				async function liveChannel() {
+					sm.addClient(makeClient("c-writer", []));
+					const channelId = await sm.handleSpawn("c-writer", { type: "SPAWN", hostId: "local" });
+					if (channelId === null) throw new Error("expected a local channel");
+					const agent = mockLocalAgents.at(-1) as unknown as Emitter | undefined;
+					if (agent === undefined) throw new Error("expected the local agent");
+					const rows = () =>
+						new SpoolDAL(dbManager.spool)
+							.getChunksByChannel(channelId)
+							.map((chunk) => ({ seq: chunk.seq, kind: chunk.kind }));
+					return {
+						channelId,
+						emit: (msg: ProtocolMessage) => agent.emit("message", msg),
+						flush: () => ctxOf(sm).chunker.flush(channelId),
+						rows,
+					};
+				}
+
+				function snapshotRes(channelId: string, lastSeq: number): ProtocolMessage {
+					return {
+						type: "SNAPSHOT_RES",
+						channelId,
+						snapshot: { serialized: "<screen>", cols: 80, rows: 24, cursorX: 0, cursorY: 0 },
+						lastSeq,
+					};
+				}
+
+				const text = (value: string) => new Uint8Array(Buffer.from(value));
+
+				it("numbers the spool itself, whatever last_seq the agent sends", async () => {
+					const { channelId, emit, flush, rows } = await liveChannel();
+
+					emit(output(channelId, text("one")));
+					flush();
+					emit(snapshotRes(channelId, 5000));
+					emit(output(channelId, text("two")));
+					flush();
+
+					expect(rows()).toEqual([
+						{ seq: 1, kind: "output" },
+						{ seq: 2, kind: "snapshot" },
+						{ seq: 3, kind: "output" },
+					]);
+				});
+
+				it("continues after the snapshot once the GC has deleted the output before it", async () => {
+					const { channelId, emit, flush, rows } = await liveChannel();
+					emit(snapshotRes(channelId, 0));
+					emit(output(channelId, text("b")));
+					flush();
+					emit(output(channelId, text("c")));
+					flush();
+					expect(rows()).toEqual([
+						{ seq: 1, kind: "snapshot" },
+						{ seq: 2, kind: "output" },
+						{ seq: 3, kind: "output" },
+					]);
+					// What the GC does to a channel over its cap: the snapshot stays.
+					dbManager.spool
+						.prepare("DELETE FROM chunks WHERE channel_id = ? AND kind = 'output'")
+						.run(channelId);
+
+					emit(snapshotRes(channelId, 0));
+					emit(output(channelId, text("d")));
+					flush();
+
+					expect(rows()).toEqual([
+						{ seq: 4, kind: "snapshot" },
+						{ seq: 5, kind: "output" },
+					]);
+				});
+			});
+
+			// Storing a snapshot happens while a read from the agent is handled: an
+			// error out of it would end that read, and the hub, which catches
+			// nothing at that level. It is logged by its code alone: a SQLite
+			// message can quote what it read, and the screen is what the terminal
+			// shows (#927's ended output logs the same way).
+			describe("a snapshot the spool fails to store", () => {
+				const MARK = "near-a-secret-931";
+				const SHOWN = "shown-on-the-screen-931";
+				let logged: Array<[string, string, Record<string, unknown> | undefined]>;
+				let withLog: SessionManager;
+				const failures: Array<{ mockRestore(): void }> = [];
+
+				beforeEach(() => {
+					logged = [];
+					withLog = new SessionManager(dbManager, undefined, undefined, undefined, {
+						log: (level: string, msg: string, extra?: Record<string, unknown>) =>
+							logged.push([level, msg, extra]),
+					} as never);
+				});
+
+				afterEach(async () => {
+					for (const failure of failures.splice(0)) failure.mockRestore();
+					await withLog.shutdown();
+				});
+
+				function failOnce(method: "insertSnapshot" | "insertChunk"): void {
+					failures.push(
+						vi.spyOn(SpoolDAL.prototype, method).mockImplementationOnce(() => {
+							throw Object.assign(new Error(`disk I/O error ${MARK}`), {
+								code: "ERR_SQLITE_IOERR",
+							});
+						}),
+					);
+				}
+
+				const screen = {
+					serialized: `\u001b[1m${SHOWN}\u001b[0m`,
+					cols: 80,
+					rows: 24,
+					cursorX: 0,
+					cursorY: 0,
+				};
+
+				function expectOneWarn(channelId: string): void {
+					expect(logged.filter(([level]) => level === "warn")).toEqual([
+						[
+							"warn",
+							"channel-lifecycle: snapshot not stored",
+							{ channelId, code: "ERR_SQLITE_IOERR" },
+						],
+					]);
+					expect(JSON.stringify(logged)).not.toContain(MARK);
+					expect(JSON.stringify(logged)).not.toContain(SHOWN);
+				}
+
+				it("on a live ATTACH_OK, still answers the pane, then gives it the output after", async () => {
+					const { channelId, agent, attach, attached, received } = await attachWaiting(withLog);
+					failOnce("insertSnapshot");
+
+					expect(() => {
+						agent.emit("message", {
+							type: "ATTACH_OK",
+							channelId,
+							requestId: attach.requestId,
+							snapshot: screen,
+							lastSeq: 0,
+						});
+						agent.emit("message", output(channelId, after));
+					}).not.toThrow();
+
+					expect(await attached).toBe(true);
+					expect(
+						received
+							.filter((m) => m.type === "ATTACH_OK" || m.type === "OUTPUT")
+							.map((m) => [m.type, (m as { cached?: boolean }).cached]),
+					).toEqual([
+						["ATTACH_OK", false],
+						["OUTPUT", undefined],
+					]);
+					expectOneWarn(channelId);
+				});
+
+				it.each([
+					["its row", "insertSnapshot"],
+					["the output flushed before it", "insertChunk"],
+				] as const)("on a SNAPSHOT_RES (%s), leaves the read handled", async (_, method) => {
+					const { channelId, agent, attach, attached, received } = await attachWaiting(withLog);
+					agent.emit("message", attachOk(channelId, attach.requestId));
+					await attached;
+					// Output the chunker holds, for the snapshot's flush to write.
+					agent.emit("message", output(channelId, new Uint8Array(Buffer.from("held"))));
+					received.length = 0;
+					failOnce(method);
+
+					expect(() => {
+						agent.emit("message", {
+							type: "SNAPSHOT_RES",
+							channelId,
+							snapshot: screen,
+							lastSeq: 0,
+						});
+						agent.emit("message", output(channelId, after));
+					}).not.toThrow();
+
+					expect(received.filter((m) => m.type === "OUTPUT")).toHaveLength(1);
+					expectOneWarn(channelId);
+				});
+			});
 		});
 	});
 
@@ -5443,6 +5689,233 @@ describe("SessionManager — elevation support", () => {
 				(m as ProtocolMessage & { code?: string }).code === "ELEVATION_CANCELLED",
 		);
 		expect(errMsg).toBeDefined();
+	});
+
+	// ─── A terminal brought back from its pane (#858) ────────────────────────
+	//
+	// A window brings an ended terminal back with a SPAWN naming it, with its
+	// shell and arguments when its list carries them, and never a launch
+	// profile. It starts the profile it was first started from, as the hub's
+	// own restart does: its environment as the profile says it now; its shell,
+	// arguments, directory, size, mode and elevation as the terminal was started.
+	// The profile is edited on each of those after the terminal starts, or
+	// deleted, and both ways of bringing it back send the agent the same SPAWN.
+	const startedAs = {
+		"an elevated shell": {
+			profile: { mode: "shell", elevated: true },
+			editedTo: { mode: "process", elevated: false },
+			// Started with doas, the method its host had then: it is elevated
+			// again with doas, whatever the host's method is now.
+			elevationMethod: "doas",
+			spawn: { elevated: true, elevationMethod: "doas", elevationSecret: "hunter2" },
+		},
+		"a process of its own, not elevated": {
+			profile: { mode: "process", elevated: false },
+			editedTo: { mode: "shell", elevated: true },
+			elevationMethod: undefined,
+			spawn: { directProcess: true },
+		},
+		"an elevated process": {
+			profile: { mode: "process", elevated: true },
+			editedTo: { mode: "shell", elevated: false },
+			elevationMethod: "doas",
+			spawn: {
+				directProcess: true,
+				elevated: true,
+				elevationMethod: "doas",
+				elevationSecret: "hunter2",
+			},
+		},
+	} as const;
+	// What the profile gives: its environment and its switch as it says them
+	// now; a deleted one gives neither.
+	const profileSays = {
+		edited: { env: { DEPLOY_ENV: "prod" }, reportDirectory: true },
+		deleted: { env: {} },
+	} as const;
+	it.each([
+		[
+			"an elevated shell",
+			"edited",
+			"its shell and arguments, as a window listing it sends them",
+			true,
+		],
+		[
+			"an elevated shell",
+			"edited",
+			"its id alone, as a window that does not list it sends it",
+			false,
+		],
+		["a process of its own, not elevated", "edited", "its shell and arguments", true],
+		["a process of its own, not elevated", "edited", "its id alone", false],
+		["an elevated process", "edited", "its shell and arguments", true],
+		["an elevated process", "edited", "its id alone", false],
+		["an elevated process", "deleted", "its shell and arguments", true],
+		["an elevated process", "deleted", "its id alone", false],
+	] as const)(
+		"brings %s whose profile was %s back from %s with the SPAWN a restart sends (#858)",
+		async (started, afterwards, _, listed) => {
+			const { profile, editedTo, elevationMethod, spawn } = startedAs[started];
+			const localHostId = await sm.ensureLocalHost();
+			const dal = new MetaDAL(dbManager.meta);
+			const profileId = dal.createLaunchProfile({
+				name: "Staging admin",
+				shell: "/usr/bin/fish",
+				args: ["--private"],
+				cwd: "/srv/staging",
+				env: { DEPLOY_ENV: "staging" },
+				...profile,
+				supportedOs: "any",
+				iconType: "auto",
+				sortOrder: 0,
+				reportDirectory: true,
+			}).id;
+			sm.addClient(makeAutoRespondClient("c-858", [], "hunter2"));
+			const channelId = await sm.handleSpawn("c-858", {
+				type: "SPAWN",
+				hostId: localHostId,
+				launchProfileId: profileId,
+				cols: 132,
+				rows: 43,
+			});
+			if (channelId === null) throw new Error("expected a channel");
+			if (elevationMethod !== undefined) {
+				dbManager.meta
+					.prepare("UPDATE channels SET elevation_method = ? WHERE id = ?")
+					.run(elevationMethod, channelId);
+			}
+			if (afterwards === "deleted") {
+				expect(dal.deleteLaunchProfile(profileId)).toBe(true);
+			} else {
+				dal.updateLaunchProfile(profileId, {
+					shell: "/usr/bin/zsh",
+					args: ["--login"],
+					cwd: "/opt/elsewhere",
+					env: { DEPLOY_ENV: "prod" },
+					...editedTo,
+				});
+			}
+			const agent = mockLocalAgents.at(-1);
+			const spawns = () =>
+				(agent?.send.mock.calls ?? [])
+					.map(([message]) => message as AgentSpawnMessage)
+					.filter((message) => message.type === "SPAWN");
+			const before = spawns().length;
+
+			expect(await sm.restartChannel(channelId, "c-858")).toBe(true);
+			const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext })
+				.ctx;
+			const entry = ctx.channels.get(channelId);
+			if (entry) entry.status = "dead";
+			dal.updateChannelStatus(channelId, "dead");
+			expect(
+				await sm.handleSpawn("c-858", {
+					type: "SPAWN",
+					hostId: localHostId,
+					reuseChannelId: channelId,
+					...(listed && { shell: "/usr/bin/fish", args: ["--private"] }),
+				}),
+			).toBe(channelId);
+			// What the bring-back recorded on the row starts it the same again.
+			expect(await sm.restartChannel(channelId, "c-858")).toBe(true);
+
+			const expected = {
+				type: "SPAWN",
+				requestId: expect.any(String),
+				channelId,
+				shell: "/usr/bin/fish",
+				args: ["--private"],
+				cwd: "/srv/staging",
+				cols: 132,
+				rows: 43,
+				envMode: "inherit",
+				...profileSays[afterwards],
+				...spawn,
+			};
+			const [restarted, broughtBack, restartedAgain, ...more] = spawns().slice(before);
+			expect(restarted).toEqual(expected);
+			expect(broughtBack).toEqual(expected);
+			expect(restartedAgain).toEqual(expected);
+			expect(more).toEqual([]);
+		},
+	);
+
+	// What a request names when it brings a terminal back is recorded with the
+	// rest: the next restart starts the terminal as that start left it.
+	it("records the start a bring-back names, so the next restart starts it the same (#858)", async () => {
+		const localHostId = await sm.ensureLocalHost();
+		const dal = new MetaDAL(dbManager.meta);
+		const launch = { supportedOs: "any", iconType: "auto" } as const;
+		const adminId = dal.createLaunchProfile({
+			name: "Staging admin",
+			shell: "/usr/bin/fish",
+			args: ["--private"],
+			cwd: "/srv/staging",
+			env: { DEPLOY_ENV: "staging" },
+			mode: "process",
+			elevated: true,
+			sortOrder: 0,
+			reportDirectory: true,
+			...launch,
+		}).id;
+		const plainId = dal.createLaunchProfile({
+			name: "Plain",
+			shell: "/bin/sh",
+			env: { OTHER: "yes" },
+			mode: "shell",
+			elevated: false,
+			sortOrder: 1,
+			...launch,
+		}).id;
+		sm.addClient(makeAutoRespondClient("c-858", [], "hunter2"));
+		const channelId = await sm.handleSpawn("c-858", {
+			type: "SPAWN",
+			hostId: localHostId,
+			launchProfileId: adminId,
+			cols: 132,
+			rows: 43,
+		});
+		if (channelId === null) throw new Error("expected a channel");
+		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+		const entry = ctx.channels.get(channelId);
+		if (entry) entry.status = "dead";
+		dal.updateChannelStatus(channelId, "dead");
+		const agent = mockLocalAgents.at(-1);
+		const lastSpawn = () =>
+			(agent?.send.mock.calls ?? [])
+				.map(([message]) => message as AgentSpawnMessage)
+				.filter((message) => message.type === "SPAWN")
+				.at(-1);
+
+		expect(
+			await sm.handleSpawn("c-858", {
+				type: "SPAWN",
+				hostId: localHostId,
+				reuseChannelId: channelId,
+				launchProfileId: plainId,
+				elevated: false,
+				directProcess: false,
+			}),
+		).toBe(channelId);
+		const broughtBack = lastSpawn();
+		expect(await sm.restartChannel(channelId, "c-858")).toBe(true);
+		const restarted = lastSpawn();
+
+		// The plain profile's shell, none of the admin profile's arguments, the
+		// terminal's own directory and size, neither a process nor elevated.
+		const expected = {
+			type: "SPAWN",
+			requestId: expect.any(String),
+			channelId,
+			shell: "/bin/sh",
+			cwd: "/srv/staging",
+			cols: 132,
+			rows: 43,
+			env: { OTHER: "yes" },
+			envMode: "inherit",
+		};
+		expect(broughtBack).toEqual(expected);
+		expect(restarted).toEqual(expected);
 	});
 });
 

@@ -332,13 +332,7 @@ export class MetaDAL {
 
 	updateChannelConfig(
 		channelId: string,
-		config: {
-			icon?: string | null;
-			shell?: string | null;
-			args?: string[];
-			cwd?: string | null;
-			directProcess?: boolean;
-		},
+		config: Parameters<ChannelsDAL["updateChannelConfig"]>[1],
 	): boolean {
 		return this.channels.updateChannelConfig(channelId, config);
 	}

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::away::AwayQueue;
-use crate::batch::{batch_loop, BatchedEvent, ChannelEventSender};
+use crate::batch::{batch_loop, BatchedEvent, ChannelEventSender, Delivery};
 use crate::flow::{Flows, InTransit, Marks};
 use crate::framing::{encode_frame, FrameReader};
 use crate::handler::{handle_message, FrameSender, Outgoing, SnapshotSenders};
@@ -1364,17 +1364,20 @@ fn send_encoded(
 /// connection of the hub that owns the channel, whichever connection spawned it
 /// (#549), charged to that connection until written (#553). While that hub has
 /// none, its own away queue keeps each channel's newest output, within bounds
-/// (`away.rs`); `register_active` sends it on (#127).
+/// (`away.rs`); `register_active` sends it on (#127). A snapshot reply goes to
+/// the connection that asked, in the same order (#931).
 fn spawn_output_router(mut batched_rx: mpsc::UnboundedReceiver<BatchedEvent>, routes: Routes) {
     tokio::spawn(async move {
         while let Some(event) = batched_rx.recv().await {
-            if let Ok(routed) = event.into_routed() {
-                routes.lock().await.route(
+            match event.into_delivery() {
+                Ok(Delivery::Owner(routed)) => routes.lock().await.route(
                     &routed.owner,
                     &routed.channel_id,
                     routed.frame,
                     routed.charge,
-                );
+                ),
+                Ok(Delivery::Asker(reply)) => reply.send(),
+                Err(_) => {}
             }
         }
     });
@@ -3672,6 +3675,167 @@ mod tests {
                         !is_about(&frame, "OUTPUT", earlier),
                         "OUTPUT for {earlier} arrived after its CHANNEL_EXIT"
                     );
+                }
+            }
+
+            daemon.stop().await;
+        }
+
+        /// A snapshot reaches its hub between the output it holds and the
+        /// output after it, over a daemon connection as over stdio (#931):
+        /// the router puts the reply on the asking connection in pipeline
+        /// order. Each round's shell prints a line, waits for one, then prints
+        /// another; the test asks for snapshots one answer at a time,
+        /// alternating ATTACH and SNAPSHOT_REQ, sends the line once a snapshot
+        /// shows the first, and goes on until one shows the second and for
+        /// 300 ms more.
+        #[tokio::test]
+        async fn a_snapshot_reaches_the_hub_between_the_output_it_holds_and_the_output_after_it() {
+            let daemon = TestDaemon::start("snapshot-order").await;
+            let mut hub = daemon.connect().await;
+
+            for round in 0..10 {
+                let channel_id = format!("snapshot-order-{round}");
+                let first = format!("snapshot-marker-{round}-a");
+                let second = format!("snapshot-marker-{round}-b");
+                // Spelt otherwise on the command line: only the output holds
+                // the markers.
+                let command = if cfg!(windows) {
+                    format!(
+                        "echo snapshot-mark^er-{round}-a& set /p line=& echo snapshot-mark^er-{round}-b& ping -n 3 127.0.0.1 >nul"
+                    )
+                } else {
+                    format!(
+                        "echo snapshot-mark\"\"er-{round}-a; read line; echo snapshot-mark\"\"er-{round}-b; sleep 2"
+                    )
+                };
+                hub.send(&spawn(&channel_id, &command)).await;
+                hub.read_through(|frame| is_about(frame, "SPAWN_OK", &channel_id))
+                    .await;
+
+                // (is a snapshot, its last_seq or the OUTPUT's seq, its screen or data).
+                let mut seen: Vec<(bool, u64, String)> = Vec::new();
+                let mut asked: u32 = 0;
+                let mut line_sent = false;
+                let mut second_shown: Option<std::time::Instant> = None;
+                let deadline = std::time::Instant::now() + DEADLINE;
+                loop {
+                    let ask = if asked.is_multiple_of(2) {
+                        HubToAgent::Attach {
+                            channel_id: channel_id.clone(),
+                            request_id: Some(format!("attach-{round}-{asked}")),
+                        }
+                    } else {
+                        HubToAgent::SnapshotReq {
+                            channel_id: channel_id.clone(),
+                        }
+                    };
+                    hub.send(&ask).await;
+                    asked += 1;
+                    // Read up to its answer, keeping the channel's output.
+                    loop {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "{channel_id}: no snapshot showed {second:?} within {DEADLINE:?}"
+                        );
+                        let Some(frame) = hub.frame_within(DEADLINE).await else {
+                            panic!("{channel_id}: no answer came");
+                        };
+                        if frame["channel_id"].as_str() != Some(channel_id.as_str()) {
+                            continue;
+                        }
+                        match frame_type(&frame) {
+                            "OUTPUT" => {
+                                let rmpv::Value::Binary(data) = &frame["data"] else {
+                                    panic!("OUTPUT without data");
+                                };
+                                seen.push((
+                                    false,
+                                    frame["seq"].as_u64().expect("OUTPUT seq"),
+                                    String::from_utf8_lossy(data).into_owned(),
+                                ));
+                            }
+                            "ATTACH_OK" | "SNAPSHOT_RES" => {
+                                let screen = frame["snapshot"]["serialized"]
+                                    .as_str()
+                                    .expect("snapshot text")
+                                    .to_string();
+                                seen.push((
+                                    true,
+                                    frame["last_seq"].as_u64().expect("last_seq"),
+                                    screen,
+                                ));
+                                break;
+                            }
+                            "CHANNEL_EXIT" => {
+                                panic!("{channel_id} ended before the test was done")
+                            }
+                            _ => {}
+                        }
+                    }
+                    let screen = &seen.last().expect("the answer was kept").2;
+                    if !line_sent && screen.contains(&first) {
+                        let line: &[u8] = if cfg!(windows) { b"go\r" } else { b"go\n" };
+                        hub.send(&HubToAgent::Input {
+                            channel_id: channel_id.clone(),
+                            data: line.to_vec(),
+                        })
+                        .await;
+                        line_sent = true;
+                    }
+                    if second_shown.is_none() && screen.contains(&second) {
+                        second_shown = Some(std::time::Instant::now());
+                    }
+                    if second_shown.is_some_and(|at| at.elapsed() > Duration::from_millis(300)) {
+                        break;
+                    }
+                }
+                hub.send(&HubToAgent::Destroy {
+                    channel_id: channel_id.clone(),
+                })
+                .await;
+
+                let first_snapshot = seen
+                    .iter()
+                    .position(|(snapshot, ..)| *snapshot)
+                    .expect("a snapshot came");
+                assert!(
+                    seen[first_snapshot..]
+                        .iter()
+                        .any(|(snapshot, ..)| !*snapshot),
+                    "{channel_id}: no OUTPUT came after a snapshot"
+                );
+                for (at, (snapshot, last_seq, screen)) in seen.iter().enumerate() {
+                    if !*snapshot {
+                        continue;
+                    }
+                    let before: String = seen[..at]
+                        .iter()
+                        .filter(|(snapshot, ..)| !*snapshot)
+                        .map(|(_, _, data)| data.as_str())
+                        .collect();
+                    for marker in [&first, &second] {
+                        assert!(
+                            !screen.contains(marker.as_str()) || before.contains(marker.as_str()),
+                            "{channel_id}: a snapshot showed {marker:?} before the OUTPUT that printed it"
+                        );
+                    }
+                    for (seq_at, (other, seq, _)) in seen.iter().enumerate() {
+                        if *other {
+                            continue;
+                        }
+                        if seq_at < at {
+                            assert!(
+                                seq <= last_seq,
+                                "{channel_id}: OUTPUT {seq} came before a snapshot whose last_seq is {last_seq}"
+                            );
+                        } else {
+                            assert!(
+                                seq > last_seq,
+                                "{channel_id}: OUTPUT {seq} came after a snapshot whose last_seq is {last_seq}"
+                            );
+                        }
+                    }
                 }
             }
 

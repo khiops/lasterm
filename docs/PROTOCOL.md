@@ -351,7 +351,13 @@ the same `channel_id`, and an INPUT can get `INPUT_DROPPED` (§ 3.4), while an A
 An ERROR without the ATTACH's `request_id` never answers it, and is handled as itself.
 
 The agent answers every ATTACH it receives, and at once. The snapshot comes from the channel's
-reader, which serves it while it reads the PTY. Once the PTY has closed, the channel is ending: an
+reader, which serves it while it reads the PTY, and sends the ATTACH_OK into the channel's output
+stream (§ 3.5): it reaches the connection that asked after every OUTPUT of the channel whose bytes
+the snapshot shows, and before every OUTPUT it does not show (#931). `last_seq` is the `seq` of the
+last read the snapshot holds, so on that connection the OUTPUT before it has `seq <= last_seq` and
+the OUTPUT after it `seq > last_seq`; it is 0 before the terminal's first read. An agent before #931
+sent 0 whatever it held, and its ATTACH_OK could overtake output its snapshot already showed. The hub
+numbers its spool itself and does not read `last_seq`. Once the PTY has closed, the channel is ending: an
 ATTACH whose request finds that reader gone, or reaches it as it stops and is dropped, gets the
 same `CHANNEL_NOT_FOUND` as one for a channel the agent no longer has, with its `request_id`. It
 does not wait for the channel's workload to exit, and the hub never waits out its 5 s for it
@@ -386,15 +392,22 @@ says in its terminal that what was typed was dropped because the terminal is not
 {
   type: "OUTPUT",
   channel_id: string,
-  seq: number,           // monotonically increasing per channel
+  seq: number,           // the last PTY read this frame carries, per run of the channel
   ts: string,            // ISO 8601
   data: Uint8Array       // raw terminal output (ANSI included)
 }
 ```
 
+`seq` counts the reads of the channel's current workload, from 1; a restart, which reuses the
+channel id, starts again from 1. A frame merges several reads and carries the last one's, so seqs
+can go unseen between two frames, and a read that held only stripped DSR queries carries none.
+
 **Batching:** Buffer 16ms or 4KB, whichever comes first, then flush. Any other frame about a
 channel (CHANNEL_EXIT, TITLE_CHANGE, PROCESS_TITLE, CWD_CHANGE, BELL, NOTIFICATION, LOG) first
-flushes that channel's buffered output, so none of its OUTPUT arrives after its CHANNEL_EXIT.
+flushes that channel's buffered output, so none of its OUTPUT arrives after its CHANNEL_EXIT. So
+does a snapshot reply, ATTACH_OK (§ 3.3) or SNAPSHOT_RES (§ 3.7): the reader puts it in this stream
+behind the output its screen holds, and it goes uncharged (§ 2.1b) to the connection that asked, so
+no OUTPUT it shows arrives after it (#931).
 
 ### 3.6 RESIZE (Hub → Agent)
 
@@ -419,6 +432,9 @@ Agent MUST resize both the PTY and the channel's `vt100` screen, so the next sna
   last_seq: number
 }
 ```
+
+It comes in the channel's output stream as ATTACH_OK does (§ 3.3): after every OUTPUT its screen
+holds, before every OUTPUT it does not, with `last_seq` the `seq` of the last read it holds (#931).
 
 ### 3.8 CHANNEL_EXIT (Agent → Hub)
 
@@ -911,6 +927,19 @@ Settings › Profiles), else the one the hub marked for the default shell its ag
 A host with none marked starts its first profile; one with no profile at all, none, and its agent
 starts its own default. The local host is no exception: its agent's HELLO marks its default as an
 SSH host's does (#802).
+
+A SPAWN with `reuse_channel_id` that names no launch profile, as a window's Restart of an ended
+terminal sends it, starts that terminal as `POST /api/channels/:id/restart` does (#858): the
+environment and `report_directory` of the launch profile it was started from, as the profile says
+them now, and its own shell, arguments, directory, size, mode and elevation, the last with the
+method it was elevated with, as its row records them. The fields the request names win as ever; one
+that names a shell names its arguments with it, none meaning none. The row then records the start
+as it was made, what the request named included: its shell, arguments, directory, size, mode,
+elevation and launch profile, so the next restart, from a window or the hub, starts the terminal
+the same. An environment the request names applies to that start only. A terminal with no profile,
+or whose profile was deleted, gets no profile's environment, and keeps its mode and elevation all
+the same; it starts the host's default profile only when neither the request nor the terminal names
+a shell.
 
 A SPAWN that names itself with `request_id` gets it back in the SPAWN_OK and in every ERROR that
 answers it, the refusal of a field it carries included, and in nothing else (#777). A window's

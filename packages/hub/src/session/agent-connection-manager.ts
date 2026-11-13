@@ -389,7 +389,7 @@ export class AgentConnectionManager {
 			} else if (msg.type === "SNAPSHOT_RES") {
 				const res = msg as AgentSnapshotResMessage;
 				this.ctx.scheduler.onSnapshotResponse(res.channelId);
-				this.lifecycle.storeSnapshot(res.channelId, res.snapshot, res.lastSeq);
+				this.lifecycle.storeSnapshot(res.channelId, res.snapshot);
 			} else if (msg.type === "CHANNEL_EXIT") {
 				const exitMsg = msg as ChannelExitMessage;
 				const channel = this.ctx.channels.get(exitMsg.channelId);

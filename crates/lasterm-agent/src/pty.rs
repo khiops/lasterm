@@ -12,7 +12,6 @@ const CHANNEL_TEARDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct PtyChannelState {
     pub process: PtyProcess,
-    pub seq: u64,
     /// The hub whose connection spawned this channel. Set at SPAWN, never
     /// changed: only a getter reads it (#127).
     owner: OwnerId,
@@ -288,7 +287,6 @@ impl PtyManager {
             id.clone(),
             PtyChannelState {
                 process,
-                seq: 0,
                 owner,
                 input,
             },

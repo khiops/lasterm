@@ -1218,23 +1218,49 @@ export class ChannelLifecycleManager {
 		};
 	}
 
-	storeSnapshot(channelId: string, snapshot: unknown, agentLastSeq: number): string | undefined {
+	/**
+	 * Store `snapshot` as the channel's newest, after the output it holds.
+	 *
+	 * The spool is numbered by the hub alone: the agent's `last_seq` counts its
+	 * own reads, another space (#457, #931). The snapshot takes the seq after
+	 * every one the chunker has used, those the GC has since deleted included,
+	 * and the output after it goes on from there: an ended terminal's output
+	 * must follow its snapshot without a gap (`buildEndedOutput`).
+	 *
+	 * It is called while a read from the agent is handled, so it never throws:
+	 * a storage error is logged, and nothing after the failing write is stored.
+	 * What was committed stays, the chunker's new start included, so a later
+	 * flush never reuses the snapshot's seq.
+	 */
+	storeSnapshot(channelId: string, snapshot: unknown): string | undefined {
 		if (!this.ctx.channels.has(channelId)) return;
-		const snapshotJson = JSON.stringify(snapshot);
-		const dataBlob = Buffer.from(snapshotJson);
-		this.ctx.chunker.flush(channelId);
-		const maxSeq = this.ctx.spoolDal.getMaxSeq(channelId);
-		const snapshotSeq = Math.max(maxSeq, agentLastSeq) + 1;
-		// Replaces the channel's previous snapshot: nothing reads an older one (#726).
-		const chunkId = this.ctx.spoolDal.insertSnapshot({
-			channelId,
-			seq: snapshotSeq,
-			dataBlob,
-			uncompressedLen: dataBlob.length,
-		});
-		this.ctx.chunker.bumpSeq(channelId, snapshotSeq + 1);
-		this.ctx.metaDal.updateCacheIndex(channelId, chunkId, snapshotSeq - 1);
-		return chunkId;
+		try {
+			const dataBlob = Buffer.from(JSON.stringify(snapshot));
+			this.ctx.chunker.flush(channelId);
+			const snapshotSeq = Math.max(
+				this.ctx.chunker.getNextSeq(channelId),
+				this.ctx.spoolDal.getMaxSeq(channelId) + 1,
+			);
+			// Replaces the channel's previous snapshot: nothing reads an older one (#726).
+			const chunkId = this.ctx.spoolDal.insertSnapshot({
+				channelId,
+				seq: snapshotSeq,
+				dataBlob,
+				uncompressedLen: dataBlob.length,
+			});
+			this.ctx.chunker.bumpSeq(channelId, snapshotSeq + 1);
+			this.ctx.metaDal.updateCacheIndex(channelId, chunkId, snapshotSeq - 1);
+			return chunkId;
+		} catch (err) {
+			// The id and the error's code only. Not the screen, which is what the
+			// terminal shows, nor the error's message, which can quote what SQLite
+			// read: as an ended terminal's spool read logs it (#927).
+			this.ctx.hubLogger?.log("warn", "channel-lifecycle: snapshot not stored", {
+				channelId,
+				code: (err as { code?: unknown } | null)?.code ?? "unknown",
+			});
+			return undefined;
+		}
 	}
 
 	// ─── Re-attach channels ───────────────────────────────────────────────────

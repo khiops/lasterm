@@ -5570,6 +5570,8 @@ describe("SessionManager — elevation support", () => {
 					...(listed && { shell: "/usr/bin/fish", args: ["--private"] }),
 				}),
 			).toBe(channelId);
+			// What the bring-back recorded on the row starts it the same again.
+			expect(await sm.restartChannel(channelId, "c-858")).toBe(true);
 
 			const expected = {
 				type: "SPAWN",
@@ -5584,9 +5586,11 @@ describe("SessionManager — elevation support", () => {
 				...profileSays[afterwards],
 				...spawn,
 			};
-			const [restarted, broughtBack] = spawns().slice(before);
+			const [restarted, broughtBack, restartedAgain, ...more] = spawns().slice(before);
 			expect(restarted).toEqual(expected);
 			expect(broughtBack).toEqual(expected);
+			expect(restartedAgain).toEqual(expected);
+			expect(more).toEqual([]);
 		},
 	);
 

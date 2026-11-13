@@ -299,10 +299,16 @@ export class ChannelLifecycleManager {
 					// the hub has been restarted since it died.
 					if (reuseChannelId !== undefined && reuseChannelId === channelId) {
 						this.ctx.metaDal.reviveChannel(channelId, session.id, cols, rows);
+						// The row records this start, as a new terminal's does: what the
+						// next restart reads, from a window or the hub, starts it the same
+						// (#858).
 						this.ctx.metaDal.updateChannelConfig(channelId, {
 							...(resolvedShell !== undefined ? { shell: resolvedShell } : {}),
-							...(resolvedArgs.length > 0 ? { args: resolvedArgs } : {}),
+							args: resolvedArgs,
 							...(resolvedCwd !== undefined ? { cwd: resolvedCwd } : {}),
+							directProcess: resolvedDirectProcess,
+							elevationMethod: resolvedElevated ? (resolvedElevationMethod ?? null) : null,
+							launchProfileId: resolvedLaunchProfileId ?? null,
 						});
 					} else {
 						this.ctx.metaDal.createChannel({
@@ -615,6 +621,7 @@ export class ChannelLifecycleManager {
 				...(shell !== undefined && { shell }),
 				...(args.length > 0 && { args }),
 				...(cwd !== undefined && { cwd }),
+				...(channel.directProcess === true && { directProcess: true }),
 				...this.restartEnv(channelId, hostId),
 				cols,
 				rows,
@@ -792,6 +799,8 @@ export class ChannelLifecycleManager {
 			...(shell !== undefined && { shell }),
 			...(args.length > 0 && { args }),
 			...(cwd !== undefined && { cwd }),
+			// As a new terminal's SPAWN says it (#858).
+			...(channel.directProcess === true && { directProcess: true }),
 			...this.restartEnv(channelId, hostId),
 			cols,
 			rows,

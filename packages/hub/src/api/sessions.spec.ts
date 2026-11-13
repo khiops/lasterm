@@ -1,6 +1,7 @@
 import type { AgentChannelStateMessage, HelloMessage, ProtocolMessage } from "@lasterm/shared";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HUB_VERSION } from "../build-version.js";
 import { ConfigResolver } from "../config.js";
 import type { ChannelLifecycleManager } from "../session/channel-lifecycle-manager.js";
 import { captureQuitFence } from "../session/quit-fence.js";
@@ -134,13 +135,16 @@ type FakeSshAgent = SshAgent & {
 	execOnHost: ReturnType<typeof vi.fn>;
 };
 
-/** What a daemon says it can do. */
+/** What a daemon at this hub's version says it can do. */
 const DAEMON_HELLO: HelloMessage = {
 	type: "HELLO",
 	version: 1,
-	agentVersion: "0.1.0",
+	agentVersion: HUB_VERSION,
 	capabilities: ["multiplex", "resize", "snapshot", "launch-profiles", "env-modes", "hub-identity"],
 };
+
+/** A daemon older than this hub, which the hub stops once it holds nothing there (#805). */
+const OUTDATED_DAEMON_HELLO: HelloMessage = { ...DAEMON_HELLO, agentVersion: "0.1.0" };
 
 let dbs: DatabaseManager;
 let sm: SessionManager;
@@ -276,71 +280,88 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		expect((await server.inject(`/api/hosts/${hostId}`)).statusCode).toBe(200);
 	});
 
-	it("V1 sends every DESTROY before close, reports each own session, and drops rows and secrets", async () => {
-		const agent = connectedAgent();
-		const { channelIds, heard, ctx } = liveTerminalsOn(agent, 2);
-		const dal = new MetaDAL(dbs.meta);
-		const olderSession = "01K580SESSION0000000000001";
-		dal.createSession({ id: olderSession, hostId, status: "active" });
-		const second = channelIds[1]!;
-		dbs.meta.prepare("UPDATE channels SET session_id = ? WHERE id = ?").run(olderSession, second);
-		ctx.channels.get(second)!.sessionId = olderSession;
-		const anotherWindow: ProtocolMessage[] = [];
-		sm.addClient({
-			id: "other-window",
-			send: (msg) => anotherWindow.push(msg),
-			attachedChannels: new Set(),
-		});
-		const order: string[] = [];
-		agent.send.mockImplementation((msg: ProtocolMessage) => order.push(msg.type));
-		vi.spyOn(agent, "close").mockImplementation(async () => {
-			order.push("close");
-			agent.connected = false;
-		});
-		const log = vi.fn();
-		ctx.hubLogger = { log } as never;
-		ctx.passphraseCache.set(hostId, { secret: "secret", expiresAt: Infinity });
-		ctx.passphraseCache.set("other", { secret: "other", expiresAt: Infinity });
-		ctx.elevationCache.set(`${hostId}:window`, { secret: "secret", expiresAt: Infinity });
-		ctx.elevationCache.set("other:window", { secret: "other", expiresAt: Infinity });
-		ctx.trustedAgentSha256.set(hostId, "hash");
-		ctx.trustedAgentSha256.set("other", "other-hash");
-		expect((await remove("?force=true")).statusCode).toBe(204);
-		expect(order).toEqual(["DESTROY", "DESTROY", "close"]);
-		for (const messages of [heard, anotherWindow]) {
-			for (const [index, id] of channelIds.entries()) {
-				expect(endsOf(messages, id)).toEqual([
-					{
-						type: "CHANNEL_STATE",
-						channelId: id,
-						sessionId: index === 0 ? SESSION_ID : olderSession,
-						status: "dead",
-						endReason: "killed",
-					},
-				]);
+	// An outdated daemon too: the delete holds the stop marker (D3 step 1), so
+	// the end of its last terminal begins no retirement and sends no STOP (#923).
+	it.each([
+		["at this hub's version", DAEMON_HELLO],
+		["older than this hub", OUTDATED_DAEMON_HELLO],
+	])(
+		"V1 sends every DESTROY before close, reports each own session, and drops rows and secrets, daemon %s",
+		async (_, hello) => {
+			const agent = connectedAgent();
+			agent.helloMessage = hello;
+			const { channelIds, heard, ctx } = liveTerminalsOn(agent, 2);
+			const dal = new MetaDAL(dbs.meta);
+			const olderSession = "01K580SESSION0000000000001";
+			dal.createSession({ id: olderSession, hostId, status: "active" });
+			const second = channelIds[1]!;
+			dbs.meta.prepare("UPDATE channels SET session_id = ? WHERE id = ?").run(olderSession, second);
+			ctx.channels.get(second)!.sessionId = olderSession;
+			const anotherWindow: ProtocolMessage[] = [];
+			sm.addClient({
+				id: "other-window",
+				send: (msg) => anotherWindow.push(msg),
+				attachedChannels: new Set(),
+			});
+			const order: string[] = [];
+			agent.send.mockImplementation((msg: ProtocolMessage) =>
+				order.push(msg.type === "DESTROY" ? msg.channelId : msg.type),
+			);
+			vi.spyOn(agent, "close").mockImplementation(async () => {
+				order.push("close");
+				agent.connected = false;
+			});
+			const log = vi.fn();
+			ctx.hubLogger = { log } as never;
+			ctx.passphraseCache.set(hostId, { secret: "secret", expiresAt: Infinity });
+			ctx.passphraseCache.set("other", { secret: "other", expiresAt: Infinity });
+			ctx.elevationCache.set(`${hostId}:window`, { secret: "secret", expiresAt: Infinity });
+			ctx.elevationCache.set("other:window", { secret: "other", expiresAt: Infinity });
+			ctx.trustedAgentSha256.set(hostId, "hash");
+			ctx.trustedAgentSha256.set("other", "other-hash");
+			expect((await remove("?force=true")).statusCode).toBe(204);
+			// One DESTROY for each terminal, naming it, then the close.
+			expect(order).toEqual([...channelIds, "close"]);
+			for (const messages of [heard, anotherWindow]) {
+				for (const [index, id] of channelIds.entries()) {
+					expect(endsOf(messages, id)).toEqual([
+						{
+							type: "CHANNEL_STATE",
+							channelId: id,
+							sessionId: index === 0 ? SESSION_ID : olderSession,
+							status: "dead",
+							endReason: "killed",
+						},
+					]);
+				}
 			}
-		}
-		expect((await server.inject(`/api/hosts/${hostId}`)).statusCode).toBe(404);
-		for (const id of channelIds) {
-			expect(ctx.channels.has(id)).toBe(false);
-			expect(dal.getChannel(id)).toBeUndefined();
-		}
-		expect(ctx.sessions.has(hostId)).toBe(false);
-		expect(ctx.agents.has(hostId)).toBe(false);
-		expect(ctx.stoppingAgents.has(hostId)).toBe(false);
-		expect(ctx.passphraseCache.has(hostId)).toBe(false);
-		expect(ctx.passphraseCache.has("other")).toBe(true);
-		expect(ctx.elevationCache.has(`${hostId}:window`)).toBe(false);
-		expect(ctx.elevationCache.has("other:window")).toBe(true);
-		expect(ctx.trustedAgentSha256.has(hostId)).toBe(false);
-		expect(ctx.trustedAgentSha256.get("other")).toBe("other-hash");
-		expect(
-			log.mock.calls.filter(([, message]) => message === "session-manager: host deleted"),
-		).toEqual([["info", "session-manager: host deleted", { hostId, ended: 2, unreachable: 0 }]]);
-	});
+			expect((await server.inject(`/api/hosts/${hostId}`)).statusCode).toBe(404);
+			for (const id of channelIds) {
+				expect(ctx.channels.has(id)).toBe(false);
+				expect(dal.getChannel(id)).toBeUndefined();
+			}
+			expect(ctx.sessions.has(hostId)).toBe(false);
+			expect(ctx.agents.has(hostId)).toBe(false);
+			expect(ctx.stoppingAgents.has(hostId)).toBe(false);
+			expect(ctx.passphraseCache.has(hostId)).toBe(false);
+			expect(ctx.passphraseCache.has("other")).toBe(true);
+			expect(ctx.elevationCache.has(`${hostId}:window`)).toBe(false);
+			expect(ctx.elevationCache.has("other:window")).toBe(true);
+			expect(ctx.trustedAgentSha256.has(hostId)).toBe(false);
+			expect(ctx.trustedAgentSha256.get("other")).toBe("other-hash");
+			expect(
+				log.mock.calls.filter(([, message]) => message === "session-manager: host deleted"),
+			).toEqual([["info", "session-manager: host deleted", { hostId, ended: 2, unreachable: 0 }]]);
+		},
+	);
 
 	it("R2 validates force before changing the host", async () => {
-		expect((await remove("?force=yes")).statusCode).toBe(400);
+		const response = await remove("?force=yes");
+		expect(response.statusCode).toBe(400);
+		expect(response.json().error).toEqual({
+			code: "VALIDATION_ERROR",
+			message: "force must be true or false.",
+		});
 		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
 	});
 
@@ -385,18 +406,32 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
 	});
 
-	it.each(["", "?force=true"])("R5 never overrides running uploads with %s", async (force) => {
-		sm.setTransfers({ activeOn: () => 2, interruptOn: vi.fn() });
-		const response = await remove(force);
-		expect(response.statusCode).toBe(409);
-		expect(response.json().error).toEqual({
-			code: "TRANSFERS_RUNNING",
-			transfers: 2,
-			message:
-				"2 uploads to this host are running. Wait for them to end or cancel them, then delete the host.",
-		});
-		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
-	});
+	it.each([
+		[
+			"",
+			2,
+			"2 uploads to this host are running. Wait for them to end or cancel them, then delete the host.",
+		],
+		[
+			"?force=true",
+			2,
+			"2 uploads to this host are running. Wait for them to end or cancel them, then delete the host.",
+		],
+		[
+			"",
+			1,
+			"1 upload to this host is running. Wait for them to end or cancel them, then delete the host.",
+		],
+	] as const)(
+		"R5 never overrides running uploads with %s, transfers=%i",
+		async (force, transfers, message) => {
+			sm.setTransfers({ activeOn: () => transfers, interruptOn: vi.fn() });
+			const response = await remove(force);
+			expect(response.statusCode).toBe(409);
+			expect(response.json().error).toEqual({ code: "TRANSFERS_RUNNING", transfers, message });
+			expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+		},
+	);
 
 	it("R6 counts unreachable terminals without promising a send", async () => {
 		const agent = connectedAgent();
@@ -414,7 +449,60 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		});
 		expect((await remove("?force=true")).statusCode).toBe(204);
 		expect(agent.sent).toEqual([]);
+		const dal = new MetaDAL(dbs.meta);
+		expect(dal.getHost(hostId)).toBeUndefined();
+		expect(dal.getChannel(channelId)).toBeUndefined();
+		expect(ctx.channels.has(channelId)).toBe(false);
+		expect(ctx.sessions.has(hostId)).toBe(false);
 	});
+
+	// D2's other forms: several terminals, and a local host, which has nothing
+	// to connect first.
+	it.each([
+		[
+			"ssh",
+			2,
+			false,
+			"2 terminals on this host have not ended. Send force=true to ask their agent to end them and delete the host.",
+		],
+		[
+			"ssh",
+			2,
+			true,
+			"2 terminals on this host have not ended, and this hub is not connected to their agent: nothing can be sent to them, and they may keep running. Connecting the host first may reach them; or send force=true to delete it anyway.",
+		],
+		[
+			"local",
+			1,
+			true,
+			"1 terminal on this host has not ended, and this hub is not connected to its agent: nothing can be sent to it, and it may keep running. Send force=true to delete it anyway.",
+		],
+		[
+			"local",
+			2,
+			true,
+			"2 terminals on this host have not ended, and this hub is not connected to their agent: nothing can be sent to them, and they may keep running. Send force=true to delete it anyway.",
+		],
+	] as const)(
+		"D2 tells a %s host's terminals=%i, unreachable=%s, in their own form",
+		async (type, terminals, unreachable, message) => {
+			if (type === "local")
+				hostId = new MetaDAL(dbs.meta).createHost({ type: "local", label: "this machine" }).id;
+			const agent = connectedAgent();
+			const { ctx } = liveTerminalsOn(agent, terminals);
+			if (unreachable) ctx.agents.delete(hostId);
+			const response = await remove();
+			expect(response.statusCode).toBe(409);
+			expect(response.json().error).toEqual({
+				code: "TERMINALS_WOULD_END",
+				terminals,
+				...(unreachable && { unreachable: terminals }),
+				message,
+			});
+			expect(agent.sent).toEqual([]);
+			expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+		},
+	);
 
 	it.each(["deleteCascadeForHost", "deleteHost"] as const)(
 		"R12 releases the marker when %s throws",
@@ -434,8 +522,14 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		},
 	);
 
-	it("V3 session deletion sends DESTROY before closing its daemon connection", async () => {
+	// A current daemon's connection is closed, an outdated one is stopped (#805):
+	// the DESTROYs go first either way (#923).
+	it.each([
+		["at this hub's version", DAEMON_HELLO, "close"],
+		["older than this hub", OUTDATED_DAEMON_HELLO, "STOP"],
+	])("V3 session deletion sends DESTROY before ending a daemon %s", async (_, hello, end) => {
 		const agent = connectedAgent();
+		agent.helloMessage = hello;
 		const { channelIds } = liveTerminalsOn(agent, 2);
 		const order: string[] = [];
 		agent.send.mockImplementation((msg: ProtocolMessage) =>
@@ -448,14 +542,13 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		expect(
 			(await server.inject({ method: "DELETE", url: `/api/sessions/${SESSION_ID}` })).statusCode,
 		).toBe(204);
-		expect(order).toEqual([...channelIds, "STOP"]);
+		expect(order).toEqual([...channelIds, end]);
 	});
 });
 
 describe("terminal work arriving after deletion or a lost connection (#910)", () => {
 	function fixture() {
 		const agent = connectedAgent();
-		agent.helloMessage = { ...DAEMON_HELLO, agentVersion: "0.15.3" };
 		const f = liveTerminalOn(agent);
 		const lifecycle = (sm as unknown as { lifecycle: ChannelLifecycleManager }).lifecycle;
 		return { ...f, agent, lifecycle, dal: new MetaDAL(dbs.meta) };
@@ -555,8 +648,10 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 					expect(result).toEqual({ ok: false, channelId: null, errCode: "HOST_NOT_FOUND" });
 				} else {
 					const pending = lifecycle.spawnChannelsForHost(hostId, agent, vi.fn(), vi.fn());
+					expect(vi.getTimerCount()).toBe(0);
 					await vi.advanceTimersByTimeAsync(10_001);
 					await pending;
+					expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([]);
 				}
 				expect(agent.sent).toEqual([]);
 				expect(ctx.pendingRequests.size).toBe(0);
@@ -661,7 +756,7 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 		},
 	);
 
-	it.each(["new-spawn", "lost", "adopted"])(
+	it.each(["new-spawn", "new-spawn, old answer early", "lost", "adopted"])(
 		"R10 keeps the terminal after the old connection is %s",
 		async (mode) => {
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
@@ -681,14 +776,39 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 						const request = next.sent.find((m) => m.type === "SPAWN")!;
 						if (request.type !== "SPAWN") throw new Error("expected SPAWN");
 						if (!request.requestId) throw new Error("expected request id");
-						ctx.pendingRequests.get(request.requestId)?.({
+						if (!ctx.pendingRequests.has(request.requestId))
+							throw new Error("expected the second SPAWN to wait for its answer");
+						// As a reconnect does, the hub hears the new connection before its answer.
+						(
+							sm as unknown as {
+								agentMgr: { wireAgentEvents(h: string, s: string, a: unknown): void };
+							}
+						).agentMgr.wireAgentEvents(hostId, SESSION_ID, next);
+						heard.length = 0;
+						next.emit("message", {
 							type: "SPAWN_OK",
 							requestId: request.requestId,
 							channelId,
+							pid: 1,
 						});
+						// R10 (c): the connection the host now has speaks for the terminal.
+						expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([
+							{ type: "CHANNEL_STATE", channelId, sessionId: SESSION_ID, status: "live" },
+						]);
 					}
 				}
 				heard.length = 0;
+				if (mode === "new-spawn, old answer early") {
+					// D4b: the replaced connection's answer, before its own timeout,
+					// speaks of a terminal the new connection holds now.
+					const track = vi.spyOn(ctx.scheduler, "trackChannel");
+					const chunk = vi.spyOn(ctx.chunker, "trackChannel");
+					agent.emit("message", { type: "SPAWN_OK", requestId: old.requestId, channelId, pid: 1 });
+					expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([]);
+					expect(track).not.toHaveBeenCalled();
+					expect(chunk).not.toHaveBeenCalled();
+					expect(ctx.pendingRequests.has(old.requestId!)).toBe(false);
+				}
 				await vi.advanceTimersByTimeAsync(10_001);
 				agent.emit("message", { type: "SPAWN_OK", requestId: old.requestId, channelId, pid: 1 });
 				expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([]);
@@ -1944,5 +2064,277 @@ describe("POST stop-keeping", () => {
 		});
 		expect(response.statusCode).toBe(200);
 		expect(f.dal.getHost(hostId)?.sshRemoteDaemon).toBeUndefined();
+	});
+});
+
+// ─── Closed sessions (#911) ───────────────────────────────────────────────────
+
+const LONG_AGO = "2026-01-01T00:00:00.000Z";
+
+/** A session row as a run left it, created at `createdAt` and last changed long ago. */
+function seedSession(id: string, host: string, status: SessionState["status"], createdAt: string) {
+	new MetaDAL(dbs.meta).createSession({ id, hostId: host, status });
+	dbs.meta
+		.prepare("UPDATE sessions SET created_at = ?, updated_at = ? WHERE id = ?")
+		.run(createdAt, LONG_AGO, id);
+}
+
+function seedChannel(id: string, sessionId: string, status: "live" | "orphan" | "dead") {
+	new MetaDAL(dbs.meta).createChannel({ id, sessionId, status, shell: "bash" });
+}
+
+/** The session rows, oldest first: id, status and updated_at. */
+function sessionRows(): Array<[string, string, string]> {
+	return new MetaDAL(dbs.meta).listSessions().map((s) => [s.id, s.status, s.updatedAt]);
+}
+
+/** An SSH host whose daemon is kept: a hub start leaves its terminals orphan and reaches nothing. */
+function daemonHost(label: string): string {
+	return new MetaDAL(dbs.meta).createHost({
+		type: "ssh",
+		label,
+		sshHost: `pi@${label}.local`,
+		os: "linux",
+		sshRemoteDaemon: true,
+	}).id;
+}
+
+async function listedSessions(
+	query = "",
+	on: FastifyInstance = server,
+): Promise<Array<{ id: string; status: string; host: string }>> {
+	const res = await on.inject({ method: "GET", url: `/api/sessions${query}` });
+	expect(res.statusCode).toBe(200);
+	return res.json<Array<{ id: string; host_id: string; status: string }>>().map((s) => ({
+		id: s.id,
+		status: s.status,
+		host: s.host_id,
+	}));
+}
+
+describe("GET /api/sessions, closed sessions (#911)", () => {
+	const S1 = "01K911SESSION0000000000S01";
+	const S2 = "01K911SESSION0000000000S02";
+	const S3 = "01K911SESSION0000000000S03";
+	const S4 = "01K911SESSION0000000000S04";
+	const S8 = "01K911SESSION0000000000S08";
+	const S9 = "01K911SESSION0000000000S09";
+	const S5 = "01K911SESSION0000000000S05";
+	let otherHost: string;
+
+	beforeEach(() => {
+		otherHost = new MetaDAL(dbs.meta).createHost({
+			type: "ssh",
+			label: "nas",
+			sshHost: "pi@nas.local",
+		}).id;
+		seedSession(S1, hostId, "closed", "2026-11-13T10:00:01.000Z");
+		seedSession(S2, hostId, "closed", "2026-11-13T10:00:02.000Z");
+		seedChannel("01K911CHANNEL00000000000C2", S2, "dead");
+		seedSession(S3, hostId, "active", "2026-11-13T10:00:03.000Z");
+		seedSession(S4, hostId, "disconnected", "2026-11-13T10:00:04.000Z");
+		seedSession(S8, hostId, "starting", "2026-11-13T10:00:05.000Z");
+		seedSession(S9, hostId, "detached", "2026-11-13T10:00:06.000Z");
+		seedSession(S5, otherHost, "active", "2026-11-13T10:00:07.000Z");
+	});
+
+	// Mutations: list every row (S1, S2 listed); keep only active and
+	// disconnected (S8, S9 missing).
+	it("GET /api/sessions lists the sessions that are not closed (#911)", async () => {
+		expect(await listedSessions()).toEqual([
+			{ id: S3, status: "active", host: hostId },
+			{ id: S4, status: "disconnected", host: hostId },
+			{ id: S8, status: "starting", host: hostId },
+			{ id: S9, status: "detached", host: hostId },
+			{ id: S5, status: "active", host: otherHost },
+		]);
+		expect((await listedSessions(`?host_id=${hostId}`)).map((s) => s.id)).toEqual([S3, S4, S8, S9]);
+	});
+
+	// Mutations: ignore `all` (S1, S2 missing); drop the host filter with it (S5
+	// in H's list); read `all=false` as true (S1, S2 listed).
+	it("GET /api/sessions?all=true lists every session the hub keeps (#911)", async () => {
+		expect((await listedSessions("?all=true")).map((s) => s.id)).toEqual([
+			S1,
+			S2,
+			S3,
+			S4,
+			S8,
+			S9,
+			S5,
+		]);
+		expect((await listedSessions(`?host_id=${hostId}&all=true`)).map((s) => s.id)).toEqual([
+			S1,
+			S2,
+			S3,
+			S4,
+			S8,
+			S9,
+		]);
+		expect((await listedSessions("?all=false")).map((s) => s.id)).toEqual([S3, S4, S8, S9, S5]);
+	});
+
+	// Mutation: read any value other than `true` as false (200).
+	it("GET /api/sessions refuses an all that is not true or false (#911)", async () => {
+		for (const value of ["yes", "1", ""]) {
+			const res = await server.inject({ method: "GET", url: `/api/sessions?all=${value}` });
+			expect(res.statusCode).toBe(400);
+			expect(res.json()).toEqual({
+				error: { code: "VALIDATION_ERROR", message: "all must be true or false." },
+			});
+		}
+	});
+});
+
+describe("a hub start and the sessions a previous run left (#911)", () => {
+	const S1 = "01K911SESSION0000000000S01";
+	const S2 = "01K911SESSION0000000000S02";
+	const S3 = "01K911SESSION0000000000S03";
+	const S4 = "01K911SESSION0000000000S04";
+	const S5 = "01K911SESSION0000000000S05";
+	const S6 = "01K911SESSION0000000000S06";
+	const S7 = "01K911SESSION0000000000S07";
+
+	// Mutations: no sweep (S1, S3 remain); delete closed rows a channel names
+	// (FK error, or S2 and S4 gone); close the held S5; close without updated_at
+	// (S4's stays LONG_AGO); rewrite rows already closed (S2's changes).
+	it("a hub start drops the sessions it neither holds nor lists a terminal under (#911)", async () => {
+		const C2 = "01K911CHANNEL00000000000C2";
+		const C4 = "01K911CHANNEL00000000000C4";
+		const C5 = "01K911CHANNEL00000000000C5";
+		const keptHost = daemonHost("k");
+		seedSession(S1, hostId, "closed", "2026-11-13T10:00:01.000Z");
+		seedSession(S2, hostId, "closed", "2026-11-13T10:00:02.000Z");
+		seedChannel(C2, S2, "dead");
+		seedSession(S3, hostId, "disconnected", "2026-11-13T10:00:03.000Z");
+		seedSession(S4, hostId, "active", "2026-11-13T10:00:04.000Z");
+		seedChannel(C4, S4, "dead");
+		seedSession(S5, keptHost, "disconnected", "2026-11-13T10:00:05.000Z");
+		seedChannel(C5, S5, "orphan");
+		const dal = new MetaDAL(dbs.meta);
+		for (const channel of [C2, C4, C5]) dal.updateCacheIndex(channel, `chunk-${channel}`, 7);
+
+		await sm.startup();
+
+		const rows = sessionRows();
+		expect(rows.map(([id, status]) => [id, status])).toEqual([
+			[S2, "closed"],
+			[S4, "closed"],
+			[S5, "disconnected"],
+		]);
+		expect(rows.find(([id]) => id === S2)?.[2]).toBe(LONG_AGO);
+		expect((rows.find(([id]) => id === S4)?.[2] ?? "") > LONG_AGO).toBe(true);
+		expect([C2, C4, C5].map((id) => dal.getChannel(id)?.sessionId)).toEqual([S2, S4, S5]);
+		expect(
+			dbs.meta.prepare("SELECT channel_id FROM cache_index ORDER BY channel_id").all(),
+		).toEqual([{ channel_id: C2 }, { channel_id: C4 }, { channel_id: C5 }]);
+		expect((await listedSessions()).map((s) => s.id)).toEqual([S5]);
+	});
+
+	// Mutation: today's adoption of the earliest row (S6 adopted and listed, S7
+	// closed).
+	it("a hub start keeps the session its live terminals were opened under (#911)", async () => {
+		const C7 = "01K911CHANNEL00000000000C7";
+		const host = daemonHost("m");
+		seedSession(S6, host, "disconnected", "2026-11-13T10:00:06.000Z");
+		seedSession(S7, host, "active", "2026-11-13T10:00:07.000Z");
+		seedChannel(C7, S7, "orphan");
+
+		await sm.startup();
+
+		expect(sessionRows().map(([id, status]) => [id, status])).toEqual([[S7, "disconnected"]]);
+		expect(new MetaDAL(dbs.meta).getChannel(C7)?.sessionId).toBe(S7);
+		expect((await listedSessions(`?host_id=${host}`)).map((s) => s.id)).toEqual([S7]);
+	});
+
+	// Mutation: spare from the close every row an alive channel names (S6 left
+	// disconnected and listed).
+	it("a hub start closes an older session its live terminals still name, and keeps it (#911)", async () => {
+		const C6 = "01K911CHANNEL00000000000C6";
+		const C7 = "01K911CHANNEL00000000000C7";
+		const host = daemonHost("m");
+		seedSession(S6, host, "disconnected", "2026-11-13T10:00:06.000Z");
+		seedChannel(C6, S6, "orphan");
+		seedSession(S7, host, "active", "2026-11-13T10:00:07.000Z");
+		seedChannel(C7, S7, "orphan");
+
+		await sm.startup();
+
+		expect(sessionRows().map(([id, status]) => [id, status])).toEqual([
+			[S6, "closed"],
+			[S7, "disconnected"],
+		]);
+		expect(new MetaDAL(dbs.meta).getChannel(C6)?.sessionId).toBe(S6);
+		expect((await listedSessions(`?host_id=${host}`)).map((s) => s.id)).toEqual([S7]);
+	});
+
+	// Mutation: sweep only after the restore found something alive (it returns
+	// early when nothing is).
+	it("a hub start with no live terminal still drops its stale sessions (#911)", async () => {
+		seedSession(S1, hostId, "closed", "2026-11-13T10:00:01.000Z");
+		seedSession(S3, hostId, "active", "2026-11-13T10:00:03.000Z");
+
+		await sm.startup();
+
+		expect(sessionRows()).toEqual([]);
+	});
+});
+
+describe("connect and disconnect, then a hub start (#911)", () => {
+	// Red on today's code: five rows (three closed, one disconnected, one active).
+	it("connect and disconnect cycles leave one session after a hub start (#911)", async () => {
+		// An agent on stdio: its sessions close with its connection.
+		agentHooks.start = async () => {
+			const agent = constructedAgents.at(-1) as FakeSshAgent;
+			agent.helloMessage = DAEMON_HELLO;
+			agent.usedRemoteDaemon = false;
+			agent.connected = true;
+		};
+		agentHooks.channelState = async () => [];
+		const connect = async (on: FastifyInstance) => {
+			const res = await on.inject({
+				method: "POST",
+				url: `/api/hosts/${hostId}/connect`,
+				payload: {},
+			});
+			expect([200, 202]).toContain(res.statusCode);
+			await vi.waitFor(async () => {
+				const statuses = (await listedSessions("", on)).map((s) => s.status);
+				expect(statuses).toContain("active");
+			});
+		};
+		for (let cycle = 0; cycle < 3; cycle++) {
+			await connect(server);
+			const res = await server.inject({
+				method: "POST",
+				url: `/api/hosts/${hostId}/disconnect`,
+				payload: { force: true },
+			});
+			expect(res.statusCode).toBe(200);
+		}
+		await connect(server);
+
+		// The hub restarts while the host is connected.
+		sm.beginQuit();
+		await sm.shutdown();
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		const metaDal = new MetaDAL(dbs.meta);
+		const restarted = new SessionManager(dbs);
+		const restartedServer = Fastify({ logger: false });
+		registerSessionRoutes(restartedServer, metaDal, restarted);
+		registerHostConnectionRoutes(restartedServer, metaDal, restarted);
+		await restartedServer.ready();
+		try {
+			await restarted.startup();
+			await connect(restartedServer);
+
+			expect((await listedSessions("", restartedServer)).map((s) => s.status)).toEqual(["active"]);
+			expect(sessionRows()).toHaveLength(1);
+		} finally {
+			await restartedServer.close();
+			restarted.beginQuit();
+			await restarted.shutdown();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
 	});
 });

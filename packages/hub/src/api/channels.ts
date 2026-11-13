@@ -8,8 +8,7 @@ export function registerChannelRoutes(
 	metaDal: MetaDAL,
 	sessionManager: SessionManager,
 ): void {
-	// GET /api/channels?host_id=X
-	// host_id filtering: look up sessions for that host, then get channels for those sessions
+	// GET /api/channels?host_id=X: the host's channels, whichever of its sessions holds them
 	server.get<{ Querystring: { host_id?: string; session_id?: string } }>(
 		"/api/channels",
 		async (request) => {
@@ -19,8 +18,7 @@ export function registerChannelRoutes(
 			if (session_id) {
 				channels = metaDal.listChannels(session_id);
 			} else if (host_id) {
-				const sessions = metaDal.listSessions(host_id);
-				channels = sessions.flatMap((s) => metaDal.listChannels(s.id));
+				channels = metaDal.listChannelsOnHost(host_id);
 			} else {
 				channels = metaDal.listChannels();
 			}
@@ -46,8 +44,7 @@ export function registerChannelRoutes(
 
 		let deadChannelIds: string[];
 		if (host_id) {
-			const sessions = metaDal.listSessions(host_id);
-			const allChannels = sessions.flatMap((s) => metaDal.listChannels(s.id));
+			const allChannels = metaDal.listChannelsOnHost(host_id);
 			deadChannelIds = allChannels.filter((c) => c.status === "dead").map((c) => c.id);
 		} else {
 			const allChannels = metaDal.listChannels();

@@ -59,6 +59,45 @@ export class SessionsDAL {
 		return rows.map(rowToSession);
 	}
 
+	/** The sessions that are not closed, oldest first: what `GET /api/sessions` lists by default. */
+	listOpenSessions(hostId?: string): Session[] {
+		const rows = (
+			hostId
+				? this.db
+						.prepare(
+							"SELECT * FROM sessions WHERE host_id = ? AND status != 'closed' ORDER BY created_at ASC",
+						)
+						.all(hostId)
+				: this.db
+						.prepare("SELECT * FROM sessions WHERE status != 'closed' ORDER BY created_at ASC")
+						.all()
+		) as SessionRow[];
+		return rows.map(rowToSession);
+	}
+
+	/**
+	 * What a hub start leaves of the sessions (#911): every session it does not
+	 * hold is closed, and every closed session no terminal belongs to goes. A
+	 * closed session a terminal still names stays, for that terminal's host is
+	 * found through it. Says how many it closed and deleted.
+	 */
+	sweepSessions(heldIds: readonly string[]): { closed: number; deleted: number } {
+		const now = new Date().toISOString();
+		const closed = this.db
+			.prepare(
+				`UPDATE sessions SET status = 'closed', updated_at = ?
+				 WHERE status != 'closed' AND id NOT IN (SELECT value FROM json_each(?))`,
+			)
+			.run(now, JSON.stringify(heldIds)).changes;
+		const deleted = this.db
+			.prepare(
+				`DELETE FROM sessions WHERE status = 'closed'
+				 AND NOT EXISTS (SELECT 1 FROM channels c WHERE c.session_id = sessions.id)`,
+			)
+			.run().changes;
+		return { closed, deleted };
+	}
+
 	updateSessionStatus(id: string, status: SessionStatus): void {
 		const now = new Date().toISOString();
 		this.db

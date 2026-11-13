@@ -47,8 +47,10 @@ pub(crate) struct SnapshotRequest {
     pub(crate) reply: SnapshotReply,
     /// The connection that asked.
     pub(crate) to: FrameSender,
-    /// Completed once the reply is in the pipeline. A reader that is gone, or
-    /// lets the request go as its PTY closes, completes nothing (#777).
+    /// Completed once the reader has taken the request: its reply is in the
+    /// pipeline, or could not be encoded and none comes. A reader that is
+    /// gone, or lets the request go as its PTY closes, completes nothing
+    /// (#777).
     pub(crate) taken: oneshot::Sender<()>,
 }
 
@@ -1446,10 +1448,14 @@ fn answer_snapshot(
             }));
             let _ = request.taken.send(());
         }
-        // The request goes unanswered from here: an ATTACH is then answered
-        // as for a terminal the agent does not have.
+        // A screen too large for one frame (`MAX_FRAME_SIZE`): no reply
+        // comes, and the hub answers its pane from the spool once it stops
+        // waiting, as for a reply lost. The request was taken all the same:
+        // the terminal runs on, and is not answered as one the agent no
+        // longer has.
         Err(e) => {
-            tracing::warn!(channel_id = %channel_id, error = %e, "snapshot reply not encoded")
+            tracing::warn!(channel_id = %channel_id, error = %e, "snapshot reply not encoded");
+            let _ = request.taken.send(());
         }
     }
 }
@@ -2128,6 +2134,59 @@ mod stdio_tests {
             assert_eq!(frames[0]["channel_id"], "closing");
             assert_eq!(frames[0]["request_id"], *request_id);
         }
+    }
+
+    /// A screen too large for one frame is not answered as a terminal the
+    /// agent no longer has: its hub would retire a terminal that runs on.
+    /// The reader takes the request and no reply comes, so the hub answers
+    /// its pane from the spool once it stops waiting (#931).
+    #[tokio::test]
+    async fn a_snapshot_too_large_to_send_is_not_answered_as_a_terminal_gone() {
+        // Cells alternating two truecolor pairs and every attribute on and
+        // off: each is drawn with its own escape sequences, about 47 bytes,
+        // and 500 x 500 of them are past what one frame may carry.
+        let mut mirror = HeadlessMirror::new(500, 500, 0);
+        let mut screen = Vec::new();
+        for row in 1..=500 {
+            screen.extend_from_slice(format!("\x1b[{row};1H").as_bytes());
+            for col in 0..500 {
+                let cell: &[u8] = if col % 2 == 0 {
+                    b"\x1b[1;2;3;4;5;7;8;9;38;2;255;254;253;48;2;252;251;250mx"
+                } else {
+                    b"\x1b[0;38;2;100;101;102;48;2;103;104;105my"
+                };
+                screen.extend_from_slice(cell);
+            }
+        }
+        mirror.process(&screen);
+        assert!(
+            mirror.snapshot().serialized.len() > crate::framing::MAX_FRAME_SIZE as usize,
+            "the screen must be too large for one frame"
+        );
+        let (channel_events, mut events) = ChannelEventSender::new(Flows::default());
+        let (to, mut replies) = mpsc::unbounded_channel();
+        let (taken, taken_rx) = oneshot::channel();
+
+        answer_snapshot(
+            SnapshotRequest {
+                reply: SnapshotReply::Attach {
+                    request_id: Some("too-large".into()),
+                },
+                to,
+                taken,
+            },
+            &mirror,
+            1,
+            &channel_events,
+            "too-large",
+        );
+
+        assert!(taken_rx.await.is_ok(), "the reader takes the request");
+        assert!(
+            events.try_recv().is_err(),
+            "no reply goes down the pipeline"
+        );
+        assert!(replies.try_recv().is_err(), "nor to the connection");
     }
 
     /// Only a daemon says it tells hubs apart.

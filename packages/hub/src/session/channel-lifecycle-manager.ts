@@ -1219,9 +1219,9 @@ export class ChannelLifecycleManager {
 	 * must follow its snapshot without a gap (`buildEndedOutput`).
 	 *
 	 * It is called while a read from the agent is handled, so it never throws:
-	 * a storage error is logged and the snapshot is not stored. What was
-	 * committed stays, the chunker's new start included, so a later flush never
-	 * reuses the snapshot's seq.
+	 * a storage error is logged, and nothing after the failing write is stored.
+	 * What was committed stays, the chunker's new start included, so a later
+	 * flush never reuses the snapshot's seq.
 	 */
 	storeSnapshot(channelId: string, snapshot: unknown): string | undefined {
 		if (!this.ctx.channels.has(channelId)) return;

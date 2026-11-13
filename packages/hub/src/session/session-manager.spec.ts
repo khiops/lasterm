@@ -5444,6 +5444,83 @@ describe("SessionManager — elevation support", () => {
 		);
 		expect(errMsg).toBeDefined();
 	});
+
+	// ─── A terminal brought back from its pane (#858) ────────────────────────
+	//
+	// A window brings an ended terminal back with a SPAWN naming it, with its
+	// shell and arguments when its list carries them, and never a launch
+	// profile. It starts the profile it was first started from, as the hub's
+	// own restart does: its environment and its elevation as the profile says
+	// them now, its shell and arguments as the terminal has them. Both ways of
+	// bringing it back send the agent the same SPAWN.
+	it.each([
+		["its shell and arguments, as a window listing it sends them", true],
+		["its id alone, as a window that does not list it sends it", false],
+	])("brings a terminal back from %s with the SPAWN a restart sends (#858)", async (_, listed) => {
+		const localHostId = await sm.ensureLocalHost();
+		const dal = new MetaDAL(dbManager.meta);
+		const profileId = dal.createLaunchProfile({
+			name: "Staging admin",
+			shell: "/usr/bin/fish",
+			args: ["--private"],
+			env: { DEPLOY_ENV: "staging" },
+			mode: "shell",
+			elevated: true,
+			supportedOs: "any",
+			iconType: "auto",
+			sortOrder: 0,
+			reportDirectory: true,
+		}).id;
+		sm.addClient(makeAutoRespondClient("c-858", [], "hunter2"));
+		const channelId = await sm.handleSpawn("c-858", {
+			type: "SPAWN",
+			hostId: localHostId,
+			launchProfileId: profileId,
+		});
+		if (channelId === null) throw new Error("expected a channel");
+		// Edited since: what the profile says now reaches the terminal, but
+		// not the arguments, which are the terminal's own.
+		dal.updateLaunchProfile(profileId, { env: { DEPLOY_ENV: "prod" }, args: ["--login"] });
+		const agent = mockLocalAgents.at(-1);
+		const spawns = () =>
+			(agent?.send.mock.calls ?? [])
+				.map(([message]) => message as AgentSpawnMessage)
+				.filter((message) => message.type === "SPAWN");
+		const before = spawns().length;
+
+		expect(await sm.restartChannel(channelId, "c-858")).toBe(true);
+		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+		const entry = ctx.channels.get(channelId);
+		if (entry) entry.status = "dead";
+		dal.updateChannelStatus(channelId, "dead");
+		expect(
+			await sm.handleSpawn("c-858", {
+				type: "SPAWN",
+				hostId: localHostId,
+				reuseChannelId: channelId,
+				...(listed && { shell: "/usr/bin/fish", args: ["--private"] }),
+			}),
+		).toBe(channelId);
+
+		const expected = {
+			type: "SPAWN",
+			requestId: expect.any(String),
+			channelId,
+			shell: "/usr/bin/fish",
+			args: ["--private"],
+			cols: 80,
+			rows: 24,
+			env: { DEPLOY_ENV: "prod" },
+			envMode: "inherit",
+			elevated: true,
+			elevationMethod: process.platform === "win32" ? "gsudo" : "sudo",
+			elevationSecret: "hunter2",
+			reportDirectory: true,
+		};
+		const [restarted, broughtBack] = spawns().slice(before);
+		expect(restarted).toEqual(expected);
+		expect(broughtBack).toEqual(expected);
+	});
 });
 
 // ─── Concurrent-SPAWN coalescing tests ───────────────────────────────────────

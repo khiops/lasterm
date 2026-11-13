@@ -912,6 +912,14 @@ A host with none marked starts its first profile; one with no profile at all, no
 starts its own default. The local host is no exception: its agent's HELLO marks its default as an
 SSH host's does (#802).
 
+A SPAWN with `reuse_channel_id` that names no launch profile, as a window's Restart of an ended
+terminal sends it, starts the profile that terminal was started from, as
+`POST /api/channels/:id/restart` does: its environment, mode, elevation and `report_directory` as
+the profile says them now, and the shell, arguments and directory the terminal has of its own, the
+request's own fields winning as ever (#858). A terminal with no profile, or whose profile was
+deleted, starts the host's default profile only when neither the request nor the terminal names a
+shell.
+
 A SPAWN that names itself with `request_id` gets it back in the SPAWN_OK and in every ERROR that
 answers it, the refusal of a field it carries included, and in nothing else (#777). A window's
 socket carries every ERROR the hub has for it: another pane's ATTACH refused, a write lock denied,

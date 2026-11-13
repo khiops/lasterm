@@ -1463,19 +1463,32 @@ export class SessionManager {
 				const defaultProfile = hostDefaultProfile(reachedHost, this.ctx.metaDal);
 
 				// ── The launch profile it starts ──────────────────────────────────────
-				// The profile the request names; with neither a shell nor a profile
-				// named, the host's default one, started as the menu would start it,
-				// whether the user chose it or the hub marked it for the agent's
-				// default (#802). With no profile at all, none: the agent starts its
-				// own default shell.
+				// The profile the request names; for a terminal brought back naming
+				// none, which is how a window brings an ended one back, the profile
+				// it was first started from, as a restart reads it (#858); with
+				// neither a shell nor a profile named, the host's default one,
+				// started as the menu would start it, whether the user chose it or
+				// the hub marked it for the agent's default (#802). With no profile
+				// at all, none: the agent starts its own default shell.
+				const ownProfile =
+					msg.launchProfileId === undefined && reused?.launchProfileId !== undefined
+						? this.ctx.metaDal.getLaunchProfile(reused.launchProfileId)
+						: undefined;
 				const profile =
 					(msg.launchProfileId
 						? this.ctx.metaDal.getLaunchProfile(msg.launchProfileId)
-						: undefined) ?? (resolvedShell === undefined ? defaultProfile : undefined);
+						: undefined) ??
+					ownProfile ??
+					(resolvedShell === undefined ? defaultProfile : undefined);
 				if (profile) {
-					resolvedShell = msg.shell ?? profile.shell;
-					resolvedArgs = msg.args ?? profile.args ?? [];
-					resolvedCwd = msg.cwd ?? profile.cwd ?? resolvedCwd;
+					// A terminal brought back keeps the shell, arguments and directory
+					// it has of its own, as a restart sends them: its profile gives
+					// the rest, as it says it now.
+					if (profile !== ownProfile) {
+						resolvedShell = msg.shell ?? profile.shell;
+						resolvedArgs = msg.args ?? profile.args ?? [];
+						resolvedCwd = msg.cwd ?? profile.cwd ?? resolvedCwd;
+					}
 					resolvedEnv = { ...(profile.env ?? {}), ...(msg.env ?? {}) };
 					resolvedDirectProcess = msg.directProcess ?? profile.mode === "process";
 					resolvedElevated = msg.elevated ?? profile.elevated;
@@ -1532,16 +1545,9 @@ export class SessionManager {
 							resolvedDirectProcess,
 						),
 					),
-					// The profile this spawn starts; for a terminal brought back under
-					// its own shell, which is how a window restarts an ended one, the
-					// profile it was first started from, as a restart reads it: bringing
-					// it back keeps the switch's effect (#839).
-					...reportDirectoryField(
-						profile ??
-							(reused?.launchProfileId !== undefined
-								? this.ctx.metaDal.getLaunchProfile(reused.launchProfileId)
-								: undefined),
-					),
+					// The profile this spawn starts, a terminal brought back's own
+					// included: bringing it back keeps the switch's effect (#839).
+					...reportDirectoryField(profile),
 				};
 
 				// ── Elevated spawn ────────────────────────────────────────────────────

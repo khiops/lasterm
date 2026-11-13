@@ -369,6 +369,12 @@ const notConnected = ref<string | null>(null);
  * registered for this pane, kept so a retry can spawn it.
  */
 const pendingHostId = ref<string | null>(spawnHostId);
+/**
+ * The pending id that spawn was registered under. The pane owes the spawn only
+ * while it shows that id: given another terminal meanwhile, from the sidebar
+ * say, it shows that one, and the spawn is no business of it (#971).
+ */
+const spawnFor: string | null = spawnHostId !== null ? (props.channelId ?? null) : null;
 /** The BEL handler is registered on the terminal, so once is enough. */
 let bellBound = false;
 /** A reconnect landed while this pane was still opening: what it sent went out
@@ -907,6 +913,8 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 
 		if (props.channelId !== null && props.channelId !== undefined) {
 			const opened = props.channelId;
+			// Given another terminal since its spawn was owed: it attaches that one.
+			if (pendingHostId.value !== null && opened !== spawnFor) pendingHostId.value = null;
 			const hostId = pendingHostId.value;
 
 			if (hostId !== null) {
@@ -918,20 +926,26 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 					select: false,
 				});
 				pendingHostId.value = null;
-				internalChannelId.value = realId;
-				// PTY was spawned at these dims — suppress the RESIZE that
-				// attachChannel would otherwise send (prevents SIGWINCH)
-				suppressNextResize(cols, rows);
-				attachChannel(realId);
-				attachedLive = true;
-				// Watched from its very start.
-				endWatch.starting(realId);
-				endWatch.attached(realId);
-				// And now that there is a channel to tell: a font arriving while
-				// it was being created refits the terminal, and that fit had
-				// nobody to send its size to.
-				syncChannelSize();
-				emit('channel-spawned', props.channelId, realId);
+				// Given another terminal while the spawn took its time: the new
+				// terminal is not this pane's, and the one it shows now is attached
+				// below. Its parent is told nothing: the pending id is in no layout
+				// any more, and the new terminal is in the sidebar's list (#971).
+				if (props.channelId === spawnFor) {
+					internalChannelId.value = realId;
+					// PTY was spawned at these dims — suppress the RESIZE that
+					// attachChannel would otherwise send (prevents SIGWINCH)
+					suppressNextResize(cols, rows);
+					attachChannel(realId);
+					attachedLive = true;
+					// Watched from its very start.
+					endWatch.starting(realId);
+					endWatch.attached(realId);
+					// And now that there is a channel to tell: a font arriving while
+					// it was being created refits the terminal, and that fit had
+					// nobody to send its size to.
+					syncChannelSize();
+					emit('channel-spawned', spawnFor, realId);
+				}
 			} else {
 				// A terminal already known to have ended is asked for all the same:
 				// the hub's CHANNEL_DEAD carries what it last printed, which the
@@ -1012,6 +1026,14 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			});
 		}
 	} catch (err) {
+		// A spawn that failed after the pane was given another terminal: not
+		// that terminal's failure. The pane owes nothing now, and opens what it
+		// shows (#971).
+		if (pendingHostId.value !== null && props.channelId !== spawnFor) {
+			pendingHostId.value = null;
+			await openChannel(cols, rows);
+			return;
+		}
 		const msg = err instanceof Error ? err.message : String(err);
 		const code = (err as { code?: string } | null)?.code;
 		// The channel died between page load and ATTACH: the pane shows it dead,
@@ -1080,6 +1102,15 @@ async function onRetry(): Promise<void> {
 watch(
 	() => props.channelId,
 	async (newId) => {
+		// A pane that failed to open never became ready, and what it says is the
+		// failure of what it was opening, a spawn included: given another
+		// terminal, it opens that one, as its Retry would (#971). One still
+		// opening attaches it once it is ready; if that open fails before, the
+		// pane shows its failure, with Retry.
+		if (newId !== null && newId !== undefined && !ready.value) {
+			if (error.value !== null || notConnected.value !== null) await onRetry();
+			return;
+		}
 		if (newId !== null && newId !== undefined && ready.value) {
 			if (isBoundTo(newId)) return;
 			endSeenLiveOf = null;

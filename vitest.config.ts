@@ -12,6 +12,9 @@ const WEB_STYLES = [/\.css$/, /\.vue\?vue&type=style/];
 export default defineConfig({
 	test: {
 		passWithNoTests: true,
+		// A failing browser spec's screenshot, kept out of the sources. Vitest reads this
+		// for every project from the root config only.
+		attachmentsDir: "target/vitest/attachments",
 		projects: [
 			{
 				test: {
@@ -51,11 +54,6 @@ export default defineConfig({
 					include: ["packages/clients/web/**/*.spec.ts"],
 					exclude: [...configDefaults.exclude, "packages/clients/web/**/*.browser.spec.ts"],
 					environment: "happy-dom",
-					// Node 26 defines a global localStorage accessor, undefined without
-					// --localstorage-file, and Vitest 4 then leaves happy-dom's Storage
-					// off the global (vitest-dev/vitest#10867). Without Node's, the specs
-					// get happy-dom's.
-					execArgv: ["--no-webstorage"],
 					// A guard against a hang, as in the hub's specs, not a measure of
 					// speed: a spec that mounts a component over a module it mocks
 					// for that one test loads the component's whole graph again, which
@@ -78,12 +76,9 @@ export default defineConfig({
 					name: "web-browser",
 					include: ["packages/clients/web/**/*.browser.spec.ts"],
 					css: { include: WEB_STYLES },
-					// A failing spec's screenshot, kept out of the sources.
-					attachmentsDir: "target/vitest/attachments",
 					browser: {
 						enabled: true,
 						headless: true,
-						screenshotDirectory: "target/vitest/screenshots",
 						provider: playwright({
 							launchOptions: {
 								channel: process.platform === "win32" ? "msedge" : "chrome",

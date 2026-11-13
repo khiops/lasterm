@@ -404,6 +404,7 @@ const {
 	awaitFont,
 	attachChannel,
 	reattachChannel,
+	isBoundTo,
 	turnMouseReportingOff,
 	bellMuted,
 	applyProfile,
@@ -970,7 +971,7 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			// The watcher waits for `ready`: a terminal given to this pane while
 			// it opened is attached now (#927).
 			const now = props.channelId;
-			if (now !== null && now !== undefined && now !== opened && now !== internalChannelId.value) {
+			if (now !== null && now !== undefined && now !== opened) {
 				askAgainOnNewSocket = false;
 				endSeenLiveOf = null;
 				void attachAndCover(now).catch((err) => {
@@ -1072,14 +1073,15 @@ async function onRetry(): Promise<void> {
 }
 
 // Re-attach when the channelId prop changes (e.g. pane reuse after tab switch).
-// Skip when the new ID matches internalChannelId (happens after pending spawn
-// resolution — replaceChannelId updates the prop from tempId to realId but
-// the channel is already attached).
+// Skip only a terminal the pane is bound to already: the one it has just
+// spawned, whose pending id the parent swaps for the real one (replaceChannelId).
+// A later return to a terminal it spawned is an attach like any other: skipping
+// every one left the pane on the terminal it showed meanwhile (#965).
 watch(
 	() => props.channelId,
 	async (newId) => {
 		if (newId !== null && newId !== undefined && ready.value) {
-			if (newId === internalChannelId.value) return;
+			if (isBoundTo(newId)) return;
 			endSeenLiveOf = null;
 			try {
 				error.value = null;

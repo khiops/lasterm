@@ -845,10 +845,6 @@ export function useTerminal(
 	}
 
 	/**
-	 * Tell the channel the size the terminal actually has, if it differs: only
-	 * when this pane decides the size, and has one of its own (#831).
-	 */
-	/**
 	 * Whether what is typed here goes to `id` now: the terminal this pane
 	 * spawned or the last one an answer bound it to, and not one it has since
 	 * asked to leave (#929, #965).
@@ -857,6 +853,10 @@ export function useTerminal(
 		return channelId === id;
 	}
 
+	/**
+	 * Tell the channel the size the terminal actually has, if it differs: only
+	 * when this pane decides the size, and has one of its own (#831).
+	 */
 	function syncChannelSize(): void {
 		const term = terminal.value;
 		if (term && decidesSize && paneMeasurable()) sendResize(term.cols, term.rows);

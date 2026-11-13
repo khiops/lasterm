@@ -615,6 +615,7 @@ export class ChannelLifecycleManager {
 				...(shell !== undefined && { shell }),
 				...(args.length > 0 && { args }),
 				...(cwd !== undefined && { cwd }),
+				...(channel.directProcess === true && { directProcess: true }),
 				...this.restartEnv(channelId, hostId),
 				cols,
 				rows,
@@ -792,6 +793,8 @@ export class ChannelLifecycleManager {
 			...(shell !== undefined && { shell }),
 			...(args.length > 0 && { args }),
 			...(cwd !== undefined && { cwd }),
+			// As a new terminal's SPAWN says it (#858).
+			...(channel.directProcess === true && { directProcess: true }),
 			...this.restartEnv(channelId, hostId),
 			cols,
 			rows,

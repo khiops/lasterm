@@ -142,6 +142,10 @@ interface ReusedTerminal {
 	args?: string[];
 	/** The launch profile it was first started from. */
 	launchProfileId?: string;
+	/** Started as a process of its own rather than a shell. */
+	directProcess?: boolean;
+	/** The method it was elevated with, when it was started elevated. */
+	elevationMethod?: ElevationMethod;
 }
 
 export interface WsClient {
@@ -990,6 +994,12 @@ export class SessionManager {
 					...(existing.channel.launchProfileId !== undefined && {
 						launchProfileId: existing.channel.launchProfileId,
 					}),
+					...(existing.channel.directProcess === true && { directProcess: true }),
+					// Elevated as a restart reads it: the flag and its method together.
+					...(existing.channel.elevated === true &&
+						existing.channel.elevationMethod !== undefined && {
+							elevationMethod: existing.channel.elevationMethod as ElevationMethod,
+						}),
 				};
 			} else {
 				// Spawning a stranger instead would put a terminal on screen that
@@ -1480,18 +1490,25 @@ export class SessionManager {
 						: undefined) ??
 					ownProfile ??
 					(resolvedShell === undefined ? defaultProfile : undefined);
+				// The method a terminal brought back was elevated with, when it is
+				// elevated again as it was.
+				let ownElevationMethod: ElevationMethod | undefined;
 				if (profile) {
-					// A terminal brought back keeps the shell, arguments and directory
-					// it has of its own, as a restart sends them: its profile gives
-					// the rest, as it says it now.
-					if (profile !== ownProfile) {
+					if (profile === ownProfile) {
+						// As a restart starts it: its own shell, arguments, directory,
+						// mode and elevation, as it was started; its profile gives its
+						// environment, as the profile says it now.
+						resolvedDirectProcess = msg.directProcess ?? reused?.directProcess === true;
+						resolvedElevated = msg.elevated ?? reused?.elevationMethod !== undefined;
+						if (msg.elevated === undefined) ownElevationMethod = reused?.elevationMethod;
+					} else {
 						resolvedShell = msg.shell ?? profile.shell;
 						resolvedArgs = msg.args ?? profile.args ?? [];
 						resolvedCwd = msg.cwd ?? profile.cwd ?? resolvedCwd;
+						resolvedDirectProcess = msg.directProcess ?? profile.mode === "process";
+						resolvedElevated = msg.elevated ?? profile.elevated;
 					}
 					resolvedEnv = { ...(profile.env ?? {}), ...(msg.env ?? {}) };
-					resolvedDirectProcess = msg.directProcess ?? profile.mode === "process";
-					resolvedElevated = msg.elevated ?? profile.elevated;
 					resolvedLaunchProfileId = profile.id;
 				}
 
@@ -1552,11 +1569,13 @@ export class SessionManager {
 
 				// ── Elevated spawn ────────────────────────────────────────────────────
 				if (resolvedElevated) {
-					const rawMethod = this.ctx.configResolver
-						? this.ctx.configResolver.resolveElevationMethod(host.elevationMethod)
-						: process.platform === "win32"
-							? "gsudo"
-							: "sudo";
+					const rawMethod =
+						ownElevationMethod ??
+						(this.ctx.configResolver
+							? this.ctx.configResolver.resolveElevationMethod(host.elevationMethod)
+							: process.platform === "win32"
+								? "gsudo"
+								: "sudo");
 					const elevCfg = this._resolveElevationConfig(host.customCommand, rawMethod);
 					if ("validationError" in elevCfg) {
 						client.send(elevCfg.validationError);

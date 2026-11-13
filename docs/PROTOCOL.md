@@ -913,12 +913,13 @@ starts its own default. The local host is no exception: its agent's HELLO marks 
 SSH host's does (#802).
 
 A SPAWN with `reuse_channel_id` that names no launch profile, as a window's Restart of an ended
-terminal sends it, starts the profile that terminal was started from, as
-`POST /api/channels/:id/restart` does: its environment, mode, elevation and `report_directory` as
-the profile says them now, and the shell, arguments and directory the terminal has of its own, the
-request's own fields winning as ever (#858). A terminal with no profile, or whose profile was
-deleted, starts the host's default profile only when neither the request nor the terminal names a
-shell.
+terminal sends it, starts that terminal as `POST /api/channels/:id/restart` does (#858): the
+environment and `report_directory` of the launch profile it was started from, as the profile says
+them now, and its own shell, arguments, directory, mode and elevation, the last with the method it
+was elevated with, as it was started. The fields the request names win as ever; one that names a
+shell names its arguments with it, none meaning none. A terminal with no profile, or whose profile
+was deleted, starts the host's default profile only when neither the request nor the terminal
+names a shell.
 
 A SPAWN that names itself with `request_id` gets it back in the SPAWN_OK and in every ERROR that
 answers it, the refusal of a field it carries included, and in nothing else (#777). A window's

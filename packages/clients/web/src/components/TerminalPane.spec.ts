@@ -457,22 +457,6 @@ describe("TerminalPane whose spawn completes after it moved on (#971)", () => {
 		expect(spawns()).toHaveLength(1);
 	});
 
-	it("attaches the terminal it was given after its spawn failed, on Retry", async () => {
-		const channel = openNew(HOST);
-		useChannelsStore().registerChannelHost(U, HOST);
-		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
-		spawnRefused("SPAWN_FAILED", "the shell could not start");
-		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
-		channel.value = U;
-		await settle();
-
-		button("Retry")?.click();
-		await settle();
-
-		expect(spawns()).toHaveLength(1);
-		expect(attachedTo()).toEqual([U]);
-	});
-
 	it("spawns nothing when it is given another terminal before its spawn is sent", async () => {
 		const channel = openNew(HOST);
 		let connected: () => void = () => {};
@@ -521,6 +505,61 @@ describe("TerminalPane whose spawn completes after it moved on (#971)", () => {
 		// The spawn's answer was taken: the window knows the new terminal's host.
 		expect(useChannelsStore().channelHostMap.get(REAL)).toBe(HOST);
 		expect(listening("OUTPUT")).toBe(0);
+	});
+});
+
+// A pane that failed to open says why, and that is about what it was opening.
+// Given another terminal from the sidebar, it kept saying so over it, never
+// attaching it, until Retry.
+describe("TerminalPane that failed to open, given another terminal (#971)", () => {
+	it("opens it after its spawn failed", async () => {
+		const channel = openNew(HOST);
+		withU();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+
+		channel.value = U;
+		await settle();
+
+		expect(errorBox()).toBeNull();
+		expect(spawns()).toHaveLength(1);
+		expect(attachedTo()).toEqual([U]);
+	});
+
+	it("opens it while its spawn waits for a password or passphrase that was not given", async () => {
+		const channel = openNew(HOST);
+		withU();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("AUTH_CANCELLED", "Authentication cancelled by user");
+		await vi.waitFor(() =>
+			expect(root.textContent).toContain("Not connected: the password or passphrase was not given"),
+		);
+
+		channel.value = U;
+		await settle();
+
+		expect(root.textContent).not.toContain(
+			"Not connected: the password or passphrase was not given",
+		);
+		expect(spawns()).toHaveLength(1);
+		expect(attachedTo()).toEqual([U]);
+	});
+
+	it("opens it after the attach of the one it showed went unanswered", async () => {
+		const channel = ref<string | null>(T);
+		mountPane(channel, "live");
+		withU();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		expect(errorBox()?.textContent).toContain("ATTACH timeout");
+
+		channel.value = U;
+		await settle();
+
+		expect(errorBox()).toBeNull();
+		expect(attachedTo()).toEqual([T, U]);
 	});
 });
 

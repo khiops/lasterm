@@ -461,6 +461,9 @@ export function useTerminal(
 	 * Call after init() and after a successful SPAWN.
 	 */
 	function attachChannel(id: string): void {
+		// A spawn that completes after the pane closed: nothing to bind, and
+		// nothing may listen for a pane that is gone (#971).
+		if (disposed) return;
 		channelId = id;
 		shownId = id;
 		leaveEndedSize();

@@ -31,6 +31,7 @@ import {
 	bellSound,
 	button,
 	CLIENT,
+	closePane,
 	emitted,
 	type Frame,
 	freshWindow,
@@ -38,6 +39,7 @@ import {
 	hear,
 	host,
 	lastOutput,
+	listening,
 	MOUSE_OFF,
 	mount,
 	mountPane,
@@ -410,6 +412,43 @@ describe("TerminalPane given back the terminal it spawned (#965)", () => {
 		type("x");
 
 		expect(inputsTo()).toEqual([REAL]);
+	});
+});
+
+// ─── A spawn that completes after the pane moved on (#971) ──────────────────
+
+// A spawn takes seconds over SSH. Given another terminal meanwhile, the pane
+// named that one as the pending id it spawned for, and its parent replaced it
+// by the new terminal in every layout; closed meanwhile, it subscribed to the
+// new terminal's output, and nothing took that listener away.
+describe("TerminalPane whose spawn completes after it moved on (#971)", () => {
+	it("names the pending terminal it spawned for, not the one it was given meanwhile", async () => {
+		const channel = openNew(HOST);
+		useChannelsStore().registerChannelHost(U, HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		channel.value = U;
+		await settle();
+
+		spawnOk(REAL);
+		await settle();
+
+		expect(emitted.filter(([event]) => event === "channel-spawned")).toEqual([
+			["channel-spawned", NEW, REAL],
+		]);
+		expect(channel.value).toBe(U);
+		expect(attachedTo()).toEqual([U]);
+	});
+
+	it("leaves nothing listening when it is closed before its spawn completes", async () => {
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		closePane();
+		expect(listening("OUTPUT")).toBe(0);
+
+		spawnOk(REAL);
+		await settle();
+
+		expect(listening("OUTPUT")).toBe(0);
 	});
 });
 

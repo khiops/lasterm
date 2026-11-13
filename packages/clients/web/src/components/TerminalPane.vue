@@ -931,7 +931,10 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 				// it was being created refits the terminal, and that fit had
 				// nobody to send its size to.
 				syncChannelSize();
-				emit('channel-spawned', props.channelId, realId);
+				// The pending id this spawn was for: the parent swaps that one for the
+				// new terminal. The pane may show another terminal by now, given to it
+				// while the spawn took its time, and that one stays where it is (#971).
+				emit('channel-spawned', opened, realId);
 			} else {
 				// A terminal already known to have ended is asked for all the same:
 				// the hub's CHANNEL_DEAD carries what it last printed, which the

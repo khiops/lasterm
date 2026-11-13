@@ -280,71 +280,80 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		expect((await server.inject(`/api/hosts/${hostId}`)).statusCode).toBe(200);
 	});
 
-	it("V1 sends every DESTROY before close, reports each own session, and drops rows and secrets", async () => {
-		const agent = connectedAgent();
-		const { channelIds, heard, ctx } = liveTerminalsOn(agent, 2);
-		const dal = new MetaDAL(dbs.meta);
-		const olderSession = "01K580SESSION0000000000001";
-		dal.createSession({ id: olderSession, hostId, status: "active" });
-		const second = channelIds[1]!;
-		dbs.meta.prepare("UPDATE channels SET session_id = ? WHERE id = ?").run(olderSession, second);
-		ctx.channels.get(second)!.sessionId = olderSession;
-		const anotherWindow: ProtocolMessage[] = [];
-		sm.addClient({
-			id: "other-window",
-			send: (msg) => anotherWindow.push(msg),
-			attachedChannels: new Set(),
-		});
-		const order: string[] = [];
-		agent.send.mockImplementation((msg: ProtocolMessage) =>
-			order.push(msg.type === "DESTROY" ? msg.channelId : msg.type),
-		);
-		vi.spyOn(agent, "close").mockImplementation(async () => {
-			order.push("close");
-			agent.connected = false;
-		});
-		const log = vi.fn();
-		ctx.hubLogger = { log } as never;
-		ctx.passphraseCache.set(hostId, { secret: "secret", expiresAt: Infinity });
-		ctx.passphraseCache.set("other", { secret: "other", expiresAt: Infinity });
-		ctx.elevationCache.set(`${hostId}:window`, { secret: "secret", expiresAt: Infinity });
-		ctx.elevationCache.set("other:window", { secret: "other", expiresAt: Infinity });
-		ctx.trustedAgentSha256.set(hostId, "hash");
-		ctx.trustedAgentSha256.set("other", "other-hash");
-		expect((await remove("?force=true")).statusCode).toBe(204);
-		// One DESTROY for each terminal, naming it, then the close.
-		expect(order).toEqual([...channelIds, "close"]);
-		for (const messages of [heard, anotherWindow]) {
-			for (const [index, id] of channelIds.entries()) {
-				expect(endsOf(messages, id)).toEqual([
-					{
-						type: "CHANNEL_STATE",
-						channelId: id,
-						sessionId: index === 0 ? SESSION_ID : olderSession,
-						status: "dead",
-						endReason: "killed",
-					},
-				]);
+	// An outdated daemon too: the delete holds the stop marker (D3 step 1), so
+	// the end of its last terminal begins no retirement and sends no STOP (#923).
+	it.each([
+		["at this hub's version", DAEMON_HELLO],
+		["older than this hub", OUTDATED_DAEMON_HELLO],
+	])(
+		"V1 sends every DESTROY before close, reports each own session, and drops rows and secrets, daemon %s",
+		async (_, hello) => {
+			const agent = connectedAgent();
+			agent.helloMessage = hello;
+			const { channelIds, heard, ctx } = liveTerminalsOn(agent, 2);
+			const dal = new MetaDAL(dbs.meta);
+			const olderSession = "01K580SESSION0000000000001";
+			dal.createSession({ id: olderSession, hostId, status: "active" });
+			const second = channelIds[1]!;
+			dbs.meta.prepare("UPDATE channels SET session_id = ? WHERE id = ?").run(olderSession, second);
+			ctx.channels.get(second)!.sessionId = olderSession;
+			const anotherWindow: ProtocolMessage[] = [];
+			sm.addClient({
+				id: "other-window",
+				send: (msg) => anotherWindow.push(msg),
+				attachedChannels: new Set(),
+			});
+			const order: string[] = [];
+			agent.send.mockImplementation((msg: ProtocolMessage) =>
+				order.push(msg.type === "DESTROY" ? msg.channelId : msg.type),
+			);
+			vi.spyOn(agent, "close").mockImplementation(async () => {
+				order.push("close");
+				agent.connected = false;
+			});
+			const log = vi.fn();
+			ctx.hubLogger = { log } as never;
+			ctx.passphraseCache.set(hostId, { secret: "secret", expiresAt: Infinity });
+			ctx.passphraseCache.set("other", { secret: "other", expiresAt: Infinity });
+			ctx.elevationCache.set(`${hostId}:window`, { secret: "secret", expiresAt: Infinity });
+			ctx.elevationCache.set("other:window", { secret: "other", expiresAt: Infinity });
+			ctx.trustedAgentSha256.set(hostId, "hash");
+			ctx.trustedAgentSha256.set("other", "other-hash");
+			expect((await remove("?force=true")).statusCode).toBe(204);
+			// One DESTROY for each terminal, naming it, then the close.
+			expect(order).toEqual([...channelIds, "close"]);
+			for (const messages of [heard, anotherWindow]) {
+				for (const [index, id] of channelIds.entries()) {
+					expect(endsOf(messages, id)).toEqual([
+						{
+							type: "CHANNEL_STATE",
+							channelId: id,
+							sessionId: index === 0 ? SESSION_ID : olderSession,
+							status: "dead",
+							endReason: "killed",
+						},
+					]);
+				}
 			}
-		}
-		expect((await server.inject(`/api/hosts/${hostId}`)).statusCode).toBe(404);
-		for (const id of channelIds) {
-			expect(ctx.channels.has(id)).toBe(false);
-			expect(dal.getChannel(id)).toBeUndefined();
-		}
-		expect(ctx.sessions.has(hostId)).toBe(false);
-		expect(ctx.agents.has(hostId)).toBe(false);
-		expect(ctx.stoppingAgents.has(hostId)).toBe(false);
-		expect(ctx.passphraseCache.has(hostId)).toBe(false);
-		expect(ctx.passphraseCache.has("other")).toBe(true);
-		expect(ctx.elevationCache.has(`${hostId}:window`)).toBe(false);
-		expect(ctx.elevationCache.has("other:window")).toBe(true);
-		expect(ctx.trustedAgentSha256.has(hostId)).toBe(false);
-		expect(ctx.trustedAgentSha256.get("other")).toBe("other-hash");
-		expect(
-			log.mock.calls.filter(([, message]) => message === "session-manager: host deleted"),
-		).toEqual([["info", "session-manager: host deleted", { hostId, ended: 2, unreachable: 0 }]]);
-	});
+			expect((await server.inject(`/api/hosts/${hostId}`)).statusCode).toBe(404);
+			for (const id of channelIds) {
+				expect(ctx.channels.has(id)).toBe(false);
+				expect(dal.getChannel(id)).toBeUndefined();
+			}
+			expect(ctx.sessions.has(hostId)).toBe(false);
+			expect(ctx.agents.has(hostId)).toBe(false);
+			expect(ctx.stoppingAgents.has(hostId)).toBe(false);
+			expect(ctx.passphraseCache.has(hostId)).toBe(false);
+			expect(ctx.passphraseCache.has("other")).toBe(true);
+			expect(ctx.elevationCache.has(`${hostId}:window`)).toBe(false);
+			expect(ctx.elevationCache.has("other:window")).toBe(true);
+			expect(ctx.trustedAgentSha256.has(hostId)).toBe(false);
+			expect(ctx.trustedAgentSha256.get("other")).toBe("other-hash");
+			expect(
+				log.mock.calls.filter(([, message]) => message === "session-manager: host deleted"),
+			).toEqual([["info", "session-manager: host deleted", { hostId, ended: 2, unreachable: 0 }]]);
+		},
+	);
 
 	it("R2 validates force before changing the host", async () => {
 		const response = await remove("?force=yes");

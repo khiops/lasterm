@@ -79,9 +79,9 @@ export default defineConfig({
 					browser: {
 						enabled: true,
 						headless: true,
-						// Mocks served by request interception, as in Vitest 4. Vitest 5.1's import-map
-						// mocks took 0.75-1.3 s on a spec's first mocked import (TitleBar's, here),
-						// against about 60 ms this way (#968).
+						// Mocks served by request interception, as in Vitest 4. With Vitest 5.1's
+						// import-map mocks, TitleBar's first mocked import took 0.75-1.3 s, past its
+						// 1 s wait; this way, a median of about 150 ms, at most about 0.5 s (#968).
 						importMapMocks: false,
 						provider: playwright({
 							launchOptions: {

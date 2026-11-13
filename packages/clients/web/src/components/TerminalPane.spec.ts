@@ -353,6 +353,66 @@ describe("TerminalPane layers", () => {
 	});
 });
 
+// ─── Given back the terminal it spawned (#965) ───────────────────────────────
+
+// A pane skips the one change of terminal that follows its own spawn: its
+// parent swaps the pending id for the terminal the pane just made and is
+// already attached to. It skipped every later return to that terminal too,
+// and stayed on the one it showed meanwhile, its keys going there.
+describe("TerminalPane given back the terminal it spawned (#965)", () => {
+	/** A pane that spawned REAL on HOST, attached to it without an ATTACH. */
+	async function spawnedReal(): Promise<Ref<string | null>> {
+		const channel = openNew(HOST);
+		useChannelsStore().registerChannelHost(U, HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnOk(REAL);
+		await settle();
+		expect(channel.value).toBe(REAL);
+		return channel;
+	}
+
+	it("does not attach the terminal it has just spawned", async () => {
+		await spawnedReal();
+
+		expect(attachedTo()).toEqual([]);
+	});
+
+	it("attaches the terminal it spawned when it is given it back", async () => {
+		const channel = await spawnedReal();
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([U]));
+		attachOk(U, "U-SCREEN");
+		await settle();
+
+		channel.value = REAL;
+		await settle();
+		expect(attachedTo()).toEqual([U, REAL]);
+		xterm.events.length = 0;
+		attachOk(REAL, "REAL-SCREEN");
+		await settle();
+		print(U, "U-OUT");
+		print(REAL, "REAL-OUT");
+
+		expect(xterm.events).toEqual(["<reset>", "REAL-SCREEN", "REAL-OUT"]);
+	});
+
+	it("attaches the terminal it spawned when given it back before the other answered", async () => {
+		const channel = await spawnedReal();
+		useWriteLockStore().handleWriteLock(REAL, CLIENT);
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([U]));
+
+		channel.value = REAL;
+		await settle();
+		expect(attachedTo()).toEqual([U, REAL]);
+		attachOk(REAL, "REAL-SCREEN");
+		await settle();
+		type("x");
+
+		expect(inputsTo()).toEqual([REAL]);
+	});
+});
+
 // ─── Spawn size ──────────────────────────────────────────────────────────────
 
 describe("TerminalPane spawn size", () => {

@@ -42,7 +42,7 @@ pub(crate) enum ChannelCommand {
 /// reply into the channel's pipeline, behind that output. So the reply reaches
 /// the connection that asked after every OUTPUT its screen holds and before
 /// every OUTPUT read after it, and its `last_seq` is the seq of the last read
-/// it holds.
+/// it holds. A screen too large for one frame gets no reply.
 pub(crate) struct SnapshotRequest {
     pub(crate) reply: SnapshotReply,
     /// The connection that asked.
@@ -1379,7 +1379,8 @@ fn send_channel_event(
 
 /// What became of a [`SnapshotRequest`] handed to a channel's reader.
 enum Asked {
-    /// Its reply is in the channel's pipeline.
+    /// The reader took it: its reply is in the channel's pipeline, or could
+    /// not be encoded and none comes.
     Taken,
     /// The reader let it go, as its PTY closed.
     Dropped,
@@ -1388,7 +1389,8 @@ enum Asked {
 }
 
 /// Ask a channel's reader for a snapshot reply to `to`, and wait until it has
-/// put the reply in its pipeline or let the request go.
+/// taken the request (its reply in the pipeline, or none when it could not be
+/// encoded) or let it go.
 async fn ask_reader(
     reader: &mpsc::UnboundedSender<ChannelCommand>,
     reply: SnapshotReply,
@@ -1410,7 +1412,8 @@ async fn ask_reader(
 }
 
 /// Answer `request` with the screen as the reads `1..=last_seq` left it, put
-/// in the channel's pipeline behind the output of those reads (#931).
+/// in the channel's pipeline behind the output of those reads (#931), or with
+/// nothing when the screen is too large for one frame.
 fn answer_snapshot(
     request: SnapshotRequest,
     mirror: &HeadlessMirror,

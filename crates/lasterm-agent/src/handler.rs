@@ -5,7 +5,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::batch::{
-    batch_loop, BatchedEvent, ChannelEvent, ChannelEventSender, EventFrame, OutputEvent,
+    batch_loop, BatchedEvent, ChannelEvent, ChannelEventSender, Delivery, EventFrame, OutputEvent,
+    ReplyFrame,
 };
 use crate::cwd::{CwdTracker, ProcessRead};
 use crate::environment::{self, EnvMode, Platform};
@@ -26,13 +27,37 @@ use async_xpty::PtySize;
 
 /// Commands sent from the main task to a per-channel PTY reader task.
 pub(crate) enum ChannelCommand {
-    /// Request a snapshot; reply is sent on the oneshot channel.
-    Snapshot(oneshot::Sender<SnapshotInfo>),
+    /// Render the screen and answer an ATTACH or a SNAPSHOT_REQ with it.
+    Snapshot(SnapshotRequest),
     /// Notify the mirror of a resize.
     Resize(u16, u16),
     /// Read the terminal's directory afresh and send it, changed or not
     /// (CWD_QUERY, #834).
     CwdQuery,
+}
+
+/// An ATTACH or a SNAPSHOT_REQ, for the channel's reader to answer (#931).
+///
+/// The reader renders the screen from what it has read so far and puts the
+/// reply into the channel's pipeline, behind that output. So the reply reaches
+/// the connection that asked after every OUTPUT its screen holds and before
+/// every OUTPUT read after it, and its `last_seq` is the seq of the last read
+/// it holds.
+pub(crate) struct SnapshotRequest {
+    pub(crate) reply: SnapshotReply,
+    /// The connection that asked.
+    pub(crate) to: FrameSender,
+    /// Completed once the reply is in the pipeline. A reader that is gone, or
+    /// lets the request go as its PTY closes, completes nothing (#777).
+    pub(crate) taken: oneshot::Sender<()>,
+}
+
+/// Which message answers a [`SnapshotRequest`].
+pub(crate) enum SnapshotReply {
+    /// ATTACH_OK, echoing the ATTACH's request id (#767).
+    Attach { request_id: Option<String> },
+    /// SNAPSHOT_RES.
+    Snapshot,
 }
 
 /// How often a terminal's process is read for its title and its directory.
@@ -176,12 +201,16 @@ pub async fn run_stdio() -> std::io::Result<DestroyAllSummary> {
         let ftx = frame_tx.clone();
         tokio::spawn(async move {
             while let Some(event) = batched_rx.recv().await {
-                if let Ok(routed) = event.into_routed() {
-                    let _ = ftx.send(Outgoing::charged(
-                        routed.frame,
-                        routed.charge,
-                        STDIO_CONNECTION,
-                    ));
+                match event.into_delivery() {
+                    Ok(Delivery::Owner(routed)) => {
+                        let _ = ftx.send(Outgoing::charged(
+                            routed.frame,
+                            routed.charge,
+                            STDIO_CONNECTION,
+                        ));
+                    }
+                    Ok(Delivery::Asker(reply)) => reply.send(),
+                    Err(_) => {}
                 }
             }
         });
@@ -553,37 +582,15 @@ pub(crate) async fn handle_message(
                 None
             };
             if let Some(tx) = tx_opt {
-                let (reply_tx, reply_rx) = oneshot::channel::<SnapshotInfo>();
-                if tx.send(ChannelCommand::Snapshot(reply_tx)).is_ok() {
-                    if let Ok(info) = reply_rx.await {
-                        // Get the current seq from the pty_manager
-                        let last_seq = {
-                            let mgr = pty_manager.lock().await;
-                            match mgr.channels.get(&channel_id) {
-                                Some(channel) => channel.seq,
-                                None => 0,
-                            }
-                        };
-                        let msg = AgentToHub::SnapshotRes {
-                            channel_id: channel_id.clone(),
-                            snapshot: SnapshotData {
-                                serialized: info.serialized,
-                                cols: info.cols,
-                                rows: info.rows,
-                                cursor_x: info.cursor_x,
-                                cursor_y: info.cursor_y,
-                            },
-                            last_seq,
-                        };
-                        send_frame(&frame_tx, &msg)?;
-                    } else {
-                        tracing::warn!(
-                            "SNAPSHOT_REQ: reader task dropped reply sender for channel: {}",
-                            channel_id
-                        );
+                match ask_reader(&tx, SnapshotReply::Snapshot, &frame_tx).await {
+                    Asked::Taken => {}
+                    Asked::Dropped => tracing::warn!(
+                        "SNAPSHOT_REQ: reader task dropped the request for channel: {}",
+                        channel_id
+                    ),
+                    Asked::Gone => {
+                        tracing::warn!("SNAPSHOT_REQ: reader task gone for channel: {}", channel_id)
                     }
-                } else {
-                    tracing::warn!("SNAPSHOT_REQ: reader task gone for channel: {}", channel_id);
                 }
             } else {
                 tracing::warn!("SNAPSHOT_REQ for unknown channel: {}", channel_id);
@@ -604,47 +611,31 @@ pub(crate) async fn handle_message(
                 None
             };
             if let Some(tx) = tx_opt {
-                let (reply_tx, reply_rx) = oneshot::channel::<SnapshotInfo>();
-                // The reader serves the snapshot while it reads its PTY. Once that
-                // has closed it serves none: the request finds it gone, or reached
-                // it as it went and is dropped. Either way the ATTACH is answered,
-                // as for a terminal the agent no longer has, which it is about to
-                // be: the hub never waits out its timeout for it (#777).
-                let snapshot = if tx.send(ChannelCommand::Snapshot(reply_tx)).is_ok() {
-                    let snapshot = reply_rx.await.ok();
-                    if snapshot.is_none() {
+                // The reader serves the snapshot while it reads its PTY, and
+                // sends the ATTACH_OK itself, in order with its output (#931).
+                // Once its PTY has closed it serves none: the request finds it
+                // gone, or reached it as it went and is dropped. Either way the
+                // ATTACH is answered here, as for a terminal the agent no longer
+                // has, which it is about to be: the hub never waits out its
+                // timeout for it (#777).
+                let reply = SnapshotReply::Attach {
+                    request_id: request_id.clone(),
+                };
+                let taken = match ask_reader(&tx, reply, &frame_tx).await {
+                    Asked::Taken => true,
+                    Asked::Dropped => {
                         tracing::warn!(
-                            "ATTACH: reader task dropped reply sender for channel: {}",
+                            "ATTACH: reader task dropped the request for channel: {}",
                             channel_id
                         );
+                        false
                     }
-                    snapshot
-                } else {
-                    tracing::warn!("ATTACH: reader task gone for channel: {}", channel_id);
-                    None
+                    Asked::Gone => {
+                        tracing::warn!("ATTACH: reader task gone for channel: {}", channel_id);
+                        false
+                    }
                 };
-                if let Some(info) = snapshot {
-                    let last_seq = {
-                        let mgr = pty_manager.lock().await;
-                        match mgr.channels.get(&channel_id) {
-                            Some(channel) => channel.seq,
-                            None => 0,
-                        }
-                    };
-                    let msg = AgentToHub::AttachOk {
-                        channel_id: channel_id.clone(),
-                        request_id,
-                        snapshot: SnapshotData {
-                            serialized: info.serialized,
-                            cols: info.cols,
-                            rows: info.rows,
-                            cursor_x: info.cursor_x,
-                            cursor_y: info.cursor_y,
-                        },
-                        last_seq,
-                    };
-                    send_frame(&frame_tx, &msg)?;
-                } else {
+                if !taken {
                     send_frame(
                         &frame_tx,
                         &AgentToHub::Error {
@@ -1210,9 +1201,8 @@ fn spawn_reader_task(
                 // Command from main task (snapshot request or resize)
                 cmd = cmd_rx.recv() => {
                     match cmd {
-                        Some(ChannelCommand::Snapshot(reply_tx)) => {
-                            let info = mirror.snapshot();
-                            let _ = reply_tx.send(info);
+                        Some(ChannelCommand::Snapshot(request)) => {
+                            answer_snapshot(request, &mirror, seq, &channel_events, &channel_id);
                         }
                         Some(ChannelCommand::Resize(new_cols, new_rows)) => {
                             mirror.resize(new_cols, new_rows);
@@ -1382,6 +1372,85 @@ fn send_channel_event(
             frame,
             ends_channel: matches!(msg, AgentToHub::ChannelExit { .. }),
         }));
+    }
+}
+
+/// What became of a [`SnapshotRequest`] handed to a channel's reader.
+enum Asked {
+    /// Its reply is in the channel's pipeline.
+    Taken,
+    /// The reader let it go, as its PTY closed.
+    Dropped,
+    /// The reader was gone already.
+    Gone,
+}
+
+/// Ask a channel's reader for a snapshot reply to `to`, and wait until it has
+/// put the reply in its pipeline or let the request go.
+async fn ask_reader(
+    reader: &mpsc::UnboundedSender<ChannelCommand>,
+    reply: SnapshotReply,
+    to: &FrameSender,
+) -> Asked {
+    let (taken, taken_rx) = oneshot::channel();
+    let request = SnapshotRequest {
+        reply,
+        to: to.clone(),
+        taken,
+    };
+    if reader.send(ChannelCommand::Snapshot(request)).is_err() {
+        return Asked::Gone;
+    }
+    match taken_rx.await {
+        Ok(()) => Asked::Taken,
+        Err(_) => Asked::Dropped,
+    }
+}
+
+/// Answer `request` with the screen as the reads `1..=last_seq` left it, put
+/// in the channel's pipeline behind the output of those reads (#931).
+fn answer_snapshot(
+    request: SnapshotRequest,
+    mirror: &HeadlessMirror,
+    last_seq: u64,
+    channel_events: &ChannelEventSender,
+    channel_id: &str,
+) {
+    let info: SnapshotInfo = mirror.snapshot();
+    let snapshot = SnapshotData {
+        serialized: info.serialized,
+        cols: info.cols,
+        rows: info.rows,
+        cursor_x: info.cursor_x,
+        cursor_y: info.cursor_y,
+    };
+    let msg = match request.reply {
+        SnapshotReply::Attach { request_id } => AgentToHub::AttachOk {
+            channel_id: channel_id.to_owned(),
+            request_id,
+            snapshot,
+            last_seq,
+        },
+        SnapshotReply::Snapshot => AgentToHub::SnapshotRes {
+            channel_id: channel_id.to_owned(),
+            snapshot,
+            last_seq,
+        },
+    };
+    match encode_frame(&msg) {
+        Ok(frame) => {
+            channel_events.send(ChannelEvent::Reply(ReplyFrame {
+                channel_id: channel_id.to_owned(),
+                frame,
+                to: request.to,
+            }));
+            let _ = request.taken.send(());
+        }
+        // The request goes unanswered from here: an ATTACH is then answered
+        // as for a terminal the agent does not have.
+        Err(e) => {
+            tracing::warn!(channel_id = %channel_id, error = %e, "snapshot reply not encoded")
+        }
     }
 }
 
@@ -1967,15 +2036,17 @@ mod stdio_tests {
         assert_eq!(frames[0]["channel_id"], "gone");
     }
 
-    /// The ATTACH_OK of a live terminal echoes the request id too.
+    /// The ATTACH_OK of a live terminal echoes the request id too. Its reader
+    /// sends it down the channel's pipeline, behind the output it holds
+    /// (#931): nothing goes to the connection around it.
     #[tokio::test]
     async fn attach_ok_echoes_the_attach_request_id() {
         use crate::protocol::HubToAgent;
         let manager = Arc::new(Mutex::new(PtyManager::new()));
         let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
-        start_terminal("attached", &manager, &senders).await;
+        let mut events = start_terminal_in("attached", None, &manager, &senders).await;
 
-        let attached = answers(
+        let direct = answers(
             HubToAgent::Attach {
                 channel_id: "attached".into(),
                 request_id: Some("attach-2".into()),
@@ -1984,14 +2055,27 @@ mod stdio_tests {
             &senders,
         )
         .await;
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match events.recv().await {
+                    Some(ChannelEvent::Reply(reply)) => break reply,
+                    Some(_) => continue,
+                    None => panic!("the terminal's pipeline closed without a reply"),
+                }
+            }
+        })
+        .await
+        .expect("the reader replies");
         if let Some(process) = manager.lock().await.remove("attached") {
             let _ = process.kill_tree();
         }
 
-        assert_eq!(attached.len(), 1, "{attached:?}");
-        assert_eq!(attached[0]["type"], "ATTACH_OK");
-        assert_eq!(attached[0]["channel_id"], "attached");
-        assert_eq!(attached[0]["request_id"], "attach-2");
+        assert!(direct.is_empty(), "{direct:?}");
+        assert_eq!(reply.channel_id, "attached");
+        let attached: serde_json::Value = rmp_serde::from_slice(&reply.frame[4..]).unwrap();
+        assert_eq!(attached["type"], "ATTACH_OK");
+        assert_eq!(attached["channel_id"], "attached");
+        assert_eq!(attached["request_id"], "attach-2");
     }
 
     /// A terminal whose reader lets go of the snapshot an ATTACH asks for, as

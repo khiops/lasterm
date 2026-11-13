@@ -716,7 +716,7 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 		lifecycle.destroyChannel(channelId);
 		if (!rowPresent) dal.deleteCascadeForHost(hostId);
 		const write = vi.spyOn(ctx.spoolDal, "insertSnapshot");
-		expect(() => lifecycle.storeSnapshot(channelId, { rows: [] }, 10)).not.toThrow();
+		expect(() => lifecycle.storeSnapshot(channelId, { rows: [] })).not.toThrow();
 		expect(write).not.toHaveBeenCalled();
 		expect(
 			dbs.meta.prepare("SELECT * FROM cache_index WHERE channel_id = ?").all(channelId),

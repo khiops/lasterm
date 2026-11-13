@@ -426,21 +426,33 @@ pub(super) fn output_data(frame: &rmpv::Value) -> &[u8] {
 
 /// The last number the daemon's screen model of `channel_id` shows: how far
 /// the daemon has read that terminal. The reader answers this whether or not
-/// it is reading its terminal. A terminal whose reader is gone has ended,
-/// having printed everything.
+/// it is reading its terminal, as a SNAPSHOT_RES sent to the connection that
+/// asked, here a queue of the test's own. A terminal whose reader is gone has
+/// ended, having printed everything.
 async fn last_number_on_screen(daemon: &DaemonShared, channel_id: &str) -> usize {
+    use crate::handler::{ChannelCommand, SnapshotReply, SnapshotRequest};
     let Some(reader) = daemon.cmd_senders.lock().await.get(channel_id).cloned() else {
         return LINES;
     };
-    let (reply, screen) = oneshot::channel();
+    let (to, mut replies) = tokio::sync::mpsc::unbounded_channel();
+    let (taken, _taken) = oneshot::channel();
     reader
-        .send(crate::handler::ChannelCommand::Snapshot(reply))
+        .send(ChannelCommand::Snapshot(SnapshotRequest {
+            reply: SnapshotReply::Snapshot,
+            to,
+            taken,
+        }))
         .unwrap_or_else(|_| panic!("the reader of {channel_id} is gone"));
-    let screen = tokio::time::timeout(DEADLINE, screen)
+    let reply = tokio::time::timeout(DEADLINE, replies.recv())
         .await
         .expect("the reader answers while its output is held back")
         .expect("the reader replies");
-    numbers_shown(screen.serialized.as_bytes())
+    let reply: rmpv::Value =
+        rmp_serde::from_slice(&reply.frame[4..]).expect("decode the SNAPSHOT_RES");
+    let screen = reply["snapshot"]["serialized"]
+        .as_str()
+        .expect("a SNAPSHOT_RES carries its screen");
+    numbers_shown(screen.as_bytes())
         .into_iter()
         .max()
         .unwrap_or(0)

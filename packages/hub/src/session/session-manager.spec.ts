@@ -2085,9 +2085,9 @@ describe("SessionManager", () => {
 		type Emitter = { emit: (event: string, message: ProtocolMessage) => void };
 
 		/** A live terminal, and another window's ATTACH on it that its agent has not answered. */
-		async function attachWaiting() {
-			sm.addClient(makeClient("c-typing", []));
-			const channelId = await sm.handleSpawn("c-typing", { type: "SPAWN", hostId: "local" });
+		async function attachWaiting(manager: SessionManager = sm) {
+			manager.addClient(makeClient("c-typing", []));
+			const channelId = await manager.handleSpawn("c-typing", { type: "SPAWN", hostId: "local" });
 			if (channelId === null) throw new Error("expected a local channel");
 			const agent = mockLocalAgents.at(-1);
 			if (agent === undefined) throw new Error("expected the local agent");
@@ -2101,8 +2101,8 @@ describe("SessionManager", () => {
 			});
 
 			const received: ProtocolMessage[] = [];
-			sm.addClient(makeClient("c-pane", received));
-			const attached = sm.handleAttach("c-pane", channelId);
+			manager.addClient(makeClient("c-pane", received));
+			const attached = manager.handleAttach("c-pane", channelId);
 			await vi.waitFor(() => expect(asked).toHaveLength(1));
 			const [attach] = asked;
 			if (attach === undefined) throw new Error("expected an ATTACH");
@@ -2212,6 +2212,252 @@ describe("SessionManager", () => {
 
 			expect(received).toEqual([{ type: "INPUT_DROPPED", channelId }]);
 			expect(elsewhere).toEqual([]);
+		});
+
+		// What the agent sends after its ATTACH_OK is output the snapshot does not
+		// hold (#931). One read can carry both, and the hub handles every frame of
+		// a read before anything it awaited resumes: the pane, which writes OUTPUT
+		// only once its ATTACH_OK has come, must still get them in that order, and
+		// the spool must keep that output after the snapshot. An agent from before
+		// request ids is matched by channel, and gets the same.
+		describe("and the output the agent sends after its ATTACH_OK (#931)", () => {
+			const after = new Uint8Array(Buffer.from("printed after the snapshot"));
+
+			function output(channelId: string, data: Uint8Array): ProtocolMessage {
+				return { type: "OUTPUT", channelId, seq: 1, ts: "2026-11-13T12:00:00.000Z", data };
+			}
+
+			/** One read: the agent's answer, then what the terminal printed after its snapshot. */
+			function answerThenPrint(agent: Emitter, channelId: string, requestId?: string): void {
+				agent.emit("message", attachOk(channelId, requestId));
+				agent.emit("message", output(channelId, after));
+			}
+
+			function ctxOf(manager: SessionManager) {
+				return (manager as unknown as { ctx: import("./session-context.js").SharedSessionContext })
+					.ctx;
+			}
+
+			const matchings = [
+				["with the ATTACH's request id", true],
+				["matched by channel, from an agent without request ids", false],
+			] as const;
+
+			it.each(matchings)("reaches the pane after its ATTACH_OK, %s", async (_, named) => {
+				const { channelId, agent, attach, attached, received } = await attachWaiting();
+
+				answerThenPrint(agent, channelId, named ? attach.requestId : undefined);
+
+				expect(await attached).toBe(true);
+				expect(
+					received.filter((m) => m.type === "ATTACH_OK" || m.type === "OUTPUT").map((m) => m.type),
+				).toEqual(["ATTACH_OK", "OUTPUT"]);
+			});
+
+			it.each(matchings)(
+				"is stored after the snapshot, as the tail an attach from the spool replays, %s",
+				async (_, named) => {
+					const { channelId, agent, attach, attached } = await attachWaiting();
+
+					answerThenPrint(agent, channelId, named ? attach.requestId : undefined);
+					await attached;
+
+					ctxOf(sm).chunker.flush(channelId);
+					const spool = new SpoolDAL(dbManager.spool);
+					const snapshot = spool.getLatestSnapshot(channelId);
+					expect(JSON.parse(snapshot?.dataBlob.toString("utf8") ?? "null")).toMatchObject({
+						serialized: "<live>",
+					});
+					const tail = spool
+						.getChunksByChannel(channelId, { kind: "output", afterSeq: snapshot?.seq ?? 0 })
+						.map((chunk) => chunk.dataBlob.toString("utf8"));
+					expect(tail).toEqual(["printed after the snapshot"]);
+				},
+			);
+
+			// The spool is the hub's: the agent's last_seq counts its own reads.
+			describe("the spool's numbering", () => {
+				async function liveChannel() {
+					sm.addClient(makeClient("c-writer", []));
+					const channelId = await sm.handleSpawn("c-writer", { type: "SPAWN", hostId: "local" });
+					if (channelId === null) throw new Error("expected a local channel");
+					const agent = mockLocalAgents.at(-1) as unknown as Emitter | undefined;
+					if (agent === undefined) throw new Error("expected the local agent");
+					const rows = () =>
+						new SpoolDAL(dbManager.spool)
+							.getChunksByChannel(channelId)
+							.map((chunk) => ({ seq: chunk.seq, kind: chunk.kind }));
+					return {
+						channelId,
+						emit: (msg: ProtocolMessage) => agent.emit("message", msg),
+						flush: () => ctxOf(sm).chunker.flush(channelId),
+						rows,
+					};
+				}
+
+				function snapshotRes(channelId: string, lastSeq: number): ProtocolMessage {
+					return {
+						type: "SNAPSHOT_RES",
+						channelId,
+						snapshot: { serialized: "<screen>", cols: 80, rows: 24, cursorX: 0, cursorY: 0 },
+						lastSeq,
+					};
+				}
+
+				const text = (value: string) => new Uint8Array(Buffer.from(value));
+
+				it("numbers the spool itself, whatever last_seq the agent sends", async () => {
+					const { channelId, emit, flush, rows } = await liveChannel();
+
+					emit(output(channelId, text("one")));
+					flush();
+					emit(snapshotRes(channelId, 5000));
+					emit(output(channelId, text("two")));
+					flush();
+
+					expect(rows()).toEqual([
+						{ seq: 1, kind: "output" },
+						{ seq: 2, kind: "snapshot" },
+						{ seq: 3, kind: "output" },
+					]);
+				});
+
+				it("continues after the snapshot once the GC has deleted the output before it", async () => {
+					const { channelId, emit, flush, rows } = await liveChannel();
+					emit(snapshotRes(channelId, 0));
+					emit(output(channelId, text("b")));
+					flush();
+					emit(output(channelId, text("c")));
+					flush();
+					expect(rows()).toEqual([
+						{ seq: 1, kind: "snapshot" },
+						{ seq: 2, kind: "output" },
+						{ seq: 3, kind: "output" },
+					]);
+					// What the GC does to a channel over its cap: the snapshot stays.
+					dbManager.spool
+						.prepare("DELETE FROM chunks WHERE channel_id = ? AND kind = 'output'")
+						.run(channelId);
+
+					emit(snapshotRes(channelId, 0));
+					emit(output(channelId, text("d")));
+					flush();
+
+					expect(rows()).toEqual([
+						{ seq: 4, kind: "snapshot" },
+						{ seq: 5, kind: "output" },
+					]);
+				});
+			});
+
+			// Storing a snapshot happens while a read from the agent is handled: an
+			// error out of it would end that read, and the hub, which catches
+			// nothing at that level. It is logged by its code alone: a SQLite
+			// message can quote what it read, and the screen is what the terminal
+			// shows (#927's ended output logs the same way).
+			describe("a snapshot the spool fails to store", () => {
+				const MARK = "near-a-secret-931";
+				const SHOWN = "shown-on-the-screen-931";
+				let logged: Array<[string, string, Record<string, unknown> | undefined]>;
+				let withLog: SessionManager;
+				const failures: Array<{ mockRestore(): void }> = [];
+
+				beforeEach(() => {
+					logged = [];
+					withLog = new SessionManager(dbManager, undefined, undefined, undefined, {
+						log: (level: string, msg: string, extra?: Record<string, unknown>) =>
+							logged.push([level, msg, extra]),
+					} as never);
+				});
+
+				afterEach(async () => {
+					for (const failure of failures.splice(0)) failure.mockRestore();
+					await withLog.shutdown();
+				});
+
+				function failOnce(method: "insertSnapshot" | "insertChunk"): void {
+					failures.push(
+						vi.spyOn(SpoolDAL.prototype, method).mockImplementationOnce(() => {
+							throw Object.assign(new Error(`disk I/O error ${MARK}`), {
+								code: "ERR_SQLITE_IOERR",
+							});
+						}),
+					);
+				}
+
+				const screen = {
+					serialized: `\u001b[1m${SHOWN}\u001b[0m`,
+					cols: 80,
+					rows: 24,
+					cursorX: 0,
+					cursorY: 0,
+				};
+
+				function expectOneWarn(channelId: string): void {
+					expect(logged.filter(([level]) => level === "warn")).toEqual([
+						[
+							"warn",
+							"channel-lifecycle: snapshot not stored",
+							{ channelId, code: "ERR_SQLITE_IOERR" },
+						],
+					]);
+					expect(JSON.stringify(logged)).not.toContain(MARK);
+					expect(JSON.stringify(logged)).not.toContain(SHOWN);
+				}
+
+				it("on a live ATTACH_OK, still answers the pane, then gives it the output after", async () => {
+					const { channelId, agent, attach, attached, received } = await attachWaiting(withLog);
+					failOnce("insertSnapshot");
+
+					expect(() => {
+						agent.emit("message", {
+							type: "ATTACH_OK",
+							channelId,
+							requestId: attach.requestId,
+							snapshot: screen,
+							lastSeq: 0,
+						});
+						agent.emit("message", output(channelId, after));
+					}).not.toThrow();
+
+					expect(await attached).toBe(true);
+					expect(
+						received
+							.filter((m) => m.type === "ATTACH_OK" || m.type === "OUTPUT")
+							.map((m) => [m.type, (m as { cached?: boolean }).cached]),
+					).toEqual([
+						["ATTACH_OK", false],
+						["OUTPUT", undefined],
+					]);
+					expectOneWarn(channelId);
+				});
+
+				it.each([
+					["its row", "insertSnapshot"],
+					["the output flushed before it", "insertChunk"],
+				] as const)("on a SNAPSHOT_RES (%s), leaves the read handled", async (_, method) => {
+					const { channelId, agent, attach, attached, received } = await attachWaiting(withLog);
+					agent.emit("message", attachOk(channelId, attach.requestId));
+					await attached;
+					// Output the chunker holds, for the snapshot's flush to write.
+					agent.emit("message", output(channelId, new Uint8Array(Buffer.from("held"))));
+					received.length = 0;
+					failOnce(method);
+
+					expect(() => {
+						agent.emit("message", {
+							type: "SNAPSHOT_RES",
+							channelId,
+							snapshot: screen,
+							lastSeq: 0,
+						});
+						agent.emit("message", output(channelId, after));
+					}).not.toThrow();
+
+					expect(received.filter((m) => m.type === "OUTPUT")).toHaveLength(1);
+					expectOneWarn(channelId);
+				});
+			});
 		});
 	});
 

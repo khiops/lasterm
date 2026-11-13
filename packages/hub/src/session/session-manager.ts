@@ -1895,9 +1895,42 @@ export class SessionManager {
 		const askedAt = this.lifecycle.askingAgent();
 		agent.send(agentAttach);
 
+		// The pane's answer, from the screen the agent rendered for this ATTACH.
+		//
+		// No tail on this path, and none is missing. The agent sends its
+		// ATTACH_OK behind every OUTPUT its screen holds, and what the terminal
+		// prints after it as ordinary OUTPUT on the same connection, in order
+		// (#931); the pane writes that next. There is no gap between the two to
+		// fill.
+		//
+		// What used to fill it compared two different numbering spaces: the
+		// hub's spool sequence is its own counter (`OutputChunker`, resuming
+		// from the spool), while `lastSeq` is the agent's. They only ever
+		// matched by accident, and once a daemon adopted a channel and started
+		// its own count at zero, `afterSeq: 0` meant "every chunk ever" — 6 MB
+		// for a full-screen program, past what the transport accepts (#457).
+		const answerLive = (agentResponse: AgentAttachOkMessage): void => {
+			this.lifecycle.storeSnapshot(channelId, agentResponse.snapshot);
+			const attachOk: UiAttachOkMessage = {
+				type: "ATTACH_OK",
+				channelId,
+				snapshot: agentResponse.snapshot,
+				tail: [],
+				writeLockHolder: this.ctx.getWriteLockHolder?.(channelId) ?? null,
+				cached: false,
+				...(dynamicTitle !== undefined && { dynamicTitle }),
+				...(processTitle !== undefined && { processTitle }),
+				displayTitle,
+				...this.sizeOf(channel, channelId),
+				...this.broadcaster.cwdFieldsOf(channelId),
+				filesPanel: this.broadcaster.filesPanelOf(channelId),
+			};
+			client.send(attachOk);
+		};
+
 		const byChannel = `attach:${channelId}`;
 		try {
-			const agentResponse = await new Promise<AgentAttachOkMessage>((resolve, reject) => {
+			await new Promise<void>((resolve, reject) => {
 				const settle = (): void => {
 					clearTimeout(timer);
 					this.ctx.pendingRequests.delete(requestId);
@@ -1914,7 +1947,17 @@ export class SessionManager {
 				const answer = (incoming: ProtocolMessage): void => {
 					if (incoming.type === "ATTACH_OK") {
 						settle();
-						resolve(incoming as AgentAttachOkMessage);
+						// Answered now, while the read that carried it is handled, and
+						// not once this promise resumes: every frame of that read is
+						// handled before then. The OUTPUT the agent sent after its
+						// ATTACH_OK would reach the pane first, which drops it until its
+						// ATTACH_OK comes, and the spool before the snapshot (#931).
+						try {
+							answerLive(incoming as AgentAttachOkMessage);
+							resolve();
+						} catch (err) {
+							reject(err);
+						}
 					} else if (incoming.type === "ERROR") {
 						settle();
 						reject(incoming);
@@ -1923,39 +1966,6 @@ export class SessionManager {
 				this.ctx.pendingRequests.set(requestId, answer);
 				this.ctx.pendingRequests.set(byChannel, answer);
 			});
-
-			this.lifecycle.storeSnapshot(channelId, agentResponse.snapshot, agentResponse.lastSeq);
-
-			// No tail on this path, and none is missing.
-			//
-			// The agent renders this snapshot when it answers the ATTACH, so it is
-			// the screen as it stands; anything produced after it arrives as
-			// ordinary OUTPUT on the same connection, in order, and the pane
-			// writes it next. There is no gap between the two to fill.
-			//
-			// What used to fill it compared two different numbering spaces: the
-			// hub's spool sequence is its own counter (`OutputChunker`, resuming
-			// from the spool), while `lastSeq` is the agent's. They only ever
-			// matched by accident, and once a daemon adopted a channel and started
-			// its own count at zero, `afterSeq: 0` meant "every chunk ever" — 6 MB
-			// for a full-screen program, past what the transport accepts (#457).
-			const tail: Uint8Array[] = [];
-
-			const attachOk: UiAttachOkMessage = {
-				type: "ATTACH_OK",
-				channelId,
-				snapshot: agentResponse.snapshot,
-				tail,
-				writeLockHolder: this.ctx.getWriteLockHolder?.(channelId) ?? null,
-				cached: false,
-				...(dynamicTitle !== undefined && { dynamicTitle }),
-				...(processTitle !== undefined && { processTitle }),
-				displayTitle,
-				...this.sizeOf(channel, channelId),
-				...this.broadcaster.cwdFieldsOf(channelId),
-				filesPanel: this.broadcaster.filesPanelOf(channelId),
-			};
-			client.send(attachOk);
 		} catch (err) {
 			if (isAgentChannelNotFoundError(err, channelId)) {
 				// The agent did not have the terminal it was asked about. By the

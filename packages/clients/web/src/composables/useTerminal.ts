@@ -91,6 +91,8 @@ export function useTerminal(
 	let pendingAttaches: PendingAttach[] = [];
 	/** The terminal whose OUTPUT this pane writes, if any. */
 	let listeningTo: string | null = null;
+	/** The pane is closed: it asks for no terminal and waits for no answer (#929). */
+	let disposed = false;
 	/**
 	 * Replays xterm is parsing now (#927). xterm parses a write later than it
 	 * takes it, or inside `write()` right after user input, and calls each
@@ -692,14 +694,28 @@ export function useTerminal(
 			stillWanted?: () => boolean;
 		},
 	): Promise<AttachAnswer> {
+		if (disposed) {
+			return Promise.reject(
+				Object.assign(new Error("The pane is closed"), { code: ATTACH_SUPERSEDED }),
+			);
+		}
 		const request = ++attachRequests;
 		supersede(pendingAttaches.filter((entry) => entry.channelId !== id));
+		// Asking for another terminal: what is typed, what xterm answers by
+		// itself and resizes go nowhere until an answer binds this one, rather
+		// than to the terminal the pane left (#929).
+		if (channelId !== null && channelId !== id) channelId = null;
 		const preserveContent = opts?.preserveContent === true;
 		// Keeping the screen, the pane writes what the terminal prints while it
 		// waits: the snapshot that holds it is not written (#930). Any other
-		// attach writes the snapshot, which holds it.
-		if (preserveContent) listenTo(id);
-		else stopListening();
+		// attach writes the snapshot, which holds it; while one waits for this
+		// terminal, the answer they share replaces the screen anyway, and
+		// output written just before that could be parsed after it.
+		const replacing = pendingAttaches.some(
+			(entry) => entry.channelId === id && !entry.preserveContent,
+		);
+		if (!preserveContent) stopListening();
+		else if (!replacing) listenTo(id);
 
 		// Don't set channelId yet — prevents spurious RESIZE messages from
 		// being sent to the hub during terminal.reset() / terminal.write()
@@ -903,6 +919,9 @@ export function useTerminal(
 	}
 
 	function dispose(): void {
+		// A closed pane waits for no answer: none may subscribe it again (#929).
+		disposed = true;
+		supersede([...pendingAttaches]);
 		if (resizeTimer !== null) clearTimeout(resizeTimer);
 		resizeTimer = null;
 		titleChangeDispose?.();

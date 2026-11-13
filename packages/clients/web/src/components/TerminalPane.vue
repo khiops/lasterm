@@ -789,6 +789,9 @@ watch(
 		if (status === 'live' || status === 'born') {
 			hasEnded.value = false;
 			heldBack.value = null;
+			// The end it saw was the previous run's: its screen no longer holds
+			// what this one prints, which the hub's last output will (#929).
+			if (endSeenLiveOf === effectiveChannelId.value) endSeenLiveOf = null;
 		}
 	},
 );
@@ -1174,15 +1177,13 @@ async function onRestart(opts?: { automatic?: boolean; bySetting?: boolean }): P
 	// spawn from a new pane does: what it prints before its attach is
 	// answered is written here, at that size (#930).
 	const term = terminal.value;
-	let ok = false;
-	let thrown: unknown;
+	let ok: boolean;
 	try {
+		// Says every failure as `false`, with its reason on the card (#942).
 		ok = await channelsStore.restartChannel(chId, paneHostId.value, {
 			automatic: opts?.automatic === true || opts?.bySetting === true,
 			...(term ? { cols: term.cols, rows: term.rows } : {}),
 		});
-	} catch (err) {
-		thrown = err;
 	} finally {
 		const underWay = new Set(restartsUnderWay.value);
 		underWay.delete(chId);
@@ -1191,10 +1192,6 @@ async function onRestart(opts?: { automatic?: boolean; bySetting?: boolean }): P
 	// Given another terminal meanwhile: this restart is not its business, and
 	// nothing it met is to be shown, waited for or attached there (#929).
 	if (effectiveChannelId.value !== chId) return;
-	if (thrown !== undefined) {
-		error.value = thrown instanceof Error ? thrown.message : String(thrown);
-		return;
-	}
 	if (!ok) {
 		endWatch.lost();
 		// Its host away: wait for it, or try again now it is back; any other
@@ -1205,6 +1202,8 @@ async function onRestart(opts?: { automatic?: boolean; bySetting?: boolean }): P
 	// This pane may be over a terminal no list shows — one on another
 	// host — where the status watcher may not have heard it come back yet.
 	hasEnded.value = false;
+	// The end it saw was the previous run's (#929): see the status watcher.
+	if (endSeenLiveOf === chId) endSeenLiveOf = null;
 	reattaching = true;
 	let result: AttachResult | null;
 	try {

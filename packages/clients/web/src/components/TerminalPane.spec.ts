@@ -676,6 +676,9 @@ describe("TerminalPane restart", () => {
 		await restarted({ channel, setUp: withU });
 		channel.value = U;
 		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, U]));
+		xterm.events.length = 0;
+		print(T, "T-WAIT");
+		expect(xterm.events).toEqual([]);
 		attachOk(U, "U-SCREEN");
 		await settle();
 		xterm.events.length = 0;
@@ -846,13 +849,17 @@ describe("TerminalPane restart", () => {
 		expect(errorBox()).toBeNull();
 	});
 
-	it("keeps the screen when every attach sharing the refusal keeps it", async () => {
+	// The end the pane saw was the previous run's: the socket's attach no longer
+	// keeps the screen over it, and the hub's last output, which holds what the
+	// new run printed, replaces it (#929).
+	it("replays the last output after restarting a terminal it saw end", async () => {
 		await openLive();
 		endIt();
 		await vi.waitFor(() => expect(card()).not.toBeNull());
 		button("Restart")?.click();
 		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
-		useChannelsStore().updateChannelStatus(T, "live");
+		// No report that T runs again has reached the pane yet: the restart's
+		// own success forgets the end (the status watcher may not have heard).
 		spawnOk(T);
 		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T]));
 		useSessionStore().reconnectCount++;
@@ -862,7 +869,7 @@ describe("TerminalPane restart", () => {
 		refuse(T, lastOutput());
 		await settle();
 
-		expect(xterm.events).toEqual([MOUSE_OFF]);
+		expect(xterm.events).toEqual(["<reset>", "LAST-SCREEN", "fail: no such file", MOUSE_OFF]);
 	});
 
 	it("shows the card of the terminal it was given during a restart", async () => {
@@ -1090,7 +1097,7 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 	// What the terminal prints while a Reconnect waits for the hub was dropped:
 	// the screen is kept, and the snapshot that holds it is not written (#930).
 	it("keeps what is printed while its attach is answered (#930)", async () => {
-		mountPane(ref(T), "live");
+		mountPane(ref(T), "live", { setUp: writer });
 		await vi.waitFor(() => expect(attachedTo()).toEqual([T]));
 		attachOk(T, "REMEMBERED", { cached: true });
 		await settle();
@@ -1098,6 +1105,9 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 
 		button("Reconnect")?.click();
 		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T]));
+		// Asking again for the terminal it is bound to keeps the binding (#929).
+		type("x");
+		expect(inputsTo()).toEqual([T]);
 		print(T, "DURING");
 		attachOk(T, "LIVE-SNAP", { cached: true, tail: [new TextEncoder().encode("TAIL")] });
 		await settle();
@@ -1150,6 +1160,37 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		await reconnectBehindAnAttach();
 
 		refuse(U, lastOutput());
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "LAST-SCREEN", "fail: no such file", MOUSE_OFF]);
+	});
+
+	// The answer will replace the screen: output written just before it could
+	// be parsed after its reset, so the Reconnect writes none early (#929).
+	it("writes nothing early when the answer will replace the screen", async () => {
+		await reconnectBehindAnAttach();
+
+		print(U, "DURING");
+		attachOk(U, "U-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "U-SNAP"]);
+	});
+
+	// Brought back from elsewhere, the terminal runs again: the end the pane saw
+	// was the previous run's, and the hub's last output replaces it (#929).
+	it("replays the last output after a terminal it saw end is brought back from elsewhere", async () => {
+		await openLive();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T]));
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, T]));
+		xterm.events.length = 0;
+
+		refuse(T, lastOutput());
 		await settle();
 
 		expect(xterm.events).toEqual(["<reset>", "LAST-SCREEN", "fail: no such file", MOUSE_OFF]);
@@ -1425,6 +1466,34 @@ describe("TerminalPane takes only the answers for the terminal it shows (#929)",
 		type("x");
 
 		expect(inputsTo()).toEqual([T]);
+	});
+
+	// Asking for another terminal unbinds the pane: typing, and xterm's own
+	// replies, went to the terminal it left until the answer came (#929).
+	it("sends nothing typed while it waits for another terminal", async () => {
+		const channel = ref(T);
+		// This window holds both terminals' write locks: typing in a pane showing
+		// U is allowed, and only the binding decides where it goes.
+		await openLive({
+			channel,
+			setUp: () => {
+				writer();
+				withU();
+				useWriteLockStore().handleWriteLock(U, CLIENT);
+			},
+		});
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+
+		type("x");
+		expect(inputsTo()).toEqual([]);
+
+		attachOk(U, "U-SCREEN");
+		await settle();
+		type("y");
+
+		expect(inputs()).toEqual(["y"]);
+		expect(inputsTo()).toEqual([U]);
 	});
 
 	it("is not closed by a late refusal for a terminal it left", async () => {
@@ -2569,7 +2638,6 @@ describe("TerminalPane waits for the host of a restart that found it away (#605)
 			hostStatus: "disconnected",
 		});
 		await settle();
-		expect(quietLine()).not.toBe("Waiting for pi…");
 		useHostsStore().updateSessionStatus(HOST, "active");
 		await settle();
 

@@ -547,7 +547,7 @@ describe("TerminalPane that failed to open, given another terminal (#971)", () =
 	});
 
 	it("opens it after the attach of the one it showed went unanswered", async () => {
-		const channel = ref<string | null>(T);
+		const channel = ref(T);
 		mountPane(channel, "live");
 		withU();
 		await vi.waitFor(() => expect(attaches()).toHaveLength(1));

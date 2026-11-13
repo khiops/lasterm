@@ -1105,7 +1105,8 @@ watch(
 		// A pane that failed to open never became ready, and what it says is the
 		// failure of what it was opening, a spawn included: given another
 		// terminal, it opens that one, as its Retry would (#971). One still
-		// opening attaches it once it is ready.
+		// opening attaches it once it is ready; if that open fails before, the
+		// pane shows its failure, with Retry.
 		if (newId !== null && newId !== undefined && !ready.value) {
 			if (error.value !== null || notConnected.value !== null) await onRetry();
 			return;

@@ -138,11 +138,22 @@ export function registerSessionRoutes(
 		},
 	);
 
-	// GET /api/sessions?host_id=X
-	server.get<{ Querystring: { host_id?: string } }>("/api/sessions", async (request) => {
-		const sessions = metaDal.listSessions(request.query.host_id);
-		return toSnakeCase(sessions);
-	});
+	// GET /api/sessions?host_id=X&all=true — the sessions that are not closed;
+	// `all=true` adds the closed ones the hub still keeps (#911)
+	server.get<{ Querystring: { host_id?: string; all?: unknown } }>(
+		"/api/sessions",
+		async (request, reply) => {
+			const { host_id, all } = request.query;
+			if (all !== undefined && all !== "true" && all !== "false") {
+				return reply
+					.code(400)
+					.send({ error: { code: "VALIDATION_ERROR", message: "all must be true or false." } });
+			}
+			const sessions =
+				all === "true" ? metaDal.listSessions(host_id) : metaDal.listOpenSessions(host_id);
+			return toSnakeCase(sessions);
+		},
+	);
 
 	// GET /api/sessions/:id
 	server.get<{ Params: { id: string } }>("/api/sessions/:id", async (request, reply) => {

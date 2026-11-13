@@ -601,15 +601,73 @@ describe("an ended terminal's last output (#927)", () => {
 		quick.refuse("T", output({ snapshot: null, tail: [bytes("T-OUT")] }));
 		await second;
 
-		expect(await first).toBe("CHANNEL_DEAD");
+		// Asking for S settled the attach for T at once: nothing it got is written (#929).
+		expect(await first).toBe("ATTACH_SUPERSEDED");
 		expect(xterm.events).toEqual(["<reset>", "S-OUT", MOUSE_OFF]);
+	});
+
+	// After #929's D12 a pane meets this mix only through orderings its fixture
+	// cannot set up: the rule is checked here, on the composable.
+	it("keeps the screen when every attach sharing the refusal keeps it", async () => {
+		const kept = pane();
+		await kept.attachLive("T", "WHOLE");
+		const restart = kept.terminal
+			.reattachChannel("T", { preserveContent: true })
+			.catch(() => undefined);
+		const socket = kept.terminal
+			.reattachChannel("T", { keepScreenIfEnded: true })
+			.catch(() => undefined);
+		xterm.events.length = 0;
+
+		kept.refuse("T", output());
+		await Promise.all([restart, socket]);
+
+		expect(xterm.events).toEqual([MOUSE_OFF]);
+	});
+
+	// Closing the pane ends what it waits for: a late answer subscribed a closed
+	// pane to its terminal's output again, for the rest of the session (#929).
+	it("waits for no answer once the pane is closed", async () => {
+		const closed = pane();
+		const waiting = closed.terminal.reattachChannel("T").then(
+			() => "resolved",
+			(err: { code?: string }) => err.code,
+		);
+
+		closed.terminal.dispose();
+		closed.hub.hear({
+			type: "ATTACH_OK",
+			channelId: "T",
+			snapshot: { serialized: "LATE", cols: 100, rows: 30, cursorX: 0, cursorY: 0 },
+			tail: [],
+			writeLockHolder: null,
+			cached: false,
+			cols: 100,
+			rows: 30,
+		});
+
+		expect(await waiting).toBe("ATTACH_SUPERSEDED");
+		expect(closed.hub.listening("OUTPUT")).toBe(0);
+		expect(closed.hub.listening("ATTACH_OK")).toBe(0);
+		expect(closed.hub.listening("ERROR")).toBe(0);
+
+		const send = closed.hub.client.send as ReturnType<typeof vi.fn>;
+		send.mockClear();
+		const after = closed.terminal.reattachChannel("S").then(
+			() => "resolved",
+			(err: { code?: string }) => err.code,
+		);
+		expect(await after).toBe("ATTACH_SUPERSEDED");
+		expect(send.mock.calls.map(([msg]) => (msg as { type: string }).type)).not.toContain("ATTACH");
+		expect(closed.hub.listening("OUTPUT")).toBe(0);
+		expect(closed.hub.listening("ATTACH_OK")).toBe(0);
 	});
 
 	it("writes nothing for a terminal the pane no longer shows", async () => {
 		const moved = pane();
 		const code = await moved.attachEnded("T", output(), { stillWanted: () => false });
 
-		expect(code).toBe("CHANNEL_DEAD");
+		expect(code).toBe("ATTACH_SUPERSEDED");
 		expect(xterm.events).toEqual([]);
 	});
 

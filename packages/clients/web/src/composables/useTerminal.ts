@@ -31,6 +31,34 @@ const DEFAULT_XTERM_SCROLLBAR_WIDTH = 14;
  */
 const MOUSE_REPORTING_OFF = "\u001b[?1000l";
 
+/** What an ATTACH_OK gives the pane that asked: everything else it already wrote. */
+export interface AttachAnswer {
+	writeLockHolder: string | null;
+	cached: boolean;
+	truncated: boolean;
+}
+
+/**
+ * The code an attach is rejected with when its answer no longer concerns the
+ * pane: it asked for another terminal since, or no longer shows this one
+ * (#929). Nothing was written for it, and nothing is to be shown.
+ */
+export const ATTACH_SUPERSEDED = "ATTACH_SUPERSEDED";
+
+/** An attach the hub has not answered yet. */
+interface PendingAttach {
+	request: number;
+	channelId: string;
+	/** Reconnect and Restart keep the screen; the hub's answer does not replace it. */
+	preserveContent: boolean;
+	/** Keep the screen if the hub answers that the terminal has ended. */
+	keepScreenIfEnded: boolean;
+	stillWanted: () => boolean;
+	timer: ReturnType<typeof setTimeout>;
+	resolve: (answer: AttachAnswer) => void;
+	reject: (err: unknown) => void;
+}
+
 export function useTerminal(
 	containerRef: Ref<HTMLElement | null>,
 	wsClient: IWsClient,
@@ -54,8 +82,17 @@ export function useTerminal(
 	 * until a terminal attaches again (#927).
 	 */
 	let endedSize: { cols: number; rows: number } | null = null;
-	/** Counts attach requests: only the latest may write what a refusal carries. */
+	/** Counts attach requests, so that the latest of the pending ones is known. */
 	let attachRequests = 0;
+	/**
+	 * The attaches this pane sent and the hub has not answered: all for one
+	 * terminal, since asking for another one supersedes them (#929).
+	 */
+	let pendingAttaches: PendingAttach[] = [];
+	/** The terminal whose OUTPUT this pane writes, if any. */
+	let listeningTo: string | null = null;
+	/** The pane is closed: it asks for no terminal and waits for no answer (#929). */
+	let disposed = false;
 	/**
 	 * Replays xterm is parsing now (#927). xterm parses a write later than it
 	 * takes it, or inside `write()` right after user input, and calls each
@@ -396,6 +433,30 @@ export function useTerminal(
 	}
 
 	/**
+	 * Write `id`'s OUTPUT to the terminal as it comes, once: asking again for
+	 * the terminal already listened to keeps the same listener.
+	 */
+	function listenTo(id: string): void {
+		if (listeningTo === id && outputUnsubscribe !== null) return;
+		outputUnsubscribe?.();
+		listeningTo = id;
+		outputUnsubscribe = wsClient.on("OUTPUT", (msg) => {
+			if (msg.type === "OUTPUT" && msg.channelId === listeningTo && terminal.value) {
+				// msg.data arrives as Uint8Array from MessagePack decode
+				const data =
+					msg.data instanceof Uint8Array ? msg.data : new TextEncoder().encode(String(msg.data));
+				terminal.value.write(data);
+			}
+		});
+	}
+
+	function stopListening(): void {
+		outputUnsubscribe?.();
+		outputUnsubscribe = null;
+		listeningTo = null;
+	}
+
+	/**
 	 * Subscribe to OUTPUT messages for the given channel and write to terminal.
 	 * Call after init() and after a successful SPAWN.
 	 */
@@ -403,142 +464,89 @@ export function useTerminal(
 		channelId = id;
 		shownId = id;
 		leaveEndedSize();
-
-		// Clean up previous subscription if any
-		outputUnsubscribe?.();
-
-		outputUnsubscribe = wsClient.on("OUTPUT", (msg) => {
-			if (msg.type === "OUTPUT" && msg.channelId === channelId && terminal.value) {
-				// msg.data arrives as Uint8Array from MessagePack decode
-				const data =
-					msg.data instanceof Uint8Array ? msg.data : new TextEncoder().encode(String(msg.data));
-				terminal.value.write(data);
-			}
-		});
+		listenTo(id);
 
 		// Send initial RESIZE so the PTY matches our dimensions from the start
 		syncChannelSize();
 	}
 
-	/**
-	 * Re-attach to an existing channel: send ATTACH, wait for ATTACH_OK,
-	 * restore snapshot + replay tail, then subscribe to live OUTPUT.
-	 */
-	/**
-	 * Re-attach to an existing channel: send ATTACH, wait for ATTACH_OK,
-	 * restore snapshot + replay tail, then subscribe to live OUTPUT.
-	 *
-	 * A terminal that has ended is refused with CHANNEL_DEAD, and one the hub
-	 * has no record of with CHANNEL_NOT_FOUND: an ATTACH never starts one
-	 * again (#559). Restart brings it back under the same channel ID.
-	 */
-	async function reattachChannel(
-		id: string,
-		opts?: {
-			preserveContent?: boolean;
-			/**
-			 * Keep the screen if the hub answers that the terminal has ended; an
-			 * ATTACH_OK replaces it as usual. For a pane over an ending it watched.
-			 */
-			keepScreenIfEnded?: boolean;
-			/** Whether the pane still shows `id` when the answer comes; true when absent. */
-			stillWanted?: () => boolean;
-		},
-	): Promise<{ writeLockHolder: string | null; cached: boolean; truncated: boolean }> {
-		const request = ++attachRequests;
-		// Clean up previous OUTPUT subscription
-		outputUnsubscribe?.();
+	/** Listens for the hub's answers while an attach waits for one. */
+	let answersUnsubscribe: (() => void) | null = null;
 
-		// Don't set channelId yet — prevents spurious RESIZE messages from
-		// being sent to the hub during terminal.reset() / terminal.write()
-		// which would cause the shell to redraw the prompt multiple times.
-
-		// Send ATTACH and wait for ATTACH_OK or ERROR
-		const result = await new Promise<{
-			snapshot: unknown;
-			tail: Uint8Array[];
-			writeLockHolder: string | null;
-			dynamicTitle: string | null;
-			displayTitle: string | null;
-			/**
-			 * The hub answered from what it remembers, with nothing attached to
-			 * the terminal itself. What is on screen is the last thing it showed,
-			 * and what is typed into it goes nowhere.
-			 */
-			cached: boolean;
-			/** Output between the snapshot and now was dropped rather than cut. */
-			truncated: boolean;
-			/** The PTY's size; null from a hub that does not say it. */
-			size: { cols: number; rows: number } | null;
-		}>((resolve, reject) => {
-			const timer = setTimeout(() => {
-				unsubOk();
-				unsubErr();
-				reject(new Error("ATTACH timeout — no response after 10s"));
-			}, 10_000);
-
-			const unsubOk = wsClient.on("ATTACH_OK", (msg) => {
-				if (msg.type === "ATTACH_OK") {
-					const uiMsg = msg as UiAttachOkMessage;
-					if (uiMsg.channelId !== id) return;
-					clearTimeout(timer);
-					unsubOk();
-					unsubErr();
-					resolve({
-						snapshot: uiMsg.snapshot,
-						tail: uiMsg.tail ?? [],
-						writeLockHolder: uiMsg.writeLockHolder ?? null,
-						dynamicTitle: uiMsg.dynamicTitle ?? null,
-						displayTitle: uiMsg.displayTitle ?? null,
-						cached: uiMsg.cached === true,
-						truncated: uiMsg.truncated === true,
-						size:
-							typeof uiMsg.cols === "number" && typeof uiMsg.rows === "number"
-								? { cols: uiMsg.cols, rows: uiMsg.rows }
-								: null,
-					});
-				}
-			});
-
-			const unsubErr = wsClient.on("ERROR", (msg) => {
-				if (
-					msg.type === "ERROR" &&
-					(msg.code === "CHANNEL_NOT_FOUND" || msg.code === "CHANNEL_DEAD")
-				) {
-					// If the ERROR carries a channelId, only act when it matches the channel
-					// being attached — prevents a broadcast error for a different channel
-					// from incorrectly rejecting this pane's attach promise.
-					if (msg.channelId !== undefined && msg.channelId !== id) return;
-					clearTimeout(timer);
-					unsubOk();
-					unsubErr();
-					// The code travels with it: what a pane does about this is not a
-					// decision to make by reading a sentence, which changes.
-					const refusal = Object.assign(new Error(msg.message ?? msg.code), { code: msg.code });
-					try {
-						// Only for the terminal the pane still shows, and only from its
-						// latest request: an older answer, or one for a terminal it has
-						// left, writes nothing (#927, #929).
-						if (
-							msg.code === "CHANNEL_DEAD" &&
-							request === attachRequests &&
-							(opts?.stillWanted?.() ?? true)
-						) {
-							showEnded(
-								id,
-								msg.lastOutput,
-								opts?.preserveContent === true || opts?.keepScreenIfEnded === true,
-							);
-						}
-					} finally {
-						// Settled whatever the writes did: the timer is gone.
-						reject(refusal);
-					}
-				}
-			});
-
-			wsClient.send({ type: "ATTACH", channelId: id });
+	function listenForAnswers(): void {
+		if (answersUnsubscribe !== null) return;
+		const offOk = wsClient.on("ATTACH_OK", (msg) => {
+			if (msg.type === "ATTACH_OK") takeAttachOk(msg as UiAttachOkMessage);
 		});
+		const offErr = wsClient.on("ERROR", (msg) => {
+			if (
+				msg.type === "ERROR" &&
+				(msg.code === "CHANNEL_NOT_FOUND" || msg.code === "CHANNEL_DEAD")
+			) {
+				takeRefusal(msg);
+			}
+		});
+		answersUnsubscribe = () => {
+			offOk();
+			offErr();
+		};
+	}
+
+	/** Settle `entries`, each by `outcome`, and stop waiting for answers once none is left. */
+	function settle(entries: PendingAttach[], outcome: (entry: PendingAttach) => void): void {
+		const settling = new Set(entries);
+		pendingAttaches = pendingAttaches.filter((entry) => !settling.has(entry));
+		if (pendingAttaches.length === 0) {
+			answersUnsubscribe?.();
+			answersUnsubscribe = null;
+		}
+		for (const entry of entries) {
+			clearTimeout(entry.timer);
+			outcome(entry);
+		}
+	}
+
+	/** Settle `entries` as no longer the pane's concern: nothing written, nothing to show. */
+	function supersede(entries: PendingAttach[]): void {
+		settle(entries, (entry) =>
+			entry.reject(
+				Object.assign(new Error("Superseded by a later attach"), { code: ATTACH_SUPERSEDED }),
+			),
+		);
+	}
+
+	/**
+	 * The attaches an answer naming `id` settles: all of them, the latest
+	 * last. An answer naming no terminal is for the one they wait on.
+	 */
+	function answeredBy(id: string | undefined): PendingAttach[] {
+		const first = pendingAttaches[0];
+		if (first === undefined) return [];
+		if (id !== undefined && id !== first.channelId) return [];
+		return [...pendingAttaches];
+	}
+
+	/**
+	 * Whether the pane still shows the terminal `waiting` asked for. When it
+	 * does not, they are superseded, and they stop the listening they started.
+	 */
+	function stillWanted(waiting: PendingAttach[]): boolean {
+		const latest = waiting[waiting.length - 1];
+		if (latest === undefined || latest.stillWanted()) return true;
+		if (listeningTo === latest.channelId) stopListening();
+		supersede(waiting);
+		return false;
+	}
+
+	/**
+	 * The terminal attached. Its answer is written once for every attach that
+	 * waited on it, by the one that keeps least: the screen is replaced unless
+	 * every one of them keeps it (#929, #930).
+	 */
+	function takeAttachOk(msg: UiAttachOkMessage): void {
+		const waiting = answeredBy(msg.channelId);
+		if (waiting.length === 0 || !stillWanted(waiting)) return;
+		const id = msg.channelId;
 
 		// A terminal attached: the size rules of #831 apply again.
 		shownId = id;
@@ -548,74 +556,190 @@ export function useTerminal(
 		// at that size, the one it was drawn for (#831). One that decides it
 		// compares its own with it, whatever it sent before: a restart spawned
 		// the PTY anew, or another client decided meanwhile.
-		if (result.size !== null) {
-			lastSentCols = result.size.cols;
-			lastSentRows = result.size.rows;
-			takePtySize(result.size.cols, result.size.rows);
+		if (typeof msg.cols === "number" && typeof msg.rows === "number") {
+			lastSentCols = msg.cols;
+			lastSentRows = msg.rows;
+			takePtySize(msg.cols, msg.rows);
 		}
 
-		// Restore snapshot if present (channelId still unset → no RESIZE sent).
-		// A replay: a bell in it already rang (#927).
+		// Restore the snapshot and its tail before binding the terminal: no
+		// RESIZE goes out while they are written. A replay: a bell in it
+		// already rang (#927).
+		const replaceScreen = waiting.some((entry) => !entry.preserveContent);
+		const tail = msg.tail ?? [];
 		replay(() => {
-			if (terminal.value && result.snapshot && !opts?.preserveContent) {
-				terminal.value.reset();
-				const serialized = (result.snapshot as { serialized?: string }).serialized;
-				if (serialized) {
-					terminal.value.write(serialized);
-				}
+			const term = terminal.value;
+			if (!term || !replaceScreen) return;
+			if (msg.snapshot) {
+				term.reset();
+				const serialized = (msg.snapshot as { serialized?: string }).serialized;
+				if (serialized) term.write(serialized);
 			}
-
-			// Replay tail chunks
-			if (terminal.value && result.tail.length > 0 && !opts?.preserveContent) {
-				for (const chunk of result.tail) {
-					const data = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk as ArrayBuffer);
-					terminal.value.write(data);
-				}
+			for (const chunk of tail) {
+				term.write(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk as ArrayBuffer));
 			}
 		});
 
 		// Restore dynamic title from ATTACH_OK (SC-02 — titles survive reconnects)
-		if (result.dynamicTitle) {
+		if (msg.dynamicTitle) {
 			titleStack.length = 0;
-			titleStack.push(result.dynamicTitle);
-			currentDynamicTitle.value = result.dynamicTitle;
+			titleStack.push(msg.dynamicTitle);
+			currentDynamicTitle.value = msg.dynamicTitle;
 		}
 
-		if (result.displayTitle) {
-			useChannelsStore().setDisplayTitle(id, result.displayTitle);
+		if (msg.displayTitle) {
+			useChannelsStore().setDisplayTitle(id, msg.displayTitle);
 		}
 
 		// Set channelId — same ID always (a restart reuses the same channel ID)
 		channelId = id;
-
-		// Subscribe to live OUTPUT. Another attach may have subscribed while this
-		// one waited — a pane can be asked for its terminal again by the hub's
-		// news as well as by a click — and keeping both wrote every chunk twice.
-		outputUnsubscribe?.();
-		outputUnsubscribe = wsClient.on("OUTPUT", (msg) => {
-			if (msg.type === "OUTPUT" && msg.channelId === channelId && terminal.value) {
-				const data =
-					msg.data instanceof Uint8Array ? msg.data : new TextEncoder().encode(String(msg.data));
-				terminal.value.write(data);
-			}
-		});
+		// Live OUTPUT, once: an attach that kept the screen already listens, and
+		// a pane asked for its terminal again by a click and by the hub's news
+		// at once wrote every chunk twice when each subscribed.
+		listenTo(id);
 
 		// Send ONE RESIZE with actual terminal dimensions so the PTY matches,
 		// when this pane decides it. Dedup'd so ResizeObserver won't cause
 		// duplicates.
 		syncChannelSize();
 
-		if (result.truncated) {
+		const truncated = msg.truncated === true;
+		if (truncated) {
 			// A terminal cannot be handed a piece of a stream, so it was not: the
 			// screen above is the last coherent one, and what followed is gone.
 			// Saying so beats a pane that looks current and is not.
 			writeNotice("output between this screen and now was dropped");
 		}
-		return {
-			writeLockHolder: result.writeLockHolder,
-			cached: result.cached,
-			truncated: result.truncated,
+		const answer: AttachAnswer = {
+			writeLockHolder: msg.writeLockHolder ?? null,
+			cached: msg.cached === true,
+			truncated,
 		};
+		settle(waiting, (entry) => entry.resolve(answer));
+	}
+
+	/**
+	 * The hub refused the attach: the terminal has ended, or it has no record
+	 * of it. The listening ends, and an ended terminal's last output replaces
+	 * the screen unless every attach that waited on it keeps the screen.
+	 */
+	function takeRefusal(msg: {
+		code: string;
+		message?: string;
+		channelId?: string;
+		lastOutput?: EndedOutput;
+	}): void {
+		const waiting = answeredBy(msg.channelId);
+		const first = waiting[0];
+		if (first === undefined || !stillWanted(waiting)) return;
+		stopListening();
+		// The code travels with it: what a pane does about this is not a
+		// decision to make by reading a sentence, which changes.
+		const refusal = Object.assign(new Error(msg.message ?? msg.code), { code: msg.code });
+		try {
+			if (msg.code === "CHANNEL_DEAD") {
+				const keepScreen = waiting.every(
+					(entry) => entry.preserveContent || entry.keepScreenIfEnded,
+				);
+				showEnded(first.channelId, msg.lastOutput, keepScreen);
+			}
+		} finally {
+			// Settled whatever the writes did: the timers are gone.
+			settle(waiting, (entry) => entry.reject(refusal));
+		}
+	}
+
+	/**
+	 * No answer came for `entry`. A newer attach for the same terminal still
+	 * waits: this one settles with it. Otherwise every attach waiting fails.
+	 */
+	function onDeadline(entry: PendingAttach): void {
+		if (pendingAttaches.some((other) => other.request > entry.request)) return;
+		fail(new Error("ATTACH timeout — no response after 10s"));
+	}
+
+	/** Every attach waiting fails with `err`, as superseded if the pane left their terminal. */
+	function fail(err: Error): void {
+		const waiting = [...pendingAttaches];
+		const latest = waiting[waiting.length - 1];
+		if (latest === undefined || !stillWanted(waiting)) return;
+		if (listeningTo === latest.channelId) stopListening();
+		settle(waiting, (entry) => entry.reject(err));
+	}
+
+	/**
+	 * Re-attach to an existing channel: send ATTACH, wait for ATTACH_OK,
+	 * restore snapshot + replay tail, then subscribe to live OUTPUT.
+	 *
+	 * A terminal that has ended is refused with CHANNEL_DEAD, and one the hub
+	 * has no record of with CHANNEL_NOT_FOUND: an ATTACH never starts one
+	 * again (#559). Restart brings it back under the same channel ID.
+	 *
+	 * Asking for a terminal settles every attach still waiting for another one
+	 * at once, rejected with `ATTACH_SUPERSEDED`, as is one whose answer comes
+	 * when the pane no longer shows its terminal: neither writes anything
+	 * (#929). Attaches for the same terminal share its answer.
+	 */
+	async function reattachChannel(
+		id: string,
+		opts?: {
+			/** Keep the screen and write what the terminal prints meanwhile (Reconnect, Restart). */
+			preserveContent?: boolean;
+			/**
+			 * Keep the screen if the hub answers that the terminal has ended; an
+			 * ATTACH_OK replaces it as usual. For a pane over an ending it watched.
+			 */
+			keepScreenIfEnded?: boolean;
+			/** Whether the pane still shows `id` when the answer comes; true when absent. */
+			stillWanted?: () => boolean;
+		},
+	): Promise<AttachAnswer> {
+		if (disposed) {
+			return Promise.reject(
+				Object.assign(new Error("The pane is closed"), { code: ATTACH_SUPERSEDED }),
+			);
+		}
+		const request = ++attachRequests;
+		supersede(pendingAttaches.filter((entry) => entry.channelId !== id));
+		// Asking for another terminal: what is typed, what xterm answers by
+		// itself and resizes go nowhere until an answer binds this one, rather
+		// than to the terminal the pane left (#929).
+		if (channelId !== null && channelId !== id) channelId = null;
+		const preserveContent = opts?.preserveContent === true;
+		// Keeping the screen, the pane writes what the terminal prints while it
+		// waits: the snapshot that holds it is not written (#930). Any other
+		// attach writes the snapshot, which holds it; while one waits for this
+		// terminal, the answer they share replaces the screen anyway, and
+		// output written just before that could be parsed after it.
+		const replacing = pendingAttaches.some(
+			(entry) => entry.channelId === id && !entry.preserveContent,
+		);
+		if (!preserveContent) stopListening();
+		else if (!replacing) listenTo(id);
+
+		// Don't set channelId yet — prevents spurious RESIZE messages from
+		// being sent to the hub during terminal.reset() / terminal.write()
+		// which would cause the shell to redraw the prompt multiple times.
+		return new Promise<AttachAnswer>((resolve, reject) => {
+			const entry: PendingAttach = {
+				request,
+				channelId: id,
+				preserveContent,
+				keepScreenIfEnded: opts?.keepScreenIfEnded === true,
+				stillWanted: opts?.stillWanted ?? (() => true),
+				timer: setTimeout(() => onDeadline(entry), 10_000),
+				resolve,
+				reject,
+			};
+			pendingAttaches.push(entry);
+			listenForAnswers();
+			try {
+				wsClient.send({ type: "ATTACH", channelId: id });
+			} catch (err) {
+				// Never sent: nothing will answer it (#942).
+				fail(err instanceof Error ? err : new Error(String(err)));
+			}
+		});
 	}
 
 	/**
@@ -721,6 +845,15 @@ export function useTerminal(
 	}
 
 	/**
+	 * Whether what is typed here goes to `id` now: the terminal this pane
+	 * spawned or the last one an answer bound it to, and not one it has since
+	 * asked to leave (#929, #965).
+	 */
+	function isBoundTo(id: string): boolean {
+		return channelId === id;
+	}
+
+	/**
 	 * Tell the channel the size the terminal actually has, if it differs: only
 	 * when this pane decides the size, and has one of its own (#831).
 	 */
@@ -795,14 +928,16 @@ export function useTerminal(
 	}
 
 	function dispose(): void {
+		// A closed pane waits for no answer: none may subscribe it again (#929).
+		disposed = true;
+		supersede([...pendingAttaches]);
 		if (resizeTimer !== null) clearTimeout(resizeTimer);
 		resizeTimer = null;
 		titleChangeDispose?.();
 		titleChangeDispose = null;
 		themeUnsubscribe?.();
 		themeUnsubscribe = null;
-		outputUnsubscribe?.();
-		outputUnsubscribe = null;
+		stopListening();
 		inputDroppedUnsubscribe?.();
 		inputDroppedUnsubscribe = null;
 		sizeUnsubscribe?.();
@@ -834,6 +969,7 @@ export function useTerminal(
 		init,
 		attachChannel,
 		reattachChannel,
+		isBoundTo,
 		turnMouseReportingOff,
 		bellMuted,
 		applyProfile,

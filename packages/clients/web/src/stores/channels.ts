@@ -1461,7 +1461,8 @@ export const useChannelsStore = defineStore("channels", () => {
 	async function restartChannel(
 		channelId: string,
 		hostIdHint?: string,
-		opts?: { automatic?: boolean },
+		/** `cols`/`rows`: the size the pane draws the terminal at, which it starts at (#930). */
+		opts?: { automatic?: boolean; cols?: number; rows?: number },
 	): Promise<boolean> {
 		if (authStore.token === null) return false;
 		setRestartFailure(channelId, null);
@@ -1483,6 +1484,9 @@ export const useChannelsStore = defineStore("channels", () => {
 					...(channel?.shell !== undefined ? { shell: channel.shell } : {}),
 					...(channel?.args !== undefined && channel.args.length > 0 ? { args: channel.args } : {}),
 					...(opts?.automatic === true ? { automatic: true } : {}),
+					...(opts?.cols !== undefined && opts?.rows !== undefined
+						? { cols: opts.cols, rows: opts.rows }
+						: {}),
 				});
 				return true;
 			} catch (err) {
@@ -1492,12 +1496,20 @@ export const useChannelsStore = defineStore("channels", () => {
 			}
 		}
 
-		const res = await hubFetch(`${hubBaseUrl()}/api/channels/${channelId}/restart`, {
-			method: "POST",
-			headers: {
-				Authorization: `Bearer ${authStore.token}`,
-			},
-		});
+		let res: Response;
+		try {
+			res = await hubFetch(`${hubBaseUrl()}/api/channels/${channelId}/restart`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${authStore.token}`,
+				},
+			});
+		} catch (err) {
+			// The hub was not reached: a failure to restart like any other, said
+			// on the terminal's card rather than thrown at a pane (#942).
+			setRestartFailure(channelId, { reason: restartFailureReason(err) });
+			return false;
+		}
 		if (!res.ok) {
 			setRestartFailure(channelId, await restFailureOf(res));
 			return false;

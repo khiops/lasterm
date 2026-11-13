@@ -233,7 +233,7 @@ import type { SearchHistoryEntry } from '../composables/useSearchHistory.js';
 import { useSearchHistory } from '../composables/useSearchHistory.js';
 import { useSearchShortcuts } from '../composables/useSearchShortcuts.js';
 import { useTabTitle } from '../composables/useTabTitle.js';
-import { useTerminal } from '../composables/useTerminal.js';
+import { ATTACH_SUPERSEDED, useTerminal } from '../composables/useTerminal.js';
 import { useVisualProfile } from '../composables/useVisualProfile.js';
 import { useWaitForHost } from '../composables/useWaitForHost.js';
 import { useWaitingAnswer } from '../composables/useWaitingAnswer.js';
@@ -404,6 +404,7 @@ const {
 	awaitFont,
 	attachChannel,
 	reattachChannel,
+	isBoundTo,
 	turnMouseReportingOff,
 	bellMuted,
 	applyProfile,
@@ -675,8 +676,9 @@ function takeAnswer(chId: string, facts: AttachFacts): void {
  * pane kept or dropped its banner whatever the hub said (#559).
  *
  * Resolves with the ATTACH_OK, or null when the hub answered that the terminal
- * has ended or that it has no record of it. Anything else is thrown: it says
- * nothing about the terminal.
+ * has ended or that it has no record of it, and when the answer is no longer
+ * this pane's concern: it asked for another terminal since, or shows another
+ * one now (#929). Anything else is thrown: it says nothing about the terminal.
  */
 async function attachAndCover(
 	chId: string,
@@ -690,10 +692,14 @@ async function attachAndCover(
 			stillWanted: () => effectiveChannelId.value === chId,
 		});
 	} catch (err) {
+		const code = (err as { code?: string } | null)?.code;
+		// Asked for another terminal since, or not showing this one any more: the
+		// answer is not about this pane, and nothing is to be done with it (#929).
+		if (code === ATTACH_SUPERSEDED) return null;
 		// Reaching the host and not finding the terminal there is an answer, not
 		// a failure to connect: dropping it left the pane saying "Not connected"
 		// over a terminal that had ended (#556).
-		const facts = factsFromRefusal((err as { code?: string } | null)?.code);
+		const facts = factsFromRefusal(code);
 		if (facts === null) throw err;
 		takeAnswer(chId, facts);
 		return null;
@@ -784,13 +790,27 @@ watch(
 		if (status === 'live' || status === 'born') {
 			hasEnded.value = false;
 			heldBack.value = null;
+			// The end it saw was the previous run's: its screen no longer holds
+			// what this one prints, which the hub's last output will (#929).
+			if (endSeenLiveOf === effectiveChannelId.value) endSeenLiveOf = null;
 		}
 	},
 );
 
-/** A restart is under way: over SSH it can take seconds, and a button that
- * does nothing visible for that long gets pressed again. */
-const restarting = ref(false);
+/**
+ * The terminals this pane has a restart under way for: over SSH one takes
+ * seconds, and a button that does nothing visible for that long gets pressed
+ * again. Each restart adds its own and takes it out when its request settles,
+ * whatever the others do: a pane given another terminal meanwhile shows and
+ * acts for that one, and finds the first still restarting if it comes back.
+ */
+const restartsUnderWay = ref<ReadonlySet<string>>(new Set());
+
+/** A restart of the terminal this pane shows is under way. */
+const restarting = computed(() => {
+	const chId = effectiveChannelId.value;
+	return chId !== null && restartsUnderWay.value.has(chId);
+});
 
 /**
  * The hub says this terminal is live while the pane is not attached to it.
@@ -951,7 +971,7 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			// The watcher waits for `ready`: a terminal given to this pane while
 			// it opened is attached now (#927).
 			const now = props.channelId;
-			if (now !== null && now !== undefined && now !== opened && now !== internalChannelId.value) {
+			if (now !== null && now !== undefined && now !== opened) {
 				askAgainOnNewSocket = false;
 				endSeenLiveOf = null;
 				void attachAndCover(now).catch((err) => {
@@ -1053,14 +1073,15 @@ async function onRetry(): Promise<void> {
 }
 
 // Re-attach when the channelId prop changes (e.g. pane reuse after tab switch).
-// Skip when the new ID matches internalChannelId (happens after pending spawn
-// resolution — replaceChannelId updates the prop from tempId to realId but
-// the channel is already attached).
+// Skip only a terminal the pane is bound to already: the one it has just
+// spawned, whose pending id the parent swaps for the real one (replaceChannelId).
+// A later return to a terminal it spawned is an attach like any other: skipping
+// every one left the pane on the terminal it showed meanwhile (#965).
 watch(
 	() => props.channelId,
 	async (newId) => {
 		if (newId !== null && newId !== undefined && ready.value) {
-			if (newId === internalChannelId.value) return;
+			if (isBoundTo(newId)) return;
 			endSeenLiveOf = null;
 			try {
 				error.value = null;
@@ -1146,50 +1167,68 @@ async function onRestart(opts?: { automatic?: boolean; bySetting?: boolean }): P
 	// for, since that path carries the prompts a passphrase or a host key need.
 	// It used to open a stranger and delete the terminal being restarted, which
 	// is the opposite of what the button says.
-	if (restarting.value) return;
-	restarting.value = true;
+	if (restartsUnderWay.value.has(chId)) return;
+	restartsUnderWay.value = new Set(restartsUnderWay.value).add(chId);
 	// Whatever this one meets decides afresh whether to wait for the host.
 	hostWait.restartStarting();
 	// The attach that follows counts from this start: an end within seconds of
 	// it is one the setting does not restart again (#574).
 	endWatch.starting(chId);
 	heldBack.value = null;
+	// The restarted terminal starts at the size this pane draws it at, as a
+	// spawn from a new pane does: what it prints before its attach is
+	// answered is written here, at that size (#930).
+	const term = terminal.value;
 	let ok: boolean;
 	try {
+		// Says every failure as `false`, with its reason on the card (#942).
 		ok = await channelsStore.restartChannel(chId, paneHostId.value, {
 			automatic: opts?.automatic === true || opts?.bySetting === true,
+			...(term ? { cols: term.cols, rows: term.rows } : {}),
 		});
 	} finally {
-		restarting.value = false;
+		const underWay = new Set(restartsUnderWay.value);
+		underWay.delete(chId);
+		restartsUnderWay.value = underWay;
 	}
+	// Given another terminal meanwhile: this restart is not its business, and
+	// nothing it met is to be shown, waited for or attached there (#929).
+	if (effectiveChannelId.value !== chId) return;
 	if (!ok) {
 		endWatch.lost();
 		// Its host away: wait for it, or try again now it is back; any other
 		// failure shows the card and its reason (#605).
 		hostWait.restartFailed(channelsStore.restartFailures.get(chId), opts?.automatic === true);
+		return;
 	}
-	if (ok) {
-		// This pane may be over a terminal no list shows — one on another
-		// host — where the status watcher may not have heard it come back yet.
-		hasEnded.value = false;
-		reattaching = true;
-		let result: AttachResult | null;
-		try {
-			result = await attachAndCover(chId, { preserveContent: true });
-		} finally {
-			reattaching = false;
-		}
-		// Ended again at once, or gone: the answer is already what covers it.
-		if (result === null) return;
-		if (result.writeLockHolder) {
-			writeLockStore.handleWriteLock(chId, result.writeLockHolder);
-		}
-		// Restore write permission — isDead watcher set canWrite=false
-		// when the channel died. If isWriter never changed (write-lock
-		// persists across restart for same channel ID), the isWriter
-		// watcher won't re-fire, so we must restore explicitly.
-		canWrite.value = isWriter.value;
+	// This pane may be over a terminal no list shows — one on another
+	// host — where the status watcher may not have heard it come back yet.
+	hasEnded.value = false;
+	// The end it saw was the previous run's (#929): see the status watcher.
+	if (endSeenLiveOf === chId) endSeenLiveOf = null;
+	reattaching = true;
+	let result: AttachResult | null;
+	try {
+		result = await attachAndCover(chId, { preserveContent: true });
+	} catch (err) {
+		// No answer about the terminal: said as every other attach failure is,
+		// with Retry (#942). Every caller starts this without waiting for it.
+		error.value = err instanceof Error ? err.message : String(err);
+		return;
+	} finally {
+		reattaching = false;
 	}
+	// Ended again at once, gone, or no longer this pane's: the answer is
+	// already what covers it.
+	if (result === null) return;
+	if (result.writeLockHolder) {
+		writeLockStore.handleWriteLock(chId, result.writeLockHolder);
+	}
+	// Restore write permission — isDead watcher set canWrite=false
+	// when the channel died. If isWriter never changed (write-lock
+	// persists across restart for same channel ID), the isWriter
+	// watcher won't re-fire, so we must restore explicitly.
+	canWrite.value = isWriter.value;
 }
 
 function onConfigure(): void {

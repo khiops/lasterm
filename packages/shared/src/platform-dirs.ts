@@ -60,7 +60,7 @@ function currentContext(): PlatformDirContext {
 	return { platform: process.platform, env: process.env, homedir };
 }
 
-function pathFor(context: PlatformDirContext): path.PlatformPath {
+function pathFor(context: PlatformDirContext): typeof path.posix {
 	return context.platform === "win32" ? path.win32 : path.posix;
 }
 

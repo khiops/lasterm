@@ -142,6 +142,13 @@ interface ReusedTerminal {
 	args?: string[];
 	/** The launch profile it was first started from. */
 	launchProfileId?: string;
+	/** Started as a process of its own rather than a shell. */
+	directProcess?: boolean;
+	/** The method it was elevated with, when it was started elevated. */
+	elevationMethod?: ElevationMethod;
+	/** Its size, as a restart sends it. */
+	cols: number;
+	rows: number;
 }
 
 export interface WsClient {
@@ -990,6 +997,14 @@ export class SessionManager {
 					...(existing.channel.launchProfileId !== undefined && {
 						launchProfileId: existing.channel.launchProfileId,
 					}),
+					...(existing.channel.directProcess === true && { directProcess: true }),
+					// Elevated as a restart reads it: the flag and its method together.
+					...(existing.channel.elevated === true &&
+						existing.channel.elevationMethod !== undefined && {
+							elevationMethod: existing.channel.elevationMethod as ElevationMethod,
+						}),
+					cols: existing.channel.cols,
+					rows: existing.channel.rows,
 				};
 			} else {
 				// Spawning a stranger instead would put a terminal on screen that
@@ -1428,8 +1443,9 @@ export class SessionManager {
 					hostId,
 				});
 				const requestId = generateId();
-				const cols = msg.cols ?? 80;
-				const rows = msg.rows ?? 24;
+				// A terminal brought back keeps its size unless the request names one.
+				const cols = msg.cols ?? reused?.cols ?? 80;
+				const rows = msg.rows ?? reused?.rows ?? 24;
 
 				// ── Launch profile resolution ─────────────────────────────────────────
 				// A terminal brought back with neither a shell nor a profile named
@@ -1463,23 +1479,46 @@ export class SessionManager {
 				const defaultProfile = hostDefaultProfile(reachedHost, this.ctx.metaDal);
 
 				// ── The launch profile it starts ──────────────────────────────────────
-				// The profile the request names; with neither a shell nor a profile
-				// named, the host's default one, started as the menu would start it,
-				// whether the user chose it or the hub marked it for the agent's
-				// default (#802). With no profile at all, none: the agent starts its
-				// own default shell.
+				// The profile the request names; for a terminal brought back naming
+				// none, which is how a window brings an ended one back, the profile
+				// it was first started from, as a restart reads it (#858); with
+				// neither a shell nor a profile named, the host's default one,
+				// started as the menu would start it, whether the user chose it or
+				// the hub marked it for the agent's default (#802). With no profile
+				// at all, none: the agent starts its own default shell.
+				const ownProfile =
+					msg.launchProfileId === undefined && reused?.launchProfileId !== undefined
+						? this.ctx.metaDal.getLaunchProfile(reused.launchProfileId)
+						: undefined;
 				const profile =
 					(msg.launchProfileId
 						? this.ctx.metaDal.getLaunchProfile(msg.launchProfileId)
-						: undefined) ?? (resolvedShell === undefined ? defaultProfile : undefined);
+						: undefined) ??
+					ownProfile ??
+					(resolvedShell === undefined ? defaultProfile : undefined);
 				if (profile) {
-					resolvedShell = msg.shell ?? profile.shell;
-					resolvedArgs = msg.args ?? profile.args ?? [];
-					resolvedCwd = msg.cwd ?? profile.cwd ?? resolvedCwd;
+					// A terminal brought back keeps the shell, arguments and directory
+					// it has of its own, as a restart sends them: its profile gives its
+					// environment, as the profile says it now.
+					if (profile !== ownProfile) {
+						resolvedShell = msg.shell ?? profile.shell;
+						resolvedArgs = msg.args ?? profile.args ?? [];
+						resolvedCwd = msg.cwd ?? profile.cwd ?? resolvedCwd;
+					}
 					resolvedEnv = { ...(profile.env ?? {}), ...(msg.env ?? {}) };
 					resolvedDirectProcess = msg.directProcess ?? profile.mode === "process";
 					resolvedElevated = msg.elevated ?? profile.elevated;
 					resolvedLaunchProfileId = profile.id;
+				}
+				// A terminal brought back naming no profile keeps its mode and its
+				// elevation as it was started, as a restart reads them, whether its
+				// profile still exists or not; elevated, it is elevated with the
+				// method it was elevated with.
+				let ownElevationMethod: ElevationMethod | undefined;
+				if (reused !== undefined && msg.launchProfileId === undefined) {
+					resolvedDirectProcess = msg.directProcess ?? reused.directProcess === true;
+					resolvedElevated = msg.elevated ?? reused.elevationMethod !== undefined;
+					ownElevationMethod = reused.elevationMethod;
 				}
 
 				// ── Elevation checks ──────────────────────────────────────────────────
@@ -1532,25 +1571,20 @@ export class SessionManager {
 							resolvedDirectProcess,
 						),
 					),
-					// The profile this spawn starts; for a terminal brought back under
-					// its own shell, which is how a window restarts an ended one, the
-					// profile it was first started from, as a restart reads it: bringing
-					// it back keeps the switch's effect (#839).
-					...reportDirectoryField(
-						profile ??
-							(reused?.launchProfileId !== undefined
-								? this.ctx.metaDal.getLaunchProfile(reused.launchProfileId)
-								: undefined),
-					),
+					// The profile this spawn starts, a terminal brought back's own
+					// included: bringing it back keeps the switch's effect (#839).
+					...reportDirectoryField(profile),
 				};
 
 				// ── Elevated spawn ────────────────────────────────────────────────────
 				if (resolvedElevated) {
-					const rawMethod = this.ctx.configResolver
-						? this.ctx.configResolver.resolveElevationMethod(host.elevationMethod)
-						: process.platform === "win32"
-							? "gsudo"
-							: "sudo";
+					const rawMethod =
+						ownElevationMethod ??
+						(this.ctx.configResolver
+							? this.ctx.configResolver.resolveElevationMethod(host.elevationMethod)
+							: process.platform === "win32"
+								? "gsudo"
+								: "sudo");
 					const elevCfg = this._resolveElevationConfig(host.customCommand, rawMethod);
 					if ("validationError" in elevCfg) {
 						client.send(elevCfg.validationError);

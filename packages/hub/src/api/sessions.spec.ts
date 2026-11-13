@@ -2066,3 +2066,275 @@ describe("POST stop-keeping", () => {
 		expect(f.dal.getHost(hostId)?.sshRemoteDaemon).toBeUndefined();
 	});
 });
+
+// ─── Closed sessions (#911) ───────────────────────────────────────────────────
+
+const LONG_AGO = "2026-01-01T00:00:00.000Z";
+
+/** A session row as a run left it, created at `createdAt` and last changed long ago. */
+function seedSession(id: string, host: string, status: SessionState["status"], createdAt: string) {
+	new MetaDAL(dbs.meta).createSession({ id, hostId: host, status });
+	dbs.meta
+		.prepare("UPDATE sessions SET created_at = ?, updated_at = ? WHERE id = ?")
+		.run(createdAt, LONG_AGO, id);
+}
+
+function seedChannel(id: string, sessionId: string, status: "live" | "orphan" | "dead") {
+	new MetaDAL(dbs.meta).createChannel({ id, sessionId, status, shell: "bash" });
+}
+
+/** The session rows, oldest first: id, status and updated_at. */
+function sessionRows(): Array<[string, string, string]> {
+	return new MetaDAL(dbs.meta).listSessions().map((s) => [s.id, s.status, s.updatedAt]);
+}
+
+/** An SSH host whose daemon is kept: a hub start leaves its terminals orphan and reaches nothing. */
+function daemonHost(label: string): string {
+	return new MetaDAL(dbs.meta).createHost({
+		type: "ssh",
+		label,
+		sshHost: `pi@${label}.local`,
+		os: "linux",
+		sshRemoteDaemon: true,
+	}).id;
+}
+
+async function listedSessions(
+	query = "",
+	on: FastifyInstance = server,
+): Promise<Array<{ id: string; status: string; host: string }>> {
+	const res = await on.inject({ method: "GET", url: `/api/sessions${query}` });
+	expect(res.statusCode).toBe(200);
+	return res.json<Array<{ id: string; host_id: string; status: string }>>().map((s) => ({
+		id: s.id,
+		status: s.status,
+		host: s.host_id,
+	}));
+}
+
+describe("GET /api/sessions, closed sessions (#911)", () => {
+	const S1 = "01K911SESSION0000000000S01";
+	const S2 = "01K911SESSION0000000000S02";
+	const S3 = "01K911SESSION0000000000S03";
+	const S4 = "01K911SESSION0000000000S04";
+	const S8 = "01K911SESSION0000000000S08";
+	const S9 = "01K911SESSION0000000000S09";
+	const S5 = "01K911SESSION0000000000S05";
+	let otherHost: string;
+
+	beforeEach(() => {
+		otherHost = new MetaDAL(dbs.meta).createHost({
+			type: "ssh",
+			label: "nas",
+			sshHost: "pi@nas.local",
+		}).id;
+		seedSession(S1, hostId, "closed", "2026-11-13T10:00:01.000Z");
+		seedSession(S2, hostId, "closed", "2026-11-13T10:00:02.000Z");
+		seedChannel("01K911CHANNEL00000000000C2", S2, "dead");
+		seedSession(S3, hostId, "active", "2026-11-13T10:00:03.000Z");
+		seedSession(S4, hostId, "disconnected", "2026-11-13T10:00:04.000Z");
+		seedSession(S8, hostId, "starting", "2026-11-13T10:00:05.000Z");
+		seedSession(S9, hostId, "detached", "2026-11-13T10:00:06.000Z");
+		seedSession(S5, otherHost, "active", "2026-11-13T10:00:07.000Z");
+	});
+
+	// Mutations: list every row (S1, S2 listed); keep only active and
+	// disconnected (S8, S9 missing).
+	it("GET /api/sessions lists the sessions that are not closed (#911)", async () => {
+		expect(await listedSessions()).toEqual([
+			{ id: S3, status: "active", host: hostId },
+			{ id: S4, status: "disconnected", host: hostId },
+			{ id: S8, status: "starting", host: hostId },
+			{ id: S9, status: "detached", host: hostId },
+			{ id: S5, status: "active", host: otherHost },
+		]);
+		expect((await listedSessions(`?host_id=${hostId}`)).map((s) => s.id)).toEqual([S3, S4, S8, S9]);
+	});
+
+	// Mutations: ignore `all` (S1, S2 missing); drop the host filter with it (S5
+	// in H's list); read `all=false` as true (S1, S2 listed).
+	it("GET /api/sessions?all=true lists every session the hub keeps (#911)", async () => {
+		expect((await listedSessions("?all=true")).map((s) => s.id)).toEqual([
+			S1,
+			S2,
+			S3,
+			S4,
+			S8,
+			S9,
+			S5,
+		]);
+		expect((await listedSessions(`?host_id=${hostId}&all=true`)).map((s) => s.id)).toEqual([
+			S1,
+			S2,
+			S3,
+			S4,
+			S8,
+			S9,
+		]);
+		expect((await listedSessions("?all=false")).map((s) => s.id)).toEqual([S3, S4, S8, S9, S5]);
+	});
+
+	// Mutation: read any value other than `true` as false (200).
+	it("GET /api/sessions refuses an all that is not true or false (#911)", async () => {
+		for (const value of ["yes", "1", ""]) {
+			const res = await server.inject({ method: "GET", url: `/api/sessions?all=${value}` });
+			expect(res.statusCode).toBe(400);
+			expect(res.json()).toEqual({
+				error: { code: "VALIDATION_ERROR", message: "all must be true or false." },
+			});
+		}
+	});
+});
+
+describe("a hub start and the sessions a previous run left (#911)", () => {
+	const S1 = "01K911SESSION0000000000S01";
+	const S2 = "01K911SESSION0000000000S02";
+	const S3 = "01K911SESSION0000000000S03";
+	const S4 = "01K911SESSION0000000000S04";
+	const S5 = "01K911SESSION0000000000S05";
+	const S6 = "01K911SESSION0000000000S06";
+	const S7 = "01K911SESSION0000000000S07";
+
+	// Mutations: no sweep (S1, S3 remain); delete closed rows a channel names
+	// (FK error, or S2 and S4 gone); close the held S5; close without updated_at
+	// (S4's stays LONG_AGO); rewrite rows already closed (S2's changes).
+	it("a hub start drops the sessions it neither holds nor lists a terminal under (#911)", async () => {
+		const C2 = "01K911CHANNEL00000000000C2";
+		const C4 = "01K911CHANNEL00000000000C4";
+		const C5 = "01K911CHANNEL00000000000C5";
+		const keptHost = daemonHost("k");
+		seedSession(S1, hostId, "closed", "2026-11-13T10:00:01.000Z");
+		seedSession(S2, hostId, "closed", "2026-11-13T10:00:02.000Z");
+		seedChannel(C2, S2, "dead");
+		seedSession(S3, hostId, "disconnected", "2026-11-13T10:00:03.000Z");
+		seedSession(S4, hostId, "active", "2026-11-13T10:00:04.000Z");
+		seedChannel(C4, S4, "dead");
+		seedSession(S5, keptHost, "disconnected", "2026-11-13T10:00:05.000Z");
+		seedChannel(C5, S5, "orphan");
+		const dal = new MetaDAL(dbs.meta);
+		for (const channel of [C2, C4, C5]) dal.updateCacheIndex(channel, `chunk-${channel}`, 7);
+
+		await sm.startup();
+
+		const rows = sessionRows();
+		expect(rows.map(([id, status]) => [id, status])).toEqual([
+			[S2, "closed"],
+			[S4, "closed"],
+			[S5, "disconnected"],
+		]);
+		expect(rows.find(([id]) => id === S2)?.[2]).toBe(LONG_AGO);
+		expect((rows.find(([id]) => id === S4)?.[2] ?? "") > LONG_AGO).toBe(true);
+		expect([C2, C4, C5].map((id) => dal.getChannel(id)?.sessionId)).toEqual([S2, S4, S5]);
+		expect(
+			dbs.meta.prepare("SELECT channel_id FROM cache_index ORDER BY channel_id").all(),
+		).toEqual([{ channel_id: C2 }, { channel_id: C4 }, { channel_id: C5 }]);
+		expect((await listedSessions()).map((s) => s.id)).toEqual([S5]);
+	});
+
+	// Mutation: today's adoption of the earliest row (S6 adopted and listed, S7
+	// closed).
+	it("a hub start keeps the session its live terminals were opened under (#911)", async () => {
+		const C7 = "01K911CHANNEL00000000000C7";
+		const host = daemonHost("m");
+		seedSession(S6, host, "disconnected", "2026-11-13T10:00:06.000Z");
+		seedSession(S7, host, "active", "2026-11-13T10:00:07.000Z");
+		seedChannel(C7, S7, "orphan");
+
+		await sm.startup();
+
+		expect(sessionRows().map(([id, status]) => [id, status])).toEqual([[S7, "disconnected"]]);
+		expect(new MetaDAL(dbs.meta).getChannel(C7)?.sessionId).toBe(S7);
+		expect((await listedSessions(`?host_id=${host}`)).map((s) => s.id)).toEqual([S7]);
+	});
+
+	// Mutation: spare from the close every row an alive channel names (S6 left
+	// disconnected and listed).
+	it("a hub start closes an older session its live terminals still name, and keeps it (#911)", async () => {
+		const C6 = "01K911CHANNEL00000000000C6";
+		const C7 = "01K911CHANNEL00000000000C7";
+		const host = daemonHost("m");
+		seedSession(S6, host, "disconnected", "2026-11-13T10:00:06.000Z");
+		seedChannel(C6, S6, "orphan");
+		seedSession(S7, host, "active", "2026-11-13T10:00:07.000Z");
+		seedChannel(C7, S7, "orphan");
+
+		await sm.startup();
+
+		expect(sessionRows().map(([id, status]) => [id, status])).toEqual([
+			[S6, "closed"],
+			[S7, "disconnected"],
+		]);
+		expect(new MetaDAL(dbs.meta).getChannel(C6)?.sessionId).toBe(S6);
+		expect((await listedSessions(`?host_id=${host}`)).map((s) => s.id)).toEqual([S7]);
+	});
+
+	// Mutation: sweep only after the restore found something alive (it returns
+	// early when nothing is).
+	it("a hub start with no live terminal still drops its stale sessions (#911)", async () => {
+		seedSession(S1, hostId, "closed", "2026-11-13T10:00:01.000Z");
+		seedSession(S3, hostId, "active", "2026-11-13T10:00:03.000Z");
+
+		await sm.startup();
+
+		expect(sessionRows()).toEqual([]);
+	});
+});
+
+describe("connect and disconnect, then a hub start (#911)", () => {
+	// Red on today's code: five rows (three closed, one disconnected, one active).
+	it("connect and disconnect cycles leave one session after a hub start (#911)", async () => {
+		// An agent on stdio: its sessions close with its connection.
+		agentHooks.start = async () => {
+			const agent = constructedAgents.at(-1) as FakeSshAgent;
+			agent.helloMessage = DAEMON_HELLO;
+			agent.usedRemoteDaemon = false;
+			agent.connected = true;
+		};
+		agentHooks.channelState = async () => [];
+		const connect = async (on: FastifyInstance) => {
+			const res = await on.inject({
+				method: "POST",
+				url: `/api/hosts/${hostId}/connect`,
+				payload: {},
+			});
+			expect([200, 202]).toContain(res.statusCode);
+			await vi.waitFor(async () => {
+				const statuses = (await listedSessions("", on)).map((s) => s.status);
+				expect(statuses).toContain("active");
+			});
+		};
+		for (let cycle = 0; cycle < 3; cycle++) {
+			await connect(server);
+			const res = await server.inject({
+				method: "POST",
+				url: `/api/hosts/${hostId}/disconnect`,
+				payload: { force: true },
+			});
+			expect(res.statusCode).toBe(200);
+		}
+		await connect(server);
+
+		// The hub restarts while the host is connected.
+		sm.beginQuit();
+		await sm.shutdown();
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		const metaDal = new MetaDAL(dbs.meta);
+		const restarted = new SessionManager(dbs);
+		const restartedServer = Fastify({ logger: false });
+		registerSessionRoutes(restartedServer, metaDal, restarted);
+		registerHostConnectionRoutes(restartedServer, metaDal, restarted);
+		await restartedServer.ready();
+		try {
+			await restarted.startup();
+			await connect(restartedServer);
+
+			expect((await listedSessions("", restartedServer)).map((s) => s.status)).toEqual(["active"]);
+			expect(sessionRows()).toHaveLength(1);
+		} finally {
+			await restartedServer.close();
+			restarted.beginQuit();
+			await restarted.shutdown();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+	});
+});

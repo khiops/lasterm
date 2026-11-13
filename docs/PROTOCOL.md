@@ -928,6 +928,19 @@ A host with none marked starts its first profile; one with no profile at all, no
 starts its own default. The local host is no exception: its agent's HELLO marks its default as an
 SSH host's does (#802).
 
+A SPAWN with `reuse_channel_id` that names no launch profile, as a window's Restart of an ended
+terminal sends it, starts that terminal as `POST /api/channels/:id/restart` does (#858): the
+environment and `report_directory` of the launch profile it was started from, as the profile says
+them now, and its own shell, arguments, directory, size, mode and elevation, the last with the
+method it was elevated with, as its row records them. The fields the request names win as ever; one
+that names a shell names its arguments with it, none meaning none. The row then records the start
+as it was made, what the request named included: its shell, arguments, directory, size, mode,
+elevation and launch profile, so the next restart, from a window or the hub, starts the terminal
+the same. An environment the request names applies to that start only. A terminal with no profile,
+or whose profile was deleted, gets no profile's environment, and keeps its mode and elevation all
+the same; it starts the host's default profile only when neither the request nor the terminal names
+a shell.
+
 A SPAWN that names itself with `request_id` gets it back in the SPAWN_OK and in every ERROR that
 answers it, the refusal of a field it carries included, and in nothing else (#777). A window's
 socket carries every ERROR the hub has for it: another pane's ATTACH refused, a write lock denied,
@@ -2204,7 +2217,7 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/sessions` | ● | `Session[]` (query: `?host_id=X`) |
+| GET | `/api/sessions` | ● | `Session[]`, the sessions that are not closed, oldest first (query: `?host_id=X`). `?all=true` lists every session the hub keeps, closed ones included (STORAGE.md § 3.3); `all` other than `true` or `false` → 400 `VALIDATION_ERROR` |
 | GET | `/api/sessions/:id` | ● | `Session` (includes channels) |
 | DELETE | `/api/sessions/:id` | ● | `?force=true\|false` → 204 (close). While uploads to the session's remote host run (§ 4.19), 409 `TRANSFERS_WOULD_STOP` `{ transfers }` and nothing is done, until `force=true`, which interrupts them; any other `force` 400 `VALIDATION_ERROR`. Sends DESTROY for each non-dead terminal when its agent is connected, before closing or stopping that connection (#910; the delivery caveats of Host deletion apply). Its terminals end `killed` (§ 4.7) and the hub lets go of the host's agent: a daemon older than the hub, which then holds none of its terminals, gets STOP without `force` (§ 3.17, #805), and the next terminal there starts the current agent |
 

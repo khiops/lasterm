@@ -5690,6 +5690,233 @@ describe("SessionManager — elevation support", () => {
 		);
 		expect(errMsg).toBeDefined();
 	});
+
+	// ─── A terminal brought back from its pane (#858) ────────────────────────
+	//
+	// A window brings an ended terminal back with a SPAWN naming it, with its
+	// shell and arguments when its list carries them, and never a launch
+	// profile. It starts the profile it was first started from, as the hub's
+	// own restart does: its environment as the profile says it now; its shell,
+	// arguments, directory, size, mode and elevation as the terminal was started.
+	// The profile is edited on each of those after the terminal starts, or
+	// deleted, and both ways of bringing it back send the agent the same SPAWN.
+	const startedAs = {
+		"an elevated shell": {
+			profile: { mode: "shell", elevated: true },
+			editedTo: { mode: "process", elevated: false },
+			// Started with doas, the method its host had then: it is elevated
+			// again with doas, whatever the host's method is now.
+			elevationMethod: "doas",
+			spawn: { elevated: true, elevationMethod: "doas", elevationSecret: "hunter2" },
+		},
+		"a process of its own, not elevated": {
+			profile: { mode: "process", elevated: false },
+			editedTo: { mode: "shell", elevated: true },
+			elevationMethod: undefined,
+			spawn: { directProcess: true },
+		},
+		"an elevated process": {
+			profile: { mode: "process", elevated: true },
+			editedTo: { mode: "shell", elevated: false },
+			elevationMethod: "doas",
+			spawn: {
+				directProcess: true,
+				elevated: true,
+				elevationMethod: "doas",
+				elevationSecret: "hunter2",
+			},
+		},
+	} as const;
+	// What the profile gives: its environment and its switch as it says them
+	// now; a deleted one gives neither.
+	const profileSays = {
+		edited: { env: { DEPLOY_ENV: "prod" }, reportDirectory: true },
+		deleted: { env: {} },
+	} as const;
+	it.each([
+		[
+			"an elevated shell",
+			"edited",
+			"its shell and arguments, as a window listing it sends them",
+			true,
+		],
+		[
+			"an elevated shell",
+			"edited",
+			"its id alone, as a window that does not list it sends it",
+			false,
+		],
+		["a process of its own, not elevated", "edited", "its shell and arguments", true],
+		["a process of its own, not elevated", "edited", "its id alone", false],
+		["an elevated process", "edited", "its shell and arguments", true],
+		["an elevated process", "edited", "its id alone", false],
+		["an elevated process", "deleted", "its shell and arguments", true],
+		["an elevated process", "deleted", "its id alone", false],
+	] as const)(
+		"brings %s whose profile was %s back from %s with the SPAWN a restart sends (#858)",
+		async (started, afterwards, _, listed) => {
+			const { profile, editedTo, elevationMethod, spawn } = startedAs[started];
+			const localHostId = await sm.ensureLocalHost();
+			const dal = new MetaDAL(dbManager.meta);
+			const profileId = dal.createLaunchProfile({
+				name: "Staging admin",
+				shell: "/usr/bin/fish",
+				args: ["--private"],
+				cwd: "/srv/staging",
+				env: { DEPLOY_ENV: "staging" },
+				...profile,
+				supportedOs: "any",
+				iconType: "auto",
+				sortOrder: 0,
+				reportDirectory: true,
+			}).id;
+			sm.addClient(makeAutoRespondClient("c-858", [], "hunter2"));
+			const channelId = await sm.handleSpawn("c-858", {
+				type: "SPAWN",
+				hostId: localHostId,
+				launchProfileId: profileId,
+				cols: 132,
+				rows: 43,
+			});
+			if (channelId === null) throw new Error("expected a channel");
+			if (elevationMethod !== undefined) {
+				dbManager.meta
+					.prepare("UPDATE channels SET elevation_method = ? WHERE id = ?")
+					.run(elevationMethod, channelId);
+			}
+			if (afterwards === "deleted") {
+				expect(dal.deleteLaunchProfile(profileId)).toBe(true);
+			} else {
+				dal.updateLaunchProfile(profileId, {
+					shell: "/usr/bin/zsh",
+					args: ["--login"],
+					cwd: "/opt/elsewhere",
+					env: { DEPLOY_ENV: "prod" },
+					...editedTo,
+				});
+			}
+			const agent = mockLocalAgents.at(-1);
+			const spawns = () =>
+				(agent?.send.mock.calls ?? [])
+					.map(([message]) => message as AgentSpawnMessage)
+					.filter((message) => message.type === "SPAWN");
+			const before = spawns().length;
+
+			expect(await sm.restartChannel(channelId, "c-858")).toBe(true);
+			const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext })
+				.ctx;
+			const entry = ctx.channels.get(channelId);
+			if (entry) entry.status = "dead";
+			dal.updateChannelStatus(channelId, "dead");
+			expect(
+				await sm.handleSpawn("c-858", {
+					type: "SPAWN",
+					hostId: localHostId,
+					reuseChannelId: channelId,
+					...(listed && { shell: "/usr/bin/fish", args: ["--private"] }),
+				}),
+			).toBe(channelId);
+			// What the bring-back recorded on the row starts it the same again.
+			expect(await sm.restartChannel(channelId, "c-858")).toBe(true);
+
+			const expected = {
+				type: "SPAWN",
+				requestId: expect.any(String),
+				channelId,
+				shell: "/usr/bin/fish",
+				args: ["--private"],
+				cwd: "/srv/staging",
+				cols: 132,
+				rows: 43,
+				envMode: "inherit",
+				...profileSays[afterwards],
+				...spawn,
+			};
+			const [restarted, broughtBack, restartedAgain, ...more] = spawns().slice(before);
+			expect(restarted).toEqual(expected);
+			expect(broughtBack).toEqual(expected);
+			expect(restartedAgain).toEqual(expected);
+			expect(more).toEqual([]);
+		},
+	);
+
+	// What a request names when it brings a terminal back is recorded with the
+	// rest: the next restart starts the terminal as that start left it.
+	it("records the start a bring-back names, so the next restart starts it the same (#858)", async () => {
+		const localHostId = await sm.ensureLocalHost();
+		const dal = new MetaDAL(dbManager.meta);
+		const launch = { supportedOs: "any", iconType: "auto" } as const;
+		const adminId = dal.createLaunchProfile({
+			name: "Staging admin",
+			shell: "/usr/bin/fish",
+			args: ["--private"],
+			cwd: "/srv/staging",
+			env: { DEPLOY_ENV: "staging" },
+			mode: "process",
+			elevated: true,
+			sortOrder: 0,
+			reportDirectory: true,
+			...launch,
+		}).id;
+		const plainId = dal.createLaunchProfile({
+			name: "Plain",
+			shell: "/bin/sh",
+			env: { OTHER: "yes" },
+			mode: "shell",
+			elevated: false,
+			sortOrder: 1,
+			...launch,
+		}).id;
+		sm.addClient(makeAutoRespondClient("c-858", [], "hunter2"));
+		const channelId = await sm.handleSpawn("c-858", {
+			type: "SPAWN",
+			hostId: localHostId,
+			launchProfileId: adminId,
+			cols: 132,
+			rows: 43,
+		});
+		if (channelId === null) throw new Error("expected a channel");
+		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+		const entry = ctx.channels.get(channelId);
+		if (entry) entry.status = "dead";
+		dal.updateChannelStatus(channelId, "dead");
+		const agent = mockLocalAgents.at(-1);
+		const lastSpawn = () =>
+			(agent?.send.mock.calls ?? [])
+				.map(([message]) => message as AgentSpawnMessage)
+				.filter((message) => message.type === "SPAWN")
+				.at(-1);
+
+		expect(
+			await sm.handleSpawn("c-858", {
+				type: "SPAWN",
+				hostId: localHostId,
+				reuseChannelId: channelId,
+				launchProfileId: plainId,
+				elevated: false,
+				directProcess: false,
+			}),
+		).toBe(channelId);
+		const broughtBack = lastSpawn();
+		expect(await sm.restartChannel(channelId, "c-858")).toBe(true);
+		const restarted = lastSpawn();
+
+		// The plain profile's shell, none of the admin profile's arguments, the
+		// terminal's own directory and size, neither a process nor elevated.
+		const expected = {
+			type: "SPAWN",
+			requestId: expect.any(String),
+			channelId,
+			shell: "/bin/sh",
+			cwd: "/srv/staging",
+			cols: 132,
+			rows: 43,
+			env: { OTHER: "yes" },
+			envMode: "inherit",
+		};
+		expect(broughtBack).toEqual(expected);
+		expect(restarted).toEqual(expected);
+	});
 });
 
 // ─── Concurrent-SPAWN coalescing tests ───────────────────────────────────────

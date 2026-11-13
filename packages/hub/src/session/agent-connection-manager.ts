@@ -222,9 +222,16 @@ export class AgentConnectionManager {
 	}
 
 	/**
-	 * On hub start, restore sessions that were alive before the previous shutdown.
+	 * On hub start, restore sessions that were alive before the previous shutdown,
+	 * then let go of the others: every session the hub does not hold now is
+	 * closed, and every closed one no terminal belongs to is deleted (#911).
 	 */
 	async startup(): Promise<void> {
+		await this.restoreAliveSessions();
+		this.ctx.metaDal.sweepSessions([...this.ctx.sessions.values()].map((state) => state.id));
+	}
+
+	private async restoreAliveSessions(): Promise<void> {
 		const alive = this.ctx.metaDal.listAliveChannelsWithHost();
 		if (alive.length === 0) return;
 
@@ -239,8 +246,10 @@ export class AgentConnectionManager {
 			const first = channels[0];
 			if (!first) continue;
 			const hostType = first.hostType;
+			// The latest session not closed: the one this host's new terminals
+			// went to, since each new session took the place of the one before.
 			const sessions = this.ctx.metaDal.listSessions(hostId);
-			const session = sessions.find((s) => s.status !== "closed");
+			const session = sessions.filter((s) => s.status !== "closed").at(-1);
 			if (!session) {
 				for (const ch of channels) {
 					this.ctx.metaDal.updateChannelStatus(ch.id, "dead");

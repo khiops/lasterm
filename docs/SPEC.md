@@ -291,7 +291,7 @@ Local daemon, single process, binds to 127.0.0.1.
 - `lasterm status [--json]` — show the hub's status
 - `lasterm host add|list|remove` — manage hosts. There is no `host test`: a connection test asks for credentials, which a CLI cannot (TEST_CONNECT, PROTOCOL.md § 4.11)
 - `lasterm agent fetch|status|import` — the agent binary cache (§ 3.5)
-- `lasterm session list [--json]` — list active sessions
+- `lasterm session list [--all] [--json]` — list the sessions that are not closed; `--all` adds the closed ones the hub still keeps (STORAGE.md § 3.3)
 - `lasterm pair [--code XXXXXXXX]` — generate a pairing code, or verify one
 - `lasterm config edit` — open config.toml in $EDITOR
 

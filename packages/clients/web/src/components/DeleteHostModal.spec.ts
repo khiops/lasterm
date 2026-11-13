@@ -197,6 +197,23 @@ describe("DeleteHostModal hub consent (#910)", () => {
 			expect(onClose).toHaveBeenCalledOnce();
 		},
 	);
+	// D7: a refusal of the forced request shows the hub's message too.
+	it("V4 shows a refusal of the forced request, and stays open", async () => {
+		const fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValueOnce(counted(2))
+			.mockResolvedValueOnce(refusal(409, "HOST_BUSY", "This host's agent is being stopped."));
+		const { onClose, onDeleted } = mountModal();
+		await clickDelete();
+		input()!.value = "pi";
+		input()!.dispatchEvent(new Event("input"));
+		await nextTick();
+		await clickDelete();
+		expect(fetchSpy.mock.calls[1]?.[0]).toBe("/api/hosts/pi?force=true");
+		expect(alert()?.textContent).toBe("This host's agent is being stopped.");
+		expect(onDeleted).not.toHaveBeenCalled();
+		expect(onClose).not.toHaveBeenCalled();
+	});
 	it("V4 shows an upload refusal without asking for the label", async () => {
 		vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
 			refusal(409, "TRANSFERS_RUNNING", "Wait for the upload."),

@@ -2129,15 +2129,35 @@ describe("host remove consent (#910)", () => {
 	}
 
 	it.each([
-		{ force: false, count: 0, unreachable: false },
-		{ force: true, count: 0, unreachable: false },
-		{ force: false, count: 1, unreachable: false },
-		{ force: false, count: 2, unreachable: false },
-		{ force: false, count: 1, unreachable: true },
-		{ force: false, count: 2, unreachable: true },
+		{ force: false, count: 0, unreachable: false, line: undefined },
+		{ force: true, count: 0, unreachable: false, line: undefined },
+		{
+			force: false,
+			count: 1,
+			unreachable: false,
+			line: "1 terminal on pi has not ended. Rerun with --force to ask its agent to end it and remove the host.",
+		},
+		{
+			force: false,
+			count: 2,
+			unreachable: false,
+			line: "2 terminals on pi have not ended. Rerun with --force to ask their agent to end them and remove the host.",
+		},
+		{
+			force: false,
+			count: 1,
+			unreachable: true,
+			line: "1 terminal on pi has not ended, and this hub is not connected to its agent: it may keep running. Rerun with --force to remove the host anyway.",
+		},
+		{
+			force: false,
+			count: 2,
+			unreachable: true,
+			line: "2 terminals on pi have not ended, and this hub is not connected to their agent: they may keep running. Rerun with --force to remove the host anyway.",
+		},
 	])(
 		"requests and explains $force / $count / $unreachable",
-		async ({ force, count, unreachable }) => {
+		async ({ force, count, unreachable, line }) => {
 			const { requests, errors, exits } = await removeHost(
 				force ? ["--force"] : [],
 				count > 0
@@ -2158,16 +2178,8 @@ describe("host remove consent (#910)", () => {
 				"GET /api/hosts",
 				`DELETE /api/hosts/host-id${force ? "?force=true" : ""}`,
 			]);
-			if (count > 0) {
-				const one = count === 1;
-				const prefix = `${count} ${one ? "terminal" : "terminals"} on pi ${one ? "has" : "have"} not ended`;
-				expect(errors).toEqual([
-					[
-						unreachable
-							? `${prefix}, and this hub is not connected to ${one ? "its" : "their"} agent: ${one ? "it" : "they"} may keep running. Rerun with --force to remove the host anyway.`
-							: `${prefix}. Rerun with --force to ask ${one ? "its" : "their"} agent to end ${one ? "it" : "them"} and remove the host.`,
-					],
-				]);
+			if (line !== undefined) {
+				expect(errors).toEqual([[line]]);
 				expect(exits).toEqual([[1]]);
 			} else {
 				expect(exits).toEqual([]);
@@ -2182,6 +2194,11 @@ describe("host remove consent (#910)", () => {
 			409,
 			'{"error":{"code":"HOST_BUSY","message":"This host\'s agent is being stopped."}}',
 			'Error: HTTP 409: {"error":{"code":"HOST_BUSY","message":"This host\'s agent is being stopped."}}',
+		],
+		[
+			409,
+			'{"error":{"code":"HOST_BUSY","message":"This host\'s agent is being stopped.","terminals":1}}',
+			'Error: HTTP 409: {"error":{"code":"HOST_BUSY","message":"This host\'s agent is being stopped.","terminals":1}}',
 		],
 		[
 			409,

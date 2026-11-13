@@ -344,7 +344,12 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 	});
 
 	it("R2 validates force before changing the host", async () => {
-		expect((await remove("?force=yes")).statusCode).toBe(400);
+		const response = await remove("?force=yes");
+		expect(response.statusCode).toBe(400);
+		expect(response.json().error).toEqual({
+			code: "VALIDATION_ERROR",
+			message: "force must be true or false.",
+		});
 		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
 	});
 
@@ -389,18 +394,32 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
 	});
 
-	it.each(["", "?force=true"])("R5 never overrides running uploads with %s", async (force) => {
-		sm.setTransfers({ activeOn: () => 2, interruptOn: vi.fn() });
-		const response = await remove(force);
-		expect(response.statusCode).toBe(409);
-		expect(response.json().error).toEqual({
-			code: "TRANSFERS_RUNNING",
-			transfers: 2,
-			message:
-				"2 uploads to this host are running. Wait for them to end or cancel them, then delete the host.",
-		});
-		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
-	});
+	it.each([
+		[
+			"",
+			2,
+			"2 uploads to this host are running. Wait for them to end or cancel them, then delete the host.",
+		],
+		[
+			"?force=true",
+			2,
+			"2 uploads to this host are running. Wait for them to end or cancel them, then delete the host.",
+		],
+		[
+			"",
+			1,
+			"1 upload to this host is running. Wait for them to end or cancel them, then delete the host.",
+		],
+	] as const)(
+		"R5 never overrides running uploads with %s, transfers=%i",
+		async (force, transfers, message) => {
+			sm.setTransfers({ activeOn: () => transfers, interruptOn: vi.fn() });
+			const response = await remove(force);
+			expect(response.statusCode).toBe(409);
+			expect(response.json().error).toEqual({ code: "TRANSFERS_RUNNING", transfers, message });
+			expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+		},
+	);
 
 	it("R6 counts unreachable terminals without promising a send", async () => {
 		const agent = connectedAgent();
@@ -418,6 +437,11 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		});
 		expect((await remove("?force=true")).statusCode).toBe(204);
 		expect(agent.sent).toEqual([]);
+		const dal = new MetaDAL(dbs.meta);
+		expect(dal.getHost(hostId)).toBeUndefined();
+		expect(dal.getChannel(channelId)).toBeUndefined();
+		expect(ctx.channels.has(channelId)).toBe(false);
+		expect(ctx.sessions.has(hostId)).toBe(false);
 	});
 
 	// D2's other forms: several terminals, and a local host, which has nothing
@@ -612,8 +636,10 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 					expect(result).toEqual({ ok: false, channelId: null, errCode: "HOST_NOT_FOUND" });
 				} else {
 					const pending = lifecycle.spawnChannelsForHost(hostId, agent, vi.fn(), vi.fn());
+					expect(vi.getTimerCount()).toBe(0);
 					await vi.advanceTimersByTimeAsync(10_001);
 					await pending;
+					expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([]);
 				}
 				expect(agent.sent).toEqual([]);
 				expect(ctx.pendingRequests.size).toBe(0);
@@ -738,10 +764,21 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 						const request = next.sent.find((m) => m.type === "SPAWN")!;
 						if (request.type !== "SPAWN") throw new Error("expected SPAWN");
 						if (!request.requestId) throw new Error("expected request id");
-						const answer = ctx.pendingRequests.get(request.requestId);
-						if (!answer) throw new Error("expected the second SPAWN to wait for its answer");
+						if (!ctx.pendingRequests.has(request.requestId))
+							throw new Error("expected the second SPAWN to wait for its answer");
+						// As a reconnect does, the hub hears the new connection before its answer.
+						(
+							sm as unknown as {
+								agentMgr: { wireAgentEvents(h: string, s: string, a: unknown): void };
+							}
+						).agentMgr.wireAgentEvents(hostId, SESSION_ID, next);
 						heard.length = 0;
-						answer({ type: "SPAWN_OK", requestId: request.requestId, channelId });
+						next.emit("message", {
+							type: "SPAWN_OK",
+							requestId: request.requestId,
+							channelId,
+							pid: 1,
+						});
 						// R10 (c): the connection the host now has speaks for the terminal.
 						expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([
 							{ type: "CHANNEL_STATE", channelId, sessionId: SESSION_ID, status: "live" },

@@ -262,6 +262,8 @@ export let sent: Frame[];
 export let hear: (msg: Frame) => void;
 /** What the pane emitted to its parent, in order: the event, then its arguments. */
 export let emitted: unknown[][];
+/** How many listeners the window has for frames of `type` now. */
+export let listening: (type: string) => number;
 
 /** A hub the test answers: every frame the pane sends is kept in `sent`. */
 function fakeHub(): void {
@@ -269,6 +271,7 @@ function fakeHub(): void {
 	hear = (msg) => {
 		for (const cb of [...(listeners.get(msg.type) ?? [])]) cb(msg);
 	};
+	listening = (type) => listeners.get(type)?.length ?? 0;
 	const socket = {
 		isConnected: true,
 		on: vi.fn((type: string, cb: Listener) => {
@@ -401,6 +404,12 @@ export function mount({ channel, hostId = HOST, onScreen, beside }: PaneProps): 
 	app = createApp(Parent);
 	app.use(pinia);
 	app.mount(root);
+}
+
+/** Close the pane, as its parent does when its tab or split goes: it is unmounted. */
+export function closePane(): void {
+	app?.unmount();
+	app = null;
 }
 
 /**

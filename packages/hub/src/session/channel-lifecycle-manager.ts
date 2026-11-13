@@ -83,7 +83,11 @@ export interface SendSpawnOpts {
 	resolvedLaunchProfileId: string | undefined;
 	cols: number;
 	rows: number;
-	suppressClientError?: boolean;
+	/**
+	 * A SPAWN_ERR with this code is not sent to the client: the caller answers
+	 * it. Every other refusal is, as without it (#958).
+	 */
+	withheldErrorCode?: string;
 	resolvedElevated?: boolean;
 	resolvedElevationMethod?: string;
 	/** The dead channel this spawn brings back, if it is one. */
@@ -177,7 +181,7 @@ export class ChannelLifecycleManager {
 	/**
 	 * Send a SPAWN message to an agent and wait for SPAWN_OK or SPAWN_ERR.
 	 * On SPAWN_OK: creates the channel in DB and memory, notifies all clients, returns channelId.
-	 * On SPAWN_ERR: sends ERROR to client (unless suppressClientError=true), returns null errCode.
+	 * On SPAWN_ERR: sends ERROR to client (unless its code is `withheldErrorCode`), returns its code.
 	 */
 	async sendSpawnAndWait(
 		opts: SendSpawnOpts,
@@ -196,7 +200,7 @@ export class ChannelLifecycleManager {
 			resolvedLaunchProfileId,
 			cols,
 			rows,
-			suppressClientError = false,
+			withheldErrorCode = undefined,
 			resolvedElevated = false,
 			resolvedElevationMethod = undefined,
 			reuseChannelId = undefined,
@@ -406,7 +410,7 @@ export class ChannelLifecycleManager {
 						message: spawnErr.message,
 					});
 
-					if (!suppressClientError) {
+					if (spawnErr.code !== withheldErrorCode) {
 						const errorMsg: ErrorMessage = {
 							type: "ERROR",
 							code: spawnErr.code,

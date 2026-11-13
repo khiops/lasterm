@@ -296,7 +296,9 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 			attachedChannels: new Set(),
 		});
 		const order: string[] = [];
-		agent.send.mockImplementation((msg: ProtocolMessage) => order.push(msg.type));
+		agent.send.mockImplementation((msg: ProtocolMessage) =>
+			order.push(msg.type === "DESTROY" ? msg.channelId : msg.type),
+		);
 		vi.spyOn(agent, "close").mockImplementation(async () => {
 			order.push("close");
 			agent.connected = false;
@@ -310,7 +312,8 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		ctx.trustedAgentSha256.set(hostId, "hash");
 		ctx.trustedAgentSha256.set("other", "other-hash");
 		expect((await remove("?force=true")).statusCode).toBe(204);
-		expect(order).toEqual(["DESTROY", "DESTROY", "close"]);
+		// One DESTROY for each terminal, naming it, then the close.
+		expect(order).toEqual([...channelIds, "close"]);
 		for (const messages of [heard, anotherWindow]) {
 			for (const [index, id] of channelIds.entries()) {
 				expect(endsOf(messages, id)).toEqual([

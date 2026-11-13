@@ -58,9 +58,16 @@ describe("spool checkpoint worker (#786)", () => {
 				},
 				{ timeout: 5000 },
 			);
+			// A worker that already failed holds close() back by nothing: its stop(),
+			// the only wait in close(), settles at once. The bound times that alone,
+			// not the final checkpoints, which take the disk's time (#978: over 2 s on
+			// a loaded Windows runner).
+			const checkpointer = dbs.checkpointerForTests;
+			expect(checkpointer).toBeDefined();
 			const start = performance.now();
-			await dbs.close();
+			await checkpointer?.stop();
 			expect(performance.now() - start).toBeLessThan(1000);
+			await dbs.close();
 			const lines = storageLines(stderr.mock.calls);
 			expect(lines).toHaveLength(1);
 			// The parentheses hold an error code or an exit status, never the message

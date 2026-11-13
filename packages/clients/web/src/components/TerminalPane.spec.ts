@@ -420,23 +420,93 @@ describe("TerminalPane given back the terminal it spawned (#965)", () => {
 // A spawn takes seconds over SSH. Given another terminal meanwhile, the pane
 // named that one as the pending id it spawned for, and its parent replaced it
 // by the new terminal in every layout; closed meanwhile, it subscribed to the
-// new terminal's output, and nothing took that listener away.
+// new terminal's output, and nothing took that listener away. The pane owes
+// its spawn only while it shows the pending id.
 describe("TerminalPane whose spawn completes after it moved on (#971)", () => {
-	it("names the pending terminal it spawned for, not the one it was given meanwhile", async () => {
+	/** A pane owing its spawn on HOST, given U before the hub answers it. */
+	async function givenUWhileSpawning(): Promise<Ref<string | null>> {
 		const channel = openNew(HOST);
 		useChannelsStore().registerChannelHost(U, HOST);
 		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
 		channel.value = U;
 		await settle();
+		return channel;
+	}
+
+	const spawnedEvents = () => emitted.filter(([event]) => event === "channel-spawned");
+
+	it("leaves the terminal it was given meanwhile alone when its spawn completes", async () => {
+		const channel = await givenUWhileSpawning();
 
 		spawnOk(REAL);
 		await settle();
 
-		expect(emitted.filter(([event]) => event === "channel-spawned")).toEqual([
-			["channel-spawned", NEW, REAL],
-		]);
+		expect(spawnedEvents()).toEqual([]);
 		expect(channel.value).toBe(U);
 		expect(attachedTo()).toEqual([U]);
+	});
+
+	it("says nothing of a spawn that failed after it was given another terminal", async () => {
+		await givenUWhileSpawning();
+
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await settle();
+
+		expect(errorBox()).toBeNull();
+		expect(attachedTo()).toEqual([U]);
+		expect(spawns()).toHaveLength(1);
+	});
+
+	it("attaches the terminal it was given after its spawn failed, on Retry", async () => {
+		const channel = openNew(HOST);
+		useChannelsStore().registerChannelHost(U, HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+		channel.value = U;
+		await settle();
+
+		button("Retry")?.click();
+		await settle();
+
+		expect(spawns()).toHaveLength(1);
+		expect(attachedTo()).toEqual([U]);
+	});
+
+	it("spawns nothing when it is given another terminal before its spawn is sent", async () => {
+		const channel = openNew(HOST);
+		let connected: () => void = () => {};
+		vi.mocked(useSessionStore().connect).mockImplementationOnce(
+			() =>
+				new Promise<void>((resolve) => {
+					connected = resolve;
+				}),
+		);
+		useChannelsStore().registerChannelHost(U, HOST);
+		await settle();
+		channel.value = U;
+		await settle();
+
+		connected();
+		await settle();
+
+		expect(spawns()).toEqual([]);
+		expect(attachedTo()).toEqual([U]);
+	});
+
+	it("keeps no watch of the terminal it spawned once it shows another", async () => {
+		await givenUWhileSpawning();
+		spawnOk(REAL);
+		await vi.waitFor(() => expect(attachedTo()).toEqual([U]));
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		expect(errorBox()).not.toBeNull();
+
+		// U runs, and the pane is attached to nothing: it asks for U again.
+		useChannelsStore().updateChannelStatus(U, "live");
+		await settle();
+
+		expect(attachedTo()).toEqual([U, U]);
 	});
 
 	it("leaves nothing listening when it is closed before its spawn completes", async () => {
@@ -448,6 +518,8 @@ describe("TerminalPane whose spawn completes after it moved on (#971)", () => {
 		spawnOk(REAL);
 		await settle();
 
+		// The spawn's answer was taken: the window knows the new terminal's host.
+		expect(useChannelsStore().channelHostMap.get(REAL)).toBe(HOST);
 		expect(listening("OUTPUT")).toBe(0);
 	});
 });

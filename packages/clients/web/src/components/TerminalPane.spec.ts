@@ -32,11 +32,13 @@ import {
 	button,
 	CLIENT,
 	emitted,
+	type Frame,
 	freshWindow,
 	HOST,
 	hear,
 	host,
 	lastOutput,
+	MOUSE_OFF,
 	mount,
 	mountPane,
 	type PaneProps,
@@ -188,6 +190,19 @@ const resizes = () =>
 	sent
 		.filter((m) => m.type === "RESIZE")
 		.map(({ channelId, cols, rows }) => ({ channelId, cols, rows }));
+/** The terminals the pane attached, in order. */
+const attachedTo = () => attaches().map((m) => m.channelId);
+/** The terminals what was typed went to, in order. */
+const inputsTo = () => sent.filter((m) => m.type === "INPUT").map((m) => m.channelId);
+const paneTitleText = () => root.querySelector(".pane-title")?.textContent?.trim() ?? null;
+/** The hub sends `text` as what `channelId` printed. */
+function print(channelId: string, text: string): void {
+	hear({ type: "OUTPUT", channelId, data: new TextEncoder().encode(text) });
+}
+/** U runs on HOST too. */
+function withU(): void {
+	useChannelsStore().registerChannelHost(U, HOST);
+}
 const alwaysBox = () => card()?.querySelector<HTMLInputElement>('input[type="checkbox"]') ?? null;
 const scopeRadio = (label: string) =>
 	[...(card()?.querySelectorAll<HTMLLabelElement>(".exit-scope-option") ?? [])].find(
@@ -499,6 +514,18 @@ describe("TerminalPane host", () => {
 		expect(spawns()[0]).toMatchObject({ hostId: HOST, reuseChannelId: T });
 	});
 
+	// What the restarted terminal prints before its attach is answered is
+	// written at the size the pane draws: it starts at that size (#930).
+	it("restarts a terminal at the size its pane draws it", async () => {
+		await openEnded();
+		expect([terminal().cols, terminal().rows]).toEqual([100, 30]);
+
+		button("Restart")?.click();
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ reuseChannelId: T, cols: 100, rows: 30 });
+	});
+
 	it("reads its profile for the host its terminal runs on, not the rail's", async () => {
 		await openLive({ hostId: PI });
 
@@ -608,6 +635,349 @@ describe("TerminalPane restart", () => {
 		await vi.waitFor(() => expect(card()).not.toBeNull());
 		expect(card()?.textContent).toContain("Could not restart it: the shell could not start");
 	});
+
+	// ─── A restart and the terminals the pane shows meanwhile (#929) ──────────
+
+	/** Restart clicked over ended T: its SPAWN is sent, and not answered yet. */
+	async function restartClicked(open: Open = {}): Promise<void> {
+		await openEnded(open);
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+	}
+
+	/** Restart over ended T, its SPAWN answered: the hub says T runs, and the pane attaches it. */
+	async function restarted(open: Open = {}): Promise<void> {
+		await restartClicked(open);
+		useChannelsStore().updateChannelStatus(T, "live");
+		spawnOk(T);
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T]));
+	}
+
+	it("attaches nothing once the pane shows another terminal", async () => {
+		const channel = ref(T);
+		await restartClicked({ channel, setUp: withU });
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		xterm.events.length = 0;
+
+		spawnOk(T);
+		await settle();
+		print(T, "T-OUT");
+		attachOk(U, "U-SCREEN");
+		await settle();
+		print(T, "T-OUT");
+
+		expect(attachedTo()).toEqual([T, U]);
+		expect(xterm.events).toEqual(["<reset>", "U-SCREEN"]);
+	});
+
+	it("says nothing of a restart's attach the pane left", async () => {
+		const channel = ref(T);
+		await restarted({ channel, setUp: withU });
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, U]));
+		xterm.events.length = 0;
+		print(T, "T-WAIT");
+		expect(xterm.events).toEqual([]);
+		attachOk(U, "U-SCREEN");
+		await settle();
+		xterm.events.length = 0;
+
+		attachOk(T, "T-LATE", { writeLockHolder: OTHER_CLIENT });
+		await settle();
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+
+		expect(xterm.events).toEqual([]);
+		expect(useWriteLockStore().locks.get(T)).toBeUndefined();
+		expect(errorBox()).toBeNull();
+	});
+
+	it("lets a reconnect's attach answer the restart's", async () => {
+		await restarted();
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, T]));
+		xterm.events.length = 0;
+
+		print(T, "BETWEEN");
+		// The restart takes the write lock the answer names: the socket's attach does not.
+		attachOk(T, "SNAP", { writeLockHolder: CLIENT });
+		await settle();
+		print(T, "AFTER");
+		type("x");
+
+		expect(xterm.events).toEqual(["<reset>", "SNAP", "AFTER"]);
+		expect(inputs()).toEqual(["x"]);
+		expect(inputsTo()).toEqual([T]);
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		expect(errorBox()).toBeNull();
+	});
+
+	it("shows what the restarted terminal prints before its attach is answered (#930)", async () => {
+		await restartClicked();
+		useChannelsStore().updateChannelStatus(T, "live");
+		xterm.events.length = 0;
+
+		spawnOk(T);
+		// The next socket message after SPAWN_OK: the restart's attach is out by
+		// then, and listening, without any timer running (#930).
+		await settle();
+		print(T, "PROMPT$ ");
+		attachOk(T, "SNAP", { tail: [new TextEncoder().encode("TAIL")] });
+		await settle();
+		print(T, "AFTER");
+
+		expect(xterm.events).toEqual(["PROMPT$ ", "AFTER"]);
+		expect(attachedTo()).toEqual([T, T]);
+	});
+
+	it("keeps what a restarted command printed before it ended again", async () => {
+		await restartClicked();
+		useChannelsStore().updateChannelStatus(T, "live");
+		xterm.events.length = 0;
+		spawnOk(T);
+		await settle();
+
+		print(T, "fail: boom");
+		refuse(T, lastOutput());
+		await settle();
+		print(T, "late");
+
+		expect(xterm.events).toEqual(["fail: boom", MOUSE_OFF]);
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+	});
+
+	it("says so when the restart's attach is not answered (#942)", async () => {
+		await restarted();
+
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		xterm.events.length = 0;
+		print(T, "after");
+
+		expect(errorBox()?.textContent).toContain("ATTACH timeout — no response after 10s");
+		expect(button("Retry")).toBeDefined();
+		expect(button("Close")).toBeDefined();
+		expect(card()).toBeNull();
+		expect(xterm.events).toEqual([]);
+
+		button("Retry")?.click();
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, T]));
+	});
+
+	it("says so when the restart's attach cannot be sent", async () => {
+		await restartClicked();
+		useChannelsStore().updateChannelStatus(T, "live");
+		vi.mocked(useSessionStore().wsClient.send).mockImplementation((msg) => {
+			if (msg.type === "ATTACH") throw new Error("WebSocket not connected");
+			sent.push(msg as Frame);
+		});
+		xterm.events.length = 0;
+
+		spawnOk(T);
+		await settle();
+		print(T, "after");
+
+		expect(errorBox()?.textContent).toContain("WebSocket not connected");
+		expect(button("Retry")).toBeDefined();
+		expect(button("Close")).toBeDefined();
+		expect(xterm.events).not.toContain("after");
+	});
+
+	it("says why when the restart cannot reach the hub", async () => {
+		mountPane(ref(T), "live", {
+			setUp: () => {
+				useChannelsStore().channels = [listed(T, "live")];
+			},
+		});
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T]));
+		refuse(T);
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		vi.mocked(fetch).mockRejectedValue(new TypeError("Failed to fetch"));
+
+		button("Restart")?.click();
+		await settle();
+
+		await vi.waitFor(() =>
+			expect(card()?.textContent).toContain("Could not restart it: Failed to fetch"),
+		);
+		expect(errorBox()).toBeNull();
+	});
+
+	it("lets the pane it left reconnect at once", async () => {
+		const channel = ref(T);
+		await restarted({ channel, setUp: withU });
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, U]));
+		attachOk(U, "U-CACHED", { cached: true });
+		await settle();
+		expect(banner()).not.toBeNull();
+
+		button("Reconnect")?.click();
+		await settle();
+
+		expect(attachedTo()).toEqual([T, T, U, U]);
+	});
+
+	it("lets the pane it left reconnect at once, both attaches pending", async () => {
+		const channel = ref(T);
+		await restarted({ channel, setUp: withU });
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, T]));
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, T, U]));
+		attachOk(U, "U-CACHED", { cached: true });
+		await settle();
+
+		button("Reconnect")?.click();
+		await settle();
+
+		expect(attachedTo()).toEqual([T, T, T, U, U]);
+	});
+
+	it("lets a reconnect's refusal answer the restart's", async () => {
+		await restarted({ setUp: writer });
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, T]));
+		xterm.events.length = 0;
+
+		refuse(T, lastOutput());
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "LAST-SCREEN", "fail: no such file", MOUSE_OFF]);
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		expect(errorBox()).toBeNull();
+	});
+
+	// The end the pane saw was the previous run's: the socket's attach no longer
+	// keeps the screen over it, and the hub's last output, which holds what the
+	// new run printed, replaces it (#929).
+	it("replays the last output after restarting a terminal it saw end", async () => {
+		await openLive();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		// No report that T runs again has reached the pane yet: the restart's
+		// own success forgets the end (the status watcher may not have heard).
+		spawnOk(T);
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T]));
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, T]));
+		xterm.events.length = 0;
+
+		refuse(T, lastOutput());
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "LAST-SCREEN", "fail: no such file", MOUSE_OFF]);
+	});
+
+	it("shows the card of the terminal it was given during a restart", async () => {
+		const channel = ref(T);
+		await restartClicked({ channel, setUp: withU });
+
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		refuse(U);
+		await settle();
+
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		expect(button("Restart")).toBeDefined();
+		expect(quietLine()).not.toBe("Restarting…");
+	});
+
+	it("lets the setting restart the terminal it was given during a restart", async () => {
+		const channel = ref(T);
+		await restartClicked({
+			channel,
+			setUp: () => {
+				withU();
+				// The setting restarts only a terminal whose write lock this window holds.
+				useWriteLockStore().handleWriteLock(U, CLIENT);
+			},
+		});
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		useChannelsStore().updateChannelStatus(U, "live");
+		attachOk(U, "U-LIVE");
+		await settle();
+		useChannelsStore().selectChannel(U);
+		settingNowSays("restart");
+		runFor(60_000);
+		await settle();
+
+		useChannelsStore().updateChannelStatus(U, "dead", 0);
+		await settle();
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(2));
+		expect(spawns()[1]).toMatchObject({ reuseChannelId: U });
+	});
+
+	it("waits for the socket's attach before saying the restart's failed", async () => {
+		await restarted();
+		await vi.advanceTimersByTimeAsync(4_000);
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, T]));
+		await vi.advanceTimersByTimeAsync(6_500);
+		await settle();
+		expect(errorBox()).toBeNull();
+
+		// The restart takes the write lock the answer names: the socket's attach does not.
+		attachOk(T, "SNAP", { writeLockHolder: CLIENT });
+		await settle();
+		type("x");
+
+		expect(errorBox()).toBeNull();
+		expect(inputsTo()).toEqual([T]);
+	});
+
+	it("lets the pane reconnect once both attaches have failed", async () => {
+		await restarted();
+		await vi.advanceTimersByTimeAsync(4_000);
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, T]));
+		await vi.advanceTimersByTimeAsync(10_500);
+		await settle();
+		expect(errorBox()?.textContent).toContain("ATTACH timeout — no response after 10s");
+
+		button("Retry")?.click();
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, T, T]));
+		attachOk(T, "CACHED", { cached: true });
+		await settle();
+		button("Reconnect")?.click();
+		await settle();
+
+		expect(attachedTo()).toEqual([T, T, T, T, T]);
+	});
+
+	it("keeps saying a terminal restarts when the pane comes back to it", async () => {
+		const channel = ref(T);
+		await restartClicked({ channel, setUp: withU });
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		refuse(U);
+		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(2));
+
+		channel.value = T;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, T]));
+		refuse(T);
+		await settle();
+
+		expect(quietLine()).toBe("Restarting…");
+		expect(card()).toBeNull();
+		expect(spawns()).toHaveLength(2);
+
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await settle();
+
+		expect(quietLine()).toBe("Restarting…");
+		expect(card()).toBeNull();
+	});
 });
 
 // ─── After a Reconnect (#556) ────────────────────────────────────────────────
@@ -685,6 +1055,10 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		expect(button("Restart")).toBeUndefined();
 		expect(button("Close")).toBeDefined();
 		expect(banner()).toBeNull();
+		// The answer ends what the Reconnect listened to (#930).
+		xterm.events.length = 0;
+		print(T, "late");
+		expect(xterm.events).toEqual([]);
 	});
 
 	// Over its banner (#556), and over a terminal that ended and was brought
@@ -722,6 +1096,108 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 
 		expect(attaches()).toHaveLength(1);
 	});
+
+	// What the terminal prints while a Reconnect waits for the hub was dropped:
+	// the screen is kept, and the snapshot that holds it is not written (#930).
+	it("keeps what is printed while its attach is answered (#930)", async () => {
+		mountPane(ref(T), "live", { setUp: writer });
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T]));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T]));
+		// Asking again for the terminal it is bound to keeps the binding (#929).
+		type("x");
+		expect(inputsTo()).toEqual([T]);
+		print(T, "DURING");
+		attachOk(T, "LIVE-SNAP", { cached: true, tail: [new TextEncoder().encode("TAIL")] });
+		await settle();
+		print(T, "AFTER");
+
+		expect(xterm.events).toEqual(["DURING", "AFTER"]);
+	});
+
+	it("attaches a terminal brought back while another restarts", async () => {
+		const channel = ref(T);
+		await openEnded({ channel, setUp: withU });
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		attachOk(U, "U-CACHED", { cached: true });
+		await settle();
+		expect(banner()).not.toBeNull();
+
+		useChannelsStore().updateChannelStatus(U, "live");
+		await settle();
+
+		expect(attachedTo()).toEqual([T, U, U]);
+	});
+
+	/** Over T's banner, given U, then Reconnect clicked before U's first attach is answered. */
+	async function reconnectBehindAnAttach(): Promise<void> {
+		const channel = ref(T);
+		mountPane(channel, "live", { setUp: withU });
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T]));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, U]));
+		xterm.events.length = 0;
+	}
+
+	it("draws the snapshot an attach without preserveContent shares with a Reconnect", async () => {
+		await reconnectBehindAnAttach();
+
+		attachOk(U, "U-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "U-SNAP"]);
+	});
+
+	it("replays the last output a refusal shares with a Reconnect", async () => {
+		await reconnectBehindAnAttach();
+
+		refuse(U, lastOutput());
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "LAST-SCREEN", "fail: no such file", MOUSE_OFF]);
+	});
+
+	// The answer will replace the screen: output written just before it could
+	// be parsed after its reset, so the Reconnect writes none early (#929).
+	it("writes nothing early when the answer will replace the screen", async () => {
+		await reconnectBehindAnAttach();
+
+		print(U, "DURING");
+		attachOk(U, "U-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "U-SNAP"]);
+	});
+
+	// Brought back from elsewhere, the terminal runs again: the end the pane saw
+	// was the previous run's, and the hub's last output replaces it (#929).
+	it("replays the last output after a terminal it saw end is brought back from elsewhere", async () => {
+		await openLive();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T]));
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T, T]));
+		xterm.events.length = 0;
+
+		refuse(T, lastOutput());
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "LAST-SCREEN", "fail: no such file", MOUSE_OFF]);
+	});
 });
 
 // ─── Every attach reads the hub's answer (#559) ──────────────────────────────
@@ -730,6 +1206,21 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 // back read nothing, and the pane kept the banner, or dropped none, whatever
 // the hub had said. The others: TerminalPane.ended-output.spec.ts.
 describe("TerminalPane covers its terminal with what the hub answers now (#559)", () => {
+	// The hub names the terminal it refuses; an older one may name none, and
+	// its refusal is still the answer to the pane's attach.
+	it("takes a refusal that names no terminal", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+
+		hear({ type: "ERROR", code: "CHANNEL_DEAD", message: "This terminal has ended." });
+		await settle();
+
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		expect(errorBox()).toBeNull();
+	});
+
 	it("drops its banner when the hub answers from the terminal once its socket is back", async () => {
 		mountPane(ref(T), "live");
 		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
@@ -916,6 +1407,179 @@ describe("TerminalPane over an ended terminal of the host not in view (#594)", (
 
 		expect(attaches()[1]).toMatchObject({ channelId: U });
 		expect(card()).toBeNull();
+	});
+});
+
+// ─── Answers for a terminal the pane left (#929) ─────────────────────────────
+
+// The hub can answer an attach late: it waits on the agent, and on an SSH host
+// first tries to reach it. A pane handed another terminal meanwhile took that
+// late answer as its own: it drew the other terminal, covered itself with its
+// state, and Close, as the setting, deleted the terminal it now showed.
+describe("TerminalPane takes only the answers for the terminal it shows (#929)", () => {
+	/**
+	 * A pane attached to T, given U (its ATTACH left unanswered), then T again,
+	 * whose second ATTACH is answered with the title "T-TITLE".
+	 */
+	async function movedBack({ setUp, ...open }: Open = {}): Promise<void> {
+		const channel = ref(T);
+		await openLive({
+			...open,
+			channel,
+			setUp: () => {
+				useChannelsStore().registerChannelHost(U, HOST);
+				setUp?.();
+			},
+		});
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		channel.value = T;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, T]));
+		attachOk(T, "T-SECOND", { dynamicTitle: "T-TITLE" });
+		await settle();
+	}
+
+	it("writes nothing from a late answer for a terminal it left", async () => {
+		await movedBack({
+			setUp: () => {
+				useChannelsStore().channels = [listed(T, "live")];
+			},
+		});
+		expect(paneTitleText()).toBe("T-TITLE");
+		expect([terminal().cols, terminal().rows]).toEqual([100, 30]);
+		xterm.events.length = 0;
+
+		attachOk(U, "U-LATE", { cached: true, cols: 120, rows: 40, dynamicTitle: "U-TITLE" });
+		await settle();
+		print(U, "U-OUT");
+		print(T, "T-OUT");
+
+		// Each of them, whichever the others: a late answer takes none (#929).
+		expect.soft(xterm.events).toEqual(["T-OUT"]);
+		expect.soft(banner()).toBeNull();
+		expect.soft([terminal().cols, terminal().rows]).toEqual([100, 30]);
+		expect.soft(paneTitleText()).toBe("T-TITLE");
+	});
+
+	it("keeps its input on the terminal it shows after a late answer", async () => {
+		await movedBack({ setUp: writer });
+
+		attachOk(U, "U-LATE");
+		await settle();
+		type("x");
+
+		expect(inputsTo()).toEqual([T]);
+	});
+
+	// Asking for another terminal unbinds the pane: typing, and xterm's own
+	// replies, went to the terminal it left until the answer came (#929).
+	it("sends nothing typed while it waits for another terminal", async () => {
+		const channel = ref(T);
+		// This window holds both terminals' write locks: typing in a pane showing
+		// U is allowed, and only the binding decides where it goes.
+		await openLive({
+			channel,
+			setUp: () => {
+				writer();
+				withU();
+				useWriteLockStore().handleWriteLock(U, CLIENT);
+			},
+		});
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+
+		type("x");
+		expect(inputsTo()).toEqual([]);
+
+		attachOk(U, "U-SCREEN");
+		await settle();
+		type("y");
+
+		expect(inputs()).toEqual(["y"]);
+		expect(inputsTo()).toEqual([U]);
+	});
+
+	it("is not closed by a late refusal for a terminal it left", async () => {
+		xterm.profile = { whenEnded: "close" };
+		await movedBack({ setUp: shown });
+
+		refuse(U, lastOutput());
+		await settle();
+		await vi.advanceTimersByTimeAsync(3_000);
+		await settle();
+
+		expect(closes()).toEqual([]);
+		expect(card()).toBeNull();
+	});
+
+	it("is not said gone by a late refusal for a terminal it left", async () => {
+		await movedBack();
+
+		hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId: U });
+		await settle();
+
+		expect(paneText()).not.toContain("This terminal no longer exists.");
+		expect(card()).toBeNull();
+	});
+
+	it("shows no timeout for a terminal it left", async () => {
+		await movedBack();
+
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+
+		expect(errorBox()).toBeNull();
+	});
+
+	/** A pane opening over T, given U and U selected before T's ATTACH is answered. */
+	async function givenAnotherWhileOpening(): Promise<void> {
+		const channel = ref(T);
+		mountPane(channel, "live", {
+			setUp: () => useChannelsStore().registerChannelHost(U, HOST),
+		});
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T]));
+		channel.value = U;
+		useChannelsStore().selectChannel(U);
+		await settle();
+	}
+
+	it("is not closed while opening by a refusal for the terminal it was given before", async () => {
+		xterm.profile = { whenEnded: "close" };
+		await givenAnotherWhileOpening();
+
+		refuse(T, lastOutput());
+		await settle();
+		await vi.advanceTimersByTimeAsync(3_000);
+		await settle();
+
+		expect(closes()).toEqual([]);
+		expect(card()).toBeNull();
+		expect(attachedTo()).toEqual([T, U]);
+		attachOk(U, "U-SCREEN");
+		await settle();
+		expect(xterm.events).toContain("U-SCREEN");
+	});
+
+	it("draws nothing while opening from the answer for the terminal it was given before", async () => {
+		await givenAnotherWhileOpening();
+		xterm.events.length = 0;
+
+		attachOk(T, "T-SCREEN");
+		await settle();
+
+		expect(xterm.events).not.toContain("<reset>");
+		expect(xterm.events).not.toContain("T-SCREEN");
+		expect(attachedTo()).toEqual([T, U]);
+	});
+
+	it("shows no timeout while opening for the terminal it was given before", async () => {
+		await givenAnotherWhileOpening();
+
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+
+		expect(errorBox()).toBeNull();
+		expect(attachedTo()).toEqual([T, U]);
 	});
 });
 
@@ -1951,6 +2615,37 @@ describe("TerminalPane waits for the host of a restart that found it away (#605)
 		await settle();
 
 		expect(spawns()).toHaveLength(1);
+	});
+
+	// Given another terminal before the hub answered: the failure is not that
+	// terminal's, and the host's return must not restart it (#929).
+	it("waits for nothing once the pane shows another terminal", async () => {
+		const channel = ref(T);
+		await openEnded({
+			channel,
+			setUp: () => {
+				useHostsStore().hosts.push(host(HOST, "pi"));
+				withU();
+			},
+		});
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		useChannelsStore().updateChannelStatus(U, "live");
+		attachOk(U, "U-LIVE");
+		await settle();
+
+		spawnRefused("HOST_UNREACHABLE", "pi cannot be reached", {
+			hostId: HOST,
+			hostStatus: "disconnected",
+		});
+		await settle();
+		useHostsStore().updateSessionStatus(HOST, "active");
+		await settle();
+
+		expect(spawns()).toHaveLength(1);
+		expect(errorBox()).toBeNull();
 	});
 
 	// Another restart, here a choice made on another overlay, decides afresh

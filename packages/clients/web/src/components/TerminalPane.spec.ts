@@ -720,13 +720,16 @@ describe("TerminalPane restart", () => {
 		xterm.events.length = 0;
 
 		spawnOk(T);
-		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T]));
+		// The next socket message after SPAWN_OK: the restart's attach is out by
+		// then, and listening, without any timer running (#930).
+		await settle();
 		print(T, "PROMPT$ ");
 		attachOk(T, "SNAP", { tail: [new TextEncoder().encode("TAIL")] });
 		await settle();
 		print(T, "AFTER");
 
 		expect(xterm.events).toEqual(["PROMPT$ ", "AFTER"]);
+		expect(attachedTo()).toEqual([T, T]);
 	});
 
 	it("keeps what a restarted command printed before it ended again", async () => {
@@ -734,7 +737,7 @@ describe("TerminalPane restart", () => {
 		useChannelsStore().updateChannelStatus(T, "live");
 		xterm.events.length = 0;
 		spawnOk(T);
-		await vi.waitFor(() => expect(attachedTo()).toEqual([T, T]));
+		await settle();
 
 		print(T, "fail: boom");
 		refuse(T, lastOutput());

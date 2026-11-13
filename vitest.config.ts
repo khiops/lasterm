@@ -51,6 +51,11 @@ export default defineConfig({
 					include: ["packages/clients/web/**/*.spec.ts"],
 					exclude: [...configDefaults.exclude, "packages/clients/web/**/*.browser.spec.ts"],
 					environment: "happy-dom",
+					// Node 26 defines a global localStorage accessor, undefined without
+					// --localstorage-file, and Vitest 4 then leaves happy-dom's Storage
+					// off the global (vitest-dev/vitest#10867). Without Node's, the specs
+					// get happy-dom's.
+					execArgv: ["--no-webstorage"],
 					// A guard against a hang, as in the hub's specs, not a measure of
 					// speed: a spec that mounts a component over a module it mocks
 					// for that one test loads the component's whole graph again, which

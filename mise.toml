@@ -1,4 +1,4 @@
 [tools]
 # Keep equal to .nvmrc (CI) and package.json "packageManager"; scripts/node-version.spec.ts checks it.
-node = "24.22.0"
+node = "26.13.1"
 pnpm = "12.4.1"

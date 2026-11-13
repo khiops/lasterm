@@ -30,7 +30,7 @@ const TEST_TLS_IDENTITY = {
 // ones each test's starts add are taken away again, so the file stays under
 // Node's listener warning.
 const SIGNALS: NodeJS.Signals[] = ["SIGTERM", "SIGINT"];
-let signalListeners = new Map<NodeJS.Signals, NodeJS.SignalsListener[]>();
+let signalListeners = new Map<NodeJS.Signals, unknown[]>();
 beforeEach(() => {
 	signalListeners = new Map(SIGNALS.map((signal) => [signal, process.listeners(signal)]));
 });

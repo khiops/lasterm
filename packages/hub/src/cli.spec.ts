@@ -2072,29 +2072,98 @@ describe("host remove consent (#910)", () => {
 		}
 	});
 
+	/**
+	 * `lasterm host remove pi` with `argv` after it, against a hub that lists
+	 * `host-id` as pi and answers its DELETE with `answer`.
+	 */
+	async function removeHost(
+		argv: string[],
+		answer: { status: number; body?: string },
+	): Promise<{ requests: string[]; errors: unknown[][]; logs: unknown[][]; exits: unknown[][] }> {
+		const tls = getTestTlsMaterial();
+		const requests: string[] = [];
+		const server = createHttpsServer(
+			{ cert: tls.pinned.cert, key: tls.pinned.key },
+			(request, response) => {
+				requests.push(`${request.method} ${request.url}`);
+				if (request.method === "GET") {
+					response.writeHead(200, { "content-type": "application/json" });
+					response.end(JSON.stringify([{ id: "host-id", label: "pi" }]));
+					return;
+				}
+				response.writeHead(
+					answer.status,
+					answer.body === undefined ? {} : { "content-type": "application/json" },
+				);
+				response.end(answer.body);
+			},
+		);
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("expected TCP address");
+		const restore = usePlatformDirs({ state: makeTempDir(), config: makeTempDir() });
+		const errors: unknown[][] = [];
+		const logs: unknown[][] = [];
+		const exits: unknown[][] = [];
+		const error = vi.spyOn(console, "error").mockImplementation((...args) => {
+			errors.push(args);
+		});
+		const log = vi.spyOn(console, "log").mockImplementation((...args) => {
+			logs.push(args);
+		});
+		const exit = vi.spyOn(process, "exit").mockImplementation(((...args: unknown[]) => {
+			exits.push(args);
+		}) as typeof process.exit);
+		try {
+			persistRuntime({ ...runtimeRecord(), port: address.port, spki: tls.pinned.spki });
+			await main(["host", "remove", "pi", ...argv]);
+			return { requests, errors, logs, exits };
+		} finally {
+			restore();
+			error.mockRestore();
+			log.mockRestore();
+			exit.mockRestore();
+			server.closeAllConnections();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	}
+
 	it.each([
-		{ force: false, count: 0, unreachable: false },
-		{ force: true, count: 0, unreachable: false },
-		{ force: false, count: 1, unreachable: false },
-		{ force: false, count: 2, unreachable: false },
-		{ force: false, count: 1, unreachable: true },
-		{ force: false, count: 2, unreachable: true },
+		{ force: false, count: 0, unreachable: false, line: undefined },
+		{ force: true, count: 0, unreachable: false, line: undefined },
+		{
+			force: false,
+			count: 1,
+			unreachable: false,
+			line: "1 terminal on pi has not ended. Rerun with --force to ask its agent to end it and remove the host.",
+		},
+		{
+			force: false,
+			count: 2,
+			unreachable: false,
+			line: "2 terminals on pi have not ended. Rerun with --force to ask their agent to end them and remove the host.",
+		},
+		{
+			force: false,
+			count: 1,
+			unreachable: true,
+			line: "1 terminal on pi has not ended, and this hub is not connected to its agent: it may keep running. Rerun with --force to remove the host anyway.",
+		},
+		{
+			force: false,
+			count: 2,
+			unreachable: true,
+			line: "2 terminals on pi have not ended, and this hub is not connected to their agent: they may keep running. Rerun with --force to remove the host anyway.",
+		},
 	])(
 		"requests and explains $force / $count / $unreachable",
-		async ({ force, count, unreachable }) => {
-			const tls = getTestTlsMaterial();
-			const requests: string[] = [];
-			const server = createHttpsServer(
-				{ cert: tls.pinned.cert, key: tls.pinned.key },
-				(request, response) => {
-					requests.push(`${request.method} ${request.url}`);
-					if (request.method === "GET") {
-						response.writeHead(200, { "content-type": "application/json" });
-						response.end(JSON.stringify([{ id: "host-id", label: "pi" }]));
-					} else if (count > 0) {
-						response.writeHead(409, { "content-type": "application/json" });
-						response.end(
-							JSON.stringify({
+		async ({ force, count, unreachable, line }) => {
+			const { requests, errors, exits } = await removeHost(
+				force ? ["--force"] : [],
+				count > 0
+					? {
+							status: 409,
+							body: JSON.stringify({
 								error: {
 									code: "TERMINALS_WOULD_END",
 									message: "hub text",
@@ -2102,49 +2171,53 @@ describe("host remove consent (#910)", () => {
 									...(unreachable && { unreachable: count }),
 								},
 							}),
-						);
-					} else {
-						response.writeHead(204);
-						response.end();
-					}
-				},
+						}
+					: { status: 204 },
 			);
-			await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-			const address = server.address();
-			if (!address || typeof address === "string") throw new Error("expected TCP address");
-			const restore = usePlatformDirs({ state: makeTempDir(), config: makeTempDir() });
-			const error = vi.spyOn(console, "error").mockImplementation(() => {});
-			const log = vi.spyOn(console, "log").mockImplementation(() => {});
-			const exit = vi.spyOn(process, "exit").mockImplementation((() => {}) as typeof process.exit);
-			try {
-				persistRuntime({ ...runtimeRecord(), port: address.port, spki: tls.pinned.spki });
-				await main(["host", "remove", "pi", ...(force ? ["--force"] : [])]);
-				expect(requests).toEqual([
-					"GET /api/hosts",
-					`DELETE /api/hosts/host-id${force ? "?force=true" : ""}`,
-				]);
-				if (count > 0) {
-					const one = count === 1;
-					const prefix = `${count} ${one ? "terminal" : "terminals"} on pi ${one ? "has" : "have"} not ended`;
-					expect(error).toHaveBeenCalledExactlyOnceWith(
-						unreachable
-							? `${prefix}, and this hub is not connected to ${one ? "its" : "their"} agent: ${one ? "it" : "they"} may keep running. Rerun with --force to remove the host anyway.`
-							: `${prefix}. Rerun with --force to ask ${one ? "its" : "their"} agent to end ${one ? "it" : "them"} and remove the host.`,
-					);
-					expect(exit).toHaveBeenCalledExactlyOnceWith(1);
-				} else {
-					expect(exit).not.toHaveBeenCalled();
-				}
-			} finally {
-				restore();
-				error.mockRestore();
-				log.mockRestore();
-				exit.mockRestore();
-				server.closeAllConnections();
-				await new Promise<void>((resolve) => server.close(() => resolve()));
+			expect(requests).toEqual([
+				"GET /api/hosts",
+				`DELETE /api/hosts/host-id${force ? "?force=true" : ""}`,
+			]);
+			if (line !== undefined) {
+				expect(errors).toEqual([[line]]);
+				expect(exits).toEqual([[1]]);
+			} else {
+				expect(exits).toEqual([]);
 			}
 		},
 	);
+
+	// D10: only TERMINALS_WOULD_END is told in the CLI's words. Any other
+	// refusal is printed as before #910, the hub's answer as it came.
+	it.each([
+		[
+			409,
+			'{"error":{"code":"HOST_BUSY","message":"This host\'s agent is being stopped."}}',
+			'Error: HTTP 409: {"error":{"code":"HOST_BUSY","message":"This host\'s agent is being stopped."}}',
+		],
+		[
+			409,
+			'{"error":{"code":"HOST_BUSY","message":"This host\'s agent is being stopped.","terminals":1}}',
+			'Error: HTTP 409: {"error":{"code":"HOST_BUSY","message":"This host\'s agent is being stopped.","terminals":1}}',
+		],
+		[
+			409,
+			'{"error":{"code":"TRANSFERS_RUNNING","message":"2 uploads to this host are running.","transfers":2}}',
+			'Error: HTTP 409: {"error":{"code":"TRANSFERS_RUNNING","message":"2 uploads to this host are running.","transfers":2}}',
+		],
+		[409, "Conflict", "Error: HTTP 409: Conflict"],
+		[
+			404,
+			'{"error":{"code":"NOT_FOUND","message":"Host not found"}}',
+			'Error: HTTP 404: {"error":{"code":"NOT_FOUND","message":"Host not found"}}',
+		],
+	])("prints any other refusal as before: HTTP %i %s", async (status, body, line) => {
+		const { requests, errors, logs, exits } = await removeHost(["--force"], { status, body });
+		expect(requests).toEqual(["GET /api/hosts", "DELETE /api/hosts/host-id?force=true"]);
+		expect(errors).toEqual([[line]]);
+		expect(logs).toEqual([]);
+		expect(exits).toEqual([[1]]);
+	});
 });
 
 // ─── host list (#903) ────────────────────────────────────────────────────────

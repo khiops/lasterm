@@ -22,7 +22,7 @@ decisions named here are in [decisions.md](decisions.md).
 
 Of the post-MVP priorities (§ 8), two have shipped: Tauri desktop packaging (`packages/clients/desktop`),
 and the hub fetching and deploying the agent binary for a remote host (SPEC.md § 3.5). The CI matrix
-of § 6 is superseded: CI runs Node 24, on Linux and Windows, and macOS is not a supported target
+of § 6 is superseded: CI runs Node 26, on Linux and Windows, and macOS is not a supported target
 (#224). The release builds the agent for Linux x64 and arm64 and for Windows x64, and the hub and the
 desktop app for Windows x64 (`.github/build-matrix.json`).
 

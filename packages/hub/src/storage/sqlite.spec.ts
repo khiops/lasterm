@@ -56,14 +56,16 @@ describe("node:sqlite on the pinned Node", () => {
 		]);
 	});
 
-	it("exports DatabaseSync and StatementSync, not yet Database and Statement", async () => {
-		// Renamed in 26.11 (DEP0210, DEP0211, documentation-only): once Database is
-		// there, import it in storage/sqlite.ts instead.
+	it("exports DatabaseSync and StatementSync, as Database and Statement too", async () => {
+		// Renamed in 26.11 (DEP0210, DEP0211, documentation-only): the new names are the
+		// same classes. storage/sqlite.ts and the spool checkpoint worker import
+		// DatabaseSync; if it goes, move both to what replaced it. Moving them to Database
+		// waits for @types/node to declare it (26.6.6 does not).
 		const sqlite: Record<string, unknown> = await import("node:sqlite");
 		expect(typeof sqlite.DatabaseSync).toBe("function");
 		expect(typeof sqlite.StatementSync).toBe("function");
-		expect("Database" in sqlite).toBe(false);
-		expect("Statement" in sqlite).toBe(false);
+		expect(sqlite.Database).toBe(sqlite.DatabaseSync);
+		expect(sqlite.Statement).toBe(sqlite.StatementSync);
 	});
 
 	it("binds NULL for a parameter left out, without a word", () => {
@@ -73,19 +75,6 @@ describe("node:sqlite on the pinned Node", () => {
 		try {
 			expect(db.prepare("SELECT ? AS a, ? AS b").get(1)).toEqual({ a: 1, b: null });
 			expect(db.prepare("SELECT @a AS a, @b AS b").get({ a: 1 })).toEqual({ a: 1, b: null });
-		} finally {
-			db.close();
-		}
-	});
-
-	it("refuses undefined, which the adapter binds as NULL", () => {
-		// 26.10 binds it as NULL itself; the mapping in bindable() can go then.
-		const db = new DatabaseSync(":memory:");
-		try {
-			expect(thrown(() => db.prepare("SELECT ? AS a").get(undefined as never))).toMatchObject({
-				name: "TypeError",
-				code: "ERR_INVALID_ARG_TYPE",
-			});
 		} finally {
 			db.close();
 		}

@@ -95,7 +95,7 @@ profile's default ACL, as `auth.json` does (SECURITY.md § 2.1, #200).
 
 **The binding: `node:sqlite` (#893).** The hub opens both databases with `node:sqlite`, which is
 compiled into Node itself. The single executable embeds no SQLite addon and extracts none, and
-nothing is downloaded or built at install. The Node `.nvmrc` pins, 24.22.0, carries SQLite 3.53.4.
+nothing is downloaded or built at install. The Node `.nvmrc` pins, 26.13.1, carries SQLite 3.54.1.
 
 - **The DAL's adapter:** `packages/hub/src/storage/sqlite.ts` gives the DAL the calls it uses,
   and keeps the rules the DAL was written for, better-sqlite3's until #893:
@@ -107,10 +107,11 @@ nothing is downloaded or built at install. The Node `.nvmrc` pins, 24.22.0, carr
   `node:sqlite` only to open a connection, set synchronous NORMAL, run PASSIVE checkpoints
   and close. Update that source too when Node's SQLite API changes.
 - **A release candidate.** `node:sqlite` is at Stability 1.2 and still changes between minor
-  versions: booleans bind since 24.21, `undefined` binds NULL from 26.10, and 26.11 renames
-  `DatabaseSync` to `Database`. The hub runs one exact Node, so a change arrives with a bump.
-  `packages/hub/src/storage/sqlite.spec.ts` pins each behaviour the adapter relies on or works
-  around, and says what to change when one moves. **Before bumping Node, run that spec first.**
+  versions: booleans bind since 24.21, `undefined` binds NULL from 26.10, and 26.11 adds
+  `Database` and `Statement` as new names for `DatabaseSync` and `StatementSync`, which stay (the
+  hub keeps the old names until `@types/node` declares the new ones). The hub runs one exact
+  Node, so a change arrives with a bump. `packages/hub/src/storage/sqlite.spec.ts` pins each
+  behaviour the adapter relies on or works around, and says what to change when one moves. **Before bumping Node, run that spec first.**
 - **Its defaults are not these.** Left alone, `node:sqlite` waits for no lock, keeps a 2 MB cache
   and syncs every commit in WAL mode (`synchronous = FULL`). So every pragma above is set
   explicitly, and the open-databases cases read them back from a file.

@@ -34,7 +34,7 @@ catalog:
   vite: "^8.3.0"
   "@vitejs/plugin-vue": "^6.0.9"
   vue-tsc: "^3.3.11"
-  "@types/node": "^24.13.5"
+  "@types/node": "^26.6.6"
   "@types/ssh2": "^1.15.6"
   concurrently: "^10.0.5"
   tsx: "^4.23.13"

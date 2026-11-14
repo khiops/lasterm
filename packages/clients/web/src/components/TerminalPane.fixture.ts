@@ -13,6 +13,7 @@ import { createPinia, type Pinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, vi } from "vitest";
 import {
 	type App,
+	type Component,
 	type ComputedRef,
 	computed,
 	createApp,
@@ -71,6 +72,13 @@ const xterm = vi.hoisted(() => ({
 	terminals: [] as unknown[],
 	/** The size a fit gives a terminal: what its pane holds. */
 	fit: { cols: 80, rows: 24 },
+	/** Told of every write a terminal takes, as it takes it. */
+	onWrite: null as ((terminal: StandInTerminal, text: string) => void) | null,
+	/**
+	 * What xterm answers by itself to a write it parses, such as a cursor-position
+	 * query: handed on as typed input. None by default.
+	 */
+	answer: null as ((text: string) => string | null) | null,
 }));
 
 /** Parse every write taken so far, in order. */
@@ -156,8 +164,11 @@ vi.mock("@xterm/xterm", () => ({
 		write(data: string | Uint8Array, callback?: () => void): void {
 			const text = typeof data === "string" ? data : new TextDecoder().decode(data);
 			if (text !== "") xterm.events.push(text);
+			xterm.onWrite?.(this as unknown as StandInTerminal, text);
 			const parse = () => {
 				if (text.includes("\u0007")) for (const listener of this.bellListeners) listener();
+				const answer = xterm.answer?.(text) ?? null;
+				if (answer !== null) for (const listener of [...this.dataListeners]) listener(answer);
 				callback?.();
 			};
 			if (xterm.parse === "now") parse();
@@ -377,8 +388,6 @@ export interface PaneProps {
 
 /** Mount the pane in the window `freshWindow` set up. */
 export function mount({ channel, hostId = HOST, onScreen, beside }: PaneProps): void {
-	root = document.createElement("div");
-	document.body.appendChild(root);
 	const Parent = defineComponent({
 		setup() {
 			if (onScreen !== undefined) {
@@ -401,7 +410,14 @@ export function mount({ channel, hostId = HOST, onScreen, beside }: PaneProps): 
 			return () => (beside === undefined ? pane(channel) : [pane(channel), pane(beside)]);
 		},
 	});
-	app = createApp(Parent);
+	mountRoot(Parent);
+}
+
+/** Mount `component` as the window's page, in the window `freshWindow` set up: a layout of panes, say. */
+export function mountRoot(component: Component): void {
+	root = document.createElement("div");
+	document.body.appendChild(root);
+	app = createApp(component);
 	app.use(pinia);
 	app.mount(root);
 }
@@ -500,6 +516,17 @@ beforeEach(() => {
 	// its unmounted pane would still call its stores' actions, and each action
 	// makes its own window's stores the active ones.
 	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+	forgetWindow();
+	bellSound.mockClear();
+	vi.spyOn(console, "error").mockImplementation(() => {});
+	vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+});
+
+/**
+ * Forget what the last window sent, emitted and made, and the stand-in's
+ * settings, as a new test starts: for a test that opens several windows in turn.
+ */
+export function forgetWindow(): void {
 	sent = [];
 	emitted = [];
 	xterm.events.length = 0;
@@ -511,10 +538,9 @@ beforeEach(() => {
 	xterm.profiles.length = 0;
 	xterm.terminals.length = 0;
 	xterm.fit = { cols: 80, rows: 24 };
-	bellSound.mockClear();
-	vi.spyOn(console, "error").mockImplementation(() => {});
-	vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
-});
+	xterm.onWrite = null;
+	xterm.answer = null;
+}
 
 afterEach(() => {
 	app?.unmount();

@@ -23,11 +23,15 @@ vi.mock("./composables/useBellSound.js", () => ({ playBellSound: vi.fn() }));
 import "./styles/base.css";
 import type { ChannelRow } from "./App.doubles.fixture.js";
 import {
+	click,
+	dialogs,
 	focusPane,
 	HOST_A,
 	mountWindow,
 	pane,
+	paneWithKeyboard,
 	press,
+	runPaletteRow,
 	settle,
 	split,
 	term,
@@ -193,5 +197,54 @@ describe("the files panel's form", () => {
 
 		expect(box("#files-panel").width).toBe(340);
 		expect(box(".pane-area").width).toBeCloseTo(area - 340, 0);
+	});
+});
+
+// Opened from the palette, Settings has nowhere to give the keyboard back to: the keyboard goes to
+// the pane, once the panel has left the page, whichever way it closes (#637, #940). happy-dom runs
+// no leave transition, so only a browser keeps the panel's focused control past the close.
+describe("closing Settings opened from the palette", () => {
+	const closings: Record<string, () => Promise<unknown>> = {
+		"its ×": () => click("Close settings panel"),
+		Esc: () => press("Escape"),
+		"Ctrl+,": () => press(",", { ctrl: true }),
+	};
+
+	for (const [way, close] of Object.entries(closings)) {
+		it(`gives the keyboard to the pane on ${way}`, async () => {
+			await mountWindow({
+				channels: [live("T1")],
+				layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+			});
+			focusPane("P1");
+			await runPaletteRow("Settings");
+			expect(dialogs()).toEqual(["Settings"]);
+			expect(document.activeElement?.closest(".settings-panel")).not.toBeNull();
+
+			await close();
+
+			await vi.waitFor(() => expect(document.querySelector(".settings-panel")).toBeNull());
+			expect(paneWithKeyboard()).toBe("P1");
+		});
+	}
+});
+
+// Opened from a control of the window, Settings gives the keyboard back to it, not to the pane.
+describe("closing Settings opened from a control", () => {
+	it("gives the keyboard back to the rail's gear Settings was opened from", async () => {
+		await mountWindow({
+			channels: [live("T1")],
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+		});
+		const gear = document.querySelector<HTMLElement>('[aria-label="Open settings panel"]');
+		gear?.focus();
+		gear?.click();
+		await settle();
+		expect(dialogs()).toEqual(["Settings"]);
+
+		await press("Escape");
+
+		await vi.waitFor(() => expect(document.querySelector(".settings-panel")).toBeNull());
+		expect(document.activeElement).toBe(gear);
 	});
 });

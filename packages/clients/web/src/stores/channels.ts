@@ -125,6 +125,26 @@ function restartFailureReason(err: unknown): string {
 	return message.replace(/^[A-Z][A-Z0-9_]+: /, "");
 }
 
+/** The terminal a new terminal's spawn started, and the size its PTY was spawned at. */
+export interface SpawnedTerminal {
+	channelId: string;
+	cols: number;
+	rows: number;
+}
+
+/** The one spawn a pending id has sent: in flight, or what came of it. */
+export interface PendingSpawnRun {
+	state: "running" | "succeeded" | "failed";
+	readonly outcome: Promise<SpawnedTerminal>;
+}
+
+/** A spawn owed for a pending id: its host, the panes showing it, its run. */
+interface PendingSpawn {
+	readonly hostId: string;
+	holders: number;
+	run: PendingSpawnRun | null;
+}
+
 /** Why the last attempt to bring a terminal back failed. */
 export interface RestartFailure {
 	/** Said for the pane, without the hub's code. */
@@ -933,22 +953,82 @@ export const useChannelsStore = defineStore("channels", () => {
 		channelHostMap.value = next;
 	}
 
-	const pendingSpawns = ref<Map<string, string>>(new Map());
+	/**
+	 * The spawns new terminals owe, by the pending id their layout leaf holds.
+	 *
+	 * A record belongs to the pending id, not to a pane: a split or a move mounts
+	 * another pane over the same id, and that pane takes up the spawn where the
+	 * one before it left it (#980). It goes once no pane holds it and no spawn of
+	 * it is in flight. The panes count themselves in and out, so it is no
+	 * reactive state.
+	 */
+	const pendingSpawns = new Map<string, PendingSpawn>();
 
 	function registerPendingSpawn(tempId: string, hostId: string): void {
-		const next = new Map(pendingSpawns.value);
-		next.set(tempId, hostId);
-		pendingSpawns.value = next;
+		pendingSpawns.set(tempId, { hostId, holders: 0, run: null });
 	}
 
-	function consumePendingSpawn(tempId: string): string | null {
-		const hostId = pendingSpawns.value.get(tempId) ?? null;
-		if (hostId !== null) {
-			const next = new Map(pendingSpawns.value);
-			next.delete(tempId);
-			pendingSpawns.value = next;
-		}
-		return hostId;
+	/**
+	 * A pane showing `tempId` counts itself in. Returns the host its spawn is
+	 * for, or null when no spawn is owed for that id.
+	 */
+	function holdPendingSpawn(tempId: string): string | null {
+		const record = pendingSpawns.get(tempId);
+		if (record === undefined) return null;
+		record.holders += 1;
+		return record.hostId;
+	}
+
+	/** A pane that held `tempId` no longer shows it. */
+	function releasePendingSpawn(tempId: string): void {
+		const record = pendingSpawns.get(tempId);
+		if (record === undefined) return;
+		record.holders -= 1;
+		forgetIfUnheld(tempId, record);
+	}
+
+	function forgetIfUnheld(tempId: string, record: PendingSpawn): void {
+		if (record.holders > 0 || record.run?.state === "running") return;
+		if (pendingSpawns.get(tempId) === record) pendingSpawns.delete(tempId);
+	}
+
+	/**
+	 * The spawn `tempId` owes: the one in flight, or its outcome, or one started
+	 * now at `cols` × `rows` when none was. Null when no spawn is owed for it.
+	 *
+	 * Every pane over the id gets the same run: the terminal it started and the
+	 * size its PTY was spawned at, or the same error, with its `code` and
+	 * `asked`. A failed run stays until a Retry clears it.
+	 */
+	function runPendingSpawn(tempId: string, cols: number, rows: number): PendingSpawnRun | null {
+		const record = pendingSpawns.get(tempId);
+		if (record === undefined) return null;
+		if (record.run !== null) return record.run;
+		const run: PendingSpawnRun = {
+			state: "running",
+			outcome: spawnChannel(record.hostId, { cols, rows, select: false }).then(
+				(channelId) => {
+					run.state = "succeeded";
+					forgetIfUnheld(tempId, record);
+					return { channelId, cols, rows };
+				},
+				(err: unknown) => {
+					run.state = "failed";
+					forgetIfUnheld(tempId, record);
+					throw err;
+				},
+			),
+		};
+		// Nobody may be waiting for it any more: every pane over it closed.
+		run.outcome.catch(() => {});
+		record.run = run;
+		return run;
+	}
+
+	/** Retry or Connect: a failed spawn is sent again, by the next pane to ask. */
+	function clearFailedPendingSpawn(tempId: string): void {
+		const record = pendingSpawns.get(tempId);
+		if (record?.run?.state === "failed") record.run = null;
 	}
 
 	// -------------------------------------------------------------------------
@@ -1599,7 +1679,10 @@ export const useChannelsStore = defineStore("channels", () => {
 		handleChannelCreated,
 		spawnChannel,
 		registerPendingSpawn,
-		consumePendingSpawn,
+		holdPendingSpawn,
+		releasePendingSpawn,
+		runPendingSpawn,
+		clearFailedPendingSpawn,
 		registerChannelHost,
 		addGroup,
 		removeGroup,

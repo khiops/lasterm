@@ -338,10 +338,14 @@ const channelsStore = useChannelsStore();
  * A pane still owing its spawn has no channel yet: there it is the host the
  * spawn is for, which an empty pane's picker or the palette may have chosen on
  * another host than the one in view (#625), and the host in view otherwise.
+ *
+ * The spawn is the pending id's, not this pane's: a split or a move mounts
+ * another pane over the same id, which takes it up where this one left it
+ * (#980). So the pane holds the id's record while it shows the id.
  */
 const spawnHostId: string | null =
 	props.channelId !== null && props.channelId !== undefined
-		? channelsStore.consumePendingSpawn(props.channelId)
+		? channelsStore.holdPendingSpawn(props.channelId)
 		: null;
 const paneHostId = computed<string | undefined>(() => {
 	const channelId = props.channelId;
@@ -375,6 +379,26 @@ const pendingHostId = ref<string | null>(spawnHostId);
  * say, it shows that one, and the spawn is no business of it (#971).
  */
 const spawnFor: string | null = spawnHostId !== null ? (props.channelId ?? null) : null;
+/**
+ * Whether it still holds that id's record: until it shows another id, or is
+ * unmounted, whichever comes first. Released in `onUnmounted`, after the pane
+ * mounted over the id in the same render has taken hold of it.
+ */
+const holdsSpawn = ref(spawnFor !== null);
+function releaseSpawn(): void {
+	if (!holdsSpawn.value || spawnFor === null) return;
+	holdsSpawn.value = false;
+	channelsStore.releasePendingSpawn(spawnFor);
+}
+watch(
+	() => props.channelId,
+	(id) => {
+		if (id !== spawnFor) releaseSpawn();
+	},
+	{ flush: 'sync' },
+);
+/** Unmounted: an open still running has nobody to open for, and starts nothing. */
+let unmounted = false;
 /** The BEL handler is registered on the terminal, so once is enough. */
 let bellBound = false;
 /** A reconnect landed while this pane was still opening: what it sent went out
@@ -869,7 +893,10 @@ const cover = computed(() =>
 		status: channelsStore.statusOf(effectiveChannelId.value),
 		ended: hasEnded.value,
 		gone: isGone.value,
-		detached: isDetached.value || hostDisconnectedByUser.value,
+		// Still owed its spawn, it has no terminal to reconnect to: Reconnect
+		// would ask the hub for the pending id. Retry or Connect is its way back
+		// (#980).
+		detached: !holdsSpawn.value && (isDetached.value || hostDisconnectedByUser.value),
 	}),
 );
 
@@ -917,24 +944,40 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			if (pendingHostId.value !== null && opened !== spawnFor) pendingHostId.value = null;
 			const hostId = pendingHostId.value;
 
-			if (hostId !== null) {
+			if (hostId !== null && spawnFor !== null) {
+				// Closed before it was asked for: nobody wants it any more.
+				if (unmounted) return;
 				// Fresh spawn — PTY is created with actual terminal dimensions
-				// so no RESIZE is needed → no SIGWINCH → no duplicate prompt
-				const realId = await channelsStore.spawnChannel(hostId, {
-					cols,
-					rows,
-					select: false,
-				});
+				// so no RESIZE is needed → no SIGWINCH → no duplicate prompt.
+				// Or the one a pane before this one over the same id started, or
+				// what came of it (#980).
+				const run = channelsStore.runPendingSpawn(spawnFor, cols, rows);
+				if (run === null) return;
+				const startedBefore = run.state === 'succeeded';
+				const spawned = await run.outcome;
+				// Unmounted meanwhile, or this very pane took it already: a Retry
+				// clicked twice opens twice, and both opens wait on the one run.
+				if (unmounted || pendingHostId.value === null) return;
 				pendingHostId.value = null;
+				const realId = spawned.channelId;
 				// Given another terminal while the spawn took its time: the new
 				// terminal is not this pane's, and the one it shows now is attached
 				// below. Its parent is told nothing: the pending id is in no layout
 				// any more, and the new terminal is in the sidebar's list (#971).
-				if (props.channelId === spawnFor) {
+				if (props.channelId === spawnFor && startedBefore) {
+					// It started before this pane asked: what it printed meanwhile
+					// went to nobody here. Its parent puts the terminal in place of
+					// the pending id, and the pane, once ready, attaches it below with
+					// the hub's snapshot. Ready before that, both the report saying it
+					// runs and the new id would attach it too.
+					emit('channel-spawned', spawnFor, realId);
+					await nextTick();
+				} else if (props.channelId === spawnFor) {
 					internalChannelId.value = realId;
-					// PTY was spawned at these dims — suppress the RESIZE that
-					// attachChannel would otherwise send (prevents SIGWINCH)
-					suppressNextResize(cols, rows);
+					// PTY was spawned at the run's dims — suppress the RESIZE that
+					// attachChannel would otherwise send (prevents SIGWINCH). A pane
+					// of another size sends its own.
+					suppressNextResize(spawned.cols, spawned.rows);
 					attachChannel(realId);
 					attachedLive = true;
 					// Watched from its very start.
@@ -1026,6 +1069,8 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			});
 		}
 	} catch (err) {
+		// Unmounted meanwhile: nobody is shown what came of it.
+		if (unmounted) return;
 		// A spawn that failed after the pane was given another terminal: not
 		// that terminal's failure. The pane owes nothing now, and opens what it
 		// shows (#971).
@@ -1090,6 +1135,9 @@ onMounted(async () => {
 async function onRetry(): Promise<void> {
 	error.value = null;
 	notConnected.value = null;
+	// The spawn it owes failed: cleared as it is clicked, so the open below sends
+	// it again, or a pane remounted over the id while this one waits does (#980).
+	if (holdsSpawn.value && spawnFor !== null) channelsStore.clearFailedPendingSpawn(spawnFor);
 	const term = terminal.value;
 	await openChannel(term?.cols ?? 80, term?.rows ?? 24);
 }
@@ -1171,6 +1219,8 @@ watch(
 );
 
 onUnmounted(() => {
+	unmounted = true;
+	releaseSpawn();
 	dispose();
 });
 

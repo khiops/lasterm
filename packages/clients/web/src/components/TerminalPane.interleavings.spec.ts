@@ -967,27 +967,28 @@ async function runPath(
 	xterm.answer = (text) => world.answerFor(text);
 	xterm.onReset = (terminal) => world.lastMarker.delete(terminal);
 	mountLayout(world);
-	let failed = false;
+	let walked: Awaited<ReturnType<typeof walk>> | undefined;
+	// The first failure, the path's own before its clean-up's, is the one reported.
+	let failure: { error: unknown } | undefined;
 	try {
 		await quiesce(world);
 		world.observe();
-		return await walk(world, prefix, offered);
+		walked = await walk(world, prefix, offered);
 	} catch (error) {
-		failed = true;
-		throw error;
-	} finally {
-		try {
-			closePane();
-			// What the closed window still had queued runs now, not in the next one.
-			await settle();
-		} catch (error) {
-			// The path's own failure, when it has one, is the one to report.
-			if (!failed) throw error;
-		} finally {
-			root.remove();
-			vi.clearAllTimers();
-		}
+		failure = { error };
 	}
+	try {
+		closePane();
+		// What the closed window still had queued runs now, not in the next one.
+		await settle();
+	} catch (error) {
+		failure ??= { error };
+	} finally {
+		root.remove();
+		vi.clearAllTimers();
+	}
+	if (failure !== undefined) throw failure.error;
+	return walked as Awaited<ReturnType<typeof walk>>;
 }
 
 async function walk(

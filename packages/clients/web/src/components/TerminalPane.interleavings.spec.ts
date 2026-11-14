@@ -27,10 +27,12 @@
  * scenario cannot tell another cause of the same violations from it. Whoever
  * fixes the defect drops the mark.
  *
- * Each check is shown to fire by a negative control (`CONTROLS`): a scenario
- * that breaks only the harness's side of the window, App's wiring, the model
- * hub, the model's deadlines or a gesture, and fails unless that check reports
- * it.
+ * Each kind, the deadline guard and the explorer's own throws are shown to fire
+ * by a negative control (`CONTROLS`): a scenario that breaks only the harness's
+ * side of the window, App's wiring, the model hub, the model's deadlines or a
+ * gesture, and fails unless that check reports it. `onWrite`'s throw has none:
+ * no such break reaches it, and a write the records cannot key leaves the pane
+ * with no marker, which `shows-other-screen` reports.
  */
 
 import { describe, expect, it, vi } from "vitest";

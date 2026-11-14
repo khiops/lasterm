@@ -203,7 +203,8 @@ interface Scenario {
 	holdConnect?: boolean;
 	/**
 	 * Time reaching the model's next deadline is an event: each request due by
-	 * then times out. Some path must then take a late answer.
+	 * then times out. Some path must then take an answer the model gives after
+	 * its time (the window may still wait for an older ATTACH behind a newer one).
 	 */
 	timeouts?: boolean;
 	/** xterm parses writes on its timer, an event of its own. */
@@ -1005,7 +1006,8 @@ async function walk(
 		if (choices.length === 0) {
 			if (flushed) break;
 			// Whatever the window still has on a timer runs: a request it sends then
-			// is a choice, stamped at the end of this jump, so the model does not time it.
+			// is a choice, stamped at the end of this jump, so its deadline in the model
+			// falls later than the window's.
 			flushed = true;
 			vi.advanceTimersByTime(60_000);
 			world.clock += 60_000;
@@ -1037,6 +1039,14 @@ async function walk(
 		await choice.run(world);
 		await quiesce(world);
 		world.observe();
+	}
+	// A replay offered nothing at a step of the path it replays diverged as
+	// surely as one offered other choices there.
+	const missed = offered[taken.length];
+	if (missed !== undefined) {
+		throw new Error(
+			`the replay of "${scenario.name}" diverged at step ${taken.length}: offered nothing, where it was offered ${missed.join("; ")}`,
+		);
 	}
 	world.checkQuiet();
 	return { taken, offers, world };
@@ -1359,6 +1369,28 @@ const drawing = (frame: Frame, serialized: string): Frame =>
 const doNothing: Step = { label: "user: a gesture that does nothing", run: () => {} };
 
 /** A gesture named after the windows it was offered in: a replay is offered another. */
+/** A gesture offered in the first window only: a replay is offered nothing there. */
+function vanishingGesture(): Step {
+	let first: World | undefined;
+	return {
+		label: "user: a gesture offered in the first window only",
+		can: (w) => {
+			first ??= w;
+			return w === first;
+		},
+		run: () => {},
+	};
+}
+
+/** Two terminals opened at once, each in a new tab: two ATTACHes to answer in either order. */
+const openTerminals: Step = {
+	label: "user: opens T and U, each in a new tab",
+	run: (w) => {
+		w.ui.layout.openTab(T);
+		w.ui.layout.openTab(U);
+	},
+};
+
 function unsteadyGesture(): Step {
 	const windows = new Set<World>();
 	return {
@@ -1653,6 +1685,16 @@ const CONTROLS: Control[] = [
 			maxPaths: 10,
 		},
 		throws: /diverged at step 0/,
+	},
+	{
+		check: "the replay check (nothing offered)",
+		scenario: {
+			name: "a gesture offered in the first window only",
+			setUp: () => {},
+			steps: [vanishingGesture(), openTerminals],
+			maxPaths: 10,
+		},
+		throws: /diverged at step 0: offered nothing/,
 	},
 	{
 		check: "the settle bound",

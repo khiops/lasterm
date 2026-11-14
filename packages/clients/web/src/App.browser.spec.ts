@@ -28,6 +28,7 @@ import {
 	focusPane,
 	HOST_A,
 	mountWindow,
+	mouseDown,
 	pane,
 	paneWithKeyboard,
 	press,
@@ -204,6 +205,20 @@ describe("the files panel's form", () => {
 // the pane, once the panel has left the page, whichever way it closes (#637, #940). happy-dom runs
 // no leave transition, so only a browser keeps the panel's focused control past the close.
 describe("closing Settings opened from the palette", () => {
+	// Two panes, so that the pane given the keyboard is the one that had it, not the first.
+	const twoPanes = () =>
+		mountWindow({
+			channels: [live("T1"), live("T2")],
+			layout: {
+				tabs: [{ id: "TAB1", root: split("vertical", term("T1", "P1"), term("T2", "P2")) }],
+			},
+		});
+	// As a click in the pane does: the pane becomes the tab's active one, its terminal takes the keys.
+	const clickPane = async (paneId: string) => {
+		await mouseDown(pane(paneId)?.querySelector(".terminal-pane"));
+		focusPane(paneId);
+	};
+
 	const closings: Record<string, () => Promise<unknown>> = {
 		"its ×": () => click("Close settings panel"),
 		Esc: () => press("Escape"),
@@ -212,11 +227,8 @@ describe("closing Settings opened from the palette", () => {
 
 	for (const [way, close] of Object.entries(closings)) {
 		it(`gives the keyboard to the pane on ${way}`, async () => {
-			await mountWindow({
-				channels: [live("T1")],
-				layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
-			});
-			focusPane("P1");
+			await twoPanes();
+			await clickPane("P2");
 			await runPaletteRow("Settings");
 			expect(dialogs()).toEqual(["Settings"]);
 			expect(document.activeElement?.closest(".settings-panel")).not.toBeNull();
@@ -224,7 +236,7 @@ describe("closing Settings opened from the palette", () => {
 			await close();
 
 			await vi.waitFor(() => expect(document.querySelector(".settings-panel")).toBeNull());
-			expect(paneWithKeyboard()).toBe("P1");
+			expect(paneWithKeyboard()).toBe("P2");
 		});
 	}
 });

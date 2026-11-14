@@ -44,7 +44,7 @@
 			>{{ hostMarkers.get(tab.id)?.initials }}</span>
 			<input
 				v-if="editingTabIndex === idx"
-				ref="editInput"
+				:ref="setEditInput"
 				v-model="editValue"
 				class="tab-rename-input"
 				@keydown.enter="commitRename"
@@ -124,7 +124,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch, nextTick } from "vue";
+import { type ComponentPublicInstance, computed, nextTick, reactive, ref, watch } from "vue";
 import type { Host } from "@lasterm/shared";
 import type { Tab } from "../composables/useLayout.js";
 import { getColorFromLabel, getInitials } from "../composables/useHostIcon.js";
@@ -395,6 +395,11 @@ const { editValue, editInput, isEditing, startRename: startRenameRaw, commitRena
 		}
 	},
 });
+
+// A string ref inside the tabs' v-for would hold an array; only the tab being renamed has the field.
+function setEditInput(el: Element | ComponentPublicInstance | null): void {
+	editInput.value = el instanceof HTMLInputElement ? el : null;
+}
 
 watch(isEditing, (editing) => {
 	if (!editing) editingTabIndex.value = null;

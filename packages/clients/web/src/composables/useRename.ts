@@ -16,7 +16,11 @@ export function useRename(options: UseRenameOptions) {
 		isEditing.value = true;
 		originalLabel = currentLabel;
 		editValue.value = currentLabel;
-		nextTick(() => editInput.value?.select());
+		nextTick(() => {
+			// select() alone does not give the field the keyboard in every engine.
+			editInput.value?.focus();
+			editInput.value?.select();
+		});
 	}
 
 	function commitRename(): void {

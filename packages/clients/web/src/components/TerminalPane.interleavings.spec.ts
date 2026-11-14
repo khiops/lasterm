@@ -6,21 +6,31 @@
  * a filled empty slot remounts `TerminalPane` as the app does. The hub is a
  * model (`World`): it holds every SPAWN and ATTACH the window sends and answers
  * them in any order; it prints and ends terminals; and, in a scenario with
- * `timeouts`, time can reach the window's next deadline, after which the hub
- * may still answer that request once. A terminal may print once the window has
- * asked for it, before its attach is answered: the pane drops that output, as
- * the hub's order allows (#931). Each scenario is a short sequence of user
- * gestures; every interleaving of them with the hub's events is run, each from
- * a fresh window, depth first, within the scenario's bound.
+ * `timeouts`, time can reach the model's next deadline, ten seconds after an
+ * ATTACH and fifteen after a SPAWN, after which the hub may still answer each
+ * request due by then once. The window keeps an older ATTACH waiting while a
+ * newer one from the same pane is pending, which the model does not follow:
+ * after each jump it checks only that the window waits for as many SPAWNs as it
+ * does, and for no ATTACH once it has none open. A terminal may print once the
+ * window has asked for it, before its attach is answered, as the hub's order
+ * allows (#931). Each scenario is a short sequence of user gestures; every
+ * interleaving of them with the hub's events is run, each from a fresh window,
+ * depth first, within the scenario's bound.
  *
  * What it rejects is `Kind`: each kind is raised in one place, which its
  * comment names.
  *
- * Open defects it reaches are named by `knownDefect` and marked on each
- * scenario that reaches them (`stillReaches`): their violations are kept out of
- * its verdict, and the scenario fails once it no longer reaches one. Until the
- * defect is fixed, a marked scenario cannot tell another cause of the same
- * violations from it. Whoever fixes the defect drops the mark.
+ * Open defects it reaches are named in `DEFECTS`, with the kinds each raises,
+ * and marked on each scenario that reaches them (`stillReaches`): their
+ * violations are kept out of its verdict, and the scenario fails once it no
+ * longer reaches one of those kinds. Until the defect is fixed, a marked
+ * scenario cannot tell another cause of the same violations from it. Whoever
+ * fixes the defect drops the mark.
+ *
+ * Each check is shown to fire by a negative control (`CONTROLS`): a scenario
+ * that breaks only the harness's side of the window, App's wiring, the model
+ * hub, the model's deadlines or a gesture, and fails unless that check reports
+ * it.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -145,13 +155,16 @@ type Kind =
 	| "spawn-missing"
 	| "pending-left";
 
+/** The open issues the harness reaches, as `DEFECTS` describes them. */
+type Defect = "#966" | "#980";
+
 interface Violation {
 	kind: Kind;
 	detail: string;
 	/** The pending id's number, when the violation is about a spawn. */
 	spawn?: number;
 	/** The open issue this violation is, when it is a known defect's. */
-	known?: string;
+	known?: Defect;
 	path: string[];
 }
 
@@ -165,8 +178,8 @@ interface SpawnRecord {
 	remounted: boolean;
 	/** Pane instances seen over the pending id, by their xterm. */
 	seen: Set<StandInTerminal>;
-	/** Each SPAWN that started a terminal: that terminal, and whether its pending id was in a layout then. */
-	started: Array<{ real: string; inLayout: boolean }>;
+	/** The terminal each SPAWN for it started, in the order the hub started them. */
+	started: string[];
 }
 
 interface Step {
@@ -183,7 +196,7 @@ interface Scenario {
 	steps: Step[];
 	/** The window's connection opens as a hub event, not at once. */
 	holdConnect?: boolean;
-	/** Time reaching the window's next deadline is an event: that request times out. */
+	/** Time reaching the model's next deadline is an event: each request due by then times out. */
 	timeouts?: boolean;
 	/** xterm parses writes on its timer, an event of its own. */
 	parseLater?: boolean;
@@ -195,9 +208,29 @@ interface Scenario {
 	/**
 	 * The open defects this scenario reaches, marked as known failures: their
 	 * violations are left out of its verdict, and it fails once it no longer
-	 * reaches one. Whoever fixes the defect removes it here.
+	 * reaches one of the kinds `DEFECTS` names for it. Whoever fixes the defect
+	 * removes it here.
 	 */
-	stillReaches?: string[];
+	stillReaches?: Defect[];
+	/** A negative control's break, on the harness's side only. */
+	break?: Break;
+}
+
+/**
+ * What a negative control changes so that one check must fire: never the
+ * window, only what the harness puts around it.
+ */
+interface Break {
+	/** App's part of these gestures, replaced. */
+	app?: Partial<Omit<Gestures, "layout">>;
+	/** Only the tab in front is mounted, rather than every tab under `v-show`. */
+	frontTabOnly?: boolean;
+	/** Each frame the model hub sends, changed before the window hears it. */
+	hub?: (frame: Frame) => Frame;
+	/** The hub events never offered, by label. */
+	withhold?: RegExp;
+	/** The model's deadlines, in place of the window's. */
+	deadlines?: { spawn?: number; attach?: number };
 }
 
 /** How long the window waits for an ATTACH's answer: `useTerminal.ts`'s attach deadline. */
@@ -283,8 +316,7 @@ class World {
 		const record = this.spawns.get(k);
 		if (record === undefined) return null;
 		if (this.inLayout(record.pending)) return record.pending;
-		const started = record.started.map((s) => s.real).find((real) => this.inLayout(real));
-		return started ?? null;
+		return record.started.find((real) => this.inLayout(real)) ?? null;
 	}
 
 	/** A pending id for a new terminal on `hostId`, as App makes one. */
@@ -306,12 +338,12 @@ class World {
 		return sent.filter((m) => m.type === "SPAWN" && m.hostId === record.host).length;
 	}
 
-	/** The Retry, or Connect, button of the pane showing new terminal `k`'s pending id. */
+	/** The Retry button of the pane showing new terminal `k`'s pending id. */
 	retryButtonOf(k: number): HTMLButtonElement | undefined {
 		const at = this.paneIdOf(pendingId(k));
 		const wrapper = at === null ? null : root.querySelector(`[data-pane-id="${at.paneId}"]`);
-		return [...(wrapper?.querySelectorAll("button") ?? [])].find((b) =>
-			["Retry", "Connect"].includes(b.textContent?.trim() ?? ""),
+		return [...(wrapper?.querySelectorAll("button") ?? [])].find(
+			(b) => b.textContent?.trim() === "Retry",
 		);
 	}
 
@@ -353,7 +385,7 @@ class World {
 	}
 
 	onChannelSpawned(tempId: string, real: string): void {
-		const record = [...this.spawns.values()].find((s) => s.started.some((st) => st.real === real));
+		const record = [...this.spawns.values()].find((s) => s.started.includes(real));
 		if (record === undefined || record.pending !== tempId) {
 			this.violate(
 				"spawn-answer-to-other-pane",
@@ -484,7 +516,13 @@ class World {
 			next.push({ label: `hub: ${nameOf(channelId)} ends`, run: (w) => w.end(channelId) });
 		}
 		if (xterm.queue.length > 0) next.push({ label: "xterm parses", run: () => drain() });
-		return next;
+		const withheld = this.scenario.break?.withhold;
+		return withheld === undefined ? next : next.filter((c) => !withheld.test(c.label));
+	}
+
+	/** The model hub sends `frame`: the window hears it, as a control's break changes it. */
+	fromHub(frame: Frame): void {
+		hear(this.scenario.break?.hub?.(frame) ?? frame);
 	}
 
 	answerSpawn(i: number, ok: boolean): void {
@@ -500,8 +538,8 @@ class World {
 			const real = realId(record.k, attempt);
 			this.live.add(real);
 			const was = late ? null : this.paneIdOf(record.pending);
-			record.started.push({ real, inLayout: was !== null });
-			hear({ type: "SPAWN_OK", channelId: real, requestId: frame.requestId });
+			record.started.push(real);
+			this.fromHub({ type: "SPAWN_OK", channelId: real, requestId: frame.requestId });
 			grantWriteLock(real);
 			// Once the answer is taken: its terminal is at the pane and tab its pending id was.
 			if (was !== null) {
@@ -519,7 +557,7 @@ class World {
 				});
 			}
 		} else {
-			hear({
+			this.fromHub({
 				type: "ERROR",
 				code: "SPAWN_FAILED",
 				message: `spawn ${record.k} failed`,
@@ -535,7 +573,7 @@ class World {
 		this.done.add(i);
 		if (this.live.has(channelId)) {
 			grantWriteLock(channelId);
-			hear({
+			this.fromHub({
 				type: "ATTACH_OK",
 				channelId,
 				snapshot: {
@@ -553,15 +591,31 @@ class World {
 				rows: 30,
 			});
 		} else if (this.dead.has(channelId)) {
-			hear({ type: "ERROR", code: "CHANNEL_DEAD", message: "This terminal has ended.", channelId });
+			this.fromHub({
+				type: "ERROR",
+				code: "CHANNEL_DEAD",
+				message: "This terminal has ended.",
+				channelId,
+			});
 		} else {
-			hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId });
+			this.fromHub({
+				type: "ERROR",
+				code: "CHANNEL_NOT_FOUND",
+				message: "No such terminal.",
+				channelId,
+			});
 		}
 	}
 
+	/** How long the model waits for a request of this type: the window's wait, unless a control breaks it. */
+	waitFor(type: string): number {
+		const broken = this.scenario.break?.deadlines;
+		if (type === "SPAWN") return broken?.spawn ?? SPAWN_DEADLINE_MS;
+		return broken?.attach ?? ATTACH_DEADLINE_MS;
+	}
+
 	deadlineOf(i: number): number {
-		const wait = (sent[i] as Frame).type === "SPAWN" ? SPAWN_DEADLINE_MS : ATTACH_DEADLINE_MS;
-		return (this.sentAt.get(i) ?? 0) + wait;
+		return (this.sentAt.get(i) ?? 0) + this.waitFor((sent[i] as Frame).type);
 	}
 
 	openRequests(): number[] {
@@ -573,7 +627,12 @@ class World {
 			.map(({ i }) => i);
 	}
 
-	/** Time reaches the window's next deadline: every request due by then times out. */
+	/**
+	 * Time reaches the model's next deadline: every request due by then times
+	 * out, in the model. The window's attach deadline is not one per request: it
+	 * keeps an older ATTACH waiting while a newer one from the same pane is
+	 * pending (`onDeadline` in `useTerminal.ts`), which the model does not follow.
+	 */
 	timeout(): void {
 		const next = Math.min(...this.openRequests().map((i) => this.deadlineOf(i)));
 		vi.advanceTimersByTime(next - this.clock + 1);
@@ -584,19 +643,20 @@ class World {
 				this.timedOut.add(i);
 			}
 		}
-		// The window must have stopped waiting for what the model says it gave up
-		// on, and only that: a deadline of the window's that drifted from the
-		// model's would otherwise turn late answers into timely ones in silence.
+		// The window waits for exactly as many SPAWNs as the model: a spawn
+		// deadline of the window's that drifted from the model's would otherwise
+		// turn late answers into timely ones, or the reverse, in silence.
 		const awaited = this.openRequests().filter((i) => (sent[i] as Frame).type === "SPAWN").length;
 		if (listening("SPAWN_OK") !== awaited) {
 			throw new Error(
-				`the window waits for ${listening("SPAWN_OK")} SPAWNs, the model for ${awaited}: its spawn deadline is not ${SPAWN_DEADLINE_MS} ms`,
+				`the window waits for ${listening("SPAWN_OK")} SPAWNs, the model for ${awaited}: its spawn deadline is not ${this.waitFor("SPAWN")} ms`,
 			);
 		}
+		// And for no ATTACH once the model has none open.
 		const attaches = this.openRequests().filter((i) => (sent[i] as Frame).type === "ATTACH");
 		if (attaches.length === 0 && listening("ATTACH_OK") > 0) {
 			throw new Error(
-				`the window still waits for an ATTACH: its attach deadline is not ${ATTACH_DEADLINE_MS} ms`,
+				`the window still waits for an ATTACH: its attach deadline is not ${this.waitFor("ATTACH")} ms`,
 			);
 		}
 	}
@@ -604,7 +664,7 @@ class World {
 	print(channelId: string): void {
 		this.printed.add(channelId);
 		const query = this.scenario.prints?.query === true ? QUERY : "";
-		hear({
+		this.fromHub({
 			type: "OUTPUT",
 			channelId,
 			data: new TextEncoder().encode(`<${nameOf(channelId)}#1>${query}`),
@@ -671,7 +731,7 @@ class World {
 				);
 			}
 			const due =
-				this.inLayout(record.pending) || record.started.some((st) => this.inLayout(st.real));
+				this.inLayout(record.pending) || record.started.some((real) => this.inLayout(real));
 			if (due && spawnsSent < 1 + record.retries) {
 				this.violate(
 					"spawn-missing",
@@ -699,7 +759,7 @@ class World {
 	kOf(channelId: string | null): number | undefined {
 		if (channelId === null) return undefined;
 		const record = [...this.spawns.values()].find(
-			(s) => s.pending === channelId || s.started.some((st) => st.real === channelId),
+			(s) => s.pending === channelId || s.started.includes(channelId),
 		);
 		return record?.k;
 	}
@@ -713,15 +773,20 @@ function grantWriteLock(channelId: string): void {
 	useWriteLockStore().handleWriteLock(channelId, CLIENT);
 }
 
-/** What each open defect looks like to the harness. */
-function knownDefect(kind: Kind, spawn: SpawnRecord | undefined): string | undefined {
-	// #966: xterm answers a query after the pane switched, as typed input to the terminal switched to.
-	if (kind === "xterm-answer-to-other-terminal") return "#966";
-	// #980: a pane remounted over its pending id loses its spawn: what the spawn
-	// starts is shown nowhere, and a failed one can no longer be retried.
-	const spawnKinds: Kind[] = ["spawn-lost", "pending-left"];
-	if (spawn?.remounted === true && spawnKinds.includes(kind)) return "#980";
-	return undefined;
+/** What each open defect looks like to the harness: the kinds it raises, and when one is its. */
+const DEFECTS: Record<Defect, { kinds: Kind[]; covers(spawn: SpawnRecord | undefined): boolean }> =
+	{
+		// xterm answers a query after the pane switched, as typed input to the terminal switched to.
+		"#966": { kinds: ["xterm-answer-to-other-terminal"], covers: () => true },
+		// A pane remounted over its pending id loses its spawn: what the spawn
+		// starts is shown nowhere, and a failed one can no longer be retried.
+		"#980": { kinds: ["pending-left", "spawn-lost"], covers: (spawn) => spawn?.remounted === true },
+	};
+
+function knownDefect(kind: Kind, spawn: SpawnRecord | undefined): Defect | undefined {
+	return (Object.keys(DEFECTS) as Defect[]).find(
+		(id) => DEFECTS[id].kinds.includes(kind) && DEFECTS[id].covers(spawn),
+	);
 }
 
 function findPane(node: PaneNode, channelId: string): string | null {
@@ -763,7 +828,6 @@ function mountLayout(world: World): void {
 					layout.splitPane(channelId, direction, MAX_PANE_COUNT);
 				},
 				onChannelSpawned: (tempId, real) => {
-					world.onChannelSpawned(tempId, real);
 					layout.replaceChannelId(tempId, real);
 					channels.selectChannel(real);
 					if (channels.activeHostId) void channels.fetchChannels(channels.activeHostId);
@@ -798,15 +862,18 @@ function mountLayout(world: World): void {
 					channels.registerPendingSpawn(tempId, hostId);
 					layout.openTab(tempId);
 				},
+				...world.scenario.break?.app,
 			};
 			world.ui = ui;
 			world.scenario.setUp(world);
+			const frontTabOnly = world.scenario.break?.frontTabOnly === true;
 			return () =>
 				layout.tabs.value.map((tab, index) => {
 					const node = layout.layouts.value[tab.id];
+					const front = index === layout.activeTabIndex.value;
 					return withDirectives(
 						h("div", { key: tab.id, class: "pane-tab-container" }, [
-							node
+							node && (front || !frontTabOnly)
 								? h(PaneLayout, {
 										node,
 										hostId: HOST,
@@ -814,14 +881,17 @@ function mountLayout(world: World): void {
 										hasMultiplePanes: countPanes(node) > 1,
 										onSplit: ui.onSplit,
 										onClosePane: ui.onClosePane,
-										onChannelSpawned: ui.onChannelSpawned,
+										onChannelSpawned: (tempId: string, real: string) => {
+											world.onChannelSpawned(tempId, real);
+											ui.onChannelSpawned(tempId, real);
+										},
 										onFillVacant: ui.onFillVacant,
 										onNewTerminalVacant: ui.onNewTerminalVacant,
 										onDropPane: ui.onDropPane,
 									})
 								: null,
 						]),
-						[[vShow, index === layout.activeTabIndex.value]],
+						[[vShow, front]],
 					);
 				});
 		},
@@ -891,9 +961,12 @@ async function runPath(
 		world.observe();
 		return await walk(world, prefix, offered);
 	} finally {
-		closePane();
-		root.remove();
-		vi.clearAllTimers();
+		try {
+			closePane();
+		} finally {
+			root.remove();
+			vi.clearAllTimers();
+		}
 	}
 }
 
@@ -959,23 +1032,29 @@ interface Outcome {
 	violations: Violation[];
 }
 
-/** Every order of `scenario`'s steps and the hub's answers, depth first, up to its bound. */
-async function explore(scenario: Scenario): Promise<Outcome> {
+/**
+ * Every order of `scenario`'s steps and the hub's answers, depth first, up to
+ * its bound, or until `enough` says the orders run so far are.
+ */
+async function explore(
+	scenario: Scenario,
+	enough?: (outcome: Outcome) => boolean,
+): Promise<Outcome> {
 	let prefix: number[] = [];
 	let offered: string[][] = [];
-	let paths = 0;
-	let everyGesture = false;
-	const violations: Violation[] = [];
+	const outcome: Outcome = { paths: 0, exhausted: false, everyGesture: false, violations: [] };
 	for (;;) {
 		const { taken, offers, world } = await runPath(scenario, prefix, offered);
-		paths++;
-		violations.push(...world.violations);
-		if (world.stepsTaken === scenario.steps.length) everyGesture = true;
+		outcome.paths++;
+		outcome.violations.push(...world.violations);
+		if (world.stepsTaken === scenario.steps.length) outcome.everyGesture = true;
 		let depth = taken.length - 1;
 		while (depth >= 0 && (taken[depth] as number) + 1 >= (offers[depth] as string[]).length)
 			depth--;
-		if (depth < 0) return { paths, exhausted: true, everyGesture, violations };
-		if (paths >= scenario.maxPaths) return { paths, exhausted: false, everyGesture, violations };
+		outcome.exhausted = depth < 0;
+		if (outcome.exhausted || outcome.paths >= scenario.maxPaths || enough?.(outcome) === true) {
+			return outcome;
+		}
 		prefix = [...taken.slice(0, depth), (taken[depth] as number) + 1];
 		// The replay is offered, up to the step that changes, what this path was.
 		offered = offers.slice(0, depth + 1);
@@ -1036,21 +1115,23 @@ const gesture = {
 	openStarted: (k: number): Step => ({
 		label: `user: opens what new terminal ${k} started in the pane, from the sidebar`,
 		can: (w) => w.spawns.get(k)?.started.at(-1) !== undefined,
-		run: (w) => w.ui.onSidebarOpenCurrentTab(w.spawns.get(k)?.started.at(-1)?.real as string),
+		run: (w) => w.ui.onSidebarOpenCurrentTab(w.spawns.get(k)?.started.at(-1) as string),
 	}),
 	newTerminalInEmptySlot: (k: number): Step => ({
 		label: `user: starts new terminal ${k} in the empty slot`,
 		can: (w) => emptySlot(w) !== undefined,
 		run: (w) => w.ui.onNewTerminalVacant(emptySlot(w) as string, hostOf(k)),
 	}),
-	retry: (k: number): Step => ({
-		label: `user: clicks Retry on new terminal ${k}'s pane`,
+	/** One Retry; a control's misbehaving gesture clicks its button other than once. */
+	retry: (k: number, clicks = 1): Step => ({
+		label: `user: clicks Retry on new terminal ${k}'s pane${clicks === 1 ? "" : ` ${clicks} times`}`,
 		can: (w) => w.retryButtonOf(k) !== undefined,
 		run: (w) => {
 			const record = w.spawns.get(k) as SpawnRecord;
 			const before = w.spawnsSentFor(record);
+			const button = w.retryButtonOf(k) as HTMLButtonElement;
 			record.retries++;
-			(w.retryButtonOf(k) as HTMLButtonElement).click();
+			for (let n = 0; n < clicks; n++) button.click();
 			// One Retry, one SPAWN, once the click has been handled.
 			w.afterStep.push(() => {
 				const sentNow = w.spawnsSentFor(record);
@@ -1179,28 +1260,347 @@ const SCENARIOS: Scenario[] = [
 	},
 ];
 
-function report(violations: Violation[]): string {
-	const seen = new Set<string>();
+/**
+ * What fails a scenario, a line each: orders left past its bound, no path that
+ * takes every gesture, each violation no open defect covers, and each kind of
+ * an open defect it reaches unmarked, or no longer reaches marked.
+ */
+function verdict(scenario: Scenario, outcome: Outcome): string[] {
 	const lines: string[] = [];
-	for (const v of violations) {
+	if (!outcome.exhausted) lines.push(`more than ${scenario.maxPaths} orders`);
+	if (!outcome.everyGesture) lines.push("no path takes every gesture");
+	const seen = new Set<string>();
+	for (const v of outcome.violations) {
 		const key = `${v.kind}: ${v.detail}`;
-		if (seen.has(key)) continue;
+		if (v.known !== undefined || seen.has(key)) continue;
 		seen.add(key);
 		lines.push(`${key}\n    after: ${v.path.join(" → ")}`);
 	}
-	return lines.join("\n");
+	const reached = new Set(
+		outcome.violations.flatMap((v) => (v.known === undefined ? [] : [`${v.known} ${v.kind}`])),
+	);
+	const marked = new Set(
+		(scenario.stillReaches ?? []).flatMap((id) => DEFECTS[id].kinds.map((kind) => `${id} ${kind}`)),
+	);
+	for (const kind of reached) if (!marked.has(kind)) lines.push(`reached, not marked: ${kind}`);
+	for (const kind of marked) if (!reached.has(kind)) lines.push(`marked, not reached: ${kind}`);
+	return lines;
 }
 
 describe("TerminalPane across event orders (#984)", () => {
 	for (const scenario of SCENARIOS) {
 		it(`${scenario.name}: every order keeps the invariants`, async () => {
 			const outcome = await explore(scenario);
-			expect(outcome.exhausted, `more than ${scenario.maxPaths} orders`).toBe(true);
-			expect(outcome.everyGesture, "a path that takes every gesture").toBe(true);
-			const unknown = outcome.violations.filter((v) => v.known === undefined);
-			expect(unknown, report(unknown)).toEqual([]);
-			const reached = [...new Set(outcome.violations.map((v) => v.known))].sort();
-			expect(reached, "the open defects it reaches").toEqual(scenario.stillReaches ?? []);
+			expect(verdict(scenario, outcome)).toEqual([]);
 		}, 120_000);
+	}
+});
+
+// --- Negative controls -------------------------------------------------------------
+
+/**
+ * A check shown to fire: a scenario whose break, on the harness's side only,
+ * must give its verdict a line matching each of `reports`, or make its
+ * exploration throw `throws`.
+ */
+interface Control {
+	check: string;
+	scenario: Scenario;
+	reports?: RegExp[];
+	throws?: RegExp;
+}
+
+/** An ATTACH_OK whose snapshot draws `serialized`, a marker or none, instead. */
+const drawing = (frame: Frame, serialized: string): Frame =>
+	frame.type === "ATTACH_OK"
+		? { ...frame, snapshot: { ...(frame.snapshot as object), serialized } }
+		: frame;
+
+const doNothing: Step = { label: "user: a gesture that does nothing", run: () => {} };
+
+/** A gesture named after the windows it was offered in: a replay is offered another. */
+function unsteadyGesture(): Step {
+	const windows = new Set<World>();
+	return {
+		get label() {
+			return `user: a gesture offered in ${windows.size} windows`;
+		},
+		can: (w) => {
+			windows.add(w);
+			return true;
+		},
+		run: () => {},
+	};
+}
+
+/** A gesture after which the page keeps changing, until it is taken down. */
+const restless: Step = {
+	label: "user: a gesture that keeps changing the page",
+	run: () => {
+		const page = root;
+		const tick = (): void => {
+			if (!page.isConnected) return;
+			page.append(document.createElement("i"));
+			void Promise.resolve().then(tick);
+		};
+		tick();
+	},
+};
+
+const CONTROLS: Control[] = [
+	{
+		check: "xterm-count",
+		scenario: {
+			name: "only the tab in front is mounted",
+			setUp: terminalTab(T, U),
+			steps: [],
+			break: { frontTabOnly: true },
+			maxPaths: 10,
+		},
+		reports: [/^xterm-count: T's leaf has 0 panes and 0 xterms/],
+	},
+	{
+		check: "xterm-answer-to-other-terminal",
+		scenario: {
+			name: "U prints T's marker and a query",
+			setUp: terminalTab(U),
+			steps: [],
+			prints: { channels: [U], query: true },
+			break: {
+				hub: (f) =>
+					f.type === "OUTPUT" ? { ...f, data: new TextEncoder().encode(`<T#1>${QUERY}`) } : f,
+			},
+			maxPaths: 20,
+		},
+		// Its kind is #966's: unmarked here, the verdict names it as reached.
+		reports: [/^reached, not marked: #966 xterm-answer-to-other-terminal$/],
+	},
+	{
+		check: "written-into-other-pane, shows-other-screen (another terminal's)",
+		scenario: {
+			name: "T's snapshot draws U's screen",
+			setUp: terminalTab(T),
+			steps: [],
+			break: { hub: (f) => drawing(f, "[U@0]") },
+			maxPaths: 10,
+		},
+		reports: [
+			/^written-into-other-pane: \[U@0\] written into the pane showing T/,
+			/^shows-other-screen: the pane showing T shows U's screen/,
+		],
+	},
+	{
+		check: "shows-other-screen (no screen)",
+		scenario: {
+			name: "T's snapshot draws nothing",
+			setUp: terminalTab(T),
+			steps: [],
+			break: { hub: (f) => drawing(f, "") },
+			maxPaths: 10,
+		},
+		reports: [/^shows-other-screen: the pane showing T shows no screen/],
+	},
+	{
+		check: "the onReset hook",
+		scenario: {
+			name: "T shown, then S, then T again from a snapshot that draws nothing",
+			setUp: terminalTab(T),
+			steps: [
+				{ ...gesture.open(S), can: (w) => w.done.size >= 1 },
+				{ ...gesture.open(T), can: (w) => w.done.size >= 2 },
+			],
+			break: {
+				hub: (f) => {
+					const asked = sent.filter((m) => m.type === "ATTACH" && m.channelId === f.channelId);
+					return asked.length > 1 ? drawing(f, "") : f;
+				},
+			},
+			maxPaths: 10,
+		},
+		// T's first screen, unless the reset clears it, passes for the second.
+		reports: [/^shows-other-screen: the pane showing T shows no screen/],
+	},
+	{
+		check: "spawn-answer-to-other-pane",
+		scenario: {
+			name: "spawn 1's answer carries spawn 2's request id",
+			setUp: (w) => {
+				newTerminalTab(1)(w);
+				newTerminalTab(2)(w);
+			},
+			steps: [],
+			break: {
+				hub: (f) => {
+					if (f.type !== "SPAWN_OK") return f;
+					const other = sent.find((m) => m.type === "SPAWN" && m.requestId !== f.requestId);
+					return { ...f, requestId: other?.requestId };
+				},
+			},
+			maxPaths: 20,
+		},
+		reports: [/^spawn-answer-to-other-pane: R11 announced for P2/],
+	},
+	{
+		check: "spawn-lost, pending-left",
+		scenario: {
+			name: "App ignores a spawn's announcement",
+			setUp: newTerminalTab(1),
+			steps: [],
+			// The spawn starts: a failed one would leave P1 over its failure.
+			break: { app: { onChannelSpawned: () => {} }, withhold: /fails/ },
+			maxPaths: 10,
+		},
+		reports: [
+			/^spawn-lost: P1's spawn started R11, which is not where P1 was, with P1 still there/,
+			/^pending-left: P1 left in the layout; its pane shows no failure/,
+		],
+	},
+	{
+		check: "spawn-failure-on-other-terminal",
+		scenario: {
+			name: "spawn 1's failure names spawn 2",
+			setUp: newTerminalTab(1),
+			steps: [],
+			break: { hub: (f) => (f.code === "SPAWN_FAILED" ? { ...f, message: "spawn 2 failed" } : f) },
+			maxPaths: 10,
+		},
+		reports: [/^spawn-failure-on-other-terminal: spawn 2 failed shown over P1/],
+	},
+	{
+		check: "left-connecting",
+		scenario: {
+			name: "the connection never opens",
+			setUp: terminalTab(T),
+			steps: [],
+			holdConnect: true,
+			break: { withhold: /connection opens/ },
+			maxPaths: 10,
+		},
+		reports: [/^left-connecting: the pane showing T still says Connecting…/],
+	},
+	{
+		check: "retry-lost, spawn-doubled",
+		scenario: {
+			name: "one Retry clicked twice",
+			setUp: newTerminalTab(1),
+			steps: [gesture.retry(1, 2)],
+			maxPaths: 20,
+		},
+		reports: [
+			/^retry-lost: Retry on P1 sent 2 SPAWNs/,
+			/^spawn-doubled: 3 SPAWNs for P1, 1 retries/,
+		],
+	},
+	{
+		check: "retry-lost, spawn-missing",
+		scenario: {
+			name: "one Retry whose click misses",
+			setUp: newTerminalTab(1),
+			steps: [gesture.retry(1, 0)],
+			maxPaths: 20,
+		},
+		reports: [
+			/^retry-lost: Retry on P1 sent 0 SPAWNs/,
+			/^spawn-missing: 1 SPAWNs for P1, 1 retries/,
+		],
+	},
+	{
+		check: "the spawn deadline guard",
+		scenario: {
+			name: "the model gives up on a SPAWN after ten seconds",
+			setUp: newTerminalTab(1),
+			steps: [],
+			timeouts: true,
+			break: { deadlines: { spawn: ATTACH_DEADLINE_MS } },
+			maxPaths: 20,
+		},
+		throws: /the window waits for 1 SPAWNs, the model for 0/,
+	},
+	{
+		check: "the attach deadline guard",
+		scenario: {
+			name: "the model gives up on an ATTACH after five seconds",
+			setUp: terminalTab(T),
+			steps: [],
+			timeouts: true,
+			break: { deadlines: { attach: 5_000 } },
+			maxPaths: 20,
+		},
+		throws: /the window still waits for an ATTACH/,
+	},
+	{
+		check: "the replay check",
+		scenario: {
+			name: "a gesture named after the windows it was offered in",
+			setUp: terminalTab(T),
+			steps: [unsteadyGesture()],
+			maxPaths: 10,
+		},
+		throws: /diverged at step 0/,
+	},
+	{
+		check: "the settle bound",
+		scenario: { name: "the page keeps changing", setUp: () => {}, steps: [restless], maxPaths: 1 },
+		throws: /the window never settled/,
+	},
+	{
+		check: "the step bound",
+		scenario: {
+			name: "more gestures than the step bound",
+			setUp: () => {},
+			steps: Array.from({ length: MAX_STEPS }, () => doNothing),
+			maxPaths: 1,
+		},
+		throws: new RegExp(`still had choices after ${MAX_STEPS} steps`),
+	},
+	{
+		check: "the exploration bound",
+		scenario: {
+			name: "a new terminal held to one order",
+			setUp: newTerminalTab(1),
+			steps: [],
+			holdConnect: true,
+			maxPaths: 1,
+		},
+		reports: [/^more than 1 orders$/],
+	},
+	{
+		check: "every gesture taken",
+		scenario: {
+			name: "a gesture never offered",
+			setUp: terminalTab(T),
+			steps: [{ ...doNothing, can: () => false }],
+			maxPaths: 10,
+		},
+		reports: [/^no path takes every gesture$/],
+	},
+	{
+		check: "each kind of a marked defect reached",
+		scenario: {
+			name: "a new terminal marked with #980",
+			setUp: newTerminalTab(1),
+			steps: [],
+			holdConnect: true,
+			maxPaths: 10,
+			stillReaches: ["#980"],
+		},
+		reports: [/^marked, not reached: #980 pending-left$/, /^marked, not reached: #980 spawn-lost$/],
+	},
+];
+
+describe("each check of the harness, shown to fire (#984)", () => {
+	for (const { check, scenario, reports = [], throws } of CONTROLS) {
+		it(`control: ${check}, when ${scenario.name}`, async () => {
+			if (throws !== undefined) {
+				await expect(explore(scenario)).rejects.toThrow(throws);
+				return;
+			}
+			const missing = (outcome: Outcome) => {
+				const lines = verdict(scenario, outcome);
+				return reports.filter((line) => !lines.some((l) => line.test(l))).map(String);
+			};
+			const outcome = await explore(scenario, (o) => missing(o).length === 0);
+			expect(missing(outcome), verdict(scenario, outcome).join("\n")).toEqual([]);
+		});
 	}
 });

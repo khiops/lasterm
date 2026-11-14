@@ -27,12 +27,14 @@
  * scenario cannot tell another cause of the same violations from it. Whoever
  * fixes the defect drops the mark.
  *
- * Each kind, the deadline guard and the explorer's own throws are shown to fire
- * by a negative control (`CONTROLS`): a scenario that breaks only the harness's
- * side of the window, App's wiring, the model hub, the model's deadlines or a
- * gesture, and fails unless that check reports it. `onWrite`'s throw has none:
- * no such break reaches it, and a write the records cannot key leaves the pane
- * with no marker, which `shows-other-screen` reports.
+ * Each kind, the deadline guards, the model's and the explorer's own throws are
+ * shown to fire by a negative control (`CONTROLS`): a scenario that breaks only
+ * the harness's side of the window, App's wiring, the model hub, the model's
+ * deadlines or a gesture, and fails unless that check reports it. `onWrite`'s
+ * throw has none: no such break reaches it, and a write the records cannot key
+ * leaves the pane with no marker, which `shows-other-screen` reports for every
+ * settled pane over a live terminal but one a spawn started and no ATTACH asked
+ * for, which shows its first output and no snapshot.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -135,7 +137,8 @@ interface Gestures {
  *   by a pane whose leaf does not show that spawn's pending id.
  * - `shows-other-screen` (`checkQuiet`): a settled pane over a live terminal
  *   whose last marked write since its last reset is another terminal's, or
- *   which has none although its terminal is not one a spawn started.
+ *   which has none, unless a spawn started its terminal and no ATTACH for it
+ *   was ever sent.
  * - `spawn-doubled` (`checkQuiet`): more SPAWNs for a pending id than one plus
  *   one per Retry.
  * - `spawn-missing` (`checkQuiet`): fewer, while the pending id or a terminal
@@ -223,8 +226,8 @@ interface Scenario {
  * window, only what the harness puts around it.
  */
 interface Break {
-	/** App's part of these gestures, replaced. */
-	app?: Partial<Omit<Gestures, "layout">>;
+	/** App's part of these gestures, replaced, given the window's layout. */
+	app?: (layout: Gestures["layout"]) => Partial<Omit<Gestures, "layout">>;
 	/** Only the tab in front is mounted, rather than every tab under `v-show`. */
 	frontTabOnly?: boolean;
 	/** Each frame the model hub sends, changed before the window hears it. */
@@ -421,8 +424,6 @@ class World {
 				this.sentAt.set(i, this.clock);
 			}
 		});
-		for (const check of this.afterStep.splice(0)) check();
-		this.checkPanes();
 		for (const record of this.spawns.values()) {
 			for (const terminal of xterm.terminals as StandInTerminal[]) {
 				if (this.shownBy(terminal) !== record.pending) continue;
@@ -430,6 +431,8 @@ class World {
 				record.seen.add(terminal);
 			}
 		}
+		for (const check of this.afterStep.splice(0)) check();
+		this.checkPanes();
 		const inputs = sent.filter((m) => m.type === "INPUT");
 		for (const input of inputs.slice(this.inputsSeen)) {
 			const data =
@@ -713,9 +716,12 @@ class World {
 			);
 			const last = terminal === undefined ? undefined : this.lastMarker.get(terminal);
 			if (settled && shown !== null && this.live.has(shown)) {
-				// A spawned terminal is shown from its first output, with no snapshot.
-				const spawned = this.kOf(shown) !== undefined;
-				if (last === undefined ? !spawned : idOf(last) !== shown) {
+				// A spawned terminal is shown from its first output, with no snapshot,
+				// until an ATTACH asks for it.
+				const fresh =
+					this.kOf(shown) !== undefined &&
+					!sent.some((m) => m.type === "ATTACH" && m.channelId === shown);
+				if (last === undefined ? !fresh : idOf(last) !== shown) {
 					this.violate(
 						"shows-other-screen",
 						`the pane showing ${name} shows ${last === undefined ? "no" : `${last}'s`} screen`,
@@ -864,7 +870,7 @@ function mountLayout(world: World): void {
 					channels.registerPendingSpawn(tempId, hostId);
 					layout.openTab(tempId);
 				},
-				...world.scenario.break?.app,
+				...world.scenario.break?.app?.(layout),
 			};
 			world.ui = ui;
 			world.scenario.setUp(world);
@@ -965,6 +971,8 @@ async function runPath(
 	} finally {
 		try {
 			closePane();
+			// What the closed window still had queued runs now, not in the next one.
+			await settle();
 		} finally {
 			root.remove();
 			vi.clearAllTimers();
@@ -981,14 +989,10 @@ async function walk(
 	const taken: number[] = [];
 	const offers: string[][] = [];
 	let flushed = false;
-	let quiet = false;
-	for (let depth = 0; depth < MAX_STEPS && !quiet; depth++) {
+	for (;;) {
 		const choices = world.choices();
 		if (choices.length === 0) {
-			if (flushed) {
-				quiet = true;
-				continue;
-			}
+			if (flushed) break;
 			// Whatever the window still has on a timer runs: a request it sends then is a choice.
 			flushed = true;
 			vi.advanceTimersByTime(60_000);
@@ -996,6 +1000,11 @@ async function walk(
 			await quiesce(world);
 			world.observe();
 			continue;
+		}
+		if (taken.length >= MAX_STEPS) {
+			throw new Error(
+				`"${scenario.name}" still had choices after ${MAX_STEPS} steps: ${world.path.join(" → ")}`,
+			);
 		}
 		flushed = false;
 		const pick = prefix[taken.length] ?? 0;
@@ -1016,11 +1025,6 @@ async function walk(
 		await choice.run(world);
 		await quiesce(world);
 		world.observe();
-	}
-	if (!quiet) {
-		throw new Error(
-			`"${scenario.name}" still had choices after ${MAX_STEPS} steps: ${world.path.join(" → ")}`,
-		);
 	}
 	world.checkQuiet();
 	return { taken, offers, world };
@@ -1362,6 +1366,25 @@ const CONTROLS: Control[] = [
 		reports: [/^xterm-count: T's leaf has 0 panes and 0 xterms/],
 	},
 	{
+		check: "xterm-count (two xterms)",
+		scenario: {
+			name: "a second xterm left in T's pane",
+			setUp: terminalTab(T),
+			steps: [
+				{
+					label: "user: a gesture that leaves a second xterm in T's pane",
+					run: (w) => {
+						const at = w.paneIdOf(T);
+						const pane = root.querySelector(`[data-pane-id="${at?.paneId}"] .terminal-pane`);
+						pane?.append(Object.assign(document.createElement("div"), { className: "xterm" }));
+					},
+				},
+			],
+			maxPaths: 10,
+		},
+		reports: [/^xterm-count: T's leaf has 1 panes and 2 xterms/],
+	},
+	{
 		check: "xterm-answer-to-other-terminal",
 		scenario: {
 			name: "U prints T's marker and a query",
@@ -1401,6 +1424,17 @@ const CONTROLS: Control[] = [
 			maxPaths: 10,
 		},
 		reports: [/^shows-other-screen: the pane showing T shows no screen/],
+	},
+	{
+		check: "shows-other-screen (a spawned terminal attached again)",
+		scenario: {
+			name: "what new terminal 1 started, given back from the sidebar, draws nothing",
+			setUp: newTerminalTab(1),
+			steps: [gesture.open(U), gesture.openStarted(1)],
+			break: { hub: (f) => (f.channelId === realId(1, 1) ? drawing(f, "") : f) },
+			maxPaths: 40,
+		},
+		reports: [/^shows-other-screen: the pane showing R11 shows no screen/],
 	},
 	{
 		check: "the onReset hook",
@@ -1449,13 +1483,35 @@ const CONTROLS: Control[] = [
 			setUp: newTerminalTab(1),
 			steps: [],
 			// The spawn starts: a failed one would leave P1 over its failure.
-			break: { app: { onChannelSpawned: () => {} }, withhold: /fails/ },
+			break: { app: () => ({ onChannelSpawned: () => {} }), withhold: /fails/ },
 			maxPaths: 10,
 		},
 		reports: [
 			/^spawn-lost: P1's spawn started R11, which is not where P1 was, with P1 still there/,
 			/^pending-left: P1 left in the layout; its pane shows no failure/,
 		],
+	},
+	{
+		check: "spawn-lost (elsewhere)",
+		scenario: {
+			name: "App closes the pending pane and opens the terminal in a new tab, under its pane id",
+			setUp: newTerminalTab(1),
+			steps: [],
+			break: {
+				app: (layout) => ({
+					onChannelSpawned: (tempId, real) => {
+						const trees = Object.values(layout.layouts.value);
+						const paneId = trees.map((t) => (t == null ? null : findPane(t, tempId))).find(Boolean);
+						layout.closePane(tempId);
+						layout.openTab(real);
+						layout.setLayout({ type: "terminal", channelId: real, paneId: paneId as string });
+					},
+				}),
+				withhold: /fails/,
+			},
+			maxPaths: 10,
+		},
+		reports: [/^spawn-lost: P1's spawn started R11, which is not where P1 was, with P1 gone/],
 	},
 	{
 		check: "spawn-failure-on-other-terminal",
@@ -1548,12 +1604,30 @@ const CONTROLS: Control[] = [
 	{
 		check: "the step bound",
 		scenario: {
-			name: "more gestures than the step bound",
+			name: "one gesture more than the step bound",
 			setUp: () => {},
-			steps: Array.from({ length: MAX_STEPS }, () => doNothing),
+			steps: Array.from({ length: MAX_STEPS + 1 }, () => doNothing),
 			maxPaths: 1,
 		},
 		throws: new RegExp(`still had choices after ${MAX_STEPS} steps`),
+	},
+	{
+		check: "the model's SPAWN without a pending id",
+		scenario: {
+			name: "App registers a pending spawn the model was not told of",
+			setUp: newTerminalTab(1),
+			steps: [],
+			break: {
+				app: (layout) => ({
+					openPendingTab: (hostId) => {
+						useChannelsStore().registerPendingSpawn(pendingId(1), hostId);
+						layout.openTab(pendingId(1));
+					},
+				}),
+			},
+			maxPaths: 1,
+		},
+		throws: /a SPAWN for no pending id/,
 	},
 	{
 		check: "the exploration bound",

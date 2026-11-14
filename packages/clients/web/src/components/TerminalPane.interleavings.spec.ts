@@ -1368,7 +1368,6 @@ const drawing = (frame: Frame, serialized: string): Frame =>
 
 const doNothing: Step = { label: "user: a gesture that does nothing", run: () => {} };
 
-/** A gesture named after the windows it was offered in: a replay is offered another. */
 /** A gesture offered in the first window only: a replay is offered nothing there. */
 function vanishingGesture(): Step {
 	let first: World | undefined;
@@ -1391,6 +1390,7 @@ const openTerminals: Step = {
 	},
 };
 
+/** A gesture named after the windows it was offered in: a replay is offered another. */
 function unsteadyGesture(): Step {
 	const windows = new Set<World>();
 	return {

@@ -10,18 +10,28 @@
  * those gestures with the hub's answers is run, each from a fresh window,
  * depth first; a scenario with more orders than its bound fails.
  *
- * After every step and once the window is quiet, it checks:
- * 1. A binding has exactly one xterm: each pane holds one, and what an xterm
- *    answers by itself to a terminal's output goes to that terminal only.
- * 2. No pane is left spawning forever: once every request is answered or has
- *    timed out, no pane says "Connecting…".
- * 3. A reply is applied only to the pane and request it answers: a snapshot or
- *    output is written only into a pane showing its terminal, a SPAWN's answer
- *    replaces only the pending id it was sent for, and a pane shows the screen
- *    of the terminal it shows.
- * 4. No spawn is lost or doubled across remounts: one SPAWN per pending id, plus
- *    one per Retry; a spawn completing while its pending id is in the layout
- *    leaves its terminal in that place.
+ * It checks, as each thing happens and once the window is quiet:
+ * 1. A binding has exactly one xterm. After every step, each terminal leaf of
+ *    the layout has one pane holding one xterm. As each input goes out, what
+ *    an xterm answers by itself to a terminal's output goes to that terminal.
+ * 2. No pane is left spawning forever: once the window is quiet, no pane says
+ *    "Connecting…".
+ * 3. A reply is applied only to the pane it answers. As each write is taken, a
+ *    snapshot or output goes only into a pane showing its terminal; as each
+ *    spawn is announced, its answer replaces only the pending id it was sent
+ *    for. Once quiet, a failed spawn shows only over its own pending id, and a
+ *    pane shows the screen of the terminal it shows. A snapshot is matched to
+ *    its terminal, not to its request: the UI's ATTACH carries no request id,
+ *    so two ATTACHes of one terminal are not told apart.
+ * 4. No spawn is lost or doubled across remounts. After the step that answers
+ *    a spawn, its terminal is where its pending id was, unless the window had
+ *    given up on it. After each Retry, exactly one SPAWN went out. Once quiet,
+ *    a pending id had one SPAWN plus one per Retry, and one still in the
+ *    layout shows its failure.
+ *
+ * The model hub may answer a request after the window gave up on it. It lets a
+ * terminal print once the window has asked for it, before its attach is
+ * answered: the pane drops that output, as the hub's order allows (#931).
  *
  * Open defects it reaches are named by `knownDefect` and marked on each
  * scenario that reaches them (`stillReaches`): their violations are kept out of
@@ -115,6 +125,7 @@ type Kind =
 	| "spawn-failure-on-other-terminal"
 	| "shows-other-screen"
 	| "spawn-doubled"
+	| "retry-lost"
 	| "spawn-lost"
 	| "pending-left";
 
@@ -144,6 +155,8 @@ interface SpawnRecord {
 
 interface Step {
 	label: string;
+	/** Whether the gesture has something to act on now: a step that has not waits. */
+	can?(world: World): boolean;
 	run(world: World): void | Promise<void>;
 }
 
@@ -178,8 +191,10 @@ class World {
 	ui!: Gestures;
 	path: string[] = [];
 	violations: Violation[] = [];
-	/** Indexes in `sent` of the requests answered, or given up on by a timeout. */
+	/** Indexes in `sent` of the requests answered, or timed out. */
 	done = new Set<number>();
+	/** Requests that timed out and are not answered yet: the hub may still answer them. */
+	timedOut = new Set<number>();
 	live = new Set<string>([T, U]);
 	dead = new Set<string>([S]);
 	spawns = new Map<number, SpawnRecord>();
@@ -263,6 +278,19 @@ class World {
 		return pendingId(k);
 	}
 
+	spawnsSentFor(record: SpawnRecord): number {
+		return sent.filter((m) => m.type === "SPAWN" && m.hostId === record.host).length;
+	}
+
+	/** The Retry, or Connect, button of the pane showing new terminal `k`'s pending id. */
+	retryButtonOf(k: number): HTMLButtonElement | undefined {
+		const at = this.paneIdOf(pendingId(k));
+		const wrapper = at === null ? null : root.querySelector(`[data-pane-id="${at.paneId}"]`);
+		return [...(wrapper?.querySelectorAll("button") ?? [])].find((b) =>
+			["Retry", "Connect"].includes(b.textContent?.trim() ?? ""),
+		);
+	}
+
 	spawnOf(frame: Frame): SpawnRecord {
 		const record = [...this.spawns.values()].find((s) => s.host === frame.hostId);
 		if (record === undefined) throw new Error(`a SPAWN for no pending id: ${String(frame.hostId)}`);
@@ -272,6 +300,11 @@ class World {
 	// --- What the window does, seen as it does it -----------------------------------
 
 	onWrite(terminal: StandInTerminal, text: string): void {
+		// Every record below is keyed by the terminals the stand-in made: a write
+		// from anything else would leave them silently empty.
+		if (!(xterm.terminals as StandInTerminal[]).includes(terminal)) {
+			throw new Error("a write from an xterm the stand-in did not make");
+		}
 		for (const match of text.matchAll(MARKER)) {
 			const name = match[1] ?? match[3] ?? "";
 			this.lastMarker.set(terminal, name);
@@ -306,9 +339,27 @@ class World {
 		}
 	}
 
-	/** Bookkeeping after each step: spawns sent, pane instances over a pending id, input sent. */
+	/** Each terminal leaf of the layout has one pane on the page, holding one xterm. */
+	checkPanes(): void {
+		for (const tree of this.trees()) {
+			for (const leaf of terminalLeaves(tree)) {
+				const wrapper = root.querySelector(`[data-pane-id="${leaf.paneId}"]`);
+				const panes = wrapper?.querySelectorAll(".terminal-pane").length ?? 0;
+				const xterms = wrapper?.querySelectorAll(".xterm").length ?? 0;
+				if (panes !== 1 || xterms !== 1) {
+					this.violate(
+						"xterm-count",
+						`${nameOf(leaf.channelId)}'s leaf has ${panes} panes and ${xterms} xterms`,
+					);
+				}
+			}
+		}
+	}
+
+	/** After each step: its queued checks, the panes, instances over a pending id, input sent. */
 	observe(): void {
 		for (const check of this.afterStep.splice(0)) check();
+		this.checkPanes();
 		for (const record of this.spawns.values()) {
 			for (const terminal of xterm.terminals as StandInTerminal[]) {
 				if (this.shownBy(terminal) !== record.pending) continue;
@@ -338,7 +389,7 @@ class World {
 	choices(): Step[] {
 		const next: Step[] = [];
 		const step = this.scenario.steps[this.stepsTaken];
-		if (step !== undefined) {
+		if (step !== undefined && (step.can?.(this) ?? true)) {
 			next.push({
 				label: step.label,
 				run: async (world) => {
@@ -373,6 +424,23 @@ class World {
 		) {
 			next.push({ label: "time: 10 s pass", run: (w) => w.timeout() });
 		}
+		// A request the window gave up on can still be answered, once, after its time.
+		for (const i of this.timedOut) {
+			const frame = sent[i] as Frame;
+			if (frame.type === "SPAWN") {
+				const k = this.spawnOf(frame).k;
+				next.push({
+					label: `hub: spawn ${k} (#${i}) starts, after its time`,
+					run: (w) => w.answerSpawn(i, true),
+				});
+			} else {
+				const name = nameOf(String(frame.channelId));
+				next.push({
+					label: `hub: answers ATTACH ${name} (#${i}), after its time`,
+					run: (w) => w.answerAttach(i),
+				});
+			}
+		}
 		for (const channelId of this.scenario.prints?.channels ?? []) {
 			const attached = sent.some((m) => m.type === "ATTACH" && m.channelId === channelId);
 			if (this.printed.has(channelId) || !attached || !this.live.has(channelId)) continue;
@@ -389,6 +457,8 @@ class World {
 	answerSpawn(i: number, ok: boolean): void {
 		const frame = sent[i] as Frame;
 		const record = this.spawnOf(frame);
+		// The window gave up on it: the pane says so, and owes the terminal no place.
+		const late = this.timedOut.delete(i);
 		this.done.add(i);
 		const attempt = sent
 			.slice(0, i + 1)
@@ -396,7 +466,7 @@ class World {
 		if (ok) {
 			const real = realId(record.k, attempt);
 			this.live.add(real);
-			const owed = this.inLayout(record.pending);
+			const owed = !late && this.inLayout(record.pending);
 			record.started.push({ real, inLayout: owed });
 			hear({ type: "SPAWN_OK", channelId: real, requestId: frame.requestId });
 			grantWriteLock(real);
@@ -427,6 +497,7 @@ class World {
 	answerAttach(i: number): void {
 		const frame = sent[i] as Frame;
 		const channelId = String(frame.channelId);
+		this.timedOut.delete(i);
 		this.done.add(i);
 		if (this.live.has(channelId)) {
 			grantWriteLock(channelId);
@@ -456,7 +527,10 @@ class World {
 
 	timeout(): void {
 		sent.forEach((frame, i) => {
-			if (frame.type === "SPAWN" || frame.type === "ATTACH") this.done.add(i);
+			if ((frame.type === "SPAWN" || frame.type === "ATTACH") && !this.done.has(i)) {
+				this.done.add(i);
+				this.timedOut.add(i);
+			}
 		});
 		vi.advanceTimersByTime(10_001);
 	}
@@ -487,9 +561,6 @@ class World {
 			const paneId = wrapper.getAttribute("data-pane-id") ?? "";
 			const shown = this.shownByPane(paneId);
 			const name = shown === null ? "?" : nameOf(shown);
-			const xterms = wrapper.querySelectorAll(".xterm");
-			if (xterms.length !== 1)
-				this.violate("xterm-count", `the pane showing ${name} holds ${xterms.length} xterms`);
 			if (pane.querySelector(".terminal-loading") !== null) {
 				this.violate(
 					"left-connecting",
@@ -581,6 +652,12 @@ function findPane(node: PaneNode, channelId: string): string | null {
 	if (node.type === "terminal") return node.channelId === channelId ? node.paneId : null;
 	if (node.type === "vacant") return null;
 	return findPane(node.first, channelId) ?? findPane(node.second, channelId);
+}
+
+function terminalLeaves(node: PaneNode): Array<{ channelId: string; paneId: string }> {
+	if (node.type === "terminal") return [{ channelId: node.channelId, paneId: node.paneId }];
+	if (node.type === "vacant") return [];
+	return [...terminalLeaves(node.first), ...terminalLeaves(node.second)];
 }
 
 function vacantIds(node: PaneNode | null | undefined): string[] {
@@ -676,10 +753,38 @@ function mountLayout(world: World): void {
 	mountRoot(Window);
 }
 
-/** Run one path: take `prefix`'s choices, then the first choice at each further step. */
+const MAX_STEPS = 200;
+
+/**
+ * Let the window run until a step's effects are over: promises, watchers and
+ * renders, until nothing it sends, writes, makes or lays out changes any more.
+ */
+async function quiesce(world: World): Promise<void> {
+	let before = "";
+	for (let round = 0; round < 20; round++) {
+		await settle();
+		const now = [
+			sent.length,
+			xterm.queue.length,
+			xterm.terminals.length,
+			JSON.stringify(world.ui.layout.layouts.value),
+			root.innerHTML.length,
+		].join("|");
+		if (now === before) return;
+		before = now;
+	}
+	throw new Error(`the window never settled, after: ${world.path.join(" → ")}`);
+}
+
+/**
+ * Run one path: take `prefix`'s choices, then the first choice at each further
+ * step. `labels` are the steps the path being replayed took: a replay that
+ * offers other choices is not deterministic, and says so.
+ */
 async function runPath(
 	scenario: Scenario,
 	prefix: number[],
+	labels: string[],
 ): Promise<{ taken: number[]; widths: number[]; world: World }> {
 	const world = new World(scenario);
 	forgetWindow();
@@ -702,32 +807,47 @@ async function runPath(
 	xterm.onWrite = (terminal, text) => world.onWrite(terminal, text);
 	xterm.answer = (text) => world.answerFor(text);
 	mountLayout(world);
-	await settle();
+	await quiesce(world);
 	world.observe();
 
 	const taken: number[] = [];
 	const widths: number[] = [];
 	let flushed = false;
-	for (let depth = 0; depth < 200; depth++) {
+	let quiet = false;
+	for (let depth = 0; depth < MAX_STEPS && !quiet; depth++) {
 		const choices = world.choices();
 		if (choices.length === 0) {
-			if (flushed) break;
+			if (flushed) {
+				quiet = true;
+				continue;
+			}
 			// Whatever the window still has on a timer runs: a request it sends then is a choice.
 			flushed = true;
 			vi.advanceTimersByTime(60_000);
-			await settle();
+			await quiesce(world);
 			world.observe();
 			continue;
 		}
 		flushed = false;
 		const pick = prefix[taken.length] ?? 0;
-		const choice = choices[pick] as Step;
+		const choice = choices[pick];
+		const expected = labels[taken.length];
+		if (choice === undefined || (expected !== undefined && choice.label !== expected)) {
+			throw new Error(
+				`the replay of "${scenario.name}" diverged at step ${taken.length}: expected ${expected ?? `choice ${pick}`}, offered ${choices.map((c) => c.label).join("; ")}`,
+			);
+		}
 		taken.push(pick);
 		widths.push(choices.length);
 		world.path.push(choice.label);
 		await choice.run(world);
-		await settle();
+		await quiesce(world);
 		world.observe();
+	}
+	if (!quiet) {
+		throw new Error(
+			`"${scenario.name}" still had choices after ${MAX_STEPS} steps: ${world.path.join(" → ")}`,
+		);
 	}
 	world.checkQuiet();
 	closePane();
@@ -745,10 +865,11 @@ interface Outcome {
 /** Every order of `scenario`'s steps and the hub's answers, depth first, up to its bound. */
 async function explore(scenario: Scenario): Promise<Outcome> {
 	let prefix: number[] = [];
+	let labels: string[] = [];
 	let paths = 0;
 	const violations: Violation[] = [];
 	for (;;) {
-		const { taken, widths, world } = await runPath(scenario, prefix);
+		const { taken, widths, world } = await runPath(scenario, prefix, labels);
 		paths++;
 		violations.push(...world.violations);
 		let depth = taken.length - 1;
@@ -756,88 +877,87 @@ async function explore(scenario: Scenario): Promise<Outcome> {
 		if (depth < 0) return { paths, exhausted: true, violations };
 		if (paths >= scenario.maxPaths) return { paths, exhausted: false, violations };
 		prefix = [...taken.slice(0, depth), (taken[depth] as number) + 1];
+		// The steps before the one that changes are replayed as they were taken.
+		labels = world.path.slice(0, depth);
 	}
 }
 
 // --- Gestures ---------------------------------------------------------------------
 
+/** The empty slot of the tab in front, if it has one. */
+function emptySlot(w: World): string | undefined {
+	const active = w.ui.layout.activeTab.value;
+	return vacantIds(active === null ? null : w.ui.layout.layouts.value[active.id])[0];
+}
+
 const gesture = {
 	split: (k: number): Step => ({
 		label: `user: splits new terminal ${k}'s pane`,
-		run: (w) => {
-			const at = w.whereIs(k);
-			if (at !== null) w.ui.onSplit(at, "vertical");
-		},
+		can: (w) => w.whereIs(k) !== null,
+		run: (w) => w.ui.onSplit(w.whereIs(k) as string, "vertical"),
 	}),
 	splitTerminal: (channelId: string): Step => ({
 		label: `user: splits ${nameOf(channelId)}'s pane`,
+		can: (w) => w.paneIdOf(channelId) !== null,
 		run: (w) => w.ui.onSplit(channelId, "vertical"),
 	}),
 	moveTerminalToNewTab: (channelId: string): Step => ({
 		label: `user: moves ${nameOf(channelId)}'s pane to a new tab`,
+		can: (w) => w.paneIdOf(channelId) !== null,
 		run: (w) => w.ui.onMoveToNewTab(channelId, w.ui.layout.tabs.value.length),
 	}),
 	fillEmptySlot: (channelId: string): Step => ({
 		label: `user: puts ${nameOf(channelId)} in the empty slot`,
-		run: (w) => {
-			const active = w.ui.layout.activeTab.value;
-			const vacant = vacantIds(active === null ? null : w.ui.layout.layouts.value[active.id])[0];
-			if (vacant !== undefined) w.ui.onFillVacant(vacant, channelId);
-		},
+		can: (w) => emptySlot(w) !== undefined,
+		run: (w) => w.ui.onFillVacant(emptySlot(w) as string, channelId),
 	}),
 	moveToNewTab: (k: number): Step => ({
 		label: `user: moves new terminal ${k}'s pane to a new tab`,
-		run: (w) => {
-			const at = w.whereIs(k);
-			if (at !== null) w.ui.onMoveToNewTab(at, w.ui.layout.tabs.value.length);
-		},
+		can: (w) => w.whereIs(k) !== null,
+		run: (w) => w.ui.onMoveToNewTab(w.whereIs(k) as string, w.ui.layout.tabs.value.length),
 	}),
 	dropBeside: (k: number, target: string, zone: DropZone): Step => ({
 		label: `user: drops new terminal ${k}'s pane ${zone} of ${nameOf(target)}'s`,
+		can: (w) => w.whereIs(k) !== null && w.paneIdOf(target) !== null,
 		run: (w) => {
-			const at = w.whereIs(k);
-			const onto = w.paneIdOf(target);
-			if (at !== null && onto !== null) w.ui.onDropPane(at, onto.paneId, onto.tabId, zone);
+			const onto = w.paneIdOf(target) as { paneId: string; tabId: string };
+			w.ui.onDropPane(w.whereIs(k) as string, onto.paneId, onto.tabId, zone);
 		},
 	}),
 	close: (k: number): Step => ({
 		label: `user: closes new terminal ${k}'s pane`,
-		run: (w) => {
-			const at = w.whereIs(k);
-			if (at !== null) w.ui.onClosePane(at);
-		},
+		can: (w) => w.whereIs(k) !== null,
+		run: (w) => w.ui.onClosePane(w.whereIs(k) as string),
 	}),
 	open: (channelId: string): Step => ({
 		label: `user: opens ${nameOf(channelId)} in the pane from the sidebar`,
 		run: (w) => w.ui.onSidebarOpenCurrentTab(channelId),
 	}),
 	openStarted: (k: number): Step => ({
-		label: `user: opens what new terminal ${k} started in the pane, once it is listed`,
-		run: (w) => {
-			const real = w.spawns.get(k)?.started.at(-1)?.real;
-			if (real !== undefined) w.ui.onSidebarOpenCurrentTab(real);
-		},
+		label: `user: opens what new terminal ${k} started in the pane, from the sidebar`,
+		can: (w) => w.spawns.get(k)?.started.at(-1) !== undefined,
+		run: (w) => w.ui.onSidebarOpenCurrentTab(w.spawns.get(k)?.started.at(-1)?.real as string),
 	}),
 	newTerminalInEmptySlot: (k: number): Step => ({
 		label: `user: starts new terminal ${k} in the empty slot`,
-		run: (w) => {
-			const active = w.ui.layout.activeTab.value;
-			const vacant = vacantIds(active === null ? null : w.ui.layout.layouts.value[active.id])[0];
-			if (vacant !== undefined) w.ui.onNewTerminalVacant(vacant, hostOf(k));
-		},
+		can: (w) => emptySlot(w) !== undefined,
+		run: (w) => w.ui.onNewTerminalVacant(emptySlot(w) as string, hostOf(k)),
 	}),
 	retry: (k: number): Step => ({
 		label: `user: clicks Retry on new terminal ${k}'s pane`,
-		run: async (w) => {
-			const at = w.paneIdOf(pendingId(k));
-			const wrapper = at === null ? null : root.querySelector(`[data-pane-id="${at.paneId}"]`);
-			const retry = [...(wrapper?.querySelectorAll("button") ?? [])].find((b) =>
-				["Retry", "Connect"].includes(b.textContent?.trim() ?? ""),
-			);
-			if (retry === undefined) return;
-			const record = w.spawns.get(k);
-			if (record !== undefined) record.retries++;
-			retry.click();
+		can: (w) => w.retryButtonOf(k) !== undefined,
+		run: (w) => {
+			const record = w.spawns.get(k) as SpawnRecord;
+			const before = w.spawnsSentFor(record);
+			record.retries++;
+			(w.retryButtonOf(k) as HTMLButtonElement).click();
+			// One Retry, one SPAWN, once the click has been handled.
+			w.afterStep.push(() => {
+				const sentNow = w.spawnsSentFor(record);
+				if (sentNow !== before + 1) {
+					w.violate("retry-lost", `Retry on P${k} sent ${sentNow - before} SPAWNs`, k);
+				}
+			});
 		},
 	}),
 };
@@ -924,14 +1044,14 @@ const SCENARIOS: Scenario[] = [
 		setUp: terminalTab(T, U),
 		steps: [gesture.moveTerminalToNewTab(T)],
 		timeouts: true,
-		maxPaths: 100,
+		maxPaths: 200,
 	},
 	{
 		name: "a pane switched to another terminal and back",
 		setUp: terminalTab(T),
 		steps: [gesture.open(U), gesture.open(T)],
 		timeouts: true,
-		maxPaths: 200,
+		maxPaths: 1000,
 	},
 	{
 		name: "Retry after a new terminal failed to start",

@@ -22,6 +22,7 @@ import {
 	nextTick,
 	provide,
 	type Ref,
+	toRaw,
 } from "vue";
 
 /** One terminal the pane made, as the stand-in for xterm keeps it. */
@@ -164,7 +165,8 @@ vi.mock("@xterm/xterm", () => ({
 		write(data: string | Uint8Array, callback?: () => void): void {
 			const text = typeof data === "string" ? data : new TextDecoder().decode(data);
 			if (text !== "") xterm.events.push(text);
-			xterm.onWrite?.(this as unknown as StandInTerminal, text);
+			// The pane holds its terminal in a ref: `this` may be its reactive proxy.
+			xterm.onWrite?.(toRaw(this) as unknown as StandInTerminal, text);
 			const parse = () => {
 				if (text.includes("\u0007")) for (const listener of this.bellListeners) listener();
 				const answer = xterm.answer?.(text) ?? null;

@@ -577,7 +577,7 @@ function knownDefect(kind: Kind, spawn: SpawnRecord | undefined): string | undef
 	if (kind === "xterm-answer-to-other-terminal") return "#966";
 	// #980: a pane remounted over its pending id loses its spawn: what the spawn
 	// starts is shown nowhere, and a failed one can no longer be retried.
-	const spawnKinds: Kind[] = ["spawn-lost", "pending-left", "spawn-doubled", "left-connecting"];
+	const spawnKinds: Kind[] = ["spawn-lost", "pending-left"];
 	if (spawn?.remounted === true && spawnKinds.includes(kind)) return "#980";
 	return undefined;
 }

@@ -201,13 +201,16 @@ interface Scenario {
 	steps: Step[];
 	/** The window's connection opens as a hub event, not at once. */
 	holdConnect?: boolean;
-	/** Time reaching the model's next deadline is an event: each request due by then times out. */
+	/**
+	 * Time reaching the model's next deadline is an event: each request due by
+	 * then times out. Some path must then take a late answer.
+	 */
 	timeouts?: boolean;
 	/** xterm parses writes on its timer, an event of its own. */
 	parseLater?: boolean;
 	/** Terminals that print once, as a hub event, and whether what they print asks xterm for the cursor. */
 	prints?: { channels: string[]; query: boolean };
-	/** Terminals that end, as a hub event. */
+	/** Terminals that end, as a hub event: some path must end each. */
 	ends?: string[];
 	maxPaths: number;
 	/**
@@ -964,15 +967,22 @@ async function runPath(
 	xterm.answer = (text) => world.answerFor(text);
 	xterm.onReset = (terminal) => world.lastMarker.delete(terminal);
 	mountLayout(world);
+	let failed = false;
 	try {
 		await quiesce(world);
 		world.observe();
 		return await walk(world, prefix, offered);
+	} catch (error) {
+		failed = true;
+		throw error;
 	} finally {
 		try {
 			closePane();
 			// What the closed window still had queued runs now, not in the next one.
 			await settle();
+		} catch (error) {
+			// The path's own failure, when it has one, is the one to report.
+			if (!failed) throw error;
 		} finally {
 			root.remove();
 			vi.clearAllTimers();
@@ -993,7 +1003,8 @@ async function walk(
 		const choices = world.choices();
 		if (choices.length === 0) {
 			if (flushed) break;
-			// Whatever the window still has on a timer runs: a request it sends then is a choice.
+			// Whatever the window still has on a timer runs: a request it sends then
+			// is a choice, stamped at the end of this jump, so the model does not time it.
 			flushed = true;
 			vi.advanceTimersByTime(60_000);
 			world.clock += 60_000;
@@ -1035,6 +1046,8 @@ interface Outcome {
 	exhausted: boolean;
 	/** Whether some path took every gesture of the scenario. */
 	everyGesture: boolean;
+	/** The hub events some path took that a scenario declares: "late", and "ends <name>" per terminal. */
+	hubEvents: Set<string>;
 	violations: Violation[];
 }
 
@@ -1048,12 +1061,23 @@ async function explore(
 ): Promise<Outcome> {
 	let prefix: number[] = [];
 	let offered: string[][] = [];
-	const outcome: Outcome = { paths: 0, exhausted: false, everyGesture: false, violations: [] };
+	const outcome: Outcome = {
+		paths: 0,
+		exhausted: false,
+		everyGesture: false,
+		hubEvents: new Set(),
+		violations: [],
+	};
 	for (;;) {
 		const { taken, offers, world } = await runPath(scenario, prefix, offered);
 		outcome.paths++;
 		outcome.violations.push(...world.violations);
 		if (world.stepsTaken === scenario.steps.length) outcome.everyGesture = true;
+		for (const label of world.path) {
+			if (label.endsWith(", after its time")) outcome.hubEvents.add("late");
+			const ended = /^hub: (\S+) ends$/.exec(label);
+			if (ended !== null) outcome.hubEvents.add(`ends ${ended[1]}`);
+		}
 		let depth = taken.length - 1;
 		while (depth >= 0 && (taken[depth] as number) + 1 >= (offers[depth] as string[]).length)
 			depth--;
@@ -1268,13 +1292,22 @@ const SCENARIOS: Scenario[] = [
 
 /**
  * What fails a scenario, a line each: orders left past its bound, no path that
- * takes every gesture, each violation no open defect covers, and each kind of
- * an open defect it reaches unmarked, or no longer reaches marked.
+ * takes every gesture, no path that takes a hub event it declares (a late
+ * answer with `timeouts`, each terminal of `ends` ending), each violation no
+ * open defect covers, and each kind of an open defect it reaches unmarked, or
+ * no longer reaches marked.
  */
 function verdict(scenario: Scenario, outcome: Outcome): string[] {
 	const lines: string[] = [];
 	if (!outcome.exhausted) lines.push(`more than ${scenario.maxPaths} orders`);
 	if (!outcome.everyGesture) lines.push("no path takes every gesture");
+	if (scenario.timeouts === true && !outcome.hubEvents.has("late")) {
+		lines.push("no path takes a late answer");
+	}
+	for (const channelId of scenario.ends ?? []) {
+		if (!outcome.hubEvents.has(`ends ${nameOf(channelId)}`))
+			lines.push(`no path ends ${nameOf(channelId)}`);
+	}
 	const seen = new Set<string>();
 	for (const v of outcome.violations) {
 		const key = `${v.kind}: ${v.detail}`;
@@ -1523,6 +1556,30 @@ const CONTROLS: Control[] = [
 			maxPaths: 10,
 		},
 		reports: [/^spawn-failure-on-other-terminal: spawn 2 failed shown over P1/],
+	},
+	{
+		check: "a late answer taken",
+		scenario: {
+			name: "late answers never offered",
+			setUp: newTerminalTab(1),
+			steps: [],
+			timeouts: true,
+			break: { withhold: /after its time$/ },
+			maxPaths: 20,
+		},
+		reports: [/^no path takes a late answer$/],
+	},
+	{
+		check: "a terminal of `ends` ending",
+		scenario: {
+			name: "U's end never offered",
+			setUp: terminalTab(U),
+			steps: [],
+			ends: [U],
+			break: { withhold: / ends$/ },
+			maxPaths: 20,
+		},
+		reports: [/^no path ends U$/],
 	},
 	{
 		check: "left-connecting",

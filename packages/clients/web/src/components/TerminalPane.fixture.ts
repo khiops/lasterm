@@ -75,6 +75,8 @@ const xterm = vi.hoisted(() => ({
 	fit: { cols: 80, rows: 24 },
 	/** Told of every write a terminal takes, as it takes it. */
 	onWrite: null as ((terminal: StandInTerminal, text: string) => void) | null,
+	/** Told of every reset of a terminal, which clears its screen. */
+	onReset: null as ((terminal: StandInTerminal) => void) | null,
 	/**
 	 * What xterm answers by itself to a write it parses, such as a cursor-position
 	 * query: handed on as typed input. None by default.
@@ -161,6 +163,7 @@ vi.mock("@xterm/xterm", () => ({
 		}
 		reset(): void {
 			xterm.events.push("<reset>");
+			xterm.onReset?.(toRaw(this) as unknown as StandInTerminal);
 		}
 		write(data: string | Uint8Array, callback?: () => void): void {
 			const text = typeof data === "string" ? data : new TextDecoder().decode(data);
@@ -541,6 +544,7 @@ export function forgetWindow(): void {
 	xterm.terminals.length = 0;
 	xterm.fit = { cols: 80, rows: 24 };
 	xterm.onWrite = null;
+	xterm.onReset = null;
 	xterm.answer = null;
 }
 

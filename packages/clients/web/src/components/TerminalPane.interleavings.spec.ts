@@ -4,39 +4,23 @@
  * The window is the real `PaneLayout` over a real `useLayout()`, every tab
  * mounted under `v-show` and wired as `App.vue` wires it, so a split, a move or
  * a filled empty slot remounts `TerminalPane` as the app does. The hub is a
- * model: it holds every SPAWN and ATTACH the window sends and answers them in
- * any order, or lets them time out; it also prints and ends terminals. Each
- * scenario is a short sequence of user gestures, and every interleaving of
- * those gestures with the hub's answers is run, each from a fresh window,
- * depth first; a scenario with more orders than its bound fails.
+ * model (`World`): it holds every SPAWN and ATTACH the window sends and answers
+ * them in any order; it prints and ends terminals; and, in a scenario with
+ * `timeouts`, time can reach the window's next deadline, after which the hub
+ * may still answer that request once. A terminal may print once the window has
+ * asked for it, before its attach is answered: the pane drops that output, as
+ * the hub's order allows (#931). Each scenario is a short sequence of user
+ * gestures; every interleaving of them with the hub's events is run, each from
+ * a fresh window, depth first, within the scenario's bound.
  *
- * It checks, as each thing happens and once the window is quiet:
- * 1. A binding has exactly one xterm. After every step, each terminal leaf of
- *    the layout has one pane holding one xterm. As each input goes out, what
- *    an xterm answers by itself to a terminal's output goes to that terminal.
- * 2. No pane is left spawning forever: once the window is quiet, no pane says
- *    "Connecting…".
- * 3. A reply is applied only to the pane it answers. As each write is taken, a
- *    snapshot or output goes only into a pane showing its terminal; as each
- *    spawn is announced, its answer replaces only the pending id it was sent
- *    for. Once quiet, a failed spawn shows only over its own pending id, and a
- *    pane shows the screen of the terminal it shows. A snapshot is matched to
- *    its terminal, not to its request: the UI's ATTACH carries no request id,
- *    so two ATTACHes of one terminal are not told apart.
- * 4. No spawn is lost or doubled across remounts. After the step that answers
- *    a spawn, its terminal is where its pending id was, unless the window had
- *    given up on it. After each Retry, exactly one SPAWN went out. Once quiet,
- *    a pending id had one SPAWN plus one per Retry, and one still in the
- *    layout shows its failure.
- *
- * The model hub may answer a request after the window gave up on it. It lets a
- * terminal print once the window has asked for it, before its attach is
- * answered: the pane drops that output, as the hub's order allows (#931).
+ * What it rejects is `Kind`: each kind is raised in one place, which its
+ * comment names.
  *
  * Open defects it reaches are named by `knownDefect` and marked on each
  * scenario that reaches them (`stillReaches`): their violations are kept out of
- * its verdict, and the scenario fails once it no longer reaches one. Whoever
- * fixes the defect drops the mark.
+ * its verdict, and the scenario fails once it no longer reaches one. Until the
+ * defect is fixed, a marked scenario cannot tell another cause of the same
+ * violations from it. Whoever fixes the defect drops the mark.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -63,6 +47,7 @@ import {
 	freshWindow,
 	HOST,
 	hear,
+	listening,
 	mountRoot,
 	root,
 	S,
@@ -116,17 +101,48 @@ interface Gestures {
 	openPendingTab(hostId: string): void;
 }
 
+/**
+ * What the harness rejects, and where:
+ * - `xterm-count` (`checkPanes`, after every step and once quiet): a terminal
+ *   leaf of the layout whose pane is missing or holds other than one xterm.
+ * - `xterm-answer-to-other-terminal` (`observe`, after every step): an INPUT
+ *   carrying xterm's answer to one terminal's query, sent to another.
+ * - `written-into-other-pane` (`onWrite`, as the write is taken): a snapshot or
+ *   output written into a pane whose leaf shows another terminal. A snapshot is
+ *   matched to its terminal, not to its ATTACH: the UI's ATTACH carries no
+ *   request id.
+ * - `spawn-answer-to-other-pane` (`onChannelSpawned`, as it is announced): a
+ *   spawn's terminal announced for another id than its SPAWN's pending id.
+ * - `spawn-lost` (`answerSpawn`, after the step that delivers a SPAWN_OK the
+ *   window still waited for): its terminal is not at the pane and tab where its
+ *   pending id was, or the pending id is still in the layout.
+ * - `retry-lost` (`gesture.retry`, after its step): a Retry after which other
+ *   than one SPAWN went out.
+ * - `left-connecting` (`checkQuiet`): a pane saying "Connecting…".
+ * - `spawn-failure-on-other-terminal` (`checkQuiet`): a spawn's failure shown
+ *   by a pane whose leaf does not show that spawn's pending id.
+ * - `shows-other-screen` (`checkQuiet`): a settled pane over a live terminal
+ *   whose last marked write since its last reset is another terminal's, or
+ *   which has none although its terminal is not one a spawn started.
+ * - `spawn-doubled` (`checkQuiet`): more SPAWNs for a pending id than one plus
+ *   one per Retry.
+ * - `spawn-missing` (`checkQuiet`): fewer, while the pending id or a terminal
+ *   its spawn started is in the layout.
+ * - `pending-left` (`checkQuiet`): a pending id in the layout whose pane shows
+ *   no failure.
+ */
 type Kind =
 	| "xterm-count"
 	| "xterm-answer-to-other-terminal"
-	| "left-connecting"
 	| "written-into-other-pane"
 	| "spawn-answer-to-other-pane"
+	| "spawn-lost"
+	| "retry-lost"
+	| "left-connecting"
 	| "spawn-failure-on-other-terminal"
 	| "shows-other-screen"
 	| "spawn-doubled"
-	| "retry-lost"
-	| "spawn-lost"
+	| "spawn-missing"
 	| "pending-left";
 
 interface Violation {
@@ -167,7 +183,7 @@ interface Scenario {
 	steps: Step[];
 	/** The window's connection opens as a hub event, not at once. */
 	holdConnect?: boolean;
-	/** Ten seconds passing is a hub event: unanswered requests time out. */
+	/** Time reaching the window's next deadline is an event: that request times out. */
 	timeouts?: boolean;
 	/** xterm parses writes on its timer, an event of its own. */
 	parseLater?: boolean;
@@ -183,6 +199,11 @@ interface Scenario {
 	 */
 	stillReaches?: string[];
 }
+
+/** How long the window waits for an ATTACH's answer: `useTerminal.ts`'s attach deadline. */
+const ATTACH_DEADLINE_MS = 10_000;
+/** How long it waits for a SPAWN's: `SPAWN_DEADLINE_MS` in `stores/channels.ts`. */
+const SPAWN_DEADLINE_MS = 15_000;
 
 const MARKER = /\[([A-Z][0-9]*)@(\d+)\]|<([A-Z][0-9]*)#(\d+)>/g;
 const QUERY = "\u001b[6n";
@@ -201,8 +222,11 @@ class World {
 	printed = new Set<string>();
 	/** Each xterm answer to a query, and the terminal whose output asked it. */
 	asks = new Map<string, string>();
-	/** The terminal of the last marker each xterm took. */
+	/** The terminal of the last marker each xterm took since its last reset. */
 	lastMarker = new Map<StandInTerminal, string>();
+	/** The window's clock, as the fake timers keep it, and when each request was sent. */
+	clock = 0;
+	sentAt = new Map<number, number>();
 	connected = true;
 	openConnection: () => void = () => {};
 	stepsTaken = 0;
@@ -358,6 +382,11 @@ class World {
 
 	/** After each step: its queued checks, the panes, instances over a pending id, input sent. */
 	observe(): void {
+		sent.forEach((frame, i) => {
+			if ((frame.type === "SPAWN" || frame.type === "ATTACH") && !this.sentAt.has(i)) {
+				this.sentAt.set(i, this.clock);
+			}
+		});
 		for (const check of this.afterStep.splice(0)) check();
 		this.checkPanes();
 		for (const record of this.spawns.values()) {
@@ -422,7 +451,7 @@ class World {
 			this.scenario.timeouts === true &&
 			open.some(({ frame }) => frame.type === "SPAWN" || frame.type === "ATTACH")
 		) {
-			next.push({ label: "time: 10 s pass", run: (w) => w.timeout() });
+			next.push({ label: "time: the window's next deadline passes", run: (w) => w.timeout() });
 		}
 		// A request the window gave up on can still be answered, once, after its time.
 		for (const i of this.timedOut) {
@@ -432,6 +461,10 @@ class World {
 				next.push({
 					label: `hub: spawn ${k} (#${i}) starts, after its time`,
 					run: (w) => w.answerSpawn(i, true),
+				});
+				next.push({
+					label: `hub: spawn ${k} (#${i}) fails, after its time`,
+					run: (w) => w.answerSpawn(i, false),
 				});
 			} else {
 				const name = nameOf(String(frame.channelId));
@@ -466,19 +499,20 @@ class World {
 		if (ok) {
 			const real = realId(record.k, attempt);
 			this.live.add(real);
-			const owed = !late && this.inLayout(record.pending);
-			record.started.push({ real, inLayout: owed });
+			const was = late ? null : this.paneIdOf(record.pending);
+			record.started.push({ real, inLayout: was !== null });
 			hear({ type: "SPAWN_OK", channelId: real, requestId: frame.requestId });
 			grantWriteLock(real);
-			// Once the answer is taken: its terminal is where its pending id was.
-			if (owed) {
+			// Once the answer is taken: its terminal is at the pane and tab its pending id was.
+			if (was !== null) {
 				this.afterStep.push(() => {
-					const placed = this.inLayout(real);
+					const now = this.paneIdOf(real);
+					const placed = now !== null && now.paneId === was.paneId && now.tabId === was.tabId;
 					const left = this.inLayout(record.pending);
 					if (!placed || left) {
 						this.violate(
 							"spawn-lost",
-							`P${record.k}'s spawn started ${nameOf(real)}, which ${placed ? "is" : "is not"} in the layout, with P${record.k} ${left ? "still there" : "gone"}`,
+							`P${record.k}'s spawn started ${nameOf(real)}, which ${placed ? "is" : "is not"} where P${record.k} was, with P${record.k} ${left ? "still there" : "gone"}`,
 							record.k,
 						);
 					}
@@ -525,14 +559,46 @@ class World {
 		}
 	}
 
+	deadlineOf(i: number): number {
+		const wait = (sent[i] as Frame).type === "SPAWN" ? SPAWN_DEADLINE_MS : ATTACH_DEADLINE_MS;
+		return (this.sentAt.get(i) ?? 0) + wait;
+	}
+
+	openRequests(): number[] {
+		return sent
+			.map((frame, i) => ({ frame, i }))
+			.filter(
+				({ frame, i }) => (frame.type === "SPAWN" || frame.type === "ATTACH") && !this.done.has(i),
+			)
+			.map(({ i }) => i);
+	}
+
+	/** Time reaches the window's next deadline: every request due by then times out. */
 	timeout(): void {
-		sent.forEach((frame, i) => {
-			if ((frame.type === "SPAWN" || frame.type === "ATTACH") && !this.done.has(i)) {
+		const next = Math.min(...this.openRequests().map((i) => this.deadlineOf(i)));
+		vi.advanceTimersByTime(next - this.clock + 1);
+		this.clock = next + 1;
+		for (const i of this.openRequests()) {
+			if (this.deadlineOf(i) < this.clock) {
 				this.done.add(i);
 				this.timedOut.add(i);
 			}
-		});
-		vi.advanceTimersByTime(10_001);
+		}
+		// The window must have stopped waiting for what the model says it gave up
+		// on, and only that: a deadline of the window's that drifted from the
+		// model's would otherwise turn late answers into timely ones in silence.
+		const awaited = this.openRequests().filter((i) => (sent[i] as Frame).type === "SPAWN").length;
+		if (listening("SPAWN_OK") !== awaited) {
+			throw new Error(
+				`the window waits for ${listening("SPAWN_OK")} SPAWNs, the model for ${awaited}: its spawn deadline is not ${SPAWN_DEADLINE_MS} ms`,
+			);
+		}
+		const attaches = this.openRequests().filter((i) => (sent[i] as Frame).type === "ATTACH");
+		if (attaches.length === 0 && listening("ATTACH_OK") > 0) {
+			throw new Error(
+				`the window still waits for an ATTACH: its attach deadline is not ${ATTACH_DEADLINE_MS} ms`,
+			);
+		}
 	}
 
 	print(channelId: string): void {
@@ -584,14 +650,15 @@ class World {
 				wrapper.contains(t.element),
 			);
 			const last = terminal === undefined ? undefined : this.lastMarker.get(terminal);
-			if (
-				settled &&
-				shown !== null &&
-				this.live.has(shown) &&
-				last !== undefined &&
-				idOf(last) !== shown
-			) {
-				this.violate("shows-other-screen", `the pane showing ${name} shows ${last}'s screen`);
+			if (settled && shown !== null && this.live.has(shown)) {
+				// A spawned terminal is shown from its first output, with no snapshot.
+				const spawned = this.kOf(shown) !== undefined;
+				if (last === undefined ? !spawned : idOf(last) !== shown) {
+					this.violate(
+						"shows-other-screen",
+						`the pane showing ${name} shows ${last === undefined ? "no" : `${last}'s`} screen`,
+					);
+				}
 			}
 		}
 		for (const record of this.spawns.values()) {
@@ -600,6 +667,15 @@ class World {
 				this.violate(
 					"spawn-doubled",
 					`${spawnsSent} SPAWNs for P${record.k}, ${record.retries} retries`,
+					record.k,
+				);
+			}
+			const due =
+				this.inLayout(record.pending) || record.started.some((st) => this.inLayout(st.real));
+			if (due && spawnsSent < 1 + record.retries) {
+				this.violate(
+					"spawn-missing",
+					`${spawnsSent} SPAWNs for P${record.k}, ${record.retries} retries, while it is in the layout`,
 					record.k,
 				);
 			}
@@ -756,8 +832,9 @@ function mountLayout(world: World): void {
 const MAX_STEPS = 200;
 
 /**
- * Let the window run until a step's effects are over: promises, watchers and
- * renders, until nothing it sends, writes, makes or lays out changes any more.
+ * Let the window run until two passes in a row leave unchanged what this
+ * measures: the frames it sent, the writes its xterms took, the xterms it made,
+ * its layout and its page.
  */
 async function quiesce(world: World): Promise<void> {
 	let before = "";
@@ -766,9 +843,10 @@ async function quiesce(world: World): Promise<void> {
 		const now = [
 			sent.length,
 			xterm.queue.length,
+			xterm.events.length,
 			xterm.terminals.length,
 			JSON.stringify(world.ui.layout.layouts.value),
-			root.innerHTML.length,
+			root.innerHTML,
 		].join("|");
 		if (now === before) return;
 		before = now;
@@ -778,14 +856,14 @@ async function quiesce(world: World): Promise<void> {
 
 /**
  * Run one path: take `prefix`'s choices, then the first choice at each further
- * step. `labels` are the steps the path being replayed took: a replay that
- * offers other choices is not deterministic, and says so.
+ * step. `offered` are the choices the path being replayed was offered at each
+ * of those steps: a replay offered others is not deterministic, and says so.
  */
 async function runPath(
 	scenario: Scenario,
 	prefix: number[],
-	labels: string[],
-): Promise<{ taken: number[]; widths: number[]; world: World }> {
+	offered: string[][],
+): Promise<{ taken: number[]; offers: string[][]; world: World }> {
 	const world = new World(scenario);
 	forgetWindow();
 	freshWindow();
@@ -806,12 +884,27 @@ async function runPath(
 	xterm.parse = scenario.parseLater === true ? "later" : "now";
 	xterm.onWrite = (terminal, text) => world.onWrite(terminal, text);
 	xterm.answer = (text) => world.answerFor(text);
+	xterm.onReset = (terminal) => world.lastMarker.delete(terminal);
 	mountLayout(world);
-	await quiesce(world);
-	world.observe();
+	try {
+		await quiesce(world);
+		world.observe();
+		return await walk(world, prefix, offered);
+	} finally {
+		closePane();
+		root.remove();
+		vi.clearAllTimers();
+	}
+}
 
+async function walk(
+	world: World,
+	prefix: number[],
+	offered: string[][],
+): Promise<{ taken: number[]; offers: string[][]; world: World }> {
+	const scenario = world.scenario;
 	const taken: number[] = [];
-	const widths: number[] = [];
+	const offers: string[][] = [];
 	let flushed = false;
 	let quiet = false;
 	for (let depth = 0; depth < MAX_STEPS && !quiet; depth++) {
@@ -824,6 +917,7 @@ async function runPath(
 			// Whatever the window still has on a timer runs: a request it sends then is a choice.
 			flushed = true;
 			vi.advanceTimersByTime(60_000);
+			world.clock += 60_000;
 			await quiesce(world);
 			world.observe();
 			continue;
@@ -831,14 +925,18 @@ async function runPath(
 		flushed = false;
 		const pick = prefix[taken.length] ?? 0;
 		const choice = choices[pick];
-		const expected = labels[taken.length];
-		if (choice === undefined || (expected !== undefined && choice.label !== expected)) {
+		const labels = choices.map((c) => c.label);
+		const expected = offered[taken.length];
+		if (
+			choice === undefined ||
+			(expected !== undefined && expected.join("\n") !== labels.join("\n"))
+		) {
 			throw new Error(
-				`the replay of "${scenario.name}" diverged at step ${taken.length}: expected ${expected ?? `choice ${pick}`}, offered ${choices.map((c) => c.label).join("; ")}`,
+				`the replay of "${scenario.name}" diverged at step ${taken.length}: offered ${labels.join("; ")}, where it was offered ${expected?.join("; ") ?? "nothing"}, choice ${pick}`,
 			);
 		}
 		taken.push(pick);
-		widths.push(choices.length);
+		offers.push(labels);
 		world.path.push(choice.label);
 		await choice.run(world);
 		await quiesce(world);
@@ -850,35 +948,37 @@ async function runPath(
 		);
 	}
 	world.checkQuiet();
-	closePane();
-	root.remove();
-	vi.clearAllTimers();
-	return { taken, widths, world };
+	return { taken, offers, world };
 }
 
 interface Outcome {
 	paths: number;
 	exhausted: boolean;
+	/** Whether some path took every gesture of the scenario. */
+	everyGesture: boolean;
 	violations: Violation[];
 }
 
 /** Every order of `scenario`'s steps and the hub's answers, depth first, up to its bound. */
 async function explore(scenario: Scenario): Promise<Outcome> {
 	let prefix: number[] = [];
-	let labels: string[] = [];
+	let offered: string[][] = [];
 	let paths = 0;
+	let everyGesture = false;
 	const violations: Violation[] = [];
 	for (;;) {
-		const { taken, widths, world } = await runPath(scenario, prefix, labels);
+		const { taken, offers, world } = await runPath(scenario, prefix, offered);
 		paths++;
 		violations.push(...world.violations);
+		if (world.stepsTaken === scenario.steps.length) everyGesture = true;
 		let depth = taken.length - 1;
-		while (depth >= 0 && (taken[depth] as number) + 1 >= (widths[depth] as number)) depth--;
-		if (depth < 0) return { paths, exhausted: true, violations };
-		if (paths >= scenario.maxPaths) return { paths, exhausted: false, violations };
+		while (depth >= 0 && (taken[depth] as number) + 1 >= (offers[depth] as string[]).length)
+			depth--;
+		if (depth < 0) return { paths, exhausted: true, everyGesture, violations };
+		if (paths >= scenario.maxPaths) return { paths, exhausted: false, everyGesture, violations };
 		prefix = [...taken.slice(0, depth), (taken[depth] as number) + 1];
-		// The steps before the one that changes are replayed as they were taken.
-		labels = world.path.slice(0, depth);
+		// The replay is offered, up to the step that changes, what this path was.
+		offered = offers.slice(0, depth + 1);
 	}
 }
 
@@ -1058,7 +1158,7 @@ const SCENARIOS: Scenario[] = [
 		setUp: newTerminalTab(1),
 		steps: [gesture.retry(1)],
 		timeouts: true,
-		maxPaths: 30,
+		maxPaths: 100,
 	},
 	{
 		name: "a terminal's query answered by xterm after the pane switched",
@@ -1096,6 +1196,7 @@ describe("TerminalPane across event orders (#984)", () => {
 		it(`${scenario.name}: every order keeps the invariants`, async () => {
 			const outcome = await explore(scenario);
 			expect(outcome.exhausted, `more than ${scenario.maxPaths} orders`).toBe(true);
+			expect(outcome.everyGesture, "a path that takes every gesture").toBe(true);
 			const unknown = outcome.violations.filter((v) => v.known === undefined);
 			expect(unknown, report(unknown)).toEqual([]);
 			const reached = [...new Set(outcome.violations.map((v) => v.known))].sort();

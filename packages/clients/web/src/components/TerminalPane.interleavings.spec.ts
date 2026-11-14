@@ -5,9 +5,10 @@
  * mounted under `v-show` and wired as `App.vue` wires it, so a split, a move or
  * a filled empty slot remounts `TerminalPane` as the app does. The hub is a
  * model: it holds every SPAWN and ATTACH the window sends and answers them in
- * any order, or lets them time out; it also prints. Each scenario is a short
- * sequence of user gestures, and every interleaving of those gestures with the
- * hub's answers is run, each from a fresh window, up to the scenario's bound.
+ * any order, or lets them time out; it also prints and ends terminals. Each
+ * scenario is a short sequence of user gestures, and every interleaving of
+ * those gestures with the hub's answers is run, each from a fresh window,
+ * depth first; a scenario with more orders than its bound fails.
  *
  * After every step and once the window is quiet, it checks:
  * 1. A binding has exactly one xterm: each pane holds one, and what an xterm
@@ -22,9 +23,10 @@
  *    one per Retry; a spawn completing while its pending id is in the layout
  *    leaves its terminal in that place.
  *
- * Open defects it reaches are listed in `KNOWN`: their violations are kept out
- * of each scenario's verdict, and a test per defect says it is still reached.
- * Once a defect is fixed, that test fails: drop it and its entry.
+ * Open defects it reaches are named by `knownDefect` and marked on each
+ * scenario that reaches them (`stillReaches`): their violations are kept out of
+ * its verdict, and the scenario fails once it no longer reaches one. Whoever
+ * fixes the defect drops the mark.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -136,9 +138,8 @@ interface SpawnRecord {
 	remounted: boolean;
 	/** Pane instances seen over the pending id, by their xterm. */
 	seen: Set<StandInTerminal>;
-	/** Each answered SPAWN: the terminal it started, and whether its pending id was in a layout then. */
+	/** Each SPAWN that started a terminal: that terminal, and whether its pending id was in a layout then. */
 	started: Array<{ real: string; inLayout: boolean }>;
-	answered: boolean;
 }
 
 interface Step {
@@ -258,7 +259,6 @@ class World {
 			remounted: false,
 			seen: new Set(),
 			started: [],
-			answered: false,
 		});
 		return pendingId(k);
 	}
@@ -398,7 +398,6 @@ class World {
 			this.live.add(real);
 			const owed = this.inLayout(record.pending);
 			record.started.push({ real, inLayout: owed });
-			record.answered = true;
 			hear({ type: "SPAWN_OK", channelId: real, requestId: frame.requestId });
 			grantWriteLock(real);
 			// Once the answer is taken: its terminal is where its pending id was.
@@ -416,7 +415,6 @@ class World {
 				});
 			}
 		} else {
-			record.answered = true;
 			hear({
 				type: "ERROR",
 				code: "SPAWN_FAILED",
@@ -460,9 +458,6 @@ class World {
 		sent.forEach((frame, i) => {
 			if (frame.type === "SPAWN" || frame.type === "ATTACH") this.done.add(i);
 		});
-		for (const record of this.spawns.values()) {
-			if (sent.some((m) => m.type === "SPAWN" && m.hostId === record.host)) record.answered = true;
-		}
 		vi.advanceTimersByTime(10_001);
 	}
 
@@ -620,6 +615,7 @@ function mountLayout(world: World): void {
 					channels.selectChannel(real);
 					if (channels.activeHostId) void channels.fetchChannels(channels.activeHostId);
 				},
+				// App also deletes an ended terminal whose pane closes; the scenarios close live ones.
 				onClosePane: (channelId) => layout.closePane(channelId),
 				onFillVacant: (vacantId, channelId) => {
 					layout.fillVacant(vacantId, channelId);

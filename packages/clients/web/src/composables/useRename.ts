@@ -17,7 +17,7 @@ export function useRename(options: UseRenameOptions) {
 		originalLabel = currentLabel;
 		editValue.value = currentLabel;
 		nextTick(() => {
-			// select() alone does not give the field the keyboard in every engine.
+			// select() is not required to move the focus, and happy-dom's does not.
 			editInput.value?.focus();
 			editInput.value?.select();
 		});

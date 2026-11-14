@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.17.1](https://github.com/khiops/lasterm/compare/v0.17.0...v0.17.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **agent:** a snapshot reaches the hub after the output it shows, before what follows ([#931](https://github.com/khiops/lasterm/issues/931)) ([#961](https://github.com/khiops/lasterm/issues/961)) ([13082fd](https://github.com/khiops/lasterm/commit/13082fdb61224c06989c0ea117015f190cc4df68))
+* **desktop:** declare the desktop crate's own cargo workspace ([#939](https://github.com/khiops/lasterm/issues/939)) ([#947](https://github.com/khiops/lasterm/issues/947)) ([7d1127d](https://github.com/khiops/lasterm/commit/7d1127d9233f69ea291efe6e378572ebea94f817))
+* **hub:** bring an ended terminal back from its pane with its launch profile ([#953](https://github.com/khiops/lasterm/issues/953)) ([9dd21ae](https://github.com/khiops/lasterm/commit/9dd21ae2ac461e819b0db8a13942f65d626be56b)), closes [#858](https://github.com/khiops/lasterm/issues/858)
+* **hub:** report an elevated spawn's first failure other than a missing password ([#974](https://github.com/khiops/lasterm/issues/974)) ([68e156a](https://github.com/khiops/lasterm/commit/68e156a562cd2e2be10762e217b827569cac0c4f)), closes [#958](https://github.com/khiops/lasterm/issues/958)
+* **hub:** sweep the sessions a hub no longer holds at start, and list open ones ([#911](https://github.com/khiops/lasterm/issues/911)) ([#960](https://github.com/khiops/lasterm/issues/960)) ([98dd942](https://github.com/khiops/lasterm/commit/98dd9424321b1a6324199c1505de8ed469735b33))
+* **web:** a pane owes its spawn only while it shows the pending id ([#976](https://github.com/khiops/lasterm/issues/976)) ([bed6b4b](https://github.com/khiops/lasterm/commit/bed6b4b9a30383f3079547fef190d956a835be34)), closes [#971](https://github.com/khiops/lasterm/issues/971)
+* **web:** attach a terminal a pane spawned when it is given it back ([#969](https://github.com/khiops/lasterm/issues/969)) ([cb3ae01](https://github.com/khiops/lasterm/commit/cb3ae0171e5a2eb67134b23548aa5c483b06f282)), closes [#965](https://github.com/khiops/lasterm/issues/965)
+* **web:** take only the attach answers for the terminal a pane shows ([#963](https://github.com/khiops/lasterm/issues/963)) ([b1f2bd0](https://github.com/khiops/lasterm/commit/b1f2bd0ac7b4598eda8baa3c2c3a603de23aca69)), closes [#929](https://github.com/khiops/lasterm/issues/929) [#930](https://github.com/khiops/lasterm/issues/930) [#942](https://github.com/khiops/lasterm/issues/942)
+
+
+### Tests
+
+* **hub:** bound only the dead worker's stop in the checkpoint fallback specs ([#979](https://github.com/khiops/lasterm/issues/979)) ([d85ee9f](https://github.com/khiops/lasterm/commit/d85ee9f44bd6e0deb5bbb78b4f5a0c433a0d1d4b)), closes [#978](https://github.com/khiops/lasterm/issues/978)
+* **hub:** build ssh2 ED25519 fixture keys that ssh2 can read back ([#982](https://github.com/khiops/lasterm/issues/982)) ([e5b09d2](https://github.com/khiops/lasterm/commit/e5b09d217685e6ef90d7c0b4368b94dded7bab56)), closes [#973](https://github.com/khiops/lasterm/issues/973)
+* **hub:** port four [#910](https://github.com/khiops/lasterm/issues/910) checks, and test a current daemon by default ([#923](https://github.com/khiops/lasterm/issues/923)) ([#951](https://github.com/khiops/lasterm/issues/951)) ([14e08a9](https://github.com/khiops/lasterm/commit/14e08a9ec97a034bbe79d98c83c0760c30b5d629))
+* run the code instead of reading its source in tests, lints for code's shape ([#936](https://github.com/khiops/lasterm/issues/936)) ([#943](https://github.com/khiops/lasterm/issues/943)) ([a1db426](https://github.com/khiops/lasterm/commit/a1db4263586adbe2152f5d71567be34301e460d0))
+* **web:** check TerminalPane by mounting it, not by reading its source ([#936](https://github.com/khiops/lasterm/issues/936)) ([#945](https://github.com/khiops/lasterm/issues/945)) ([c9e2dab](https://github.com/khiops/lasterm/commit/c9e2dab8e05855ce81aaac63812451fc7f657669))
+* **web:** check the window by mounting it and driving it as a user does ([#936](https://github.com/khiops/lasterm/issues/936)) ([#946](https://github.com/khiops/lasterm/issues/946)) ([6c93979](https://github.com/khiops/lasterm/commit/6c93979e853f341732572e3aaf2175ebca93f48b))
+* **web:** explore the pane lifecycle across event orders ([#985](https://github.com/khiops/lasterm/issues/985)) ([d9a7ef1](https://github.com/khiops/lasterm/commit/d9a7ef139faf748b36996402c6a1fd6c143fef92)), closes [#984](https://github.com/khiops/lasterm/issues/984)
+* **web:** rest the pointer away before browser specs read what it is not on ([#948](https://github.com/khiops/lasterm/issues/948)) ([#950](https://github.com/khiops/lasterm/issues/950)) ([5c1660f](https://github.com/khiops/lasterm/commit/5c1660f9f7299cef780848938409f66956b4b4fb))
+
+
+### Documentation
+
+* **root:** Store news for a pane given back the terminal it opened ([#965](https://github.com/khiops/lasterm/issues/965)) ([#970](https://github.com/khiops/lasterm/issues/970)) ([d7c7b2f](https://github.com/khiops/lasterm/commit/d7c7b2f32785b2865f3977bc4640efd3ebf20397))
+* **root:** Store news for a pane's attach answers ([#929](https://github.com/khiops/lasterm/issues/929), [#930](https://github.com/khiops/lasterm/issues/930), [#942](https://github.com/khiops/lasterm/issues/942)) ([#964](https://github.com/khiops/lasterm/issues/964)) ([bea3684](https://github.com/khiops/lasterm/commit/bea3684299496a86d37a3d093ca3e689ccc30676))
+* **root:** Store news for a reattached terminal shown once ([#931](https://github.com/khiops/lasterm/issues/931)) ([#962](https://github.com/khiops/lasterm/issues/962)) ([51e3f48](https://github.com/khiops/lasterm/commit/51e3f488beb5fcd8072336e4f91b5b3d74f150fb))
+* **root:** Store news for a spawn that completes after its pane moved on ([#971](https://github.com/khiops/lasterm/issues/971)) ([#977](https://github.com/khiops/lasterm/issues/977)) ([7993117](https://github.com/khiops/lasterm/commit/799311765cb56b01d6e8320df54441921f87435a))
+* **root:** Store news for an elevated terminal's start failure ([#958](https://github.com/khiops/lasterm/issues/958)) ([#975](https://github.com/khiops/lasterm/issues/975)) ([d9b6ecf](https://github.com/khiops/lasterm/commit/d9b6ecf888a527b6c6fd3d519aed08b4703ca918))
+* **root:** Store news for restarting an ended terminal with its launch profile ([#952](https://github.com/khiops/lasterm/issues/952)) ([e3e0138](https://github.com/khiops/lasterm/commit/e3e01383cd14672c02b64a4b15451776d8ca1b0a))
+
 ## [0.17.0](https://github.com/khiops/lasterm/compare/v0.16.0...v0.17.0) (2026-11-11)
 
 

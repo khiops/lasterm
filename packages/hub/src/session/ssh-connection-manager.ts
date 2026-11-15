@@ -839,7 +839,7 @@ export class SshConnectionManager {
 		try {
 			connectConfig = await buildSshConnectConfig(
 				{
-					method: msg.sshAuth ?? "key",
+					method: msg.sshAuth,
 					keyPath: msg.sshKeyPath,
 					sshConfigHost: savedRoute ? saved.sshConfigHost : undefined,
 				},

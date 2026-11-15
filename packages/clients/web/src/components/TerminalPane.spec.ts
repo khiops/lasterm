@@ -1995,6 +1995,12 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 	/** A third terminal on HOST. */
 	const V = "01HZZZZZZZZZZZZZZZZZZZZZV6";
 	const xterms = () => [...root.querySelectorAll(".xterm")];
+	/** The pane's one `.xterm`, the same element and not one that merely looks like it. */
+	function theXterm(): Element | undefined {
+		const all = xterms();
+		expect(all).toHaveLength(1);
+		return all[0];
+	}
 	const size = () => [terminal().cols, terminal().rows];
 	const bells = (id: string) => useNotificationStore().bellCounts.get(id) ?? 0;
 	const unread = (id: string) => useNotificationStore().unreadLines.get(id) ?? 0;
@@ -2105,7 +2111,7 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 		await switched(channel);
 
 		expect(terminal()).not.toBe(before);
-		expect(xterms()).toEqual([terminal().element]);
+		expect(theXterm()).toBe(terminal().element);
 		expect(before.disposed).toBe(true);
 	});
 
@@ -2455,7 +2461,7 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 			attachOk(T, "T-AGAIN");
 			await settle();
 
-			expect(xterms()).toEqual([before]);
+			expect(theXterm()).toBe(before);
 		});
 
 		it("by a Restart", async () => {
@@ -2469,7 +2475,7 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 			attachOk(T, "AGAIN");
 			await settle();
 
-			expect(xterms()).toEqual([before]);
+			expect(theXterm()).toBe(before);
 		});
 
 		it("by the socket coming back", async () => {
@@ -2481,7 +2487,7 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 			attachOk(T, "AGAIN");
 			await settle();
 
-			expect(xterms()).toEqual([before]);
+			expect(theXterm()).toBe(before);
 		});
 	});
 
@@ -2574,7 +2580,7 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 
 		await givenU(channel);
 
-		expect(xterms()).toEqual([before]);
+		expect(theXterm()).toBe(before);
 	});
 
 	it("keeps its xterm when the terminal it waits for is superseded", async () => {
@@ -2585,7 +2591,7 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 		channel.value = V;
 		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, V]));
 
-		expect(xterms()).toEqual([before]);
+		expect(theXterm()).toBe(before);
 	});
 
 	it("keeps its xterm when the terminal it was given never answers", async () => {
@@ -2596,7 +2602,7 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 		await vi.advanceTimersByTimeAsync(10_000);
 		await settle();
 
-		expect(xterms()).toEqual([before]);
+		expect(theXterm()).toBe(before);
 	});
 
 	it("keeps its xterm when its attach for the terminal it was given cannot be sent", async () => {
@@ -2610,7 +2616,7 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 		channel.value = U;
 		await settle();
 
-		expect(xterms()).toEqual([before.element]);
+		expect(theXterm()).toBe(before.element);
 		expect(before.disposed).toBe(false);
 	});
 

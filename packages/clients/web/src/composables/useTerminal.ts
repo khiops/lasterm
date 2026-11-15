@@ -31,6 +31,34 @@ const DEFAULT_XTERM_SCROLLBAR_WIDTH = 14;
  */
 const MOUSE_REPORTING_OFF = "\u001b[?1000l";
 
+/**
+ * Written before a live snapshot that replaces a screen the pane kept (#1010):
+ * it puts back what a reset leaves of how text is drawn, which the snapshot
+ * (vt100's `contents_formatted`) takes for granted and does not set. What the
+ * kept screen's output left otherwise draws the snapshot wrong. The input modes
+ * a running program set (cursor keys, keypad, bracketed paste, mouse, focus)
+ * are not touched, nor is the scrollback: a reset would drop both, and the
+ * snapshot carries neither. In xterm 6.0.0, in this order:
+ */
+const SNAPSHOT_DRAWING_STATE = [
+	// Synchronized output off: a frame left open holds the drawing back.
+	"\u001b[?2026l",
+	// The main buffer. It restores the cursor saved with it, charset included.
+	"\u001b[?1049l",
+	// Origin mode off: the snapshot's cursor moves and clear are absolute.
+	"\u001b[?6l",
+	// The whole screen scrolls: the snapshot goes down its rows with CR LF.
+	"\u001b[r",
+	// Autowrap on: a wrapped row is written on past the right edge.
+	"\u001b[?7h",
+	// Replace mode, not insert.
+	"\u001b[4l",
+	// ASCII in G0, and G0 in use.
+	"\u001b(B\u000f",
+	// No hyperlink open: SGR 0 does not close one.
+	"\u001b]8;;\u001b\\",
+].join("");
+
 /** What an ATTACH_OK gives the pane that asked: everything else it already wrote. */
 export interface AttachAnswer {
 	writeLockHolder: string | null;
@@ -676,16 +704,17 @@ export function useTerminal(
 		);
 		const tail = msg.tail ?? [];
 		// A screen kept by every attach and replaced only because the answer is
-		// live (#1010) is not reset: the agent's snapshot clears the screen
-		// itself (vt100's `contents_formatted`), in order after what xterm has
-		// not parsed yet, and the input modes the program set (bracketed paste,
-		// application cursor, mouse), which the snapshot does not carry, stay.
+		// live (#1010) is not reset: a reset would drop the input modes the
+		// program set, and the scrollback, neither of which the snapshot carries.
+		// What decides how the snapshot is drawn is put back instead, in xterm's
+		// stream: in order after what it has not parsed yet, as the snapshot.
 		const resetFirst = waiting.some((entry) => !entry.preserveContent);
 		replay(() => {
 			const term = terminal.value;
 			if (!term || !replaceScreen) return;
 			if (msg.snapshot) {
 				if (resetFirst) term.reset();
+				else term.write(SNAPSHOT_DRAWING_STATE);
 				const serialized = (msg.snapshot as { serialized?: string }).serialized;
 				if (serialized) term.write(serialized);
 			}

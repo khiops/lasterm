@@ -14,6 +14,7 @@
  * element) is in TerminalPane.browser.spec.ts.
  */
 import { BUNDLED_THEMES, type Channel } from "@lasterm/shared";
+import type { Terminal } from "@xterm/xterm";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { defineComponent, h, type Ref, ref } from "vue";
@@ -77,6 +78,12 @@ const NEW = "pending-1";
 const REAL = "01HZZZZZZZZZZZZZZZZZZZZZR5";
 /** Another window of the same hub. */
 const OTHER_CLIENT = "01HZZZZZZZZZZZZZZZZZZZZCL2";
+/**
+ * What the pane writes before a live snapshot over a screen it kept: how text
+ * is drawn, put back as a reset leaves it, input modes aside (#1010).
+ */
+const SNAPSHOT_DRAWING_STATE =
+	"\u001b[?2026l\u001b[?1049l\u001b[?6l\u001b[r\u001b[?7h\u001b[4l\u001b(B\u000f\u001b]8;;\u001b\\";
 
 // ─── The window around the pane ──────────────────────────────────────────────
 
@@ -1487,9 +1494,9 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		attachOk(T, "LIVE-SNAP", { tail: [new TextEncoder().encode("TAIL")] });
 		await settle();
 
-		// No reset: the snapshot clears the screen itself, and a reset would drop
-		// the input modes the program set, which the snapshot does not carry.
-		expect(xterm.events).toEqual(["LIVE-SNAP", "TAIL"]);
+		// No reset, which would drop the input modes the program set: how text is
+		// drawn is put back first, in the stream (#1010, drawn below by xterm).
+		expect(xterm.events).toEqual([SNAPSHOT_DRAWING_STATE, "LIVE-SNAP", "TAIL"]);
 		expect(banner()).toBeNull();
 	});
 
@@ -1505,9 +1512,7 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		attachOk(T, "LIVE-SNAP");
 		await settle();
 
-		// No reset: the snapshot clears the screen itself, and a reset would drop
-		// the input modes the program set, which the snapshot does not carry.
-		expect(xterm.events).toEqual(["LIVE-SNAP"]);
+		expect(xterm.events).toEqual([SNAPSHOT_DRAWING_STATE, "LIVE-SNAP"]);
 		expect(banner()).toBeNull();
 	});
 
@@ -1649,6 +1654,153 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		await settle();
 
 		expect(xterm.events).toEqual(["<reset>", "LAST-SCREEN", "fail: no such file", MOUSE_OFF]);
+	});
+});
+
+// ─── The live screen over one from memory, as xterm draws it (#1010) ─────────
+
+/** What vt100's `contents_formatted` starts with: the cursor shown, plain attributes, a clear screen. */
+const CLEAR = "\u001b[?25h\u001b[m\u001b[H\u001b[J";
+
+/**
+ * xterm itself (6.0.0), unopened, at the PTY's size: it parses every write and
+ * reset the pane's stand-in takes, in the order the pane makes them.
+ */
+async function realXterm(): Promise<Terminal> {
+	const { Terminal: Xterm } = await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
+	const real = new Xterm({ cols: 100, rows: 30, allowProposedApi: true });
+	onTestFinished(() => real.dispose());
+	xterm.onWrite = (_term, text) => real.write(text);
+	xterm.onReset = () => real.reset();
+	return real;
+}
+
+/** Let `real` parse all it took: xterm parses on a timer, which these tests fake. */
+async function parsedBy(real: Terminal): Promise<void> {
+	let parsed = false;
+	real.write("", () => {
+		parsed = true;
+	});
+	for (let tick = 0; !parsed && tick < 100; tick++) await vi.advanceTimersByTimeAsync(1);
+	expect(parsed).toBe(true);
+}
+
+/**
+ * A pane over T, answered from memory with a copy whose tail ends in `left`,
+ * then answered live, once the hub says T is live, with `snapshot` and `tail`:
+ * xterm, having parsed all the pane wrote.
+ */
+async function liveOverRemembered(left: string, snapshot: string, tail = ""): Promise<Terminal> {
+	mountPane(ref(T), "live");
+	const real = await realXterm();
+	await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+	attachOk(T, `${CLEAR}REMEMBERED`, { cached: true, tail: [new TextEncoder().encode(left)] });
+	await settle();
+
+	useChannelsStore().updateChannelStatus(T, "live");
+	await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+	attachOk(T, snapshot, { tail: tail === "" ? [] : [new TextEncoder().encode(tail)] });
+	await settle();
+	await parsedBy(real);
+	return real;
+}
+
+/** The screen's first `count` rows, as xterm holds them, trailing blanks dropped. */
+function screenRows(real: Terminal, count: number): string[] {
+	const buffer = real.buffer.active;
+	return Array.from(
+		{ length: count },
+		(_, row) => buffer.getLine(buffer.baseY + row)?.translateToString(true) ?? "",
+	);
+}
+
+// The copy from memory ends in whatever its program left set. The live
+// snapshot assumes how a reset draws text, and the program, still running,
+// the input modes it set; the snapshot carries neither.
+describe("TerminalPane drawing the live screen over one from memory (#1010)", () => {
+	it("draws it from the top, whatever scrolling region and origin mode the copy left", async () => {
+		const real = await liveOverRemembered(
+			"\u001b[2;4r\u001b[?6h",
+			`${CLEAR}one\r\ntwo\r\nthree\r\nfour\r\nfive`,
+			// The program sets a region, then goes to the screen's top left corner.
+			"\u001b[3;5r\u001b[HX",
+		);
+
+		expect(screenRows(real, 6)).toEqual(["Xne", "two", "three", "four", "five", ""]);
+	});
+
+	it("draws it in ASCII, whatever character set the copy left in use", async () => {
+		const real = await liveOverRemembered(
+			// DEC line drawing in G0 and G1, and G1 in use.
+			"\u001b(0\u001b)0\u000e",
+			`${CLEAR}live`,
+			// The program readies line drawing in G1, as a terminal's `enacs` does,
+			// and goes on writing in G0.
+			"\u001b)0 now",
+		);
+
+		expect(screenRows(real, 1)).toEqual(["live now"]);
+	});
+
+	it("wraps its long rows, whatever the copy left of autowrap", async () => {
+		const real = await liveOverRemembered("\u001b[?7l", `${CLEAR}${"a".repeat(100)}bc`);
+
+		expect(screenRows(real, 2)).toEqual(["a".repeat(100), "bc"]);
+	});
+
+	it("writes over its text, whatever the copy left of insert mode", async () => {
+		const real = await liveOverRemembered("\u001b[4h", `${CLEAR}live\u001b[H`, "L");
+
+		expect(screenRows(real, 1)).toEqual(["Live"]);
+	});
+
+	it("draws it in the main buffer, as an attach that resets does", async () => {
+		const real = await liveOverRemembered(`\u001b[?1049h${CLEAR}ALT`, `${CLEAR}live`);
+
+		expect(real.buffer.active.type).toBe("normal");
+		expect(screenRows(real, 1)).toEqual(["live"]);
+	});
+
+	it("draws it at once, whatever frame the copy left open", async () => {
+		const real = await liveOverRemembered("\u001b[?2026h", `${CLEAR}live`);
+
+		expect(real.modes.synchronizedOutputMode).toBe(false);
+	});
+
+	it("links none of it, whatever hyperlink the copy left open", async () => {
+		const real = await liveOverRemembered(
+			"\u001b]8;;https://example.invalid/\u001b\\",
+			`${CLEAR}live`,
+		);
+
+		expect(screenRows(real, 1)).toEqual(["live"]);
+		// xterm keeps a cell's link in its own cell data, which its API leaves out.
+		const cell = real.buffer.active.getLine(real.buffer.active.baseY)?.getCell(0) as unknown as {
+			extended: { urlId: number };
+		};
+		expect(cell.extended.urlId).toBe(0);
+	});
+
+	it("keeps the input modes the program set", async () => {
+		const real = await liveOverRemembered(
+			"\u001b[?1h\u001b=\u001b[?2004h\u001b[?1000h\u001b[?1004h",
+			`${CLEAR}live`,
+		);
+
+		expect(real.modes).toMatchObject({
+			applicationCursorKeysMode: true,
+			applicationKeypadMode: true,
+			bracketedPasteMode: true,
+			mouseTrackingMode: "vt200",
+			sendFocusMode: true,
+		});
+	});
+
+	it("keeps the scrollback the copy filled", async () => {
+		const real = await liveOverRemembered(`${"\r\n".repeat(30)}older`, `${CLEAR}live`);
+
+		expect(real.buffer.active.getLine(0)?.translateToString(true)).toBe("REMEMBERED");
+		expect(screenRows(real, 1)).toEqual(["live"]);
 	});
 });
 

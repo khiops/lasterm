@@ -2778,7 +2778,11 @@ describe("SessionManager", () => {
 			};
 		}
 
-		it("holds what the terminal printed just before its agent went away", async () => {
+		/**
+		 * A terminal whose SSH agent goes away just after printing, then a pane's
+		 * ATTACH, answered from the spool. `beforeAttach` runs just before it.
+		 */
+		async function attachAfterAgentLeft(beforeAttach?: () => void) {
 			const host = new MetaDAL(dbManager.meta).createHost({
 				type: "ssh",
 				label: "test-ssh-956",
@@ -2801,17 +2805,40 @@ describe("SessionManager", () => {
 				await vi.advanceTimersByTimeAsync(0);
 
 				sm.addClient(makeClient("reader", received));
+				beforeAttach?.();
 				const attaching = sm.handleAttach("reader", channelId);
 				// Under the chunker's second: what it holds is not stored yet.
 				await vi.advanceTimersByTimeAsync(500);
-				await attaching;
+				expect(await attaching).toBe(true);
 			} finally {
 				vi.useRealTimers();
 			}
+			return cachedAnswer(received);
+		}
 
-			const answer = cachedAnswer(received);
+		it("holds what the terminal printed just before its agent went away", async () => {
+			const answer = await attachAfterAgentLeft();
+
 			expect(answer.snapshot).toEqual(SCREEN);
 			expect(answer.tail.join("")).toBe("last words");
+		});
+
+		// Before #956 the answer only read the spool; a write failing now must not
+		// cost the pane the answer it got then.
+		it("still answers from what is stored when that output cannot be stored", async () => {
+			const failure = vi.spyOn(SpoolDAL.prototype, "insertChunk");
+			try {
+				const answer = await attachAfterAgentLeft(() => {
+					failure.mockImplementationOnce(() => {
+						throw Object.assign(new Error("disk full"), { code: "ERR_SQLITE_FULL" });
+					});
+				});
+
+				expect(answer.snapshot).toEqual(SCREEN);
+				expect(answer.tail).toEqual([]);
+			} finally {
+				failure.mockRestore();
+			}
 		});
 
 		it("holds what the terminal printed while its agent did not answer", async () => {

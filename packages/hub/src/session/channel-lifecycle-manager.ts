@@ -1142,7 +1142,16 @@ export class ChannelLifecycleManager {
 		// What the chunker still holds is output the hub has received: a pane
 		// drops the OUTPUT it hears while its ATTACH waits, so an answer read
 		// from the spool before that output is stored would lose it (#956).
-		this.ctx.chunker.flush(channelId);
+		// A write that fails leaves the answer to what is stored, as before:
+		// the pane still gets one. Logged as `storeSnapshot` logs, by code.
+		try {
+			this.ctx.chunker.flush(channelId);
+		} catch (err) {
+			this.ctx.hubLogger?.log("warn", "channel-lifecycle: output not stored before attach", {
+				channelId,
+				code: (err as { code?: unknown } | null)?.code ?? "unknown",
+			});
+		}
 		const snapshotChunk = this.ctx.spoolDal.getLatestSnapshot(channelId);
 		if (snapshotChunk) {
 			try {

@@ -10,6 +10,7 @@ import { MetaDAL } from "../storage/meta.js";
 import { getTestTls } from "../test-tls.fixture.js";
 import {
 	type CreateLaunchProfileBody,
+	launchProfileOverridesError,
 	type UpdateLaunchProfileBody,
 	validateCreateBody,
 	validateUpdateBody,
@@ -265,6 +266,18 @@ describe("validateCreateBody", () => {
 			);
 		}
 	});
+
+	it("takes sort_order as a safe integer, or none, and refuses anything else (#916)", () => {
+		const min = { name: "Min", shell: "/bin/bash" };
+		for (const sort_order of [-3, 0, null, undefined]) {
+			expect(validateCreateBody(body({ ...min, sort_order }))).toBeNull();
+		}
+		for (const sort_order of [1.5, 2 ** 53 + 2, "7"]) {
+			expect(validateCreateBody(body({ ...min, sort_order }))).toBe(
+				"sort_order must be an integer",
+			);
+		}
+	});
 });
 
 describe("a launch profile's report_directory through the routes (#839)", () => {
@@ -344,6 +357,15 @@ describe("validateUpdateBody", () => {
 		);
 	});
 
+	it("takes sort_order as a safe integer only (#916)", () => {
+		for (const sort_order of [-3, 0]) {
+			expect(validateUpdateBody(body({ sort_order }))).toBeNull();
+		}
+		for (const sort_order of [1.5, 2 ** 53 + 2, "7"]) {
+			expect(validateUpdateBody(body({ sort_order }))).toBe("sort_order must be an integer");
+		}
+	});
+
 	it("refuses an empty or missing name, and a shell POST would refuse", () => {
 		for (const name of ["", "   ", null, "x".repeat(101)]) {
 			expect(validateUpdateBody(body({ name }))).toBe("name must be 1-100 characters");
@@ -378,6 +400,267 @@ describe("validateUpdateBody", () => {
 		expect(validateUpdateBody(body({ icon_type: "svg" }))).toBe(
 			"icon_type must be 'auto', 'emoji', or 'image'",
 		);
+	});
+});
+
+// ─── launchProfileOverridesError — the check of profile_overrides (#916) ───────
+
+describe("launchProfileOverridesError", () => {
+	it("passes none, null and an object the profile writes accept", () => {
+		expect(launchProfileOverridesError(undefined)).toBeNull();
+		expect(launchProfileOverridesError(null)).toBeNull();
+		expect(launchProfileOverridesError({ fontSize: 14, transferDrop: "upload" })).toBeNull();
+	});
+
+	it("refuses what is not an object", () => {
+		for (const value of [[], "x", 1]) {
+			expect(launchProfileOverridesError(value)).toEqual({
+				code: "VALIDATION_ERROR",
+				message: "profile_overrides must be an object",
+			});
+		}
+	});
+
+	it("refuses what a terminal's profile write refuses, with its code", () => {
+		let nested: unknown = 1;
+		for (let i = 0; i < 33; i++) nested = [nested];
+		expect(launchProfileOverridesError({ nope: 1 })).toEqual({
+			code: "VALIDATION_ERROR",
+			message: "Unknown profile key: nope",
+		});
+		expect(launchProfileOverridesError({ transferVerify: true })).toEqual({
+			code: "VALIDATION_ERROR",
+			message: '"transferVerify" is set globally or for a host, not for one terminal',
+		});
+		expect(launchProfileOverridesError({ transferDrop: "bogus" })).toEqual({
+			code: "INVALID_VALUE",
+			message: 'Invalid value for "transferDrop": "bogus"',
+		});
+		expect(launchProfileOverridesError({ fontSize: Number.POSITIVE_INFINITY })).toEqual({
+			code: "INVALID_VALUE",
+			message: 'Invalid value for "fontSize": numbers must be finite',
+		});
+		expect(launchProfileOverridesError({ themeOverrides: nested })).toEqual({
+			code: "INVALID_VALUE",
+			message: 'Invalid value for "themeOverrides": nested more than 32 levels deep',
+		});
+	});
+});
+
+// ─── What the launch profile routes refuse (#916) ─────────────────────────────
+
+describe("the launch profile routes refuse what they cannot store or read back (#916)", () => {
+	useHubServer();
+
+	/** A request whose JSON body is sent as written: 1e400 and 2^53+2 have no JS literal. */
+	async function send(
+		method: "POST" | "PUT",
+		url: string,
+		body?: string,
+	): Promise<{ status: number; json: unknown }> {
+		const res = await server.inject({
+			method,
+			url,
+			...(body !== undefined && {
+				payload: body,
+				headers: { "content-type": "application/json" },
+			}),
+		});
+		return { status: res.statusCode, json: res.body === "" ? undefined : res.json() };
+	}
+
+	function refusal(code: string, message: string): { status: number; json: unknown } {
+		return { status: 400, json: { error: { code, message } } };
+	}
+
+	type WireProfile = Record<string, unknown> & { id: string; name: string };
+
+	async function launchProfiles(): Promise<WireProfile[]> {
+		const res = await server.inject({ method: "GET", url: "/api/launch-profiles" });
+		expect(res.statusCode).toBe(200);
+		return res.json<WireProfile[]>();
+	}
+
+	async function hostProfiles(): Promise<WireProfile[]> {
+		const hosts = (await server.inject({ method: "GET", url: "/api/hosts" })).json<
+			Array<{ id: string; type: string }>
+		>();
+		const local = hosts.find((h) => h.type === "local");
+		if (!local) throw new Error("local host not found");
+		const res = await server.inject({ method: "GET", url: `/api/hosts/${local.id}/profiles` });
+		expect(res.statusCode).toBe(200);
+		return res.json<WireProfile[]>();
+	}
+
+	/** The row by name, read from both lists, which must agree on its overrides. */
+	async function inBothLists(name: string): Promise<WireProfile | undefined> {
+		const listed = (await launchProfiles()).find((p) => p.name === name);
+		const onHost = (await hostProfiles()).find((p) => p.name === name);
+		expect(onHost?.profile_overrides).toEqual(listed?.profile_overrides);
+		return listed;
+	}
+
+	const deep = (n: number): string => `${"[".repeat(n)}1${"]".repeat(n)}`;
+
+	it("refuses a body that is not an object on the launch profile routes (#916)", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+			const profile = await createProfile({ name: "Kept" });
+			vi.setSystemTime(new Date("2026-01-02T00:00:00.000Z"));
+			const notObject = refusal("VALIDATION_ERROR", "body must be an object");
+			const url = `/api/launch-profiles/${profile.id}`;
+			for (const body of [undefined, "null", "[]", "true"]) {
+				expect(await send("POST", "/api/launch-profiles", body)).toEqual(notObject);
+				expect(await send("PUT", url, body)).toEqual(notObject);
+				expect(await send("PUT", "/api/launch-profiles/order", body)).toEqual(notObject);
+			}
+			const listed = await launchProfiles();
+			expect(listed.map((p) => p.name)).toEqual(["Kept"]);
+			expect(listed[0]?.updated_at).toBe("2026-01-01T00:00:00.000Z");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("refuses a profile_overrides the profile writes refuse, and stores nothing (#916)", async () => {
+		const tooDeep = 'Invalid value for "themeOverrides": nested more than 32 levels deep';
+		const cases: Array<[string, string, string]> = [
+			['{"nope":1}', "VALIDATION_ERROR", "Unknown profile key: nope"],
+			[
+				'{"transferVerify":true}',
+				"VALIDATION_ERROR",
+				'"transferVerify" is set globally or for a host, not for one terminal',
+			],
+			['{"transferDrop":"bogus"}', "INVALID_VALUE", 'Invalid value for "transferDrop": "bogus"'],
+			[
+				'{"fontSize":1e400}',
+				"INVALID_VALUE",
+				'Invalid value for "fontSize": numbers must be finite',
+			],
+			[`{"themeOverrides":${deep(33)}}`, "INVALID_VALUE", tooDeep],
+			[`{"themeOverrides":${deep(5000)}}`, "INVALID_VALUE", tooDeep],
+			["[1,2]", "VALIDATION_ERROR", "profile_overrides must be an object"],
+			['"x"', "VALIDATION_ERROR", "profile_overrides must be an object"],
+		];
+		for (const [overrides, code, message] of cases) {
+			const body = `{"name":"Refused","shell":"/bin/bash","profile_overrides":${overrides}}`;
+			expect(await send("POST", "/api/launch-profiles", body)).toEqual(refusal(code, message));
+			expect(await inBothLists("Refused")).toBeUndefined();
+		}
+	});
+
+	it("refuses on PUT what POST refuses in profile_overrides (#916)", async () => {
+		const profile = await createProfile({ name: "Edited", profile_overrides: { fontSize: 12 } });
+		const body = '{"profile_overrides":{"transferDrop":"bogus"}}';
+		expect(await send("PUT", `/api/launch-profiles/${profile.id}`, body)).toEqual(
+			refusal("INVALID_VALUE", 'Invalid value for "transferDrop": "bogus"'),
+		);
+		expect((await inBothLists("Edited"))?.profile_overrides).toEqual({ font_size: 12 });
+	});
+
+	it("stores, replaces and clears the profile_overrides the web form sends (#916)", async () => {
+		const profile = await createProfile({
+			name: "Form",
+			profile_overrides: {
+				fontFamily: "Consolas",
+				fontSize: 14,
+				cursorStyle: "bar",
+				scrollback: 5000,
+				envMode: "inherit",
+				transferDrop: "upload",
+			},
+		});
+		const asSent = {
+			font_family: "Consolas",
+			font_size: 14,
+			cursor_style: "bar",
+			scrollback: 5000,
+			env_mode: "inherit",
+			transfer_drop: "upload",
+		};
+		expect((await inBothLists("Form"))?.profile_overrides).toEqual(asSent);
+		const url = `/api/launch-profiles/${profile.id}`;
+
+		expect((await send("PUT", url, '{"name":"Form2"}')).status).toBe(200);
+		expect((await inBothLists("Form2"))?.profile_overrides).toEqual(asSent);
+
+		expect((await send("PUT", url, '{"profile_overrides":{"fontSize":16}}')).status).toBe(200);
+		expect((await inBothLists("Form2"))?.profile_overrides).toEqual({ font_size: 16 });
+
+		expect((await send("PUT", url, '{"profile_overrides":null}')).status).toBe(200);
+		const cleared = await inBothLists("Form2");
+		expect(cleared).toBeDefined();
+		expect(cleared).not.toHaveProperty("profile_overrides");
+	});
+
+	it("treats a null member of profile_overrides as the profile writes do (#916)", async () => {
+		const post = (name: string, overrides: string) =>
+			send(
+				"POST",
+				"/api/launch-profiles",
+				`{"name":"${name}","shell":"/bin/bash","profile_overrides":${overrides}}`,
+			);
+		expect((await post("Known", '{"fontSize":null}')).status).toBe(201);
+		expect((await inBothLists("Known"))?.profile_overrides).toEqual({ font_size: null });
+
+		expect(await post("Unknown", '{"nope":null}')).toEqual(
+			refusal("VALIDATION_ERROR", "Unknown profile key: nope"),
+		);
+		expect(await inBothLists("Unknown")).toBeUndefined();
+
+		expect((await post("HostOnly", '{"transferVerify":null}')).status).toBe(201);
+
+		const none = await post("None", "null");
+		expect(none.status).toBe(201);
+		expect(none.json).not.toHaveProperty("profile_overrides");
+	});
+
+	it("keeps 404 first and every 400 before a 409 (#916)", async () => {
+		expect(await send("PUT", "/api/launch-profiles/unknown-id", "null")).toEqual({
+			status: 404,
+			json: { error: { code: "NOT_FOUND", message: "Launch profile not found" } },
+		});
+		const a = await createProfile({ name: "A" });
+		await createProfile({ name: "B" });
+		const unknownKey = refusal("VALIDATION_ERROR", "Unknown profile key: nope");
+		const taken = '{"name":"A","shell":"/bin/bash","profile_overrides":{"nope":1}}';
+		expect(await send("POST", "/api/launch-profiles", taken)).toEqual(unknownKey);
+		const renamed = '{"name":"B","profile_overrides":{"nope":1}}';
+		expect(await send("PUT", `/api/launch-profiles/${a.id}`, renamed)).toEqual(unknownKey);
+		expect((await launchProfiles()).map((p) => p.name).sort()).toEqual(["A", "B"]);
+	});
+
+	it("refuses a sort_order that is not a safe integer, keeping the lists readable (#916)", async () => {
+		const notInteger = refusal("VALIDATION_ERROR", "sort_order must be an integer");
+		for (const sortOrder of ["9007199254740994", "1.5", '"7"']) {
+			const body = `{"name":"Refused","shell":"/bin/bash","sort_order":${sortOrder}}`;
+			expect(await send("POST", "/api/launch-profiles", body)).toEqual(notInteger);
+			expect(await inBothLists("Refused")).toBeUndefined();
+		}
+		const kept = await createProfile({ name: "Kept", sort_order: 4 });
+		const unsafe = '{"sort_order":9007199254740994}';
+		expect(await send("PUT", `/api/launch-profiles/${kept.id}`, unsafe)).toEqual(notInteger);
+		expect((await inBothLists("Kept"))?.sort_order).toBe(4);
+		expect(await send("PUT", `/api/launch-profiles/${kept.id}`, '{"sort_order":null}')).toEqual(
+			refusal("VALIDATION_ERROR", "sort_order cannot be cleared"),
+		);
+		expect((await inBothLists("Kept"))?.sort_order).toBe(4);
+
+		expect((await createProfile({ name: "Negative", sort_order: -3 })).sort_order).toBe(-3);
+		expect((await createProfile({ name: "Omitted" })).sort_order).toBe(0);
+		expect((await createProfile({ name: "Null", sort_order: null })).sort_order).toBe(0);
+	});
+
+	it("refuses ids that are not all strings (#916)", async () => {
+		await createProfile({ name: "A", sort_order: 5 });
+		const b = await createProfile({ name: "B", sort_order: 6 });
+		const notStrings = refusal("VALIDATION_ERROR", "ids must be an array of strings");
+		for (const ids of ["[{}]", `["${b.id}",7]`, '"x"']) {
+			const res = await send("PUT", "/api/launch-profiles/order", `{"ids":${ids}}`);
+			expect(res).toEqual(notStrings);
+		}
+		expect((await launchProfiles()).find((p) => p.id === b.id)?.sort_order).toBe(6);
 	});
 });
 
@@ -613,6 +896,9 @@ describe("PUT /api/launch-profiles/order", () => {
 			payload: { ids: "not-an-array" },
 		});
 		expect(res.statusCode).toBe(400);
+		expect(res.json()).toEqual({
+			error: { code: "VALIDATION_ERROR", message: "ids must be an array of strings" },
+		});
 	});
 
 	it("handles unknown IDs without error (SC-32)", async () => {

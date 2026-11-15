@@ -12,6 +12,7 @@ mod handler;
 mod headless;
 mod identity;
 mod input;
+mod input_modes;
 mod logging;
 mod owner;
 mod platform_dirs;

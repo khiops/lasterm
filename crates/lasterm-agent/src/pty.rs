@@ -6,7 +6,9 @@ use async_xpty::{CommandBuilder, ExitStatus, PtyProcess};
 use tokio::task::JoinHandle;
 
 use crate::input::{InputQueue, INPUT_QUEUE_BYTES};
+use crate::input_modes::InputModeCell;
 use crate::owner::OwnerId;
+use std::sync::Arc;
 
 const CHANNEL_TEARDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -18,6 +20,9 @@ pub(crate) struct PtyChannelState {
     /// What the hub typed and the terminal has not taken yet. Its writer ends
     /// when the channel is removed (#740).
     pub(crate) input: InputQueue,
+    /// The modes its reader last saw, which decide how its input is written
+    /// (#1012).
+    pub(crate) input_modes: Arc<InputModeCell>,
 }
 
 impl PtyChannelState {
@@ -208,6 +213,13 @@ impl PtyManager {
 
     /// Take a reader only while its channel remains registered. A daemon sweep
     /// can remove the channel between spawn and reader registration.
+    /// Where the channel's reader publishes its program's input modes (#1012).
+    pub(crate) fn input_modes_for(&self, channel_id: &str) -> Option<Arc<InputModeCell>> {
+        self.channels
+            .get(channel_id)
+            .map(|channel| Arc::clone(&channel.input_modes))
+    }
+
     pub(crate) fn reader_for(&mut self, channel_id: &str) -> Option<async_xpty::PtyReader> {
         #[cfg(test)]
         if std::mem::take(&mut self.sweep_next_reader_lookup) {
@@ -289,6 +301,7 @@ impl PtyManager {
                 process,
                 owner,
                 input,
+                input_modes: Arc::default(),
             },
         );
         Ok((id, pid))

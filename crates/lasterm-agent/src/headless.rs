@@ -3,6 +3,17 @@ use std::ops::RangeInclusive;
 use std::time::Instant;
 
 use crate::cwd::{self, ShellReport};
+use crate::input_modes::InputModes;
+
+/// What xterm resets on DECSTR and vt100 does not (#1012): cursor keys, the
+/// keypad, bracketed paste, the cursor style, cursor visibility and the
+/// attributes. Fed to the parser where the DECSTR was.
+const DECSTR_RESET: &[u8] = b"\x1b[?1l\x1b>\x1b[?2004l\x1b[0 q\x1b[?25h\x1b[m";
+
+/// Sets the mouse mode, the mouse encoding and the cursor style to their
+/// defaults, which vt100's `input_mode_formatted` leaves out when they are
+/// at them (#1012).
+const MODE_RESET: &str = "\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[0 q";
 
 /// What vt100 hands back through callbacks rather than keeping on the screen:
 /// the window title (OSC 0 and OSC 2), and the OSC sequences it does not
@@ -18,6 +29,11 @@ struct MirrorCallbacks {
     shell_cwd: Option<ShellReport>,
     /// This host's name, as an OSC 7 for this host names it.
     local_host: String,
+    /// Whether the program asked for focus reports (`?1004`), which vt100
+    /// does not follow (#1012).
+    focus: bool,
+    /// A DECSTR (`CSI … ! p`) completed since the mirror last looked.
+    decstr: bool,
 }
 
 impl vt100::Callbacks for MirrorCallbacks {
@@ -26,6 +42,23 @@ impl vt100::Callbacks for MirrorCallbacks {
         // titles to callbacks.
         if let Ok(title) = std::str::from_utf8(title) {
             self.title = title.to_string();
+        }
+    }
+
+    fn unhandled_csi(
+        &mut self,
+        _: &mut vt100::Screen,
+        i1: Option<u8>,
+        i2: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        if c == 'p' && (i1 == Some(b'!') || i2 == Some(b'!')) {
+            self.decstr = true;
+        }
+        // A combined sequence comes whole, with the params vt100 handled too.
+        if i1 == Some(b'?') && (c == 'h' || c == 'l') && params.iter().any(|p| *p == [1004]) {
+            self.focus = c == 'h';
         }
     }
 
@@ -52,6 +85,9 @@ pub struct HeadlessMirror {
     pending_bell: bool,
     pending_notification: Option<String>,
     pending_shell_cwd: Option<ShellReport>,
+    /// The last byte of the previous read: a DECSTR's `!` or a RIS's `ESC`
+    /// may end one read and its last byte start the next.
+    last_byte: Option<u8>,
 }
 
 const BELL_THROTTLE_MS: u128 = 100;
@@ -82,6 +118,8 @@ impl HeadlessMirror {
                 notification: None,
                 shell_cwd: None,
                 local_host: local_host.to_owned(),
+                focus: false,
+                decstr: false,
             },
         );
         Self {
@@ -93,6 +131,7 @@ impl HeadlessMirror {
             pending_bell: false,
             pending_notification: None,
             pending_shell_cwd: None,
+            last_byte: None,
         }
     }
 
@@ -100,7 +139,38 @@ impl HeadlessMirror {
     /// Call this with every chunk of data from the PTY.
     /// After calling, check pending_* fields for events.
     pub fn process(&mut self, data: &[u8]) {
-        self.parser.process(data);
+        // Each byte that may end a DECSTR (`p` after `!`) or a RIS (`c` after
+        // `ESC`) ends a slice, so that what they reset is reset at their place
+        // in the stream, before the bytes after them (#1012).
+        let mut start = 0;
+        for (idx, &byte) in data.iter().enumerate() {
+            let prev = if idx == 0 {
+                self.last_byte
+            } else {
+                Some(data[idx - 1])
+            };
+            let decstr_end = byte == b'p' && prev == Some(b'!');
+            let ris = byte == b'c' && prev == Some(0x1b);
+            if !decstr_end && !ris {
+                continue;
+            }
+            self.parser.process(&data[start..=idx]);
+            start = idx + 1;
+            if decstr_end && std::mem::take(&mut self.parser.callbacks_mut().decstr) {
+                self.parser.process(DECSTR_RESET);
+                self.parser.callbacks_mut().focus = false;
+            }
+            if ris {
+                // vt100 resets the modes it follows itself.
+                self.parser.callbacks_mut().focus = false;
+            }
+        }
+        if start < data.len() {
+            self.parser.process(&data[start..]);
+        }
+        if let Some(&last) = data.last() {
+            self.last_byte = Some(last);
+        }
 
         // Check for title change (OSC 0/2)
         let new_title = &self.parser.callbacks().title;
@@ -154,10 +224,16 @@ impl HeadlessMirror {
     }
 
     /// Produce a snapshot of the current terminal state.
-    /// Returns ANSI escape sequences that reconstruct the screen content.
+    /// Returns ANSI escape sequences that reconstruct the screen content, and
+    /// the input modes and screen the program is in (#1012).
     pub fn snapshot(&self) -> SnapshotInfo {
         let screen = self.parser.screen();
         let (rows, cols) = screen.size();
+        let focus = if self.parser.callbacks().focus {
+            "\x1b[?1004h"
+        } else {
+            "\x1b[?1004l"
+        };
         SnapshotInfo {
             // The screen content with ANSI formatting.
             serialized: screen.contents_formatted(),
@@ -165,6 +241,17 @@ impl HeadlessMirror {
             rows: rows.get(),
             cursor_x: screen.cursor_position().1,
             cursor_y: screen.cursor_position().0,
+            alternate_screen: screen.alternate_screen(),
+            input_modes: format!("{MODE_RESET}{}{focus}", screen.input_mode_formatted()),
+        }
+    }
+
+    /// The program's modes that decide how its input is written (#1012).
+    pub(crate) fn input_modes(&self) -> InputModes {
+        let screen = self.parser.screen();
+        InputModes {
+            bracketed_paste: screen.bracketed_paste(),
+            application_cursor: screen.application_cursor(),
         }
     }
 
@@ -203,6 +290,11 @@ pub struct SnapshotInfo {
     pub rows: u16,
     pub cursor_x: u16,
     pub cursor_y: u16,
+    /// The program is in the alternate screen.
+    pub alternate_screen: bool,
+    /// Every input mode the program set, written so that it sets each one
+    /// whatever a terminal held before.
+    pub input_modes: String,
 }
 
 /// Check if data contains a bare bell (\x07) not part of an OSC terminator.
@@ -404,6 +496,104 @@ fn sanitize_notification(msg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The D1 reset that `input_modes` starts with (#1012).
+    const RESET: &str = "\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[0 q";
+
+    #[test]
+    fn the_snapshot_carries_the_whole_input_mode_state() {
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        assert_eq!(
+            mirror.snapshot().input_modes,
+            format!("{RESET}\x1b>\x1b[?1l\x1b[?2004l\x1b[?1004l")
+        );
+
+        mirror.process(b"\x1b[?2004h\x1b[?1h\x1b=\x1b[?1000h\x1b[?1006h\x1b[3 q\x1b[?1004h$ ");
+        assert_eq!(
+            mirror.snapshot().input_modes,
+            format!("{RESET}\x1b=\x1b[?1h\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[3 q\x1b[?1004h")
+        );
+    }
+
+    #[test]
+    fn the_snapshot_says_whether_the_alternate_screen_is_up() {
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        assert!(!mirror.snapshot().alternate_screen);
+        mirror.process(b"\x1b[?1049hEDIT");
+        assert!(mirror.snapshot().alternate_screen);
+        mirror.process(b"\x1b[?1049l");
+        assert!(!mirror.snapshot().alternate_screen);
+    }
+
+    #[test]
+    fn focus_reporting_is_followed_in_combined_sequences() {
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1b[?1;1004;2004h");
+        assert!(mirror.snapshot().input_modes.ends_with("\x1b[?1004h"));
+        mirror.process(b"\x1b[?1;1004l");
+        assert!(mirror.snapshot().input_modes.ends_with("\x1b[?1004l"));
+    }
+
+    #[test]
+    fn decstr_and_ris_reset_the_modes_xterm_resets() {
+        let reset_modes = format!("{RESET}\x1b>\x1b[?1l\x1b[?2004l\x1b[?1004l");
+        // Plain.
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1b[?1h\x1b=\x1b[?2004h\x1b[?1004h\x1b[3 q\x1b[!p");
+        assert_eq!(mirror.snapshot().input_modes, reset_modes);
+        // Cursor and attributes.
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1b[?25l\x1b[31m\x1b[!pX");
+        let snap = mirror.snapshot();
+        assert!(
+            snap.serialized.starts_with("\x1b[?25h"),
+            "{:?}",
+            snap.serialized
+        );
+        assert!(!snap.serialized.contains("31m"), "{:?}", snap.serialized);
+        // Parameters.
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1b[?1h\x1b[?2004h\x1b[0!p");
+        assert_eq!(mirror.snapshot().input_modes, reset_modes);
+        // Split across two reads.
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1b[?1h\x1b[?2004h\x1b[!");
+        mirror.process(b"p");
+        assert_eq!(mirror.snapshot().input_modes, reset_modes);
+        // Position: what follows the DECSTR in the same read stays.
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1b[!p\x1b[?1h");
+        assert!(mirror.snapshot().input_modes.contains("\x1b[?1h"));
+        // RIS, whole and split.
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1b[?1004h\x1bc");
+        assert!(mirror.snapshot().input_modes.ends_with("\x1b[?1004l"));
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1b[?1004h\x1b");
+        mirror.process(b"c");
+        assert!(mirror.snapshot().input_modes.ends_with("\x1b[?1004l"));
+        // Focus set after the reset, in the same read.
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1b[!p\x1b[?1004h");
+        assert!(mirror.snapshot().input_modes.ends_with("\x1b[?1004h"));
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1bc\x1b[?1004h");
+        assert!(mirror.snapshot().input_modes.ends_with("\x1b[?1004h"));
+    }
+
+    #[test]
+    fn the_mirror_hands_over_the_modes_that_decide_input() {
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        assert_eq!(mirror.input_modes(), InputModes::default());
+        mirror.process(b"\x1b[?2004h\x1b[?1h");
+        assert_eq!(
+            mirror.input_modes(),
+            InputModes {
+                bracketed_paste: true,
+                application_cursor: true
+            }
+        );
+    }
 
     #[test]
     fn test_snapshot_basic() {

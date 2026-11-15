@@ -2383,7 +2383,7 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 |--------|------|------|--------------|
 | GET | `/api/launch-profiles` | ● | `LaunchProfile[]`, or a page with `?limit=&offset=` (see Pagination) |
 | POST | `/api/launch-profiles` | ● | CreateLaunchProfile → `LaunchProfile` (201) |
-| PUT | `/api/launch-profiles/order` | ● | `{ ids }` → 204 |
+| PUT | `/api/launch-profiles/order` | ● | `{ ids }` → 204. 400 `VALIDATION_ERROR` for a body that is not an object, or `ids` that are not an array of strings; nothing is reordered then |
 | GET | `/api/launch-profiles/:id` | ● | `LaunchProfile` |
 | PUT | `/api/launch-profiles/:id` | ● | UpdateLaunchProfile → `LaunchProfile` |
 | DELETE | `/api/launch-profiles/:id` | ● | 204. 400 `LAST_PROFILE` for the only one left. A host whose default it was gets back at once the one its agent's default shell was given (#802) |
@@ -2615,11 +2615,22 @@ A host group answers `{ id, name, sort_order, color, created_at, updated_at }`.
   icon_type?: 'auto' | 'emoji' | 'image', // default 'auto'
   icon_value?: string | null,   // at most 256 chars
   color?: string | null,        // hex "#rrggbb"
-  profile_overrides?: Partial<TerminalProfile> | null, // stored as sent, camelCase inside
-  sort_order?: number,
+  profile_overrides?: Partial<TerminalProfile> | null, // camelCase keys; see below
+  sort_order?: number | null,   // a safe integer; default 0
   report_directory?: boolean    // default false: its PowerShell reports its directory (§ 3.2, #839)
 }
 ```
+
+A body that is not an object is refused with 400 `VALIDATION_ERROR` `body must be an object`.
+`profile_overrides` is checked as a terminal's profile write (#916): it must be an object (400
+`VALIDATION_ERROR` otherwise); a key that is not a profile key, or one set only globally or for a
+host (`transferFallbackDir`, `transferVerify`), 400 `VALIDATION_ERROR`; a number that is not
+finite, a value nested more than 32 deep, or a file-transfer value outside its table 400
+`INVALID_VALUE` naming its key. A `null` member is checked for its key only. Keys are camelCase
+on write; a response gives them in snake_case, so a client sending a response's overrides back
+converts them first. `sort_order` that is not a safe integer: 400 `VALIDATION_ERROR`
+`sort_order must be an integer`. Every refusal stores nothing, and comes before the 409 for a
+taken name.
 
 **UpdateLaunchProfile:** Same fields as CreateLaunchProfile, all optional. A field left out keeps
 its stored value. `null` clears a field that may be empty (`args`, `cwd`, `env`, `icon_value`,

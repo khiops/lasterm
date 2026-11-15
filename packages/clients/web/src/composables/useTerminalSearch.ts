@@ -63,6 +63,20 @@ export function useTerminalSearch() {
 		});
 	}
 
+	/**
+	 * Move the search to another terminal instance, which holds another
+	 * terminal's output (#966). The box keeps its query, options and open
+	 * state; its counts start from none, never the old instance's, and a valid
+	 * query is searched again in the new one.
+	 */
+	function rebind(term: Terminal, opts?: SearchInitOptions): void {
+		dispose();
+		init(term, opts);
+		matchCount.value = 0;
+		currentMatch.value = 0;
+		if (query.value) search(query.value);
+	}
+
 	/** Update the scrollbar markers enabled state at runtime. */
 	function setScrollbarMarkers(enabled: boolean): void {
 		scrollbarMarkersEnabled = enabled;
@@ -194,6 +208,7 @@ export function useTerminalSearch() {
 		regexError,
 		// Actions
 		init,
+		rebind,
 		search,
 		findNext,
 		findPrevious,

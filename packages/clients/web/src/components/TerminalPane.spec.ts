@@ -15,7 +15,7 @@
  */
 import { BUNDLED_THEMES, type Channel } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { defineComponent, h, type Ref, ref } from "vue";
 import "../styles/base.css";
 import { useChannelsStore } from "../stores/channels.js";
@@ -32,6 +32,8 @@ import {
 	button,
 	CLIENT,
 	closePane,
+	drain,
+	dropQueueOf,
 	emitted,
 	type Frame,
 	freshWindow,
@@ -47,10 +49,13 @@ import {
 	type PaneProps,
 	paneProfile,
 	paneText,
+	parseOf,
 	press,
 	refuse,
 	root,
 	S,
+	type StandInSearch,
+	type StandInTerminal,
 	sent,
 	settle,
 	spawnOk,
@@ -1973,6 +1978,758 @@ describe("TerminalPane takes only the answers for the terminal it shows (#929)",
 
 		expect(errorBox()).toBeNull();
 		expect(attachedTo()).toEqual([T, U]);
+	});
+});
+
+// ─── A pane switched to another terminal (#966) ──────────────────────────────
+
+// xterm parses a write later than it takes it, and the pane kept one xterm
+// across terminals: what the terminal it left printed just before a switch was
+// parsed once the next one had bound it. xterm's answer to its query was typed
+// into the next terminal, its title and modes stayed, and a screen with no
+// snapshot to replace it stayed up under the new binding. Each terminal now
+// gets an xterm of its own, and the one it left is disposed.
+describe("TerminalPane switched to another terminal (#966)", () => {
+	const QUERY = "\u001b[6n";
+	const REPLY = "\u001b[1;1R";
+	/** A third terminal on HOST. */
+	const V = "01HZZZZZZZZZZZZZZZZZZZZZV6";
+	const xterms = () => [...root.querySelectorAll(".xterm")];
+	/** The pane's one `.xterm`, the same element and not one that merely looks like it. */
+	function theXterm(): Element | undefined {
+		const all = xterms();
+		expect(all).toHaveLength(1);
+		return all[0];
+	}
+	const size = () => [terminal().cols, terminal().rows];
+	const bells = (id: string) => useNotificationStore().bellCounts.get(id) ?? 0;
+	const unread = (id: string) => useNotificationStore().unreadLines.get(id) ?? 0;
+	const searchInput = () =>
+		root.querySelector<HTMLInputElement>('input[aria-label="Search terminal"]');
+	const searchShown = () =>
+		root.querySelector<HTMLElement>('[role="search"]')?.style.display !== "none";
+	const counts = () =>
+		root.querySelector(".search-overlay__match-count")?.textContent?.trim() ?? null;
+	const regexOn = () =>
+		root
+			.querySelector('button[title="Use Regular Expression"]')
+			?.classList.contains("search-overlay__toggle--active") ?? false;
+	const regexError = () =>
+		root.querySelector(".search-overlay__regex-error")?.textContent?.trim() ?? "";
+	const searches = () => xterm.searches as StandInSearch[];
+
+	/** U and V run on HOST too. */
+	function withTerminals(): void {
+		const channels = useChannelsStore();
+		channels.registerChannelHost(U, HOST);
+		channels.registerChannelHost(V, HOST);
+	}
+
+	/** T and U are listed, with the titles the hub computed for them. */
+	function listBoth(): void {
+		useChannelsStore().channels = [
+			listed(T, "live", { displayTitle: "T-NAME" }),
+			listed(U, "live", { displayTitle: "U-NAME" }),
+		];
+	}
+
+	/** This window holds both T's and U's write locks: the pane decides their size. */
+	function writesBoth(): void {
+		writer();
+		useWriteLockStore().handleWriteLock(U, CLIENT);
+	}
+
+	/** A pane showing T, whose ATTACH_OK writes `T-SCREEN` and carries `answer`. */
+	async function showingT({
+		setUp,
+		answer = {},
+	}: {
+		setUp?: () => void;
+		answer?: Partial<Frame>;
+	} = {}): Promise<Ref<string>> {
+		const channel = ref(T);
+		mountPane(channel, "live", {
+			setUp: () => {
+				withTerminals();
+				setUp?.();
+			},
+		});
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "T-SCREEN", answer);
+		await settle();
+		return channel;
+	}
+
+	/** The pane given U: its ATTACH sent, not answered. */
+	async function givenU(channel: Ref<string>): Promise<void> {
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo().at(-1)).toBe(U));
+	}
+
+	/** The pane given U, which answers with `U-SCREEN`. */
+	async function switched(channel: Ref<string>, over: Partial<Frame> = {}): Promise<void> {
+		await givenU(channel);
+		attachOk(U, "U-SCREEN", over);
+		await settle();
+	}
+
+	async function openSearch(): Promise<void> {
+		press({ ctrlKey: true, shiftKey: true, key: "F" }, "\u0006");
+		await settle();
+	}
+
+	async function typeSearch(query: string): Promise<void> {
+		const input = searchInput();
+		if (input === null) throw new Error("the search box is not shown");
+		input.value = query;
+		input.dispatchEvent(new Event("input"));
+		await settle();
+	}
+
+	async function toggleRegex(): Promise<void> {
+		root.querySelector<HTMLButtonElement>('button[title="Use Regular Expression"]')?.click();
+		await settle();
+	}
+
+	it("sends the terminal it switched to nothing xterm answers for the one it left", async () => {
+		const channel = await showingT({ setUp: writesBoth });
+		xterm.answer = (text) => (text.includes(QUERY) ? REPLY : null);
+		xterm.parse = "later";
+		print(T, QUERY);
+		await switched(channel);
+
+		drain();
+		await settle();
+
+		expect(inputsTo()).toEqual([]);
+	});
+
+	it("shows the terminal it switched to in a new xterm and keeps only that one", async () => {
+		const channel = await showingT();
+		const before = terminal();
+
+		await switched(channel);
+
+		expect(terminal()).not.toBe(before);
+		expect(theXterm()).toBe(terminal().element);
+		expect(before.disposed).toBe(true);
+	});
+
+	it("shows an empty screen for a terminal switched to without a snapshot", async () => {
+		const channel = await showingT();
+
+		await switched(channel, { snapshot: null, tail: [], cached: true });
+
+		expect(terminal().parsed).toEqual([]);
+	});
+
+	it("shows the title of the terminal it switched to, not the one it left", async () => {
+		const channel = await showingT({ setUp: listBoth, answer: { dynamicTitle: "T-TITLE" } });
+		expect(paneTitleText()).toBe("T-TITLE");
+
+		await switched(channel);
+
+		expect(paneTitleText()).toBe("U-NAME");
+	});
+
+	it("keeps the keyboard when it switches to another terminal", async () => {
+		const channel = await showingT();
+		terminal().focus();
+
+		await switched(channel);
+
+		expect(terminal().element.contains(document.activeElement)).toBe(true);
+	});
+
+	it("leaves the keyboard elsewhere when it switches without it", async () => {
+		const channel = await showingT({ setUp: () => useChannelsStore().selectChannel(T) });
+		const elsewhere = document.body.appendChild(document.createElement("button"));
+		onTestFinished(() => elsewhere.remove());
+		await givenU(channel);
+		useChannelsStore().selectChannel(U);
+		await settle();
+		elsewhere.focus();
+
+		attachOk(U, "U-SCREEN");
+		await settle();
+
+		expect(document.activeElement).toBe(elsewhere);
+	});
+
+	/** T's ATTACH_OK replay begun in its xterm: its opening marker parsed, not its closing one. */
+	async function replayBegun(): Promise<{ channel: Ref<string>; left: StandInTerminal }> {
+		const channel = ref(T);
+		mountPane(channel, "live", { setUp: withTerminals });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		xterm.parse = "later";
+		attachOk(T, "T-SCREEN");
+		await settle();
+		const left = terminal();
+		parseOf(left, 1);
+		return { channel, left };
+	}
+
+	it("rings the bell of the terminal it switched to while the one it left never finishes its replay", async () => {
+		const { channel, left } = await replayBegun();
+		await switched(channel);
+		dropQueueOf(left);
+		parseOf(terminal());
+
+		print(U, "\u0007");
+		parseOf(terminal());
+
+		expect(bells(U)).toBe(1);
+	});
+
+	it("keeps the bells of the terminal it switched to's replay muted while the one it left finishes its own", async () => {
+		const { channel, left } = await replayBegun();
+		await givenU(channel);
+		attachOk(U, "U-SCREEN\u0007");
+		await settle();
+		const shown = terminal();
+
+		parseOf(shown, 1);
+		parseOf(left);
+		parseOf(shown);
+
+		expect(bells(U)).toBe(0);
+	});
+
+	it("searches the terminal it switched to", async () => {
+		const channel = await showingT();
+		const [left] = searches();
+		await switched(channel);
+
+		await openSearch();
+		await typeSearch("needle");
+
+		const shown = searches().at(-1);
+		expect(shown).not.toBe(left);
+		expect(shown?.findNext).toHaveBeenCalledWith(
+			"needle",
+			expect.objectContaining({ incremental: true }),
+		);
+		expect(left?.dispose).toHaveBeenCalled();
+	});
+
+	it("searches an open query again in the terminal it switched to", async () => {
+		const channel = await showingT();
+		await openSearch();
+		await toggleRegex();
+		await typeSearch("ne+dle");
+		searches()[0]?.report(3, 0);
+		await settle();
+		expect(counts()).toBe("1/3");
+
+		await switched(channel);
+
+		const shown = searches().at(-1);
+		expect(searchInput()?.value).toBe("ne+dle");
+		expect(regexOn()).toBe(true);
+		expect(shown?.findNext).toHaveBeenCalledWith(
+			"ne+dle",
+			expect.objectContaining({ regex: true }),
+		);
+		expect(counts()).toBe("0/0");
+		shown?.report(5, 1);
+		await settle();
+		expect(counts()).toBe("2/5");
+	});
+
+	it("shows no count of the terminal it left for an invalid search", async () => {
+		const channel = await showingT();
+		await openSearch();
+		await toggleRegex();
+		await typeSearch("needle");
+		searches()[0]?.report(3, 0);
+		await settle();
+		await typeSearch("(");
+		expect(counts()).toBe("1/3");
+		expect(regexError()).not.toBe("");
+
+		await switched(channel);
+
+		expect(counts()).toBe("0/0");
+		expect(searchInput()?.value).toBe("(");
+		expect(regexError()).not.toBe("");
+		expect(searches().at(-1)?.findNext).not.toHaveBeenCalled();
+	});
+
+	it("draws the terminal it switched to with the profile applied last", async () => {
+		const channel = await showingT({
+			setUp: () => {
+				useThemeStore().appearance.scrollbar.style = "hidden";
+			},
+		});
+		paneProfile().profile.value = {
+			...paneProfile().profile.value,
+			fontSize: 18,
+			fontFamily: '"Fira Code"',
+			cursorStyle: "underline",
+			scrollback: 1234,
+			scrollbarMarkers: false,
+		};
+		await settle();
+
+		await switched(channel);
+
+		expect(terminal().options).toMatchObject({
+			fontSize: 18,
+			fontFamily: '"Fira Code"',
+			cursorStyle: "underline",
+			cursorBlink: false,
+			scrollback: 1234,
+			overviewRuler: { width: 1 },
+		});
+	});
+
+	it("draws the terminal it switched to in the theme set last", async () => {
+		const channel = await showingT();
+		const later = BUNDLED_THEMES.nord!;
+		useThemeStore().applyTheme(later);
+		await settle();
+
+		await switched(channel);
+
+		expect(terminal().options.theme).toEqual(useThemeStore().toXtermTheme(later.colors));
+	});
+
+	it("draws the terminal it switched to at its PTY size", async () => {
+		const channel = await showingT();
+
+		await switched(channel, { cols: 120, rows: 40 });
+
+		expect(size()).toEqual([120, 40]);
+	});
+
+	it("sizes the scrollbar of the terminal it switched to", async () => {
+		const channel = await showingT();
+		await switched(channel);
+
+		useThemeStore().appearance.scrollbar.widthThin = 9;
+		window.dispatchEvent(new Event("nt:scrollbar-changed"));
+
+		expect(terminal().options.overviewRuler).toMatchObject({ width: 9 });
+	});
+
+	it("draws the terminal it switched to in its host's theme", async () => {
+		const own = BUNDLED_THEMES.nord!;
+		const channel = await showingT({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [host(HOST, "pi", JSON.stringify({ theme: own.name }))];
+			},
+		});
+		useThemeStore().applyTheme(BUNDLED_THEMES.dracula!);
+		await settle();
+
+		await switched(channel);
+
+		expect(terminal().options.theme).toEqual(useThemeStore().toXtermTheme(own.colors));
+	});
+
+	it("fits the terminal it switched to to its pane", async () => {
+		paneHasASize();
+		const channel = await showingT({ setUp: writesBoth });
+		expect(size()).toEqual([80, 24]);
+		await givenU(channel);
+		xterm.fit = { cols: 90, rows: 28 };
+
+		attachOk(U, "U-SCREEN");
+		await settle();
+
+		expect(size()).toEqual([90, 28]);
+		expect(terminal().unicode.activeVersion).toBe("11");
+	});
+
+	it("keeps the size of a pane out of sight that switches", async () => {
+		xterm.fit = { cols: 132, rows: 43 };
+		const channel = await showingT({ setUp: writesBoth });
+		expect(size()).toEqual([132, 43]);
+		await givenU(channel);
+		xterm.fit = { cols: 90, rows: 28 };
+
+		attachOk(U, "U-SCREEN");
+		await settle();
+
+		expect(size()).toEqual([132, 43]);
+	});
+
+	it("fits its terminal again once the font settles", async () => {
+		paneHasASize();
+		mountPane(ref(T), "live", { setUp: writer });
+		// Promises only: the frames the refit waits for have not passed.
+		await settle();
+		expect(size()).toEqual([80, 24]);
+
+		xterm.fit = { cols: 90, rows: 28 };
+
+		await vi.waitFor(() => expect(size()).toEqual([90, 28]));
+	});
+
+	it("fits the terminal it switched to again once the font settles", async () => {
+		paneHasASize();
+		const channel = await showingT({ setUp: writesBoth });
+		await switched(channel);
+		expect(size()).toEqual([80, 24]);
+
+		xterm.fit = { cols: 90, rows: 28 };
+
+		await vi.waitFor(() => expect(size()).toEqual([90, 28]));
+	});
+
+	/**
+	 * T attached from what the hub remembers (the banner shows), then U given and
+	 * its ATTACH timed out: the banner stays over T's screen. Reconnect asks for U.
+	 */
+	async function reconnectingOverT(): Promise<void> {
+		const channel = await showingT({ answer: { cached: true } });
+		expect(banner()).not.toBeNull();
+		await givenU(channel);
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, U]));
+	}
+
+	it("writes the snapshot of a terminal reconnected over another's screen", async () => {
+		await reconnectingOverT();
+		const before = terminal();
+		print(U, "U-OUT");
+
+		attachOk(U, "U-SCREEN");
+		await settle();
+
+		expect(terminal()).not.toBe(before);
+		expect(terminal().parsed).toContain("U-SCREEN");
+		expect(xterm.events).not.toContain("U-OUT");
+	});
+
+	it("shows an ended terminal it switched to in a new xterm", async () => {
+		const channel = await showingT();
+		const before = terminal();
+		await givenU(channel);
+
+		refuse(U, lastOutput());
+		await settle();
+
+		expect(terminal()).not.toBe(before);
+		expect(before.disposed).toBe(true);
+		expect(terminal().parsed).toContain("LAST-SCREEN");
+	});
+
+	it("shows the last output of a terminal reconnected over another's screen", async () => {
+		await reconnectingOverT();
+
+		refuse(U, lastOutput());
+		await settle();
+
+		expect(terminal().parsed).toContain("LAST-SCREEN");
+	});
+
+	it("shows an ended terminal it switched to over nothing of the one it left when the hub kept nothing", async () => {
+		const channel = await showingT();
+		const before = terminal();
+		await givenU(channel);
+
+		refuse(U);
+		await settle();
+
+		expect(terminal()).not.toBe(before);
+		expect(terminal().parsed).not.toContain("T-SCREEN");
+	});
+
+	it("shows a terminal it switched to that is gone over nothing of the one it left", async () => {
+		const channel = await showingT();
+		const before = terminal();
+		await givenU(channel);
+
+		hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId: U });
+		await settle();
+
+		expect(terminal()).not.toBe(before);
+		expect(terminal().parsed).toEqual([]);
+	});
+
+	describe("keeps its xterm when the terminal it shows is attached again", () => {
+		it("by a Reconnect", async () => {
+			await showingT({ answer: { cached: true } });
+			const before = terminal().element;
+
+			button("Reconnect")?.click();
+			await vi.waitFor(() => expect(attachedTo()).toEqual([T, T]));
+			attachOk(T, "T-AGAIN");
+			await settle();
+
+			expect(theXterm()).toBe(before);
+		});
+
+		it("by a Restart", async () => {
+			await openEnded();
+			const before = terminal().element;
+
+			button("Restart")?.click();
+			await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+			spawnOk(T);
+			await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+			attachOk(T, "AGAIN");
+			await settle();
+
+			expect(theXterm()).toBe(before);
+		});
+
+		it("by the socket coming back", async () => {
+			await openLive();
+			const before = terminal().element;
+
+			useSessionStore().reconnectCount++;
+			await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+			attachOk(T, "AGAIN");
+			await settle();
+
+			expect(theXterm()).toBe(before);
+		});
+	});
+
+	it("rings the bell of the terminal it switched to", async () => {
+		const channel = await showingT();
+		await switched(channel);
+
+		print(U, "\u0007");
+
+		expect(bells(U)).toBe(1);
+	});
+
+	it("takes its shortcuts in the terminal it switched to", async () => {
+		const channel = await showingT();
+		await switched(channel);
+
+		expect(press({ ctrlKey: true, shiftKey: true, key: "F" }, "\u0006")).toBe(false);
+		await settle();
+
+		expect(searchShown()).toBe(true);
+	});
+
+	it("leaves no xterm when it closes after a switch", async () => {
+		const channel = await showingT();
+		await switched(channel);
+		const shown = terminal();
+
+		closePane();
+
+		expect(root.querySelectorAll(".xterm")).toHaveLength(0);
+		expect(shown.disposed).toBe(true);
+	});
+
+	it("rings nothing for a bell of the terminal it left while it waits for the next", async () => {
+		xterm.profile = { bellSound: "system" };
+		const channel = await showingT({ setUp: () => useChannelsStore().selectChannel(T) });
+		xterm.parse = "later";
+		print(T, "\u0007");
+		await givenU(channel);
+
+		drain();
+
+		expect(bells(U)).toBe(0);
+		expect(bells(T)).toBe(0);
+		expect(bellSound).not.toHaveBeenCalled();
+	});
+
+	it("rings again for the terminal it holds once it asks for it again", async () => {
+		const channel = await showingT();
+		xterm.parse = "later";
+		print(T, "\u0007");
+		await givenU(channel);
+		channel.value = T;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, T]));
+
+		drain();
+
+		expect(bells(T)).toBe(1);
+	});
+
+	it("clears the badge of the selected terminal that rang", async () => {
+		await showingT({ setUp: () => useChannelsStore().selectChannel(T) });
+		useNotificationStore().setActivity(T);
+		print(T, "\u0007");
+		expect(bells(T)).toBe(1);
+
+		await vi.advanceTimersByTimeAsync(1_000);
+
+		expect(bells(T)).toBe(0);
+		expect(useNotificationStore().activityDots.get(T) ?? false).toBe(false);
+	});
+
+	it("clears only the badge of the terminal that rang", async () => {
+		const channel = await showingT({ setUp: () => useChannelsStore().selectChannel(T) });
+		print(T, "\u0007");
+		await givenU(channel);
+		useChannelsStore().selectChannel(U);
+		await settle();
+		useNotificationStore().incrementBellCount(U);
+
+		await vi.advanceTimersByTimeAsync(1_000);
+
+		expect(bells(U)).toBe(1);
+		expect(bells(T)).toBe(1);
+	});
+
+	it("keeps its xterm while it waits for the terminal it was given", async () => {
+		const channel = await showingT();
+		const before = terminal().element;
+
+		await givenU(channel);
+
+		expect(theXterm()).toBe(before);
+	});
+
+	it("keeps its xterm when the terminal it waits for is superseded", async () => {
+		const channel = await showingT();
+		const before = terminal().element;
+		await givenU(channel);
+
+		channel.value = V;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, V]));
+
+		expect(theXterm()).toBe(before);
+	});
+
+	it("keeps its xterm when the terminal it was given never answers", async () => {
+		const channel = await showingT();
+		const before = terminal().element;
+		await givenU(channel);
+
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+
+		expect(theXterm()).toBe(before);
+	});
+
+	it("keeps its xterm when its attach for the terminal it was given cannot be sent", async () => {
+		const channel = await showingT();
+		const before = terminal();
+		vi.mocked(useSessionStore().wsClient.send).mockImplementation((msg) => {
+			if (msg.type === "ATTACH") throw new Error("WebSocket not connected");
+			sent.push(msg as Frame);
+		});
+
+		channel.value = U;
+		await settle();
+
+		expect(theXterm()).toBe(before.element);
+		expect(before.disposed).toBe(false);
+	});
+
+	it("clears unread lines on a scroll in the terminal it switched to", async () => {
+		const channel = await showingT();
+		await givenU(channel);
+		useChannelsStore().selectChannel(U);
+		attachOk(U, "U-SCREEN");
+		await settle();
+		useNotificationStore().addUnreadLines(U, 7);
+
+		print(U, "one\r\ntwo");
+
+		expect(unread(U)).toBe(0);
+	});
+
+	it("shows the title of the terminal it was given while it waits for it", async () => {
+		const channel = await showingT({ setUp: listBoth, answer: { dynamicTitle: "T-TITLE" } });
+		xterm.parse = "later";
+		print(T, "\u001b]0;T-LATE\u0007");
+		await givenU(channel);
+
+		drain();
+		await settle();
+
+		expect(paneTitleText()).toBe("U-NAME");
+	});
+
+	it("shows the title of the terminal it was given when it never answers", async () => {
+		const channel = await showingT({ setUp: listBoth, answer: { dynamicTitle: "T-TITLE" } });
+		xterm.parse = "later";
+		print(T, "\u001b]0;T-LATE\u0007");
+		await givenU(channel);
+		drain();
+
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+
+		expect(paneTitleText()).toBe("U-NAME");
+	});
+
+	it("takes the titles of the terminal it holds again once it asks for it again", async () => {
+		const channel = await showingT({ setUp: listBoth, answer: { dynamicTitle: "T-TITLE" } });
+		xterm.parse = "later";
+		print(T, "\u001b]0;T-NEW\u0007");
+		await givenU(channel);
+		channel.value = T;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, T]));
+		expect(paneTitleText()).toBe("T-NAME");
+
+		drain();
+		await settle();
+
+		expect(paneTitleText()).toBe("T-NEW");
+	});
+
+	it("keeps the unread lines of the terminal it was given when the one it left scrolls", async () => {
+		const channel = await showingT();
+		useNotificationStore().addUnreadLines(U, 7);
+		xterm.parse = "later";
+		print(T, "one\r\ntwo");
+		await givenU(channel);
+		useChannelsStore().selectChannel(U);
+		await settle();
+
+		drain();
+
+		expect(unread(U)).toBe(7);
+	});
+
+	it("clears unread lines on a scroll once it asks again for the terminal it holds", async () => {
+		const channel = await showingT({ setUp: () => useChannelsStore().selectChannel(T) });
+		xterm.parse = "later";
+		print(T, "one\r\ntwo");
+		await givenU(channel);
+		channel.value = T;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, T]));
+		useNotificationStore().addUnreadLines(T, 5);
+
+		drain();
+
+		expect(unread(T)).toBe(0);
+	});
+
+	it("replaces an xterm that only listened to the terminal it left", async () => {
+		const channel = ref(T);
+		mountPane(channel, "dead", { setUp: withTerminals });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		refuse(T);
+		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+		const before = terminal();
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnOk(T);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		print(T, "T-EARLY");
+		expect(before.parsed).toContain("T-EARLY");
+
+		await switched(channel);
+
+		expect(terminal()).not.toBe(before);
+		expect(terminal().parsed).not.toContain("T-EARLY");
+	});
+
+	it("draws nothing the terminal it left printed on the screen of the one it switched to", async () => {
+		const channel = await showingT();
+		xterm.parse = "later";
+		print(T, "T-LATE");
+		await switched(channel);
+
+		drain();
+
+		expect(terminal().parsed).toEqual(["U-SCREEN"]);
 	});
 });
 

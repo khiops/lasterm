@@ -87,8 +87,9 @@ export const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => 
 /**
  * The values a terminal profile accepts, by key, in the routes that consult
  * it: `PUT /api/config/global`, a host's or a channel's profile `PATCH`, and
- * a host's `profile_json` on `POST` and `PUT /api/hosts` (#848). A launch
- * profile's `profile_overrides` does not go through it. A key
+ * a host's `profile_json` on `POST` and `PUT /api/hosts` (#848), and a launch
+ * profile's `profile_overrides` on `POST` and `PUT /api/launch-profiles`
+ * (#916). A key
  * without an entry is stored as given; `null`, which removes a key, is never
  * asked about. Each rule is unit-tested in `config.spec.ts`, and each route
  * keeps one test proving it consults this table.

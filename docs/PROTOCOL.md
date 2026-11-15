@@ -2517,8 +2517,9 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 left out keeps its stored value; `null` clears one that may be empty, such as `ssh_port` (back
 to 22), `ssh_user`, `ssh_key_path` or `color` (#792).
 
-The routes store a sign-in method for every SSH host they write (#917). CreateHost on an SSH host without
-`ssh_auth` stores `key` when `ssh_key_path` names a file, and `agent` otherwise; a key path made
+Three writes store a sign-in method for an SSH host sent without one (#917): CreateHost, an
+UpdateHost that turns a local host into an SSH one, and the import; migration 027 did it for the
+rows before. CreateHost on an SSH host without `ssh_auth` stores `key` when `ssh_key_path` names a file, and `agent` otherwise; a key path made
 only of ASCII whitespace names none. UpdateHost that turns a local host with no method into an SSH
 one does the same, on the key path sent or, if none is sent, the stored one. Any other edit changes
 the stored method only when `ssh_auth` is sent: `{ ssh_key_path }` alone on a host on `agent`

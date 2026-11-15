@@ -516,9 +516,9 @@ export class SshAgent extends AgentConnection {
 		const username = this.host.sshUser || parsed.username;
 		const hostname = parsed.hostname;
 		const port = this.host.sshPort ?? 22;
-		// The HTTP writers store a method for every SSH host (#917); one stored
-		// without by another writer is not given either, which would sign in one
-		// way here and another as a jump.
+		// Create, import and an edit from local to SSH store a method (#917); a
+		// host left without one (an internal writer, or a duplicate of its row) is
+		// not given either, which would sign in one way here and another as a jump.
 		const authMethod = this.host.sshAuth;
 		if (authMethod === undefined) {
 			throw new Error("Host has no sign-in method configured");

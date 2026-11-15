@@ -86,9 +86,9 @@ export function resolveJump(
 						"The host this one is reached through is no longer an SSH host here. Point it at another, or give its address instead.",
 				};
 			}
-			// The HTTP writers store a method for every SSH host (#917); a jump
-			// through one stored without is refused rather than signing in another way than the host
-			// itself would.
+			// Create, import and an edit from local to SSH store a method (#917); a
+			// jump through a host left without one is refused rather than signing in
+			// another way than the host itself would.
 			if (jumpHost.sshAuth === undefined) {
 				return {
 					kind: "refused",

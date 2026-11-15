@@ -45,6 +45,9 @@ export interface AttachAnswer {
  */
 export const ATTACH_SUPERSEDED = "ATTACH_SUPERSEDED";
 
+/** RIS: xterm resets the terminal when it parses it, after what it was sent before. */
+const FULL_RESET = "c";
+
 /** An attach the hub has not answered yet. */
 interface PendingAttach {
 	request: number;
@@ -675,11 +678,17 @@ export function useTerminal(
 			(entry) => !entry.preserveContent || (entry.replaceIfLive && msg.cached !== true),
 		);
 		const tail = msg.tail ?? [];
+		// Listening while it waited, the xterm may not have parsed all it was
+		// sent yet, which the snapshot holds: a reset written after it clears
+		// it, where `reset()` would clear first and let it be parsed over the
+		// snapshot (#1010).
+		const queuedOutput = listeningTo === id;
 		replay(() => {
 			const term = terminal.value;
 			if (!term || !replaceScreen) return;
 			if (msg.snapshot) {
-				term.reset();
+				if (queuedOutput) term.write(FULL_RESET);
+				else term.reset();
 				const serialized = (msg.snapshot as { serialized?: string }).serialized;
 				if (serialized) term.write(serialized);
 			}

@@ -1487,7 +1487,7 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		attachOk(T, "LIVE-SNAP");
 		await settle();
 
-		expect(xterm.events).toEqual(["<reset>", "LIVE-SNAP"]);
+		expect(terminal().parsed).toEqual(["LIVE-SNAP"]);
 		expect(banner()).toBeNull();
 	});
 
@@ -1503,8 +1503,27 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		attachOk(T, "LIVE-SNAP");
 		await settle();
 
-		expect(xterm.events).toEqual(["<reset>", "LIVE-SNAP"]);
+		expect(terminal().parsed).toEqual(["LIVE-SNAP"]);
 		expect(banner()).toBeNull();
+	});
+
+	// What it printed while the Reconnect waited is in the live snapshot: once
+	// xterm has parsed everything, the screen is that snapshot alone (#1010).
+	it("draws the live answer over what xterm had not parsed when it came (#1010)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.parse = "later";
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		print(T, "DURING");
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+		drain();
+
+		expect(terminal().parsed).toEqual(["LIVE-SNAP"]);
 	});
 
 	// What it drew live through the end it watched stays (#927).

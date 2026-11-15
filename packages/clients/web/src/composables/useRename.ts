@@ -16,7 +16,11 @@ export function useRename(options: UseRenameOptions) {
 		isEditing.value = true;
 		originalLabel = currentLabel;
 		editValue.value = currentLabel;
-		nextTick(() => editInput.value?.select());
+		nextTick(() => {
+			// select() is not required to move the focus, and happy-dom's does not.
+			editInput.value?.focus();
+			editInput.value?.select();
+		});
 	}
 
 	function commitRename(): void {

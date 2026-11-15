@@ -16,7 +16,7 @@
 import { BUNDLED_THEMES, type Channel } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { type Ref, ref } from "vue";
+import { defineComponent, h, type Ref, ref } from "vue";
 import "../styles/base.css";
 import { useChannelsStore } from "../stores/channels.js";
 import { useConfigStore } from "../stores/config.js";
@@ -43,6 +43,7 @@ import {
 	MOUSE_OFF,
 	mount,
 	mountPane,
+	mountRoot,
 	type PaneProps,
 	paneProfile,
 	paneText,
@@ -60,6 +61,7 @@ import {
 	type,
 	xterm,
 } from "./TerminalPane.fixture.js";
+import TerminalPane from "./TerminalPane.vue";
 
 /** Another host: the one the rail has selected, or one a spawn is for. */
 const PI = "01HZZZZZZZZZZZZZZZZZZZZZP3";
@@ -176,6 +178,51 @@ function openNew(on: string, props: Omit<PaneProps, "channel"> = {}): Ref<string
 	const channel = ref<string | null>(NEW);
 	mount({ channel, ...props });
 	return channel;
+}
+
+/**
+ * A pane that owes its spawn on HOST, under a parent that remounts it over the
+ * same pending id, as a split or a move does: `remount` gives it a new key.
+ * The parent swaps the pending id for the new terminal, as App does.
+ */
+function openNewRemountable(): { channel: Ref<string | null>; remount(): Promise<void> } {
+	freshWindow();
+	useChannelsStore().registerPendingSpawn(NEW, HOST);
+	const channel = ref<string | null>(NEW);
+	const key = ref(0);
+	mountRoot(
+		defineComponent({
+			setup: () => () =>
+				h(TerminalPane, {
+					key: key.value,
+					channelId: channel.value,
+					hostId: HOST,
+					onChannelSpawned: (tempId: string, realId: string) => {
+						emitted.push(["channel-spawned", tempId, realId]);
+						if (channel.value === tempId) channel.value = realId;
+					},
+				}),
+		}),
+	);
+	return {
+		channel,
+		remount: async () => {
+			key.value++;
+			await settle();
+		},
+	};
+}
+
+/** The window's connection opens only when the returned function is called: for the next pane to ask. */
+function holdConnection(): () => void {
+	let open: () => void = () => {};
+	vi.mocked(useSessionStore().connect).mockImplementationOnce(
+		() =>
+			new Promise<void>((resolve) => {
+				open = resolve;
+			}),
+	);
+	return () => open();
 }
 
 // ─── What the pane shows and sends ───────────────────────────────────────────
@@ -563,6 +610,129 @@ describe("TerminalPane that failed to open, given another terminal (#971)", () =
 	});
 });
 
+// A split or a move mounts another pane over a new terminal's pending id. The
+// spawn was the first pane's: the next one attached the pending id, and said
+// its terminal was gone, while the terminal the spawn started was in no pane.
+// The spawn is the pending id's now, whichever pane shows it.
+describe("TerminalPane remounted over its new terminal (#980)", () => {
+	it("a new terminal that failed keeps its failure and Retry when its pane remounts", async () => {
+		const { remount } = openNewRemountable();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+
+		await remount();
+
+		await vi.waitFor(() => expect(errorBox()?.textContent).toContain("the shell could not start"));
+		expect(button("Retry")).toBeDefined();
+		expect(attaches()).toEqual([]);
+		expect(spawns()).toHaveLength(1);
+	});
+
+	it("a pane remounted while its terminal starts sends its own size once it starts", async () => {
+		paneHasASize();
+		const { remount } = openNewRemountable();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ hostId: HOST, cols: 80, rows: 24 });
+
+		// Remounted in a larger pane, before the hub answers.
+		xterm.fit = { cols: 100, rows: 30 };
+		await remount();
+		spawnOk(REAL);
+		useWriteLockStore().handleWriteLock(REAL, CLIENT);
+
+		await vi.waitFor(() => expect(resizes()).toEqual([{ channelId: REAL, cols: 100, rows: 30 }]));
+		await resizesSettle();
+		expect(resizes()).toHaveLength(1);
+		expect(spawns()).toHaveLength(1);
+	});
+
+	// The pane it replaced was waiting for the same connection: unmounted, it
+	// starts nothing, and the remounted pane asks at its own size.
+	it("a pane remounted before its terminal is asked for asks for it at its own size", async () => {
+		const { remount } = openNewRemountable();
+		let open: () => void = () => {};
+		const opened = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		vi.mocked(useSessionStore().connect).mockImplementation(() => opened);
+		await vi.waitFor(() => expect(useSessionStore().connect).toHaveBeenCalledTimes(1));
+
+		xterm.fit = { cols: 100, rows: 30 };
+		await remount();
+		await vi.waitFor(() => expect(useSessionStore().connect).toHaveBeenCalledTimes(2));
+		open();
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		await settle();
+		expect(spawns()).toHaveLength(1);
+		expect(spawns()[0]).toMatchObject({ hostId: HOST, cols: 100, rows: 30 });
+	});
+
+	it("a new terminal closed before it is asked for is never asked for", async () => {
+		openNew(HOST);
+		const open = holdConnection();
+		await vi.waitFor(() => expect(useSessionStore().connect).toHaveBeenCalledTimes(1));
+
+		closePane();
+		open();
+		await settle();
+
+		expect(spawns()).toEqual([]);
+	});
+
+	it("a pane that takes its terminal after it started shows what it printed", async () => {
+		const { channel, remount } = openNewRemountable();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		const open = holdConnection();
+		await remount();
+
+		// Before the remounted pane asks: the hub reports the terminal running,
+		// as the session store routes CHANNEL_STATE, answers the SPAWN, and the
+		// terminal prints.
+		useChannelsStore().updateChannelStatus(REAL, "live");
+		spawnOk(REAL);
+		print(REAL, "EARLY");
+		await settle();
+		open();
+
+		await vi.waitFor(() => expect(attachedTo()).toEqual([REAL]));
+		expect(channel.value).toBe(REAL);
+		expect(emitted).toContainEqual(["channel-spawned", NEW, REAL]);
+		xterm.events.length = 0;
+		attachOk(REAL, "SNAPSHOT-WITH-EARLY");
+		await settle();
+		expect(xterm.events).toEqual(["<reset>", "SNAPSHOT-WITH-EARLY"]);
+		expect(attachedTo()).toEqual([REAL]);
+	});
+
+	it("a Retry clicked before its pane remounts is sent by the remounted pane", async () => {
+		const { channel, remount } = openNewRemountable();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+		// The connection is held from the Retry until after the remount.
+		let open: () => void = () => {};
+		const opened = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		vi.mocked(useSessionStore().connect).mockImplementation(() => opened);
+
+		button("Retry")?.click();
+		await settle();
+		await remount();
+		open();
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(2));
+		spawnOk(REAL);
+		await settle();
+		expect(channel.value).toBe(REAL);
+		expect(emitted).toContainEqual(["channel-spawned", NEW, REAL]);
+		expect(errorBox()).toBeNull();
+		expect(spawns()).toHaveLength(2);
+	});
+});
+
 // ─── Spawn size ──────────────────────────────────────────────────────────────
 
 describe("TerminalPane spawn size", () => {
@@ -689,6 +859,19 @@ describe("TerminalPane recovery", () => {
 
 		expect(spawns()).toHaveLength(1);
 		expect(errorBox()?.textContent).toContain("SPAWN timeout");
+	});
+
+	it("tries its spawn again when the connection comes back after it failed", async () => {
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+
+		useSessionStore().reconnectCount++;
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(2));
+		expect(errorBox()).toBeNull();
+		expect(attaches()).toEqual([]);
 	});
 
 	it("tries again on its own when the connection comes back", async () => {
@@ -2747,6 +2930,68 @@ describe("TerminalPane over a host its user disconnected (#648)", () => {
 
 		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
 		expect(connect).not.toHaveBeenCalled();
+	});
+
+	// A pane still owed its spawn has no terminal yet: its Reconnect asked the
+	// hub for the pending id, and the pane then said its terminal was gone
+	// (#980). Retry or Connect is its way back.
+	it("shows no Not connected banner while it is owed its spawn: while its spawn runs", async () => {
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+
+		useHostsStore().setDisconnectedByUser([HOST]);
+		await settle();
+
+		expect(banner()).toBeNull();
+		expect(button("Reconnect")).toBeUndefined();
+		expect(attaches()).toEqual([]);
+	});
+
+	it("shows no Not connected banner while it is owed its spawn: after its spawn failed", async () => {
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+
+		useHostsStore().setDisconnectedByUser([HOST]);
+		await settle();
+
+		expect(banner()).toBeNull();
+		expect(button("Reconnect")).toBeUndefined();
+		expect(errorBox()?.textContent).toContain("the shell could not start");
+		expect(button("Retry")).toBeDefined();
+		expect(attaches()).toEqual([]);
+	});
+
+	it("shows no Not connected banner while it is owed its spawn: after its host's password or passphrase was not given", async () => {
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("AUTH_CANCELLED", "Authentication cancelled by user");
+		await vi.waitFor(() => expect(button("Connect")).toBeDefined());
+
+		useHostsStore().setDisconnectedByUser([HOST]);
+		await settle();
+
+		expect(banner()).toBeNull();
+		expect(button("Reconnect")).toBeUndefined();
+		expect(button("Connect")).toBeDefined();
+		expect(attaches()).toEqual([]);
+	});
+
+	it("shows no Not connected banner while it is owed its spawn: once it started", async () => {
+		const channel = openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnOk(REAL);
+		await settle();
+		expect(channel.value).toBe(REAL);
+
+		useHostsStore().setDisconnectedByUser([HOST]);
+		await settle();
+		expect(banner()?.textContent).toContain("Not connected.");
+		vi.spyOn(useHostsStore(), "connectHost").mockResolvedValue({ ok: true, status: 200, body: {} });
+		button("Reconnect")?.click();
+
+		await vi.waitFor(() => expect(attachedTo()).toEqual([REAL]));
 	});
 });
 

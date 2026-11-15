@@ -161,7 +161,7 @@ type Kind =
 	| "pending-left";
 
 /** The open issues the harness reaches, as `DEFECTS` describes them. */
-type Defect = "#966" | "#980";
+type Defect = "#966";
 
 interface Violation {
 	kind: Kind;
@@ -179,10 +179,6 @@ interface SpawnRecord {
 	host: string;
 	/** Retries clicked on a pane showing the pending id. */
 	retries: number;
-	/** Whether a second pane instance came over the pending id: its spawn, sent or failed, was the first one's. */
-	remounted: boolean;
-	/** Pane instances seen over the pending id, by their xterm. */
-	seen: Set<StandInTerminal>;
 	/** The terminal each SPAWN for it started, in the order the hub started them. */
 	started: string[];
 }
@@ -278,7 +274,7 @@ class World {
 	constructor(readonly scenario: Scenario) {}
 
 	violate(kind: Kind, detail: string, spawn?: number): void {
-		const known = knownDefect(kind, spawn === undefined ? undefined : this.spawns.get(spawn));
+		const known = knownDefect(kind);
 		this.violations.push({
 			kind,
 			detail,
@@ -336,8 +332,6 @@ class World {
 			pending: pendingId(k),
 			host: hostId,
 			retries: 0,
-			remounted: false,
-			seen: new Set(),
 			started: [],
 		});
 		return pendingId(k);
@@ -421,20 +415,13 @@ class World {
 		}
 	}
 
-	/** After each step: its queued checks, the panes, instances over a pending id, input sent. */
+	/** After each step: its queued checks, the panes, input sent. */
 	observe(): void {
 		sent.forEach((frame, i) => {
 			if ((frame.type === "SPAWN" || frame.type === "ATTACH") && !this.sentAt.has(i)) {
 				this.sentAt.set(i, this.clock);
 			}
 		});
-		for (const record of this.spawns.values()) {
-			for (const terminal of xterm.terminals as StandInTerminal[]) {
-				if (this.shownBy(terminal) !== record.pending) continue;
-				if (record.seen.size > 0 && !record.seen.has(terminal)) record.remounted = true;
-				record.seen.add(terminal);
-			}
-		}
 		for (const check of this.afterStep.splice(0)) check();
 		this.checkPanes();
 		const inputs = sent.filter((m) => m.type === "INPUT");
@@ -785,20 +772,14 @@ function grantWriteLock(channelId: string): void {
 	useWriteLockStore().handleWriteLock(channelId, CLIENT);
 }
 
-/** What each open defect looks like to the harness: the kinds it raises, and when one is its. */
-const DEFECTS: Record<Defect, { kinds: Kind[]; covers(spawn: SpawnRecord | undefined): boolean }> =
-	{
-		// xterm answers a query after the pane switched, as typed input to the terminal switched to.
-		"#966": { kinds: ["xterm-answer-to-other-terminal"], covers: () => true },
-		// A pane remounted over its pending id loses its spawn: what the spawn
-		// starts is shown nowhere, and a failed one can no longer be retried.
-		"#980": { kinds: ["pending-left", "spawn-lost"], covers: (spawn) => spawn?.remounted === true },
-	};
+/** What each open defect looks like to the harness: the kinds it raises. */
+const DEFECTS: Record<Defect, { kinds: Kind[] }> = {
+	// xterm answers a query after the pane switched, as typed input to the terminal switched to.
+	"#966": { kinds: ["xterm-answer-to-other-terminal"] },
+};
 
-function knownDefect(kind: Kind, spawn: SpawnRecord | undefined): Defect | undefined {
-	return (Object.keys(DEFECTS) as Defect[]).find(
-		(id) => DEFECTS[id].kinds.includes(kind) && DEFECTS[id].covers(spawn),
-	);
+function knownDefect(kind: Kind): Defect | undefined {
+	return (Object.keys(DEFECTS) as Defect[]).find((id) => DEFECTS[id].kinds.includes(kind));
 }
 
 function findPane(node: PaneNode, channelId: string): string | null {
@@ -1116,6 +1097,12 @@ const gesture = {
 		can: (w) => w.whereIs(k) !== null,
 		run: (w) => w.ui.onSplit(w.whereIs(k) as string, "vertical"),
 	}),
+	/** A split once the pane shows its spawn's failure: every path that splits has failed first. */
+	splitFailed: (k: number): Step => ({
+		label: `user: splits new terminal ${k}'s pane, which shows its failure`,
+		can: (w) => w.retryButtonOf(k) !== undefined,
+		run: (w) => w.ui.onSplit(w.whereIs(k) as string, "vertical"),
+	}),
 	splitTerminal: (channelId: string): Step => ({
 		label: `user: splits ${nameOf(channelId)}'s pane`,
 		can: (w) => w.paneIdOf(channelId) !== null,
@@ -1202,7 +1189,6 @@ const SCENARIOS: Scenario[] = [
 		steps: [gesture.split(1)],
 		holdConnect: true,
 		maxPaths: 40,
-		stillReaches: ["#980"],
 	},
 	{
 		name: "a new terminal moved to a new tab",
@@ -1210,7 +1196,6 @@ const SCENARIOS: Scenario[] = [
 		steps: [gesture.moveToNewTab(1)],
 		holdConnect: true,
 		maxPaths: 40,
-		stillReaches: ["#980"],
 	},
 	{
 		name: "a new terminal dropped beside another tab's terminal",
@@ -1220,7 +1205,13 @@ const SCENARIOS: Scenario[] = [
 		},
 		steps: [gesture.dropBeside(1, T, "right")],
 		maxPaths: 200,
-		stillReaches: ["#980"],
+	},
+	{
+		name: "a new terminal split, then moved to a new tab, while it starts",
+		setUp: newTerminalTab(1),
+		steps: [gesture.split(1), gesture.moveToNewTab(1)],
+		holdConnect: true,
+		maxPaths: 50,
 	},
 	{
 		name: "a new terminal closed while it starts",
@@ -1253,7 +1244,6 @@ const SCENARIOS: Scenario[] = [
 		setUp: newTerminalTab(1),
 		steps: [gesture.split(1), gesture.newTerminalInEmptySlot(2)],
 		maxPaths: 200,
-		stillReaches: ["#980"],
 	},
 	{
 		name: "a split's empty half given a terminal while the other half attaches",
@@ -1281,6 +1271,20 @@ const SCENARIOS: Scenario[] = [
 		steps: [gesture.retry(1)],
 		timeouts: true,
 		maxPaths: 100,
+	},
+	{
+		name: "Retry clicked twice after a new terminal failed to start",
+		setUp: newTerminalTab(1),
+		steps: [gesture.retry(1, 2)],
+		timeouts: true,
+		maxPaths: 100,
+	},
+	{
+		name: "a new terminal split after it failed, then retried",
+		setUp: newTerminalTab(1),
+		steps: [gesture.splitFailed(1), gesture.retry(1)],
+		timeouts: true,
+		maxPaths: 150,
 	},
 	{
 		name: "a terminal's query answered by xterm after the pane switched",
@@ -1629,9 +1633,19 @@ const CONTROLS: Control[] = [
 	{
 		check: "retry-lost, spawn-doubled",
 		scenario: {
-			name: "one Retry clicked twice",
+			name: "one Retry with a SPAWN of the harness's own beside it",
 			setUp: newTerminalTab(1),
-			steps: [gesture.retry(1, 2)],
+			steps: [
+				{
+					...gesture.retry(1),
+					run: async (w) => {
+						await gesture.retry(1).run(w);
+						void useChannelsStore()
+							.spawnChannel(hostOf(1), { select: false })
+							.catch(() => {});
+					},
+				},
+			],
 			maxPaths: 20,
 		},
 		reports: [
@@ -1753,14 +1767,15 @@ const CONTROLS: Control[] = [
 	{
 		check: "each kind of a marked defect reached",
 		scenario: {
-			name: "a new terminal marked with #980",
+			name: "a new terminal marked with #966",
 			setUp: newTerminalTab(1),
 			steps: [],
 			holdConnect: true,
 			maxPaths: 10,
-			stillReaches: ["#980"],
+			stillReaches: ["#966"],
 		},
-		reports: [/^marked, not reached: #980 pending-left$/, /^marked, not reached: #980 spawn-lost$/],
+		// It prints nothing, so xterm has no query to answer.
+		reports: [/^marked, not reached: #966 xterm-answer-to-other-terminal$/],
 	},
 ];
 

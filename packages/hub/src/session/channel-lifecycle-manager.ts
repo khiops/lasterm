@@ -1125,6 +1125,10 @@ export class ChannelLifecycleManager {
 		return { tail: chunks.map((c) => new Uint8Array(c.dataBlob)), truncated: false };
 	}
 
+	/**
+	 * A cached ATTACH_OK's screen: the newest snapshot and the output after it,
+	 * every byte the hub has received included, stored yet or not.
+	 */
 	buildAttachPayload(channelId: string): {
 		snapshot: UiAttachOkMessage["snapshot"];
 		tail: Uint8Array[];
@@ -1134,6 +1138,10 @@ export class ChannelLifecycleManager {
 		let tail: Uint8Array[] = [];
 		let truncated = false;
 
+		// What the chunker still holds is output the hub has received: a pane
+		// drops the OUTPUT it hears while its ATTACH waits, so an answer read
+		// from the spool before that output is stored would lose it (#956).
+		this.ctx.chunker.flush(channelId);
 		const snapshotChunk = this.ctx.spoolDal.getLatestSnapshot(channelId);
 		if (snapshotChunk) {
 			try {

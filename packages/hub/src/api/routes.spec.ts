@@ -149,8 +149,9 @@ describe("POST /api/hosts", () => {
 		expect(body.trust_remote_hints).toBe("ask");
 	});
 
-	// Every SSH host is stored with the method it signs in with, so connecting
-	// to it and going through it sign in the same way (#917).
+	// POST stores a method for each SSH host it creates, sent or implied by its
+	// key path, so connecting to it and going through it sign in the same way; a
+	// local host gets only the one sent (#917).
 	it("stores the method an SSH host left without one signs in with", async () => {
 		async function stored(payload: Record<string, unknown>): Promise<unknown> {
 			const res = await server.inject({ method: "POST", url: "/api/hosts", payload });
@@ -672,8 +673,9 @@ describe("PUT /api/hosts/:id", () => {
 			expect(res.statusCode).toBe(200);
 		});
 
-		// A local host turned into an SSH one gets the method a new SSH host would;
-		// any other edit leaves the method as it is, sent or not (#917).
+		// A local host with no method, turned into an SSH one without `ssh_auth`,
+		// gets `key` on the key path sent or stored, else `agent`; any other edit
+		// changes the stored method only when it sends one (#917).
 		it("an edit to SSH stores the method a host left without one signs in with", async () => {
 			async function local(label: string, fields: Record<string, unknown> = {}): Promise<string> {
 				const res = await server.inject({
@@ -738,7 +740,7 @@ describe("PUT /api/hosts/:id", () => {
 			});
 
 			// An SSH row an internal writer left without a method is not given one by
-			// an edit: the readers refuse it instead.
+			// an edit that sends none: the readers refuse it instead.
 			const bare = new MetaDAL(dbs.meta).createHost({
 				type: "ssh",
 				label: "bare",

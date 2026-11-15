@@ -100,7 +100,7 @@ describe("resolveJump", () => {
 			type: "ssh",
 			label: id,
 			sshHost: `me@${id}.example.com`,
-			// Every SSH host is stored with its method (#917).
+			// With a method, as POST /api/hosts and the import store an SSH host (#917).
 			sshAuth: "agent",
 			iconType: "auto",
 			trustRemoteHints: "ignore",

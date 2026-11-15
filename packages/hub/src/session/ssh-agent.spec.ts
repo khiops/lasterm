@@ -942,8 +942,9 @@ describe("SshAgent", () => {
 		TEST_TIMEOUT,
 	);
 
-	// Every SSH host is stored with its method (#917): one without is not given
-	// either, which would sign in one way here and another as a jump.
+	// An SSH host stored without a method, as an internal writer can leave it, is
+	// not given either (#917), which would sign in one way here and another as a
+	// jump.
 	it(
 		"refuses a host with no sign-in method before dialling",
 		async () => {

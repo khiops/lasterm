@@ -240,11 +240,12 @@ export function isBlankKeyPath(keyPath: string | null | undefined): boolean {
 }
 
 /**
- * The method an SSH host signs in with when its writer names none (#917): the
- * key it names, else the agent, as an import reads a `~/.ssh/config` entry with
- * or without an `IdentityFile`. Create, import and an edit from local to SSH
- * store it, as migration 027 did for the rows before, so the direct connect and
- * a jump through the host use the same one.
+ * The default method of an SSH host sent without one (#917): the key it names,
+ * else the agent, as an import reads a `~/.ssh/config` entry with or without an
+ * `IdentityFile`. Only POST, the import, and a PUT that turns a local host with
+ * no method into an SSH one store it; migration 027 applied the same rule to
+ * the SSH hosts stored without one before. The direct connect and a jump
+ * through the host then read the same stored method.
  */
 export function sshAuthFor(keyPath: string | null | undefined): "agent" | "key" {
 	return isBlankKeyPath(keyPath) ? "agent" : "key";
@@ -268,8 +269,8 @@ function validateSshSignIn(host: SshSignIn): string | null {
 	if (!host.ssh_host) {
 		return "ssh_host is required for SSH hosts and must not contain null bytes";
 	}
-	// Left out, the route stores `sshAuthFor` the key path (#917); sent as
-	// null, it is refused as POST always did.
+	// A method left out passes here; one sent as null is refused, as POST always
+	// did.
 	if (host.ssh_auth === null) return "ssh_auth must be 'agent', 'key', or 'password'";
 	if (host.ssh_auth === "key" && isBlankKeyPath(host.ssh_key_path)) {
 		return "ssh_key_path is required when ssh_auth is 'key'";

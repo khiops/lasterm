@@ -1134,7 +1134,7 @@ describe("meta.db migration 026: the uploads' tables", () => {
 	});
 });
 
-// ─── Migration 027: every SSH host is stored with its method (#917) ─────────
+// ─── Migration 027: SSH hosts stored without a method get one (#917) ─────────
 //
 // An SSH host without one was read as key auth when connected to and as the
 // agent when gone through. It gets the method its key path implies; nothing

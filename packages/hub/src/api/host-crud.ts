@@ -119,7 +119,8 @@ export function registerHostCrudRoutes(
 			label: body.label.trim(),
 			...(body.ssh_host !== undefined && { sshHost: body.ssh_host }),
 			...(body.ssh_port !== undefined && { sshPort: body.ssh_port }),
-			// An SSH host is created with its method, sent or `sshAuthFor` (#917).
+			// An SSH host gets the method sent, else `sshAuthFor` its key path; a local
+			// host only one sent (#917).
 			...(body.ssh_auth !== undefined
 				? { sshAuth: body.ssh_auth }
 				: body.type === "ssh" && { sshAuth: sshAuthFor(body.ssh_key_path) }),
@@ -261,7 +262,9 @@ export function registerHostCrudRoutes(
 			if (body.ssh_port !== undefined) updateInput.sshPort = body.ssh_port;
 			if (body.ssh_auth !== undefined) updateInput.sshAuth = body.ssh_auth;
 			else if (body.type === "ssh" && host.type === "local" && host.sshAuth === undefined) {
-				// A local host turned into an SSH one gets the method a new one would (#917).
+				// A local host with no method turned into an SSH one gets `sshAuthFor` its
+				// key path, sent or stored; any other edit that sends no method keeps the
+				// stored one, none included (#917).
 				updateInput.sshAuth = sshAuthFor(
 					body.ssh_key_path !== undefined ? body.ssh_key_path : host.sshKeyPath,
 				);

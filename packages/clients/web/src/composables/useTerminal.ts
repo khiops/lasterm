@@ -741,13 +741,14 @@ export function useTerminal(
 		const refusal = Object.assign(new Error(msg.message ?? msg.code), { code: msg.code });
 		try {
 			// An answer about another terminal than the one the xterm holds: a new
-			// xterm, so that nothing of the one left stays under this one's card,
-			// and there is no screen of its own to keep (#966).
-			const replaced = shownId !== null && shownId !== first.channelId;
-			if (replaced) replaceXterm();
+			// xterm, so that nothing of the one left stays under this one's card
+			// (#966). Asked over that other terminal's screen, none of the attaches
+			// waiting keeps the screen (`reattachChannel`).
+			if (shownId !== null && shownId !== first.channelId) replaceXterm();
 			if (msg.code === "CHANNEL_DEAD") {
-				const keepScreen =
-					!replaced && waiting.every((entry) => entry.preserveContent || entry.keepScreenIfEnded);
+				const keepScreen = waiting.every(
+					(entry) => entry.preserveContent || entry.keepScreenIfEnded,
+				);
 				showEnded(first.channelId, msg.lastOutput, keepScreen);
 			}
 		} finally {

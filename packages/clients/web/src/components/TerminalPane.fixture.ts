@@ -245,11 +245,7 @@ vi.mock("@xterm/xterm", () => ({
 			xterm.onWrite?.(self as unknown as StandInTerminal, text);
 			const parse = Object.assign(
 				() => {
-					// RIS, as xterm parses it: a reset, after what it parsed before.
-					const reset = text.lastIndexOf("c");
-					if (reset !== -1) self.parsed = [];
-					const shown = reset === -1 ? text : text.slice(reset + 2);
-					if (shown !== "") self.parsed.push(shown);
+					if (text !== "") self.parsed.push(text);
 					for (const title of titlesIn(text)) {
 						for (const listener of [...self.titleListeners]) listener(title);
 					}

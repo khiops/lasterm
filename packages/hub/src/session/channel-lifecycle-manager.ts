@@ -1127,7 +1127,8 @@ export class ChannelLifecycleManager {
 
 	/**
 	 * A cached ATTACH_OK's screen: the newest snapshot and the output after it,
-	 * every byte the hub has received included, stored yet or not.
+	 * what the chunker still holds included, within `boundTail`'s bound. With
+	 * no snapshot stored, nothing.
 	 */
 	buildAttachPayload(channelId: string): {
 		snapshot: UiAttachOkMessage["snapshot"];

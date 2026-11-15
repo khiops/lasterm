@@ -2748,8 +2748,8 @@ describe("SessionManager", () => {
 	// The hub stores a channel's output a second after it arrives, or once
 	// 256 KiB are waiting, or when it stores a snapshot. A pane that drops the
 	// OUTPUT it hears while its ATTACH waits writes, from a cached ATTACH_OK,
-	// only what that answer holds: so it holds every byte the hub has received
-	// for the terminal, stored yet or not.
+	// only what that answer holds: so after its snapshot it holds the output
+	// the hub has received, stored yet or not, within the tail's bound.
 	describe("an ATTACH answered from the spool (#956)", () => {
 		const SCREEN = { serialized: "<screen>", cols: 80, rows: 24, cursorX: 0, cursorY: 0 };
 
@@ -2832,16 +2832,16 @@ describe("SessionManager", () => {
 			agent.send.mockImplementation((msg: ProtocolMessage) => {
 				if (msg.type !== "ATTACH") answer?.(msg);
 			});
-			emit(snapshotRes(channelId));
-			emit(output(channelId, "before "));
-
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 			const received: ProtocolMessage[] = [];
 			try {
+				emit(snapshotRes(channelId));
+				// Stored by the chunker's second, before the ATTACH times out.
+				emit(output(channelId, "before "));
 				sm.addClient(makeClient("reader", received));
 				const attaching = sm.handleAttach("reader", channelId);
 				// The ATTACH times out at 5 s; this output arrives 0.5 s before, and
-				// the chunker would store it 0.5 s after.
+				// the chunker's next second would store it 0.5 s after.
 				await vi.advanceTimersByTimeAsync(4_500);
 				emit(output(channelId, "while waiting"));
 				await vi.advanceTimersByTimeAsync(600);

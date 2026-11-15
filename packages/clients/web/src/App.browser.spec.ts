@@ -23,11 +23,16 @@ vi.mock("./composables/useBellSound.js", () => ({ playBellSound: vi.fn() }));
 import "./styles/base.css";
 import type { ChannelRow } from "./App.doubles.fixture.js";
 import {
+	click,
+	dialogs,
 	focusPane,
 	HOST_A,
 	mountWindow,
+	mouseDown,
 	pane,
+	paneWithKeyboard,
 	press,
+	runPaletteRow,
 	settle,
 	split,
 	term,
@@ -193,5 +198,65 @@ describe("the files panel's form", () => {
 
 		expect(box("#files-panel").width).toBe(340);
 		expect(box(".pane-area").width).toBeCloseTo(area - 340, 0);
+	});
+});
+
+// Opened from the palette, Settings has nowhere to give the keyboard back to: the keyboard goes to
+// the pane, once the panel has left the page, whichever way it closes (#637, #940). happy-dom runs
+// no leave transition, so only a browser keeps the panel's focused control past the close.
+describe("closing Settings opened from the palette", () => {
+	// Two panes, so that the pane given the keyboard is the one that had it, not the first.
+	const twoPanes = () =>
+		mountWindow({
+			channels: [live("T1"), live("T2")],
+			layout: {
+				tabs: [{ id: "TAB1", root: split("vertical", term("T1", "P1"), term("T2", "P2")) }],
+			},
+		});
+	// As a click in the pane does: the pane becomes the tab's active one, its terminal takes the keys.
+	const clickPane = async (paneId: string) => {
+		await mouseDown(pane(paneId)?.querySelector(".terminal-pane"));
+		focusPane(paneId);
+	};
+
+	const closings: Record<string, () => Promise<unknown>> = {
+		"its ×": () => click("Close settings panel"),
+		Esc: () => press("Escape"),
+		"Ctrl+,": () => press(",", { ctrl: true }),
+	};
+
+	for (const [way, close] of Object.entries(closings)) {
+		it(`gives the keyboard to the pane on ${way}`, async () => {
+			await twoPanes();
+			await clickPane("P2");
+			await runPaletteRow("Settings");
+			expect(dialogs()).toEqual(["Settings"]);
+			expect(document.activeElement?.closest(".settings-panel")).not.toBeNull();
+
+			await close();
+
+			await vi.waitFor(() => expect(document.querySelector(".settings-panel")).toBeNull());
+			expect(paneWithKeyboard()).toBe("P2");
+		});
+	}
+});
+
+// Opened from a control of the window, Settings gives the keyboard back to it, not to the pane.
+describe("closing Settings opened from a control", () => {
+	it("gives the keyboard back to the rail's gear Settings was opened from", async () => {
+		await mountWindow({
+			channels: [live("T1")],
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+		});
+		const gear = document.querySelector<HTMLElement>('[aria-label="Open settings panel"]');
+		gear?.focus();
+		gear?.click();
+		await settle();
+		expect(dialogs()).toEqual(["Settings"]);
+
+		await press("Escape");
+
+		await vi.waitFor(() => expect(document.querySelector(".settings-panel")).toBeNull());
+		expect(document.activeElement).toBe(gear);
 	});
 });

@@ -1615,12 +1615,15 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 }
 
 // Settings gives the keyboard back to where it was when it opened; opened from the palette,
-// that was nowhere any more, and the keyboard goes to the pane (#637).
+// that was nowhere any more, and the keyboard goes to the pane (#637). The panel stays in the page
+// for its leave transition, its control still focused: a keyboard still in it was given back
+// nowhere, and would fall to the page once the panel is gone (#940).
 watch(showSettings, (open) => {
 	if (open) return;
 	void nextTick(() => {
 		const active = document.activeElement;
-		if (active === null || active === document.body) focusActivePane();
+		if (active === null || active === document.body || active.closest('.settings-panel') !== null)
+			focusActivePane();
 	});
 });
 

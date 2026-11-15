@@ -2200,7 +2200,7 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
 | GET | `/api/ssh-config` | ● | `{ entries, has_include }` — parses `~/.ssh/config`. 404 `NOT_FOUND` when there is none |
-| POST | `/api/hosts/import` | ● | `{ entries: { name, label, sshRemoteDaemon?: boolean \| null }[] }` (the key is camelCase) → `Host[]` (201). 409 `CONFLICT` with `error.conflicting_labels` when a label is in use, and nothing is created; 400 `VALIDATION_ERROR` for a `name` not in `~/.ssh/config` |
+| POST | `/api/hosts/import` | ● | `{ entries: { name, label, sshRemoteDaemon?: boolean \| null }[] }` (the key is camelCase) → `Host[]` (201). An entry with an `IdentityFile` is stored as `key` with that path, one without as `agent`, whether or not an SSH agent answers at import time (#917). 409 `CONFLICT` with `error.conflicting_labels` when a label is in use, and nothing is created; 400 `VALIDATION_ERROR` for a `name` not in `~/.ssh/config` |
 
 #### SSH Keys
 
@@ -2493,7 +2493,7 @@ hub drops its record; an interrupted one stays across restarts until it is resum
   ssh_host?: string,                  // required if type=ssh, "hostname" or "ip"
   ssh_port?: number | null,           // range 1-65535; none or null is 22
   ssh_user?: string | null,           // SSH username
-  ssh_auth?: 'agent' | 'key' | 'password',
+  ssh_auth?: 'agent' | 'key' | 'password',  // left out on an SSH host: 'key' with a key path, else 'agent'
   ssh_key_path?: string | null,       // required if ssh_auth=key
   ssh_config_host?: string,           // Host alias from ~/.ssh/config
   ssh_proxy_host_id?: string | null,  // jump host this hub knows (SPEC.md § 4.5b)
@@ -2516,6 +2516,13 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 **UpdateHost:** Same fields as CreateHost, all optional (partial update, deep merge). A field
 left out keeps its stored value; `null` clears one that may be empty, such as `ssh_port` (back
 to 22), `ssh_user`, `ssh_key_path` or `color` (#792).
+
+An SSH host is always stored with its sign-in method (#917). CreateHost on an SSH host without
+`ssh_auth` stores `key` when `ssh_key_path` names a file, and `agent` otherwise; a key path made
+only of ASCII whitespace names none. UpdateHost that turns a local host with no method into an SSH
+one does the same, on the key path sent or, if none is sent, the stored one. Any other edit changes
+the stored method only when `ssh_auth` is sent: `{ ssh_key_path }` alone on a host on `agent`
+leaves it on `agent`. `ssh_auth: null` is refused.
 
 Both routes answer 400 `VALIDATION_ERROR` for a field of another type than the one above, or a
 value outside its choices (#795). An edit gets CreateHost's rules: each field it sends is checked

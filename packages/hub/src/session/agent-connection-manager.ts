@@ -569,7 +569,11 @@ export class AgentConnectionManager {
 	 */
 	private recordSshConnection(hostId: string, agent: SshAgent): void {
 		const host = this.ctx.metaDal.getHost(hostId);
-		const authMethod = host?.sshAuth ?? "key";
+		// The method this connection signed in with, which an edit made while it
+		// connected does not change (#917). `start` refuses a host without one, so
+		// a connection that authenticated always has it.
+		const authMethod = agent.authMethod;
+		if (authMethod === undefined) return;
 		this.ctx.security.sshConnected({
 			hostId,
 			hostLabel: host?.label ?? "",

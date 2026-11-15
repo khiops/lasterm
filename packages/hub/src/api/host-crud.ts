@@ -5,6 +5,7 @@ import type { MetaDAL } from "../storage/meta.js";
 import type { CreateHostBody, UpdateHostBody } from "./hosts.js";
 import {
 	readHostProfileJson,
+	sshAuthFor,
 	validateCreateHost,
 	validateIconImage,
 	validateUpdateHost,
@@ -118,7 +119,10 @@ export function registerHostCrudRoutes(
 			label: body.label.trim(),
 			...(body.ssh_host !== undefined && { sshHost: body.ssh_host }),
 			...(body.ssh_port !== undefined && { sshPort: body.ssh_port }),
-			...(body.ssh_auth !== undefined && { sshAuth: body.ssh_auth }),
+			// An SSH host is always stored with its method (#917).
+			...(body.ssh_auth !== undefined
+				? { sshAuth: body.ssh_auth }
+				: body.type === "ssh" && { sshAuth: sshAuthFor(body.ssh_key_path) }),
 			...(body.ssh_key_path !== undefined && { sshKeyPath: body.ssh_key_path }),
 			...(body.icon_type !== undefined && { iconType: body.icon_type }),
 			...(body.icon_value !== undefined && { iconValue: body.icon_value }),
@@ -256,6 +260,12 @@ export function registerHostCrudRoutes(
 			if (body.ssh_host !== undefined) updateInput.sshHost = body.ssh_host;
 			if (body.ssh_port !== undefined) updateInput.sshPort = body.ssh_port;
 			if (body.ssh_auth !== undefined) updateInput.sshAuth = body.ssh_auth;
+			else if (body.type === "ssh" && host.type === "local" && host.sshAuth === undefined) {
+				// A local host turned into an SSH one gets the method a new one would (#917).
+				updateInput.sshAuth = sshAuthFor(
+					body.ssh_key_path !== undefined ? body.ssh_key_path : host.sshKeyPath,
+				);
+			}
 			if (body.ssh_key_path !== undefined) updateInput.sshKeyPath = body.ssh_key_path;
 			if (body.icon_type !== undefined) updateInput.iconType = body.icon_type;
 			if (body.icon_value !== undefined) updateInput.iconValue = body.icon_value;

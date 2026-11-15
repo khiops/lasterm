@@ -60,12 +60,12 @@ describe("openTestDatabases", () => {
 		expect(fk).toBe(1);
 	});
 
-	it("meta.db: schema_version is 26 after migration", () => {
+	it("meta.db: schema_version is 27 after migration", () => {
 		dbs = openTestDatabases();
 		const row = dbs.meta.prepare("SELECT MAX(version) as v FROM schema_version").get() as {
 			v: number;
 		};
-		expect(row.v).toBe(26);
+		expect(row.v).toBe(27);
 	});
 
 	it("spool.db: schema_version is 1 after migration", () => {
@@ -104,7 +104,7 @@ describe("openTestDatabases", () => {
 		expect(table?.name).toBe("chunks");
 	});
 
-	it("migration runner is idempotent (running twice produces same schema_version = 26)", () => {
+	it("migration runner is idempotent (running twice produces same schema_version = 27)", () => {
 		// First open
 		const dbs1 = openTestDatabases();
 		const v1 = (
@@ -119,8 +119,8 @@ describe("openTestDatabases", () => {
 		).v;
 		dbs2.close();
 
-		expect(v1).toBe(26);
-		expect(v2).toBe(26);
+		expect(v1).toBe(27);
+		expect(v2).toBe(27);
 	});
 
 	it("close() closes memory databases synchronously and returns a promise", async () => {
@@ -271,6 +271,7 @@ describe("meta.db and its baseline", () => {
 			{ version: 24 },
 			{ version: 25 },
 			{ version: 26 },
+			{ version: 27 },
 		]);
 		expect(tables(dbs.meta)).toEqual([
 			"auth_tokens",
@@ -345,11 +346,11 @@ describe("meta.db and its baseline", () => {
 			CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL);
 			INSERT INTO schema_version VALUES (21, '2026-10-01 00:00:00');
 			CREATE TABLE hosts (
-				id TEXT PRIMARY KEY, label TEXT, keep_alive_seconds INTEGER DEFAULT 60,
-				default_shell TEXT, discovered_shells TEXT,
+				id TEXT PRIMARY KEY, type TEXT, label TEXT, ssh_auth TEXT, ssh_key_path TEXT,
+				keep_alive_seconds INTEGER DEFAULT 60, default_shell TEXT, discovered_shells TEXT,
 				ssh_fingerprint TEXT, ssh_proxy_fingerprint TEXT
 			);
-			INSERT INTO hosts (id, label) VALUES ('H1', 'here');
+			INSERT INTO hosts (id, type, label) VALUES ('H1', 'local', 'here');
 			CREATE TABLE host_launch_profiles (
 				host_id TEXT NOT NULL, profile_id TEXT NOT NULL, override_type TEXT NOT NULL
 			);
@@ -367,6 +368,7 @@ describe("meta.db and its baseline", () => {
 			{ version: 24 },
 			{ version: 25 },
 			{ version: 26 },
+			{ version: 27 },
 		]);
 		expect(tables(dbs.meta)).toEqual([
 			"host_launch_profiles",
@@ -380,7 +382,10 @@ describe("meta.db and its baseline", () => {
 		expect(columns(dbs.meta, "launch_profiles")).toEqual(["id", "name", "report_directory"]);
 		expect(columns(dbs.meta, "hosts")).toEqual([
 			"id",
+			"type",
 			"label",
+			"ssh_auth",
+			"ssh_key_path",
 			"keep_alive_seconds",
 			"default_shell",
 			"discovered_shells",
@@ -391,7 +396,10 @@ describe("meta.db and its baseline", () => {
 		expect(dbs.meta.prepare("SELECT * FROM hosts").all()).toEqual([
 			{
 				id: "H1",
+				type: "local",
 				label: "here",
+				ssh_auth: null,
+				ssh_key_path: null,
 				keep_alive_seconds: 60,
 				default_shell: null,
 				discovered_shells: null,
@@ -491,6 +499,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 24 },
 			{ version: 25 },
 			{ version: 26 },
+			{ version: 27 },
 		]);
 		// What a connection reads, and compares with fingerprintOf(key) as it is.
 		expect(dal.getHostFingerprint("T", routeOf("T"))).toBe(fingerprintOf(target));
@@ -525,6 +534,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 24 },
 			{ version: 25 },
 			{ version: 26 },
+			{ version: 27 },
 		]);
 		expect(pins(dbs.meta)).toEqual([]);
 	});
@@ -544,6 +554,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 24 },
 			{ version: 25 },
 			{ version: 26 },
+			{ version: 27 },
 		]);
 		expect(pins(dbs.meta)).toEqual(migrated);
 
@@ -628,6 +639,7 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 			{ version: 24 },
 			{ version: 25 },
 			{ version: 26 },
+			{ version: 27 },
 		]);
 		const row = (
 			id: string,
@@ -675,6 +687,7 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 			{ version: 24 },
 			{ version: 25 },
 			{ version: 26 },
+			{ version: 27 },
 		]);
 		expect(shells(dbs.meta)).toEqual(chosen);
 	});
@@ -752,6 +765,7 @@ describe("meta.db migration 024: a launch profile override says whether the user
 			{ version: 24 },
 			{ version: 25 },
 			{ version: 26 },
+			{ version: 27 },
 		]);
 		expect(overrides(dbs.meta)).toEqual([
 			{
@@ -838,6 +852,7 @@ describe("meta.db migration 025: a launch profile can have its PowerShell report
 			{ version: 24 },
 			{ version: 25 },
 			{ version: 26 },
+			{ version: 27 },
 		]);
 		expect(
 			dbs.meta.prepare("SELECT id, report_directory, updated_at FROM launch_profiles").all(),
@@ -943,8 +958,8 @@ describe("meta.db migration 026: the uploads' tables", () => {
 			before.exec(migration(file));
 		}
 		const host = before.prepare(
-			`INSERT INTO hosts (id, type, label, ssh_host, created_at, updated_at)
-			VALUES (?, 'ssh', ?, ?, '${at}', '${at}')`,
+			`INSERT INTO hosts (id, type, label, ssh_host, ssh_auth, created_at, updated_at)
+			VALUES (?, 'ssh', ?, ?, 'agent', '${at}', '${at}')`,
 		);
 		host.run("H", "pi", "pi.test");
 		host.run("H2", "box", "box.test");
@@ -1018,7 +1033,7 @@ describe("meta.db migration 026: the uploads' tables", () => {
 
 		dbs = openDatabases(dir);
 
-		expect(versions(dbs.meta)).toEqual([...upTo25, { version: 26 }]);
+		expect(versions(dbs.meta)).toEqual([...upTo25, { version: 26 }, { version: 27 }]);
 		const after = contents(dbs.meta);
 		expect(Object.keys(after).filter((table) => !(table in before))).toEqual([
 			"transfer_items",
@@ -1109,12 +1124,82 @@ describe("meta.db migration 026: the uploads' tables", () => {
 		said.mockRestore();
 
 		expect(ahead).toBe(true);
-		expect(versions(dbs.meta)).toEqual([...upTo25, { version: 26 }]);
+		expect(versions(dbs.meta)).toEqual([...upTo25, { version: 26 }, { version: 27 }]);
 		const meta = new MetaDAL(dbs.meta);
 		expect(meta.getHost("H")?.label).toBe("pi");
 		expect(meta.deleteHost("H2")).toBe(true);
 		expect(count(dbs.meta, "transfers")).toBe(1);
 		expect(count(dbs.meta, "transfer_items")).toBe(1);
 		expect(tables(dbs.meta)).toEqual(expect.arrayContaining(["transfer_items", "transfers"]));
+	});
+});
+
+// ─── Migration 027: every SSH host is stored with its method (#917) ─────────
+//
+// An SSH host without one was read as key auth when connected to and as the
+// agent when gone through. It gets the method its key path implies; nothing
+// else changes.
+
+describe("meta.db migration 027", () => {
+	let dir: string;
+	let dbs: DatabaseManager | undefined;
+
+	beforeEach(() => {
+		dir = makeTempDir("lasterm-db-027-");
+	});
+
+	afterEach(async () => {
+		await dbs?.close();
+		dbs = undefined;
+		await removeTempDir(dir);
+	});
+
+	const migration = (name: string) =>
+		readFileSync(fileURLToPath(new URL(`./migrations/meta/${name}`, import.meta.url)), "utf-8");
+	const versions = (db: Database) =>
+		db.prepare("SELECT version FROM schema_version ORDER BY rowid").all();
+	const hosts = (db: Database) => db.prepare("SELECT * FROM hosts ORDER BY id").all();
+
+	const at = "2026-11-01T00:00:00.000Z";
+
+	it("gives every SSH host without a sign-in method the one its key path implies", () => {
+		const before = new Database(join(dir, "meta.db"));
+		for (const file of [
+			"021-baseline.sql",
+			"022-unpadded-ssh-pins.sql",
+			"023-discovered-default-shell.sql",
+			"024-launch-profile-set-by-user.sql",
+			"025-launch-profile-report-directory.sql",
+			"026-transfers.sql",
+		]) {
+			before.exec(migration(file));
+		}
+		const host = before.prepare(
+			`INSERT INTO hosts (id, type, label, ssh_host, ssh_auth, ssh_key_path, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, '${at}', '${at}')`,
+		);
+		host.run("H1", "ssh", "no-key", "a.test", null, null);
+		host.run("H2", "ssh", "key-path", "b.test", null, "~/.ssh/k");
+		host.run("H3", "ssh", "spaces", "c.test", null, "  ");
+		host.run("H4", "ssh", "tab", "d.test", null, "\t");
+		host.run("H5", "ssh", "password", "e.test", "password", null);
+		host.run("H6", "ssh", "agent-with-key", "f.test", "agent", "~/.ssh/k");
+		host.run("H7", "local", "local", null, null, null);
+		const rowsBefore = hosts(before) as Array<Record<string, unknown>>;
+		before.close();
+
+		dbs = openDatabases(dir);
+
+		expect(versions(dbs.meta)).toEqual([
+			{ version: 21 },
+			{ version: 22 },
+			{ version: 23 },
+			{ version: 24 },
+			{ version: 25 },
+			{ version: 26 },
+			{ version: 27 },
+		]);
+		const methods = ["agent", "key", "agent", "agent", "password", "agent", null];
+		expect(hosts(dbs.meta)).toEqual(rowsBefore.map((row, i) => ({ ...row, ssh_auth: methods[i] })));
 	});
 });

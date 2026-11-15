@@ -661,6 +661,7 @@ packages/hub/src/storage/migrations/
 │   ├── 024-launch-profile-set-by-user.sql
 │   ├── 025-launch-profile-report-directory.sql
 │   ├── 026-transfers.sql
+│   ├── 027-ssh-auth-for-every-ssh-host.sql
 │   └── ...
 └── spool/
     ├── 001-initial.sql
@@ -699,6 +700,7 @@ them. `spool.db` was not squashed: it still has its one migration.
 | `024-launch-profile-set-by-user.sql` | Adds `host_launch_profiles.set_by_user`: 1 for an override the user set through the hosts' profile routes, 0 for one the hub made from what an agent reported (#800). The hub marks the profile of the default shell a host's agent reports as the host's default only where the host has none, or where the one it has is its own earlier mark, which so follows the agent's default; it never replaces a default the user set, and never marks a profile the user hid. A hub before it marked the agent's at every connection, over the user's, so every row already there is left at 0, the column's default, and none is rewritten. A hub before #800, run again on the database, ignores the column and marks its agent's default at every connection again; a row it adds reads 0. |
 | `025-launch-profile-report-directory.sql` | Adds `launch_profiles.report_directory`: 1 for a profile whose PowerShell reports its directory (#839). The hub then says so in the SPAWN of each of its terminals, restarts included, and a Windows agent starts a `pwsh` or `powershell` whose arguments run nothing of their own with a prompt that reports its directory (PROTOCOL.md § 3.2). Every profile already there reads 0, the column's default: the switch changes the command line a shell starts with, and only its user turns it on. No row is rewritten. A hub before #839, run again on the database, ignores the column and starts every profile as it always did; a profile it adds reads 0. |
 | `026-transfers.sql` | Adds `transfers` and `transfer_items` (§ 3.9), where uploads are kept so that a restart, a crash or an update loses none (#860). Nothing else is touched. A hub before #860, run again on the database, opens it as one ahead of its migrations (§ 9.1), never names the two tables, and keeps its uploads in memory as it did; a host it deletes takes its uploads' rows with it, through the cascades. Back on a hub with #860, what it left there is read as before. |
+| `027-ssh-auth-for-every-ssh-host.sql` | Gives every SSH host stored without `ssh_auth` the method the hub now stores for one written without it (#917): `key` when its `ssh_key_path` holds something other than ASCII whitespace, `agent` otherwise. Before, such a host was read as key auth when connected to and as the agent when gone through. No other column or row is touched, `updated_at` included; a local host keeps its NULL. A hub before #917, run again on the database, reads each method as stored. |
 
 ## 10. Backup & Restore
 

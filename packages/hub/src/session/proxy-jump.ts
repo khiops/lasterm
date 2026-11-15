@@ -86,6 +86,16 @@ export function resolveJump(
 						"The host this one is reached through is no longer an SSH host here. Point it at another, or give its address instead.",
 				};
 			}
+			// Every SSH host is stored with its method (#917); a jump through one
+			// without is refused rather than signing in another way than the host
+			// itself would.
+			if (jumpHost.sshAuth === undefined) {
+				return {
+					kind: "refused",
+					message:
+						"The host this one is reached through has no sign-in method. Edit it and choose one.",
+				};
+			}
 			const jumpParsed = parseSshHost(jumpHost.sshHost);
 			const expectedRoute = targetRoute(
 				{ ...jumpHost, sshProxyHostId: null, sshProxySpec: null },
@@ -103,7 +113,7 @@ export function resolveJump(
 						(name): name is string => !!name,
 					),
 					auth: {
-						method: jumpHost.sshAuth ?? "agent",
+						method: jumpHost.sshAuth,
 						keyPath: jumpHost.sshKeyPath ?? undefined,
 						// Its `IdentityAgent none` keeps the agent from signing its key (#876).
 						...(jumpHost.sshConfigHost ? { sshConfigHost: jumpHost.sshConfigHost } : {}),

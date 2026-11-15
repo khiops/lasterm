@@ -613,7 +613,12 @@ describe("SSH connections are recorded in the security log", () => {
 			sshHost: "deploy@build.example",
 			sshAuth: "password",
 		} as unknown as Host;
-		(built.ctx.metaDal as unknown as Record<string, unknown>).getHost = vi.fn(() => host);
+		// The host as it reads now, edited to the agent since the connection was
+		// built: the record says the method the connection signed in with (#917).
+		(built.ctx.metaDal as unknown as Record<string, unknown>).getHost = vi.fn(() => ({
+			...host,
+			sshAuth: "agent",
+		}));
 		return { ...built, records, host };
 	}
 

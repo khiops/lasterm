@@ -11,6 +11,7 @@ import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { windowsLaunchCommand } from "./agent-deployer.js";
 import { AuthCancelledError } from "./auth-cancelled.js";
 import { type AuthPromptFn, buildJumpAuth, SshAgent } from "./ssh-agent.js";
+import { noSshAgentMessage, sshAgentAddress } from "./ssh-agent-address.js";
 import { sshExec } from "./ssh-exec.js";
 
 // ─── Mock agent-deployer.js for Fix B deploy-fallback tests ─────────────────
@@ -28,6 +29,12 @@ vi.mock("./agent-deployer.js", async (importOriginal) => {
 			arch: null,
 		}),
 	};
+});
+
+// Whether an agent answers is the machine's; a case that needs none says so.
+vi.mock("./ssh-agent-address.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("./ssh-agent-address.js")>();
+	return { ...actual, sshAgentAddress: vi.fn(actual.sshAgentAddress) };
 });
 
 const TEST_TIMEOUT = 10_000;
@@ -931,6 +938,43 @@ describe("SshAgent", () => {
 			agents.push(agent);
 
 			await expect(agent.start()).rejects.toThrow();
+		},
+		TEST_TIMEOUT,
+	);
+
+	// Every SSH host is stored with its method (#917): one without is not given
+	// either, which would sign in one way here and another as a jump.
+	it(
+		"refuses a host with no sign-in method before dialling",
+		async () => {
+			const seen = { connections: 0, refused: 0 };
+			const { server, port } = await createMockSshServer(() => {}, { seen });
+			servers.push(server);
+			const host = makeHost(port);
+			Reflect.deleteProperty(host, "sshAuth");
+			const agent = new SshAgent(host);
+			agents.push(agent);
+
+			await expect(agent.start()).rejects.toThrow("Host has no sign-in method configured");
+			expect(seen.connections).toBe(0);
+		},
+		TEST_TIMEOUT,
+	);
+
+	// A host stored as agent signs in with the agent, whatever key path it also
+	// keeps: here no agent answers, so it says so, and never reads the key (#917).
+	it(
+		"signs in with the agent a host stored as agent, its key path notwithstanding",
+		async () => {
+			vi.mocked(sshAgentAddress).mockReturnValueOnce(null);
+			const seen = { connections: 0, refused: 0 };
+			const { server, port } = await createMockSshServer(() => {}, { seen });
+			servers.push(server);
+			const agent = new SshAgent(makeHost(port, { sshAuth: "agent" }));
+			agents.push(agent);
+
+			await expect(agent.start()).rejects.toThrow(noSshAgentMessage(process.platform));
+			expect(seen.connections).toBe(0);
 		},
 		TEST_TIMEOUT,
 	);

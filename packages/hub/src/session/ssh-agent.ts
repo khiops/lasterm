@@ -1,6 +1,13 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import type { AgentConfig, HelloMessage, Host, HostArch, HostOs } from "@lasterm/shared";
+import type {
+	AgentConfig,
+	HelloMessage,
+	Host,
+	HostArch,
+	HostOs,
+	SshAuthMethod,
+} from "@lasterm/shared";
 import { DEFAULT_AGENT_CONFIG, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import ssh2, { Client, type ClientChannel, type ConnectConfig, type SyncHostVerifier } from "ssh2";
 import { fingerprintOf } from "../ssh/fingerprint.js";
@@ -424,6 +431,15 @@ export class SshAgent extends AgentConnection {
 	 */
 	keySigner: KeySigner | null = null;
 
+	/**
+	 * The method this connection signs in with: the host's, as it was when the
+	 * agent was built, not as the host reads after an edit made while it
+	 * connects. The security log says it.
+	 */
+	get authMethod(): SshAuthMethod | undefined {
+		return this.host.sshAuth;
+	}
+
 	lastKeyVerification: HostKeyVerification = {
 		capturedFingerprint: "",
 		mismatch: false,
@@ -500,7 +516,12 @@ export class SshAgent extends AgentConnection {
 		const username = this.host.sshUser || parsed.username;
 		const hostname = parsed.hostname;
 		const port = this.host.sshPort ?? 22;
-		const authMethod = this.host.sshAuth ?? "key";
+		// Every SSH host is stored with its method (#917); one without is not
+		// given either, which would sign in one way here and another as a jump.
+		const authMethod = this.host.sshAuth;
+		if (authMethod === undefined) {
+			throw new Error("Host has no sign-in method configured");
+		}
 		console.error(`[lasterm-ssh] resolved: ${username}@${hostname}:${port} auth=${authMethod}`);
 
 		// If aborted while building the connect config (which may prompt for auth),

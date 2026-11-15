@@ -71,12 +71,20 @@ describe("validateCreateHost", () => {
 	});
 
 	it("refuses key auth without a key path, or with a blank one", () => {
-		for (const ssh_key_path of [undefined, null, "", "  "]) {
+		for (const ssh_key_path of [undefined, null, "", "  ", " \t"]) {
 			const host = { type: "ssh", label: "key", ssh_host: "10.0.0.1", ssh_auth: "key" };
 			expect(validateCreateHost(body({ ...host, ssh_key_path }))).toBe(
 				"ssh_key_path is required when ssh_auth is 'key'",
 			);
 		}
+	});
+
+	// Blank is the one test the hub's default and migration 027 share: only
+	// ASCII whitespace, so a path the default stores as a key is one key auth
+	// takes (#917).
+	it("takes key auth with a key path blank by no ASCII whitespace rule", () => {
+		const host = { type: "ssh", label: "key", ssh_host: "10.0.0.1", ssh_auth: "key" };
+		expect(validateCreateHost(body({ ...host, ssh_key_path: "\u00a0" }))).toBeNull();
 	});
 
 	// A text column took a number or a boolean as text, and failed the write on

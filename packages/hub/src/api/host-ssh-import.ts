@@ -2,10 +2,10 @@ import type { SshConfigImport } from "@lasterm/shared";
 import { toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import { parseJumpSpec } from "../session/proxy-jump.js";
-import { sshAgentAddress, windowsAgentPipeExists } from "../session/ssh-agent-address.js";
 import type { ParseResult } from "../ssh/ssh-config-parser.js";
 import { readSshConfig } from "../ssh/ssh-config-parser.js";
 import type { MetaDAL } from "../storage/meta.js";
+import { sshAuthFor } from "./hosts.js";
 import type { AnnounceHostsChange } from "./hosts-changed.js";
 
 type SshConfigImportValidation = { entries: SshConfigImport[] } | { error: string };
@@ -152,17 +152,6 @@ export function registerHostSshImportRoutes(
 				});
 			}
 
-			// An entry naming no IdentityFile is one `ssh` logs into with whatever
-			// the agent holds — that is how these very hosts already work from a
-			// shell. Imported as "key" with no key, they could only ask for a
-			// password (#436).
-			const agentIsReachable =
-				sshAgentAddress({
-					env: process.env,
-					platform: process.platform,
-					pipeExists: windowsAgentPipeExists,
-				}) !== null;
-
 			// Build host inputs and create in a transaction
 			const inputs = entries.map((entry) => {
 				// Safe: validated above that all entries exist in entryMap
@@ -173,11 +162,12 @@ export function registerHostSshImportRoutes(
 					sshHost: sshEntry.hostname ?? sshEntry.name,
 					sshPort: sshEntry.port,
 					...(sshEntry.user != null && { sshUser: sshEntry.user }),
-					...(sshEntry.identityFile != null
-						? { sshKeyPath: sshEntry.identityFile, sshAuth: "key" as const }
-						: agentIsReachable
-							? { sshAuth: "agent" as const }
-							: {}),
+					// An entry naming no IdentityFile is one `ssh` logs into with
+					// whatever the agent holds, as these hosts already work from a
+					// shell: stored as the agent whether or not one runs now (#436, #917).
+					...(sshAuthFor(sshEntry.identityFile) === "key"
+						? { sshKeyPath: sshEntry.identityFile as string, sshAuth: "key" as const }
+						: { sshAuth: "agent" as const }),
 					sshConfigHost: sshEntry.name,
 					// Kept as written for now; the pass below links it to a host of
 					// this list when one turns out to be that bastion.

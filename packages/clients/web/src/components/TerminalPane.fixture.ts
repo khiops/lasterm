@@ -31,6 +31,8 @@ export interface StandInTerminal {
 	rows: number;
 	options: Record<string, unknown>;
 	element: HTMLElement;
+	/** Its helper textarea, where the keyboard and a paste arrive. */
+	textarea: HTMLTextAreaElement;
 	/** The key handler xterm was last given: xterm keeps one. */
 	keyHandler: ((ev: KeyboardEvent) => boolean) | null;
 	dataListeners: Array<(data: string) => void>;
@@ -168,15 +170,27 @@ vi.mock("@xterm/xterm", () => ({
 		private titleListeners: Array<(title: string) => void> = [];
 		private scrollListeners: Array<() => void> = [];
 		/** Where xterm takes the keyboard: its helper textarea, inside its element. */
-		private input = document.createElement("textarea");
+		textarea = document.createElement("textarea");
+		/** As xterm's parser: handlers for sequences, which this double never calls (#1012). */
+		parser = { registerCsiHandler: () => ({ dispose() {} }) };
 		constructor(options: Record<string, unknown>) {
 			this.options = { ...options };
 			// As xterm: it starts at the size it is given, 80×24 otherwise.
 			if (typeof options.cols === "number") this.cols = options.cols;
 			if (typeof options.rows === "number") this.rows = options.rows;
 			this.element.className = "xterm";
-			this.input.className = "xterm-helper-textarea";
-			this.element.appendChild(this.input);
+			this.textarea.className = "xterm-helper-textarea";
+			this.element.appendChild(this.textarea);
+			// As xterm 6.0.0: it pastes on a paste event at its textarea or its
+			// element, stopping it there, here as with bracketed paste off
+			// (`Clipboard.ts`, `handlePasteEvent`).
+			const paste = (event: ClipboardEvent): void => {
+				event.stopPropagation();
+				const text = event.clipboardData?.getData("text/plain") ?? "";
+				this.input(text.replace(/\r?\n/g, "\r"));
+			};
+			this.textarea.addEventListener("paste", paste);
+			this.element.addEventListener("paste", paste);
 			xterm.terminals.push(this);
 		}
 		loadAddon(addon: { activate?: (terminal: unknown) => void }): void {
@@ -222,9 +236,13 @@ vi.mock("@xterm/xterm", () => ({
 			return xterm.selection;
 		}
 		focus(): void {
-			this.input.focus();
+			this.textarea.focus();
 		}
 		scrollToBottom(): void {}
+		/** As xterm's `input`: data sent as if the user typed it, to the onData listeners. */
+		input(data: string, _wasUserInput = true): void {
+			for (const listener of [...this.dataListeners]) listener(data);
+		}
 		/** As xterm: a change of size is told to its listeners. */
 		resize(cols: number, rows: number): void {
 			if (cols === this.cols && rows === this.rows) return;

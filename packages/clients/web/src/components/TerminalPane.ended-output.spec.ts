@@ -52,6 +52,27 @@ describe("TerminalPane over a terminal that has ended (#927)", () => {
 		expect(spawns()).toEqual([]);
 	});
 
+	// An ended terminal takes no input, and its last screen stays where it can
+	// be scrolled: its snapshot's mode and screen state are not applied (#1012).
+	it("draws an ended terminal's last screen without its snapshot's input modes or alternate screen", async () => {
+		mountPane(ref(T), "dead");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		const last = lastOutput();
+		refuse(T, {
+			...last,
+			snapshot: {
+				...(last.snapshot ?? { serialized: "", cols: 80, rows: 24, cursorX: 0, cursorY: 0 }),
+				alternateScreen: true,
+				inputModes: "\u001b[?2004h\u001b[?1h",
+			},
+		});
+
+		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+		expect(xterm.events).toContain("LAST-SCREEN");
+		expect(xterm.events).not.toContain("\u001b[?1049h");
+		expect(xterm.events.some((event) => event.includes("\u001b[?2004h"))).toBe(false);
+	});
+
 	it("shows the card when the hub does not answer", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		mountPane(ref(T), "dead");

@@ -385,6 +385,8 @@ export function xtermInput(event: KeyboardEvent): string | null {
 export const xtermModule = {
 	Terminal: class {
 		options: Record<string, unknown>;
+		/** As xterm's parser: handlers for sequences, which this double never calls (#1012). */
+		parser = { registerCsiHandler: () => ({ dispose() {} }) };
 		cols = 80;
 		rows = 24;
 		unicode = { activeVersion: "" };

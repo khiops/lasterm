@@ -2212,7 +2212,12 @@ describe("useChannelsStore — a new terminal's spawn, whichever pane shows it (
 				hostId: "host-1",
 				requestId: hub.spawns()[0],
 			});
-			await expect(run?.outcome).resolves.toEqual({ channelId: "ch-1", cols: 80, rows: 24 });
+			await expect(run?.outcome).resolves.toEqual({
+				channelId: "ch-1",
+				cols: 80,
+				rows: 24,
+				adaptsInput: false,
+			});
 
 			store.releasePendingSpawn("pending-1");
 
@@ -2273,7 +2278,17 @@ describe("useChannelsStore — a new terminal's spawn, whichever pane shows it (
 		hub.emit({ type: "SPAWN_OK", channelId: "ch-2", hostId: "host-1", requestId: idSecond });
 		hub.emit({ type: "SPAWN_OK", channelId: "ch-1", hostId: "host-1", requestId: idFirst });
 
-		await expect(first?.outcome).resolves.toEqual({ channelId: "ch-1", cols: 80, rows: 24 });
-		await expect(second?.outcome).resolves.toEqual({ channelId: "ch-2", cols: 100, rows: 30 });
+		await expect(first?.outcome).resolves.toEqual({
+			channelId: "ch-1",
+			cols: 80,
+			rows: 24,
+			adaptsInput: false,
+		});
+		await expect(second?.outcome).resolves.toEqual({
+			channelId: "ch-2",
+			cols: 100,
+			rows: 30,
+			adaptsInput: false,
+		});
 	});
 });

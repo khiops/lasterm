@@ -988,7 +988,7 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 					// attachChannel would otherwise send (prevents SIGWINCH). A pane
 					// of another size sends its own.
 					suppressNextResize(spawned.cols, spawned.rows);
-					attachChannel(realId);
+					attachChannel(realId, { adaptsInput: spawned.adaptsInput });
 					attachedLive = true;
 					// Watched from its very start.
 					endWatch.starting(realId);

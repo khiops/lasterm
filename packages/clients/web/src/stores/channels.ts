@@ -130,6 +130,8 @@ export interface SpawnedTerminal {
 	channelId: string;
 	cols: number;
 	rows: number;
+	/** What its SPAWN_OK said of the agent's input (#1012); false from an older hub. */
+	adaptsInput: boolean;
 }
 
 /** The one spawn a pending id has sent: in flight, or what came of it. */
@@ -1000,6 +1002,14 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * size its PTY was spawned at, or the same error, with its `code` and
 	 * `asked`. A failed run stays until a Retry clears it.
 	 */
+	/** What each SPAWN_OK said of its agent's input (#1012), until its pane takes it. */
+	const spawnAdaptsInput = new Map<string, boolean>();
+	function takeSpawnAdaptsInput(channelId: string): boolean {
+		const adapts = spawnAdaptsInput.get(channelId) === true;
+		spawnAdaptsInput.delete(channelId);
+		return adapts;
+	}
+
 	function runPendingSpawn(tempId: string, cols: number, rows: number): PendingSpawnRun | null {
 		const record = pendingSpawns.get(tempId);
 		if (record === undefined) return null;
@@ -1010,7 +1020,7 @@ export const useChannelsStore = defineStore("channels", () => {
 				(channelId) => {
 					run.state = "succeeded";
 					forgetIfUnheld(tempId, record);
-					return { channelId, cols, rows };
+					return { channelId, cols, rows, adaptsInput: takeSpawnAdaptsInput(channelId) };
 				},
 				(err: unknown) => {
 					run.state = "failed";
@@ -1152,6 +1162,7 @@ export const useChannelsStore = defineStore("channels", () => {
 					// on another host than the one in view reads its profile and its
 					// theme from this, and would take the host in view's meanwhile.
 					registerChannelHost(msg.channelId, hostId);
+					spawnAdaptsInput.set(msg.channelId, "adaptsInput" in msg && msg.adaptsInput === true);
 					refreshAfterSpawn(hostId);
 					if (opts?.select !== false) {
 						selectChannel(msg.channelId);

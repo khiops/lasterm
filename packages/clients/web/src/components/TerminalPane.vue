@@ -399,7 +399,7 @@ watch(
 );
 /** Unmounted: an open still running has nobody to open for, and starts nothing. */
 let unmounted = false;
-/** The BEL handler is registered on the terminal, so once is enough. */
+/** The BEL handler is told of every xterm's bells by `useTerminal`, so once is enough. */
 let bellBound = false;
 /** A reconnect landed while this pane was still opening: what it sent went out
  * on a socket that is gone, so the failure to come is not the channel's fault. */
@@ -437,6 +437,8 @@ const {
 	isBoundTo,
 	turnMouseReportingOff,
 	bellMuted,
+	onBell,
+	onScroll,
 	applyProfile,
 	suppressNextResize,
 	syncChannelSize,
@@ -1049,20 +1051,21 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 				});
 			}
 			// Register xterm.js BEL handler — fires on \x07 from PTY output
+			// In whichever xterm the pane has, for the terminal that xterm holds (#966).
 			if (bellBound) return;
 			bellBound = true;
-			terminal.value?.onBell(() => {
+			onBell((chId) => {
 				// A bell in what the hub kept rang when it was printed (#927).
 				if (bellMuted()) return;
-				const chId = props.channelId;
 				// Increment bell badge (agent BELL WS message not reliable for all shells)
-				if (chId != null && resolvedProfile.value.bellBadge !== false) {
+				if (resolvedProfile.value.bellBadge !== false) {
 					notificationStore.incrementBellCount(chId);
-					// Auto-clear badge after 1s if this is the active channel
+					// Auto-clear badge after 1s if this is the active channel: the
+					// terminal that rang, not the one the pane shows by then (#966).
 					if (chId === channelsStore.selectedChannelId) {
 						setTimeout(() => {
-							if (props.channelId === channelsStore.selectedChannelId) {
-								notificationStore.clearBellAndActivity(props.channelId!);
+							if (chId === channelsStore.selectedChannelId) {
+								notificationStore.clearBellAndActivity(chId);
 							}
 						}, 1000);
 					}
@@ -1819,26 +1822,26 @@ useSearchShortcuts(search.isOpen, {
 // Wire natural scroll-to-bottom detection (EFF-07 / F-007).
 // When the viewport reaches the bottom of the scrollback buffer,
 // clear unread badges and hide the unread lines bar.
-watch(terminal, (term) => {
-	if (!term) return;
-	term.onScroll(() => {
-		const buf = term.buffer.active;
-		// Viewport is at bottom when baseY equals the scrollback position
-		// (i.e., no lines are hidden below the viewport)
-		if (buf.baseY === buf.viewportY) {
-			onNaturalScrollToBottom();
-		}
-	});
+// Every xterm the pane makes, and none it has left for another terminal (#966).
+onScroll((term) => {
+	const buf = term.buffer.active;
+	// Viewport is at bottom when baseY equals the scrollback position
+	// (i.e., no lines are hidden below the viewport)
+	if (buf.baseY === buf.viewportY) {
+		onNaturalScrollToBottom();
+	}
 });
 
 // The terminal that becomes the selected one takes the keyboard: a new
 // terminal, or a tab switched to, left it on the page body, so the first keys
 // went nowhere until a click.
+// Once the pane has an xterm, not each time it makes a new one for another
+// terminal: that one takes the keyboard only if the old one had it (#966).
 watch(
-	[isActiveTab, terminal],
-	([active, term]) => {
+	[isActiveTab, () => terminal.value !== null],
+	([active, present]) => {
 		// Over a terminal that has ended, the keyboard goes to the overlay's card.
-		if (active && term) void nextTick(() => (exitCard.value ?? term).focus());
+		if (active && present) void nextTick(() => (exitCard.value ?? terminal.value)?.focus());
 	},
 	{ immediate: true },
 );

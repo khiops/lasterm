@@ -3,7 +3,7 @@ import { sanitizeTitle } from "@lasterm/shared";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { Terminal } from "@xterm/xterm";
-import { type Ref, ref } from "vue";
+import { type Ref, ref, shallowRef } from "vue";
 import type { IWsClient } from "../services/ws-client.js";
 import { useChannelsStore } from "../stores/channels.js";
 import { useThemeStore } from "../stores/theme.js";
@@ -66,16 +66,38 @@ export function useTerminal(
 	/** Explicit per-host theme name from host.profileJson (SC-03 override). */
 	hostThemeName?: string,
 ) {
-	const terminal = ref<Terminal | null>(null);
+	/**
+	 * The pane's xterm. Each one holds one terminal's output for its whole life:
+	 * the pane makes a new one before it writes another terminal's (#966).
+	 * Shallow, so that it yields the xterm itself, which work tied to one xterm
+	 * compares against.
+	 */
+	const terminal = shallowRef<Terminal | null>(null);
 	const fitAddon = new FitAddon();
 	const search = useTerminalSearch();
 	let channelId: string | null = null;
 	/**
-	 * The terminal whose output the screen holds: the one attached last, or
-	 * the ended one whose last output it shows (#927). A refusal with nothing
-	 * to show keeps a screen that is already that terminal's.
+	 * The terminal whose output the screen holds: the one attached last, the
+	 * one listened to over a screen that held none, or the ended one whose last
+	 * output it shows (#927). A refusal with nothing to show keeps a screen that
+	 * is already that terminal's. Null for an xterm given no terminal yet.
 	 */
 	let shownId: string | null = null;
+	/**
+	 * The pane has asked for a terminal other than the one its xterm holds, and
+	 * that xterm is still the pane's: what it reports about a terminal (a bell, a
+	 * title, a scroll) is about the one left, and goes nowhere (#966).
+	 */
+	let leftHeld = false;
+	/** The profile applied last, which a new xterm is made with. */
+	let currentProfile = profile;
+	/** The host's own theme, when the pane has one (SC-03). */
+	let hostTheme: ReturnType<typeof useThemeStore>["availableThemes"][number] | undefined;
+	/** The terminal colours the theme subscription gave last: a new xterm takes them. */
+	let lastTheme: Record<string, string> | null = null;
+	/** What `TerminalPane` wants told of every xterm's bells and scrolls. */
+	const bellListeners: Array<(heldId: string) => void> = [];
+	const scrollListeners: Array<(term: Terminal) => void> = [];
 	/**
 	 * Set while the pane shows an ended terminal's last output: the size that
 	 * output was drawn at, which the pane keeps whatever its write lock says,
@@ -94,12 +116,13 @@ export function useTerminal(
 	/** The pane is closed: it asks for no terminal and waits for no answer (#929). */
 	let disposed = false;
 	/**
-	 * Replays xterm is parsing now (#927). xterm parses a write later than it
-	 * takes it, or inside `write()` right after user input, and calls each
+	 * Replays each xterm is parsing now (#927). xterm parses a write later than
+	 * it takes it, or inside `write()` right after user input, and calls each
 	 * write's callback once that write is parsed: markers written around a
-	 * replay therefore bracket its parse, whichever way it goes.
+	 * replay therefore bracket its parse, whichever way it goes. Counted per
+	 * xterm: one the pane replaced may still parse its markers, or never (#966).
 	 */
-	let replaysParsing = 0;
+	const replaysParsing = new WeakMap<Terminal, number>();
 	let resizeObserver: ResizeObserver | null = null;
 	let onScrollbarChanged: (() => void) | null = null;
 	/** Whether search matches are marked in the scrollbar gutter (profile). */
@@ -155,7 +178,6 @@ export function useTerminal(
 	 * null when stack is empty (fallback handled by useTabTitle).
 	 */
 	const currentDynamicTitle = ref<string | null>(null);
-	let titleChangeDispose: (() => void) | null = null;
 
 	/** Size xterm's scrollbar and ruler from the appearance setting and the profile. */
 	function applyScrollbarWidth(term: Terminal): void {
@@ -308,22 +330,25 @@ export function useTerminal(
 		);
 	}
 
-	function init(): { cols: number; rows: number } {
-		if (!containerRef.value) {
-			console.error("[useTerminal] containerRef is null — cannot init");
-			return { cols: 80, rows: 24 };
-		}
-
-		const p = profile;
+	/**
+	 * Make an xterm in the pane and make it the pane's: the first one at mount,
+	 * and each one that replaces it (#966). Every one is set up alike, from the
+	 * profile applied last and the theme in force. One that replaces another
+	 * starts at the old one's size and is sized by `layout()` after, since a
+	 * pane out of sight has none of its own to fit to.
+	 */
+	function makeXterm(container: HTMLElement, size?: { cols: number; rows: number }): Terminal {
+		const p = currentProfile;
 		const themeStore = useThemeStore();
-
-		// Per-host theme override (SC-03): use hostThemeName from host.profileJson
-		// if explicitly set. Otherwise use the runtime active theme.
-		const hostTheme = hostThemeName
-			? themeStore.availableThemes.find((t) => t.name === hostThemeName)
-			: undefined;
-		const initialColors = (hostTheme ?? themeStore.activeTheme)?.colors;
-		const initialXtermTheme = initialColors ? themeStore.toXtermTheme(initialColors) : {};
+		// The theme the pane's subscription set last, unless the host has its own;
+		// the active one before any came.
+		const colors = (hostTheme ?? themeStore.activeTheme)?.colors;
+		const theme =
+			hostTheme === undefined && lastTheme !== null
+				? lastTheme
+				: colors
+					? themeStore.toXtermTheme(colors)
+					: {};
 
 		scrollbarMarkers = p?.scrollbarMarkers !== false; // default true
 		const term = new Terminal({
@@ -337,16 +362,23 @@ export function useTerminal(
 			overviewRuler: {
 				width: terminalScrollbarWidth(themeStore.appearance.scrollbar, scrollbarMarkers),
 			},
-			theme: initialXtermTheme,
+			theme,
+			...size,
 		});
 
 		term.loadAddon(fitAddon);
 		term.loadAddon(new Unicode11Addon());
 		term.unicode.activeVersion = "11";
-		term.open(containerRef.value);
+		term.open(container);
 		// Before the first fit, since what it counts is what the PTY is spawned with.
 		syncMeasuredFont(term);
-		fitAddon.fit();
+		if (size === undefined) {
+			fitAddon.fit();
+			search.init(term, { scrollbarMarkers });
+		} else {
+			search.rebind(term, { scrollbarMarkers });
+		}
+		terminal.value = term;
 		// A font arriving late changes the cell, and with it the count: fit again
 		// so the terminal and its PTY agree even when the wait above was skipped.
 		void refitWhenFontSettles(
@@ -354,8 +386,6 @@ export function useTerminal(
 			p?.fontFamily ?? DEFAULT_FONT_FAMILY,
 			p?.fontSize ?? DEFAULT_FONT_SIZE,
 		);
-		search.init(term, { scrollbarMarkers });
-		terminal.value = term;
 
 		// Keyboard input → send INPUT to hub (only when holding write lock)
 		term.onData((data: string) => {
@@ -371,6 +401,83 @@ export function useTerminal(
 		// Terminal resize → send RESIZE to hub (debounced to coalesce rapid
 		// resizes), when this pane decides the size and still has one of its own.
 		term.onResize(scheduleSync);
+
+		// Terminal title change (OSC 0/2) → push to title stack, unless the pane
+		// has left the terminal this xterm holds (#966).
+		term.onTitleChange((raw: string) => {
+			if (leftHeld) return;
+			const clean = sanitizeTitle(raw); // defense-in-depth
+			if (clean === "") {
+				// INV-09: empty title — don't push, show top of stack instead
+				return;
+			}
+			titleStack.push(clean);
+			if (titleStack.length > MAX_TITLE_STACK) {
+				titleStack.shift();
+			}
+			currentDynamicTitle.value = clean;
+		});
+
+		// A bell or a scroll is about the terminal this xterm holds, and only
+		// while the pane has not left it (#966).
+		term.onBell(() => {
+			const held = shownId;
+			if (leftHeld || held === null) return;
+			for (const listener of [...bellListeners]) listener(held);
+		});
+		term.onScroll(() => {
+			if (leftHeld) return;
+			for (const listener of [...scrollListeners]) listener(term);
+		});
+		return term;
+	}
+
+	/**
+	 * Give the pane a new xterm before it writes another terminal's output, and
+	 * dispose the one holding the terminal it left (#966). What that one still
+	 * parses (an answer to a query, a title, a mode, a bell, a scroll) then
+	 * reaches nothing: a disposed xterm emits nothing. The keyboard follows when
+	 * the old one had it.
+	 */
+	function replaceXterm(): void {
+		const old = terminal.value;
+		const container = containerRef.value;
+		if (old === null || container === null) return;
+		const hadKeyboard = old.element?.contains(document.activeElement) === true;
+		const term = makeXterm(container, { cols: old.cols, rows: old.rows });
+		if (hadKeyboard) term.focus();
+		old.dispose();
+		shownId = null;
+		leftHeld = false;
+		layout();
+	}
+
+	/**
+	 * The pane asks for a terminal other than the one its xterm holds: that
+	 * xterm's title, bells and scrolls are the left terminal's from now on, and
+	 * its titles leave the tab (#966).
+	 */
+	function leaveHeld(): void {
+		leftHeld = true;
+		titleStack.length = 0;
+		currentDynamicTitle.value = null;
+	}
+
+	function init(): { cols: number; rows: number } {
+		if (!containerRef.value) {
+			console.error("[useTerminal] containerRef is null — cannot init");
+			return { cols: 80, rows: 24 };
+		}
+
+		const themeStore = useThemeStore();
+
+		// Per-host theme override (SC-03): use hostThemeName from host.profileJson
+		// if explicitly set. Otherwise use the runtime active theme.
+		hostTheme = hostThemeName
+			? themeStore.availableThemes.find((t) => t.name === hostThemeName)
+			: undefined;
+
+		const term = makeXterm(containerRef.value);
 
 		// The PTY's size changed: the pane draws at it unless it decides it (#831).
 		sizeUnsubscribe?.();
@@ -395,31 +502,18 @@ export function useTerminal(
 			layout();
 		});
 		resizeObserver.observe(containerRef.value);
+		// The xterm the pane has when the setting changes, not the one made first (#966).
 		onScrollbarChanged = (): void => {
-			applyScrollbarWidth(term);
+			const current = terminal.value;
+			if (current) applyScrollbarWidth(current);
 			layout();
 		};
 		window.addEventListener("nt:scrollbar-changed", onScrollbarChanged);
 
-		// Terminal title change (OSC 0/2) → push to title stack
-		titleChangeDispose?.();
-		const titleDisposable = term.onTitleChange((raw: string) => {
-			const clean = sanitizeTitle(raw); // defense-in-depth
-			if (clean === "") {
-				// INV-09: empty title — don't push, show top of stack instead
-				return;
-			}
-			titleStack.push(clean);
-			if (titleStack.length > MAX_TITLE_STACK) {
-				titleStack.shift();
-			}
-			currentDynamicTitle.value = clean;
-		});
-		titleChangeDispose = () => titleDisposable.dispose();
-
 		// Subscribe to global theme changes so all terminals update live.
 		// Per-host override (SC-03): if a host-specific theme is set, keep it.
 		themeUnsubscribe = themeStore.onTerminalThemeChange((xtermTheme) => {
+			lastTheme = xtermTheme;
 			if (terminal.value) {
 				if (hostTheme) {
 					terminal.value.options.theme = themeStore.toXtermTheme(hostTheme.colors);
@@ -437,6 +531,8 @@ export function useTerminal(
 	 * the terminal already listened to keeps the same listener.
 	 */
 	function listenTo(id: string): void {
+		// Listening writes: an xterm that held none holds this terminal now (#966).
+		if (shownId === null) shownId = id;
 		if (listeningTo === id && outputUnsubscribe !== null) return;
 		outputUnsubscribe?.();
 		listeningTo = id;
@@ -551,6 +647,10 @@ export function useTerminal(
 		if (waiting.length === 0 || !stillWanted(waiting)) return;
 		const id = msg.channelId;
 
+		// The xterm holds another terminal's output: this one gets a new one,
+		// before anything of it is written or sized, whatever the answer carries
+		// (#966).
+		if (shownId !== null && shownId !== id) replaceXterm();
 		// A terminal attached: the size rules of #831 apply again.
 		shownId = id;
 		leaveEndedSize();
@@ -640,6 +740,11 @@ export function useTerminal(
 		// decision to make by reading a sentence, which changes.
 		const refusal = Object.assign(new Error(msg.message ?? msg.code), { code: msg.code });
 		try {
+			// An answer about another terminal than the one the xterm holds: a new
+			// xterm, so that nothing of the one left stays under this one's card
+			// (#966). Asked over that other terminal's screen, none of the attaches
+			// waiting keeps the screen (`reattachChannel`).
+			if (shownId !== null && shownId !== first.channelId) replaceXterm();
 			if (msg.code === "CHANNEL_DEAD") {
 				const keepScreen = waiting.every(
 					(entry) => entry.preserveContent || entry.keepScreenIfEnded,
@@ -708,7 +813,13 @@ export function useTerminal(
 		// itself and resizes go nowhere until an answer binds this one, rather
 		// than to the terminal the pane left (#929).
 		if (channelId !== null && channelId !== id) channelId = null;
-		const preserveContent = opts?.preserveContent === true;
+		// The xterm holds another terminal: what it still reports is that one's,
+		// and there is no screen of this one's to keep, so the attach replaces it
+		// (#966). Asking again for the terminal it holds takes its reports again.
+		const elsewhere = shownId !== null && shownId !== id;
+		if (elsewhere) leaveHeld();
+		else if (shownId === id) leftHeld = false;
+		const preserveContent = opts?.preserveContent === true && !elsewhere;
 		// Keeping the screen, the pane writes what the terminal prints while it
 		// waits: the snapshot that holds it is not written (#930). Any other
 		// attach writes the snapshot, which holds it; while one waits for this
@@ -728,7 +839,7 @@ export function useTerminal(
 				request,
 				channelId: id,
 				preserveContent,
-				keepScreenIfEnded: opts?.keepScreenIfEnded === true,
+				keepScreenIfEnded: opts?.keepScreenIfEnded === true && !elsewhere,
 				stillWanted: opts?.stillWanted ?? (() => true),
 				timer: setTimeout(() => onDeadline(entry), 10_000),
 				resolve,
@@ -802,17 +913,18 @@ export function useTerminal(
 			return;
 		}
 		term.write("", () => {
-			replaysParsing++;
+			replaysParsing.set(term, (replaysParsing.get(term) ?? 0) + 1);
 		});
 		write();
 		term.write("", () => {
-			replaysParsing--;
+			replaysParsing.set(term, (replaysParsing.get(term) ?? 0) - 1);
 		});
 	}
 
-	/** Whether xterm is parsing a replay now: a bell it reports is not news. */
+	/** Whether the pane's xterm is parsing a replay now: a bell it reports is not news. */
 	function bellMuted(): boolean {
-		return replaysParsing > 0;
+		const term = terminal.value;
+		return term !== null && (replaysParsing.get(term) ?? 0) > 0;
 	}
 
 	/** Turn mouse reporting off in this pane's xterm, as over an ended terminal (#927). */
@@ -867,6 +979,7 @@ export function useTerminal(
 
 	/** Re-apply profile options (font, cursor, scrollback, scrollbar markers) to the live terminal. */
 	function applyProfile(p: TerminalProfile): void {
+		currentProfile = p;
 		const term = terminal.value;
 		if (!term) return;
 		term.options.fontFamily = p.fontFamily ?? DEFAULT_FONT_FAMILY;
@@ -936,8 +1049,6 @@ export function useTerminal(
 		supersede([...pendingAttaches]);
 		if (resizeTimer !== null) clearTimeout(resizeTimer);
 		resizeTimer = null;
-		titleChangeDispose?.();
-		titleChangeDispose = null;
 		themeUnsubscribe?.();
 		themeUnsubscribe = null;
 		stopListening();
@@ -957,10 +1068,26 @@ export function useTerminal(
 		terminal.value = null;
 		channelId = null;
 		shownId = null;
+		leftHeld = false;
 		endedSize = null;
-		replaysParsing = 0;
+		bellListeners.length = 0;
+		scrollListeners.length = 0;
 		titleStack.length = 0;
 		currentDynamicTitle.value = null;
+	}
+
+	/**
+	 * Tell `listener` of a bell in the pane's xterm, whichever it is then, with
+	 * the terminal that xterm holds (#966). Not for a replay's bells: see
+	 * `bellMuted`.
+	 */
+	function onBell(listener: (heldId: string) => void): void {
+		bellListeners.push(listener);
+	}
+
+	/** Tell `listener` each time the pane's xterm, whichever it is then, scrolls (#966). */
+	function onScroll(listener: (term: Terminal) => void): void {
+		scrollListeners.push(listener);
 	}
 
 	return {
@@ -975,6 +1102,8 @@ export function useTerminal(
 		isBoundTo,
 		turnMouseReportingOff,
 		bellMuted,
+		onBell,
+		onScroll,
 		applyProfile,
 		suppressNextResize,
 		syncChannelSize,

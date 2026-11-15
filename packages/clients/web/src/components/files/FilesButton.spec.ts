@@ -27,6 +27,8 @@ vi.mock("../../composables/useTerminal.js", async () => {
 			setDecidesSize: () => {},
 			dispose: () => {},
 			fitAddon: {},
+			onBell: () => {},
+			onScroll: () => {},
 		}),
 	};
 });

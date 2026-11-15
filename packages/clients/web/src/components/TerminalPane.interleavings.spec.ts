@@ -20,13 +20,6 @@
  * What it rejects is `Kind`: each kind is raised in one place, which its
  * comment names.
  *
- * Open defects it reaches are named in `DEFECTS`, with the kinds each raises,
- * and marked on each scenario that reaches them (`stillReaches`): their
- * violations are kept out of its verdict, and the scenario fails once it no
- * longer reaches one of those kinds. Until the defect is fixed, a marked
- * scenario cannot tell another cause of the same violations from it. Whoever
- * fixes the defect drops the mark.
- *
  * Each kind, the deadline guards, the model's and the explorer's own throws are
  * shown to fire by a negative control (`CONTROLS`): a scenario that breaks only
  * the harness's side of the window, App's wiring, the model hub, the model's
@@ -160,16 +153,11 @@ type Kind =
 	| "spawn-missing"
 	| "pending-left";
 
-/** The open issues the harness reaches, as `DEFECTS` describes them. */
-type Defect = "#966";
-
 interface Violation {
 	kind: Kind;
 	detail: string;
 	/** The pending id's number, when the violation is about a spawn. */
 	spawn?: number;
-	/** The open issue this violation is, when it is a known defect's. */
-	known?: Defect;
 	path: string[];
 }
 
@@ -210,13 +198,6 @@ interface Scenario {
 	/** Terminals that end, as a hub event: some path must end each. */
 	ends?: string[];
 	maxPaths: number;
-	/**
-	 * The open defects this scenario reaches, marked as known failures: their
-	 * violations are left out of its verdict, and it fails once it no longer
-	 * reaches one of the kinds `DEFECTS` names for it. Whoever fixes the defect
-	 * removes it here.
-	 */
-	stillReaches?: Defect[];
 	/** A negative control's break, on the harness's side only. */
 	break?: Break;
 }
@@ -274,12 +255,10 @@ class World {
 	constructor(readonly scenario: Scenario) {}
 
 	violate(kind: Kind, detail: string, spawn?: number): void {
-		const known = knownDefect(kind);
 		this.violations.push({
 			kind,
 			detail,
 			...(spawn !== undefined && { spawn }),
-			...(known !== undefined && { known }),
 			path: [...this.path],
 		});
 	}
@@ -770,16 +749,6 @@ class World {
  */
 function grantWriteLock(channelId: string): void {
 	useWriteLockStore().handleWriteLock(channelId, CLIENT);
-}
-
-/** What each open defect looks like to the harness: the kinds it raises. */
-const DEFECTS: Record<Defect, { kinds: Kind[] }> = {
-	// xterm answers a query after the pane switched, as typed input to the terminal switched to.
-	"#966": { kinds: ["xterm-answer-to-other-terminal"] },
-};
-
-function knownDefect(kind: Kind): Defect | undefined {
-	return (Object.keys(DEFECTS) as Defect[]).find((id) => DEFECTS[id].kinds.includes(kind));
 }
 
 function findPane(node: PaneNode, channelId: string): string | null {
@@ -1293,7 +1262,6 @@ const SCENARIOS: Scenario[] = [
 		parseLater: true,
 		prints: { channels: [U], query: true },
 		maxPaths: 80,
-		stillReaches: ["#966"],
 	},
 	{
 		name: "a pane switched to a terminal that ends meanwhile",
@@ -1308,9 +1276,7 @@ const SCENARIOS: Scenario[] = [
 /**
  * What fails a scenario, a line each: orders left past its bound, no path that
  * takes every gesture, no path that takes a hub event it declares (a late
- * answer with `timeouts`, each terminal of `ends` ending), each violation no
- * open defect covers, and each kind of an open defect it reaches unmarked, or
- * no longer reaches marked.
+ * answer with `timeouts`, each terminal of `ends` ending), and each violation.
  */
 function verdict(scenario: Scenario, outcome: Outcome): string[] {
 	const lines: string[] = [];
@@ -1326,18 +1292,10 @@ function verdict(scenario: Scenario, outcome: Outcome): string[] {
 	const seen = new Set<string>();
 	for (const v of outcome.violations) {
 		const key = `${v.kind}: ${v.detail}`;
-		if (v.known !== undefined || seen.has(key)) continue;
+		if (seen.has(key)) continue;
 		seen.add(key);
 		lines.push(`${key}\n    after: ${v.path.join(" → ")}`);
 	}
-	const reached = new Set(
-		outcome.violations.flatMap((v) => (v.known === undefined ? [] : [`${v.known} ${v.kind}`])),
-	);
-	const marked = new Set(
-		(scenario.stillReaches ?? []).flatMap((id) => DEFECTS[id].kinds.map((kind) => `${id} ${kind}`)),
-	);
-	for (const kind of reached) if (!marked.has(kind)) lines.push(`reached, not marked: ${kind}`);
-	for (const kind of marked) if (!reached.has(kind)) lines.push(`marked, not reached: ${kind}`);
 	return lines;
 }
 
@@ -1467,8 +1425,7 @@ const CONTROLS: Control[] = [
 			},
 			maxPaths: 20,
 		},
-		// Its kind is #966's: unmarked here, the verdict names it as reached.
-		reports: [/^reached, not marked: #966 xterm-answer-to-other-terminal$/],
+		reports: [/^xterm-answer-to-other-terminal: xterm's answer to T's query sent to U\n/],
 	},
 	{
 		check: "written-into-other-pane, shows-other-screen (another terminal's)",
@@ -1763,19 +1720,6 @@ const CONTROLS: Control[] = [
 			maxPaths: 10,
 		},
 		reports: [/^no path takes every gesture$/],
-	},
-	{
-		check: "each kind of a marked defect reached",
-		scenario: {
-			name: "a new terminal marked with #966",
-			setUp: newTerminalTab(1),
-			steps: [],
-			holdConnect: true,
-			maxPaths: 10,
-			stillReaches: ["#966"],
-		},
-		// It prints nothing, so xterm has no query to answer.
-		reports: [/^marked, not reached: #966 xterm-answer-to-other-terminal$/],
 	},
 ];
 

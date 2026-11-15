@@ -55,6 +55,12 @@ vi.mock("@xterm/xterm", () => ({
 		onTitleChange() {
 			return { dispose() {} };
 		}
+		onBell() {
+			return { dispose() {} };
+		}
+		onScroll() {
+			return { dispose() {} };
+		}
 		dispose(): void {}
 	},
 }));

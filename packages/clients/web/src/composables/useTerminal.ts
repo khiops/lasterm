@@ -35,7 +35,6 @@ const MOUSE_REPORTING_OFF = "\u001b[?1000l";
 /** A paste's markers (#1012). */
 const PASTE_START = "\u001b[200~";
 const PASTE_END = "\u001b[201~";
-const PASTE_MARKER = /\u001b\[20[01]~/g;
 
 /**
  * A pasted text with no paste marker left in it, removed until none remains,
@@ -47,7 +46,7 @@ function withoutPasteMarkers(text: string): string {
 	let current = text;
 	do {
 		previous = current;
-		current = current.replace(PASTE_MARKER, "");
+		current = current.replaceAll(PASTE_START, "").replaceAll(PASTE_END, "");
 	} while (current !== previous);
 	return current;
 }

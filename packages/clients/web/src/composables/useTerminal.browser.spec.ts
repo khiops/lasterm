@@ -4,7 +4,7 @@
  * other specs mock xterm module-wide, so this one drives `useTerminal` itself,
  * with a hub the test speaks for.
  */
-import type { ProtocolMessage, UiAttachOkMessage } from "@lasterm/shared";
+import type { ProtocolMessage, SnapshotData, UiAttachOkMessage } from "@lasterm/shared";
 import "@xterm/xterm/css/xterm.css";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -81,7 +81,7 @@ function print(text: string): void {
 	} as unknown as ProtocolMessage);
 }
 function answer(
-	over: Partial<UiAttachOkMessage> & { snapshot?: Partial<UiAttachOkMessage["snapshot"] & object> },
+	over: Omit<Partial<UiAttachOkMessage>, "snapshot"> & { snapshot?: Partial<SnapshotData> },
 ): void {
 	const { snapshot, ...rest } = over;
 	hear({
@@ -155,6 +155,8 @@ describe("an attach that keeps the screen (#1012)", () => {
 
 		const kept = pane.reattachChannel(T, { preserveContent: true });
 		print(`${ESC}[?100`);
+		// xterm holds the start of the sequence when the answer comes.
+		await parsed();
 		answer({ snapshot: { alternateScreen: true, inputModes: `${ESC}[?1004l` } });
 		await kept;
 		print("4h");

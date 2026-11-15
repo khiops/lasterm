@@ -15,7 +15,7 @@
  */
 import { BUNDLED_THEMES, type Channel } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { defineComponent, h, type Ref, ref } from "vue";
 import "../styles/base.css";
 import { useChannelsStore } from "../stores/channels.js";
@@ -2144,6 +2144,7 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 	it("leaves the keyboard elsewhere when it switches without it", async () => {
 		const channel = await showingT({ setUp: () => useChannelsStore().selectChannel(T) });
 		const elsewhere = document.body.appendChild(document.createElement("button"));
+		onTestFinished(() => elsewhere.remove());
 		await givenU(channel);
 		useChannelsStore().selectChannel(U);
 		await settle();
@@ -2153,7 +2154,6 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 		await settle();
 
 		expect(document.activeElement).toBe(elsewhere);
-		elsewhere.remove();
 	});
 
 	/** T's ATTACH_OK replay begun in its xterm: its opening marker parsed, not its closing one. */

@@ -23,7 +23,7 @@ vi.mock("../ssh/ssh-config-parser.js", () => ({
 }));
 
 // Whether an agent is running is a fact about the machine the tests happen to
-// run on, and the import reads it. Held here so each case states its own.
+// run on. Held here so no case depends on it.
 vi.mock("../session/ssh-agent-address.js", () => ({
 	sshAgentAddress: vi.fn(() => null),
 	windowsAgentPipeExists: vi.fn(() => false),
@@ -147,6 +147,64 @@ describe("POST /api/hosts", () => {
 		expect(body.ssh_key_path).toBe("/home/user/.ssh/id_ed25519");
 		expect(body.color).toBe("#ff0000");
 		expect(body.trust_remote_hints).toBe("ask");
+	});
+
+	// POST stores a method for each SSH host it creates, sent or implied by its
+	// key path, so connecting to it and going through it sign in the same way; a
+	// local host gets only the one sent (#917).
+	it("stores the method an SSH host left without one signs in with", async () => {
+		async function stored(payload: Record<string, unknown>): Promise<unknown> {
+			const res = await server.inject({ method: "POST", url: "/api/hosts", payload });
+			expect(res.statusCode, res.body).toBe(201);
+			return dbs.meta
+				.prepare("SELECT ssh_auth, ssh_key_path FROM hosts WHERE id = ?")
+				.get(res.json<{ id: string }>().id);
+		}
+		const ssh = { type: "ssh", ssh_host: "10.0.0.21" };
+
+		expect(await stored({ ...ssh, label: "no-key" })).toEqual({
+			ssh_auth: "agent",
+			ssh_key_path: null,
+		});
+		expect(await stored({ ...ssh, label: "key-path", ssh_key_path: "~/.ssh/id_x" })).toEqual({
+			ssh_auth: "key",
+			ssh_key_path: "~/.ssh/id_x",
+		});
+		expect(
+			await stored({ ...ssh, label: "sent-agent", ssh_auth: "agent", ssh_key_path: "~/.ssh/id_x" }),
+		).toEqual({ ssh_auth: "agent", ssh_key_path: "~/.ssh/id_x" });
+		expect(await stored({ ...ssh, label: "blank-path", ssh_key_path: " \t" })).toEqual({
+			ssh_auth: "agent",
+			ssh_key_path: " \t",
+		});
+		expect(await stored({ type: "local", label: "local-none" })).toEqual({
+			ssh_auth: null,
+			ssh_key_path: null,
+		});
+		expect(await stored({ type: "local", label: "local-sent", ssh_auth: "password" })).toEqual({
+			ssh_auth: "password",
+			ssh_key_path: null,
+		});
+	});
+
+	it("refuses a null sign-in method and creates nothing", async () => {
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts",
+			payload: { type: "ssh", label: "null-auth", ssh_host: "10.0.0.22", ssh_auth: null },
+		});
+		expect(res.statusCode).toBe(400);
+		expect(res.json()).toEqual({
+			error: {
+				code: "VALIDATION_ERROR",
+				message: "ssh_auth must be 'agent', 'key', or 'password'",
+			},
+		});
+		expect(
+			dbs.meta.prepare("SELECT COUNT(*) AS n FROM hosts WHERE label = 'null-auth'").get(),
+		).toEqual({
+			n: 0,
+		});
 	});
 
 	// Each rule of validateCreateHost is unit-tested in hosts.spec.ts; this
@@ -613,6 +671,85 @@ describe("PUT /api/hosts/:id", () => {
 				payload: { label: "moved", host_group_id: null },
 			});
 			expect(res.statusCode).toBe(200);
+		});
+
+		// A local host with no method, turned into an SSH one without `ssh_auth`,
+		// gets `key` on the key path sent or stored, else `agent`; any other edit
+		// changes the stored method only when it sends one (#917).
+		it("an edit to SSH stores the method a host left without one signs in with", async () => {
+			async function local(label: string, fields: Record<string, unknown> = {}): Promise<string> {
+				const res = await server.inject({
+					method: "POST",
+					url: "/api/hosts",
+					payload: { type: "local", label, ...fields },
+				});
+				expect(res.statusCode, res.body).toBe(201);
+				return res.json<{ id: string }>().id;
+			}
+			async function put(id: string, payload: Record<string, unknown>): Promise<unknown> {
+				const res = await server.inject({ method: "PUT", url: `/api/hosts/${id}`, payload });
+				expect(res.statusCode, res.body).toBe(200);
+				return signIn(id);
+			}
+			const toSsh = { type: "ssh", ssh_host: "10.0.0.31" };
+
+			expect(await put(await local("to-ssh-none"), toSsh)).toEqual({
+				ssh_auth: "agent",
+				ssh_key_path: null,
+			});
+			expect(await put(await local("to-ssh-sent"), { ...toSsh, ssh_key_path: "~/.ssh/k" })).toEqual(
+				{ ssh_auth: "key", ssh_key_path: "~/.ssh/k" },
+			);
+			expect(await put(await local("to-ssh-stored", { ssh_key_path: "~/.ssh/k" }), toSsh)).toEqual({
+				ssh_auth: "key",
+				ssh_key_path: "~/.ssh/k",
+			});
+			expect(
+				await put(await local("to-ssh-cleared", { ssh_key_path: "~/.ssh/k" }), {
+					...toSsh,
+					ssh_key_path: null,
+				}),
+			).toEqual({ ssh_auth: "agent", ssh_key_path: null });
+			expect(
+				await put(await local("to-ssh-sent-method"), { ...toSsh, ssh_auth: "password" }),
+			).toEqual({ ssh_auth: "password", ssh_key_path: null });
+			expect(
+				await put(await local("to-ssh-stored-method", { ssh_auth: "password" }), toSsh),
+			).toEqual({ ssh_auth: "password", ssh_key_path: null });
+
+			// A stored method changes only when one is sent.
+			const password = await sshHost({ ssh_auth: "password" });
+			expect(await put(password, { label: "renamed" })).toEqual({
+				ssh_auth: "password",
+				ssh_key_path: null,
+			});
+			expect(await put(password, { ssh_key_path: "~/.ssh/k" })).toEqual({
+				ssh_auth: "password",
+				ssh_key_path: "~/.ssh/k",
+			});
+			const agent = (
+				await server.inject({
+					method: "POST",
+					url: "/api/hosts",
+					payload: { type: "ssh", label: "stays-agent", ssh_host: "10.0.0.32", ssh_auth: "agent" },
+				})
+			).json<{ id: string }>().id;
+			expect(await put(agent, { ssh_key_path: "~/.ssh/k" })).toEqual({
+				ssh_auth: "agent",
+				ssh_key_path: "~/.ssh/k",
+			});
+
+			// An SSH row an internal writer left without a method is not given one by
+			// an edit that sends none: the readers refuse it instead.
+			const bare = new MetaDAL(dbs.meta).createHost({
+				type: "ssh",
+				label: "bare",
+				sshHost: "10.0.0.33",
+			}).id;
+			expect(await put(bare, { label: "bare-renamed" })).toEqual({
+				ssh_auth: null,
+				ssh_key_path: null,
+			});
 		});
 	});
 
@@ -2364,40 +2501,6 @@ describe("POST /api/hosts/import — the auth an entry is imported with", () => 
 		expect(hosts[0]?.ssh_key_path).toBe("/home/user/.ssh/id_ed25519");
 	});
 
-	// An entry naming no key is one `ssh` logs into with whatever the agent
-	// holds. Imported with no method at all, it could only ask for a password
-	// on a host that has never needed one (#436).
-	it("imports an entry with no identityFile as agent auth when an agent is running", async () => {
-		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
-		const { sshAgentAddress } = await import("../session/ssh-agent-address.js");
-		vi.mocked(sshAgentAddress).mockReturnValueOnce("//./pipe/openssh-ssh-agent");
-		vi.mocked(readSshConfig).mockReturnValueOnce({
-			entries: [
-				{
-					name: "agentonly",
-					hostname: "10.0.0.3",
-					port: 22,
-					user: "pi",
-					identityFile: null,
-					proxyJump: null,
-					isGitHost: false,
-				},
-			],
-			hasInclude: false,
-		});
-
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/hosts/import",
-			payload: { entries: [{ name: "agentonly", label: "agent-only-host" }] },
-		});
-
-		expect(res.statusCode).toBe(201);
-		const hosts = res.json<Array<{ ssh_auth: string | null; ssh_key_path?: string }>>();
-		expect(hosts[0]?.ssh_auth).toBe("agent");
-		expect(hosts[0]?.ssh_key_path).toBeUndefined();
-	});
-
 	// A bastion is usually a host of its own, imported in the same breath.
 	// Linking to it is what lets it carry its own key and its own sign-in.
 	it("links an imported ProxyJump to the host it names", async () => {
@@ -2448,8 +2551,12 @@ describe("POST /api/hosts/import — the auth an entry is imported with", () => 
 		expect(behind?.ssh_proxy_spec).toBeUndefined();
 	});
 
-	it("does not set sshAuth when identityFile is absent and no agent is running", async () => {
+	// No agent running at import time does not change how the entry signs in:
+	// connecting then says no agent answers, as for any agent host (#917).
+	it("imports an entry with no identityFile as agent auth even when no agent is running", async () => {
 		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		const { sshAgentAddress } = await import("../session/ssh-agent-address.js");
+		vi.mocked(sshAgentAddress).mockReturnValue(null);
 		vi.mocked(readSshConfig).mockReturnValueOnce({
 			entries: [
 				{
@@ -2474,10 +2581,9 @@ describe("POST /api/hosts/import — the auth an entry is imported with", () => 
 		});
 
 		expect(res.statusCode).toBe(201);
-		const hosts = res.json<Array<{ ssh_auth: string | null }>>();
-		// ssh_auth should be null/undefined (not set to "key")
-		expect(hosts[0]).toBeDefined();
-		expect(hosts[0]?.ssh_auth == null).toBe(true);
+		const hosts = res.json<Array<{ ssh_auth: string | null; ssh_key_path?: string }>>();
+		expect(hosts[0]?.ssh_auth).toBe("agent");
+		expect(hosts[0]?.ssh_key_path).toBeUndefined();
 	});
 });
 

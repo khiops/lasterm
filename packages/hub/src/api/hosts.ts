@@ -230,6 +230,27 @@ function validateHostFields(fields: Record<string, unknown>): string | null {
 	return validateSshPort(fields.ssh_port) ?? validateHostColor(fields.color);
 }
 
+/**
+ * Whether a key path names no file: absent, or only ASCII whitespace (tab, LF,
+ * VT, FF, CR, space). Migration 027 tests the same characters in SQL, so a
+ * path reads alike whether the hub or the migration chose the method.
+ */
+export function isBlankKeyPath(keyPath: string | null | undefined): boolean {
+	return keyPath == null || /^[\t\n\v\f\r ]*$/.test(keyPath);
+}
+
+/**
+ * The default method of an SSH host sent without one (#917): the key it names,
+ * else the agent, as an import reads a `~/.ssh/config` entry with or without an
+ * `IdentityFile`. Only POST, the import, and a PUT that turns a local host with
+ * no method into an SSH one store it; migration 027 applied the same rule to
+ * the SSH hosts stored without one before. The direct connect and a jump
+ * through the host then read the same stored method.
+ */
+export function sshAuthFor(keyPath: string | null | undefined): "agent" | "key" {
+	return isBlankKeyPath(keyPath) ? "agent" : "key";
+}
+
 /** How an SSH host is reached and signs in, its fields already checked one by one. */
 interface SshSignIn {
 	type: unknown;
@@ -248,10 +269,10 @@ function validateSshSignIn(host: SshSignIn): string | null {
 	if (!host.ssh_host) {
 		return "ssh_host is required for SSH hosts and must not contain null bytes";
 	}
-	// Left out, none is stored, as an import does; sent as null, it is refused
-	// as POST always did.
+	// A method left out passes here; one sent as null is refused, as POST always
+	// did.
 	if (host.ssh_auth === null) return "ssh_auth must be 'agent', 'key', or 'password'";
-	if (host.ssh_auth === "key" && !host.ssh_key_path?.trim()) {
+	if (host.ssh_auth === "key" && isBlankKeyPath(host.ssh_key_path)) {
 		return "ssh_key_path is required when ssh_auth is 'key'";
 	}
 	return null;

@@ -86,6 +86,17 @@ export function resolveJump(
 						"The host this one is reached through is no longer an SSH host here. Point it at another, or give its address instead.",
 				};
 			}
+			// An SSH host created by POST /api/hosts or the import, or turned from
+			// local into SSH by a PUT, has a method (#917). A jump through one stored
+			// without, as an internal writer can leave it, is refused rather than
+			// signing in another way than the host itself would.
+			if (jumpHost.sshAuth === undefined) {
+				return {
+					kind: "refused",
+					message:
+						"The host this one is reached through has no sign-in method. Edit it and choose one.",
+				};
+			}
 			const jumpParsed = parseSshHost(jumpHost.sshHost);
 			const expectedRoute = targetRoute(
 				{ ...jumpHost, sshProxyHostId: null, sshProxySpec: null },
@@ -103,7 +114,7 @@ export function resolveJump(
 						(name): name is string => !!name,
 					),
 					auth: {
-						method: jumpHost.sshAuth ?? "agent",
+						method: jumpHost.sshAuth,
 						keyPath: jumpHost.sshKeyPath ?? undefined,
 						// Its `IdentityAgent none` keeps the agent from signing its key (#876).
 						...(jumpHost.sshConfigHost ? { sshConfigHost: jumpHost.sshConfigHost } : {}),

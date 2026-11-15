@@ -996,6 +996,8 @@ User-configured host overrides (Layer 3) are persistent in meta.db and are not a
 
 Each host record specifies exactly one auth method via `ssh_auth` field (`'agent'`, `'key'`, `'password'`). There is **no fallback chain**. If the chosen method fails, the connection fails and the user must reconfigure.
 
+`POST /api/hosts`, `POST /api/hosts/import` and an edit that turns a local host with no method into an SSH one give a method to an SSH host sent without one, and migration 027 gave one to the SSH hosts stored without it before (#917): `key` when the host names a key path, and `agent` otherwise (PROTOCOL.md, CreateHost). Any other edit changes the method only when it sends one, and a duplicate copies it as stored, none included. A session uses the stored method to connect to the host and to go through it to another host. Connecting to or through an SSH host stored without a method, as an internal writer can leave one, is refused; none is picked for it.
+
 - `agent`: the agent this machine publishes — `SSH_AUTH_SOCK` where there is one, and on Windows the OpenSSH agent's named pipe, which no variable announces. Fail if no agent answers.
 - `key`: read private key from `ssh_key_path`. If passphrase-protected, prompt user via UI dialog. A
   passphrase that does not decrypt the key is asked for again, saying so, until one does or the

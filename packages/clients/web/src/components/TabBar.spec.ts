@@ -267,3 +267,21 @@ describe("TabBar tooltips", () => {
 		}
 	});
 });
+
+// Double-clicking a tab's name renames it in place (#941).
+describe("TabBar rename", () => {
+	it("gives the rename field the keyboard with the whole name selected", async () => {
+		mountBar(["t0", "t1"], 0);
+		const label = tab("t1").querySelector(".tab__label");
+		if (!label) throw new Error("no label on t1");
+		label.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+		await nextTick();
+		await nextTick();
+		const input = tab("t1").querySelector("input.tab-rename-input") as HTMLInputElement | null;
+		expect(input).not.toBeNull();
+		expect(document.activeElement).toBe(input);
+		expect(input?.value).toBe("Label t1");
+		expect(input?.selectionStart).toBe(0);
+		expect(input?.selectionEnd).toBe("Label t1".length);
+	});
+});

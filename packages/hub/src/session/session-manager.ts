@@ -1,4 +1,5 @@
 import { sshAddress, targetRoute } from "../ssh-route.js";
+import { agentAdaptsInput } from "./input-modes.js";
 /**
  * SessionManager — coordinator for hub session management.
  *
@@ -1913,6 +1914,7 @@ export class SessionManager {
 				...this.sizeOf(channel, channelId),
 				...this.broadcaster.cwdFieldsOf(channelId),
 				filesPanel: this.broadcaster.filesPanelOf(channelId),
+				adaptsInput: agentAdaptsInput(this.ctx.agents, channel.hostId),
 			};
 			client.send(attachOk);
 			return true;
@@ -1957,6 +1959,7 @@ export class SessionManager {
 				...this.sizeOf(channel, channelId),
 				...this.broadcaster.cwdFieldsOf(channelId),
 				filesPanel: this.broadcaster.filesPanelOf(channelId),
+				adaptsInput: agentAdaptsInput(this.ctx.agents, channel.hostId),
 			};
 			client.send(attachOk);
 		};
@@ -2039,6 +2042,7 @@ export class SessionManager {
 				...this.sizeOf(channel, channelId),
 				...this.broadcaster.cwdFieldsOf(channelId),
 				filesPanel: this.broadcaster.filesPanelOf(channelId),
+				adaptsInput: agentAdaptsInput(this.ctx.agents, channel.hostId),
 			};
 			client.send(attachOk);
 		}

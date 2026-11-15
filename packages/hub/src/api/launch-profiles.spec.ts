@@ -642,6 +642,10 @@ describe("the launch profile routes refuse what they cannot store or read back (
 		const unsafe = '{"sort_order":9007199254740994}';
 		expect(await send("PUT", `/api/launch-profiles/${kept.id}`, unsafe)).toEqual(notInteger);
 		expect((await inBothLists("Kept"))?.sort_order).toBe(4);
+		expect(await send("PUT", `/api/launch-profiles/${kept.id}`, '{"sort_order":null}')).toEqual(
+			refusal("VALIDATION_ERROR", "sort_order cannot be cleared"),
+		);
+		expect((await inBothLists("Kept"))?.sort_order).toBe(4);
 
 		expect((await createProfile({ name: "Negative", sort_order: -3 })).sort_order).toBe(-3);
 		expect((await createProfile({ name: "Omitted" })).sort_order).toBe(0);

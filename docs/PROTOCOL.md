@@ -2626,7 +2626,8 @@ A body that is not an object is refused with 400 `VALIDATION_ERROR` `body must b
 `VALIDATION_ERROR` otherwise); a key that is not a profile key, or one set only globally or for a
 host (`transferFallbackDir`, `transferVerify`), 400 `VALIDATION_ERROR`; a number that is not
 finite, a value nested more than 32 deep, or a file-transfer value outside its table 400
-`INVALID_VALUE` naming its key. A `null` member is checked for its key only. Keys are camelCase
+`INVALID_VALUE` naming its key. A `null` member is checked only against the list of profile
+keys: under a key set only globally or for a host it is accepted. Keys are camelCase
 on write; a response gives them in snake_case, so a client sending a response's overrides back
 converts them first. `sort_order` that is not a safe integer: 400 `VALIDATION_ERROR`
 `sort_order must be an integer`. Every refusal stores nothing, and comes before the 409 for a

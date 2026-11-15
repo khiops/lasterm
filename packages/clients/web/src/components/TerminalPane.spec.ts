@@ -1484,12 +1484,12 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 
 		useChannelsStore().updateChannelStatus(T, "live");
 		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
-		attachOk(T, "LIVE-SNAP");
+		attachOk(T, "LIVE-SNAP", { tail: [new TextEncoder().encode("TAIL")] });
 		await settle();
 
 		// No reset: the snapshot clears the screen itself, and a reset would drop
 		// the input modes the program set, which the snapshot does not carry.
-		expect(xterm.events).toEqual(["LIVE-SNAP"]);
+		expect(xterm.events).toEqual(["LIVE-SNAP", "TAIL"]);
 		expect(banner()).toBeNull();
 	});
 
@@ -1523,8 +1523,8 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		attachOk(T, "BACK");
 		await settle();
 
-		expect(xterm.events).not.toContain("<reset>");
-		expect(xterm.events).not.toContain("BACK");
+		expect(card()).toBeNull();
+		expect(xterm.events).toEqual([]);
 	});
 
 	it("attaches again when a terminal it saw end is brought back from elsewhere", async () => {

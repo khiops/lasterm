@@ -836,7 +836,7 @@ lock: bringing an ended one back is a SPAWN that names it, which is the user's R
 last_output: {
   snapshot: { serialized, cols, rows, cursor_x, cursor_y } | null,
   tail: Uint8Array[],   // the output after the snapshot, as one element; [] when none is sent
-  truncated?: true,     // there was output to send, and it was not
+  truncated?: true,     // a snapshot or output was not sent (rules below)
   cols: number,         // the terminal's last size, which the pane draws them at (resizes are not stored)
   rows: number
 }
@@ -854,19 +854,15 @@ screen it was not written for shows something wrong without saying so:
 - a channel the GC emptied, or one that printed nothing, has `snapshot: null` and `tail: []`;
 - a spool the hub cannot read leaves `last_output` out: the refusal goes as an older hub's.
 
-The tail follows the cached ATTACH_OK's rule: sent when it totals at most 128 KiB, else `tail: []`
-and `truncated`. A snapshot stored above 256 KiB is not sent (`snapshot: null`, `truncated`): the
+The tail is sent when it totals at most 128 KiB, else `tail: []` and `truncated`. A snapshot stored above 256 KiB is not sent (`snapshot: null`, `truncated`): the
 answer stays under the 512 KiB the desktop takes in one message. The pane draws it at `cols` ×
 `rows` under its exit card, read-only.
 
 A cached ATTACH_OK (`cached: true`: the agent is gone, or did not answer the hub's ATTACH) carries
 the same as `last_output`, read under the same rules, with one difference: with no snapshot stored it
 carries nothing (`snapshot: null`, `tail: []`, no `truncated`), not the stream from its first seq,
-since a pane keeps the screen it shows when an ATTACH_OK has no snapshot. So it carries the newest
-snapshot and the output stored after it, the output the hub still held unstored included, as one
-element; a gap after the snapshot, or more than 128 KiB of output, sends the snapshot alone with
-`truncated`; a snapshot stored above 256 KiB sends `snapshot: null`, `tail: []` and `truncated`; one
-that does not parse sends nothing, without `truncated`.
+since a pane keeps the screen it shows when an ATTACH_OK has no snapshot. Its output after the
+snapshot includes what the hub had received and not yet stored.
 
 The answer is what a pane shows, and a pane attaches again whenever its socket is replaced: an
 ATTACH_OK from the terminal leaves it uncovered, one with `cached: true` shows it is not connected,

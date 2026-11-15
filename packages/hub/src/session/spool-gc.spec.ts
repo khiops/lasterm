@@ -10,6 +10,7 @@ import {
 } from "../storage/spool.fixture.js";
 import { SpoolDAL } from "../storage/spool.js";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
+import { OutputChunker } from "./output-chunker.js";
 import type { SharedSessionContext } from "./session-context.js";
 import { SpoolGarbageCollector } from "./spool-gc.js";
 import type { StateBroadcaster } from "./state-broadcaster.js";
@@ -81,7 +82,7 @@ describe("SpoolGarbageCollector (#726)", () => {
 	/** What an ATTACH answered from the spool carries (`buildAttachPayload`). */
 	function attachPayload(channelId: string) {
 		const lifecycle = new ChannelLifecycleManager(
-			{ spoolDal } as unknown as SharedSessionContext,
+			{ spoolDal, chunker: new OutputChunker(spoolDal) } as unknown as SharedSessionContext,
 			{} as StateBroadcaster,
 		);
 		return lifecycle.buildAttachPayload(channelId);

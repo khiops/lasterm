@@ -8,6 +8,7 @@ import type {
 	EndedOutput,
 	ErrorMessage,
 	ProtocolMessage,
+	UiAttachOkMessage,
 	UiSpawnMessage,
 } from "@lasterm/shared";
 import { ErrorCode } from "@lasterm/shared";
@@ -2740,6 +2741,144 @@ describe("SessionManager", () => {
 		const errMsg = received[0] as unknown as { type: string; code: string };
 		expect(errMsg.type).toBe("ERROR");
 		expect(errMsg.code).toBe("CHANNEL_DEAD");
+	});
+
+	// ─── An ATTACH answered from the spool (#956) ────────────────────────────
+	//
+	// The hub stores a channel's output a second after it arrives, or once
+	// 256 KiB are waiting, or when it stores a snapshot. A pane that drops the
+	// OUTPUT it hears while its ATTACH waits writes, from a cached ATTACH_OK,
+	// only what that answer holds: so after its snapshot it holds the output
+	// the hub has received, stored yet or not, within the tail's bound.
+	describe("an ATTACH answered from the spool (#956)", () => {
+		const SCREEN = { serialized: "<screen>", cols: 80, rows: 24, cursorX: 0, cursorY: 0 };
+
+		function snapshotRes(channelId: string): ProtocolMessage {
+			return { type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 };
+		}
+
+		function output(channelId: string, value: string): ProtocolMessage {
+			return {
+				type: "OUTPUT",
+				channelId,
+				seq: 1,
+				ts: "2026-11-15T12:00:00.000Z",
+				data: new Uint8Array(Buffer.from(value)),
+			};
+		}
+
+		function cachedAnswer(received: ProtocolMessage[]): { snapshot: unknown; tail: string[] } {
+			const ok = received.find((m) => m.type === "ATTACH_OK") as
+				| (UiAttachOkMessage & { cached: boolean })
+				| undefined;
+			expect(ok?.cached).toBe(true);
+			return {
+				snapshot: ok?.snapshot,
+				tail: (ok?.tail ?? []).map((part) => Buffer.from(part).toString()),
+			};
+		}
+
+		/**
+		 * A terminal whose SSH agent goes away just after printing, then a pane's
+		 * ATTACH, answered from the spool. `beforeAttach` runs just before it.
+		 */
+		async function attachAfterAgentLeft(beforeAttach?: () => void) {
+			const host = new MetaDAL(dbManager.meta).createHost({
+				type: "ssh",
+				label: "test-ssh-956",
+				sshHost: "user@localhost",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+			});
+			sm.addClient(makeClient("writer", []));
+			const channelId = await sm.handleSpawn("writer", { type: "SPAWN", hostId: host.id });
+			if (channelId === null) throw new Error("expected an SSH channel");
+			const agent = mockSshAgentInstance;
+			if (agent === null) throw new Error("expected the SSH agent");
+
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const received: ProtocolMessage[] = [];
+			try {
+				agent._emit("message", snapshotRes(channelId));
+				agent._emit("message", output(channelId, "last words"));
+				agent.simulateClose();
+				await vi.advanceTimersByTimeAsync(0);
+
+				sm.addClient(makeClient("reader", received));
+				beforeAttach?.();
+				const attaching = sm.handleAttach("reader", channelId);
+				// Under the chunker's second: what it holds is not stored yet.
+				await vi.advanceTimersByTimeAsync(500);
+				expect(await attaching).toBe(true);
+			} finally {
+				vi.useRealTimers();
+			}
+			return cachedAnswer(received);
+		}
+
+		it("holds what the terminal printed just before its agent went away", async () => {
+			const answer = await attachAfterAgentLeft();
+
+			expect(answer.snapshot).toEqual(SCREEN);
+			expect(answer.tail.join("")).toBe("last words");
+		});
+
+		// Before #956 the answer only read the spool; a write failing now must not
+		// cost the pane the answer it got then.
+		it("still answers from what is stored when that output cannot be stored", async () => {
+			const failure = vi.spyOn(SpoolDAL.prototype, "insertChunk");
+			try {
+				const answer = await attachAfterAgentLeft(() => {
+					failure.mockImplementationOnce(() => {
+						throw Object.assign(new Error("disk full"), { code: "ERR_SQLITE_FULL" });
+					});
+				});
+
+				expect(answer.snapshot).toEqual(SCREEN);
+				expect(answer.tail).toEqual([]);
+			} finally {
+				failure.mockRestore();
+			}
+		});
+
+		it("holds what the terminal printed while its agent did not answer", async () => {
+			sm.addClient(makeClient("writer", []));
+			const channelId = await sm.handleSpawn("writer", { type: "SPAWN", hostId: "local" });
+			if (channelId === null) throw new Error("expected a local channel");
+			const agent = mockLocalAgents.at(-1);
+			if (agent === undefined) throw new Error("expected the local agent");
+			const emit = (msg: ProtocolMessage) =>
+				(agent as unknown as { emit: (event: string, m: ProtocolMessage) => void }).emit(
+					"message",
+					msg,
+				);
+			const answer = agent.send.getMockImplementation() as
+				| ((msg: ProtocolMessage) => void)
+				| undefined;
+			// An agent that never answers the ATTACH.
+			agent.send.mockImplementation((msg: ProtocolMessage) => {
+				if (msg.type !== "ATTACH") answer?.(msg);
+			});
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const received: ProtocolMessage[] = [];
+			try {
+				emit(snapshotRes(channelId));
+				// Stored by the chunker's second, before the ATTACH times out.
+				emit(output(channelId, "before "));
+				sm.addClient(makeClient("reader", received));
+				const attaching = sm.handleAttach("reader", channelId);
+				// The ATTACH times out at 5 s; this output arrives 0.5 s before, and
+				// the chunker's next second would store it 0.5 s after.
+				await vi.advanceTimersByTimeAsync(4_500);
+				emit(output(channelId, "while waiting"));
+				await vi.advanceTimersByTimeAsync(600);
+				expect(await attaching).toBe(true);
+			} finally {
+				vi.useRealTimers();
+			}
+
+			expect(cachedAnswer(received).tail.join("")).toBe("before while waiting");
+		});
 	});
 
 	// ─── An ended terminal's last output (#927) ──────────────────────────────

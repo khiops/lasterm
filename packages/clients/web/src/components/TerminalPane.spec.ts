@@ -1516,6 +1516,25 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		expect(banner()).toBeNull();
 	});
 
+	// The socket back over a live screen, answered from memory: the live
+	// answer after it replaces that copy as well (#1010).
+	it("draws the live answer over a copy from memory its socket's return brought (#1010)", async () => {
+		await openLive();
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([SNAPSHOT_DRAWING_STATE, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
 	// What it drew live through the end it watched stays (#927).
 	it("keeps the screen it watched end when the terminal is brought back live", async () => {
 		await openLive();
@@ -1690,7 +1709,12 @@ async function parsedBy(real: Terminal): Promise<void> {
  * then answered live, once the hub says T is live, with `snapshot` and `tail`:
  * xterm, having parsed all the pane wrote.
  */
-async function liveOverRemembered(left: string, snapshot: string, tail = ""): Promise<Terminal> {
+async function liveOverRemembered(
+	left: string,
+	snapshot: string,
+	tail = "",
+	during = "",
+): Promise<Terminal> {
 	mountPane(ref(T), "live");
 	const real = await realXterm();
 	await vi.waitFor(() => expect(attaches()).toHaveLength(1));
@@ -1699,6 +1723,8 @@ async function liveOverRemembered(left: string, snapshot: string, tail = ""): Pr
 
 	useChannelsStore().updateChannelStatus(T, "live");
 	await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+	// Printed while the attach waits: the live snapshot holds it (#931).
+	if (during !== "") print(T, during);
 	attachOk(T, snapshot, { tail: tail === "" ? [] : [new TextEncoder().encode(tail)] });
 	await settle();
 	await parsedBy(real);
@@ -1718,6 +1744,13 @@ function screenRows(real: Terminal, count: number): string[] {
 // snapshot assumes how a reset draws text, and the program, still running,
 // the input modes it set; the snapshot carries neither.
 describe("TerminalPane drawing the live screen over one from memory (#1010)", () => {
+	it("draws what was printed while it waited before the snapshot, which covers it", async () => {
+		const real = await liveOverRemembered("", `${CLEAR}live`, "", "DURING");
+
+		expect(xterm.events.slice(-3)).toEqual(["DURING", SNAPSHOT_DRAWING_STATE, `${CLEAR}live`]);
+		expect(screenRows(real, 2)).toEqual(["live", ""]);
+	});
+
 	it("draws it from the top, whatever scrolling region and origin mode the copy left", async () => {
 		const real = await liveOverRemembered(
 			"\u001b[2;4r\u001b[?6h",

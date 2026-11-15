@@ -38,7 +38,9 @@ const MOUSE_REPORTING_OFF = "\u001b[?1000l";
  * kept screen's output left otherwise draws the snapshot wrong. The input modes
  * a running program set (cursor keys, keypad, bracketed paste, mouse, focus)
  * are not touched, nor is the scrollback: a reset would drop both, and the
- * snapshot carries neither. In xterm 6.0.0, in this order:
+ * snapshot carries neither. The input modes kept are those xterm last saw,
+ * from the copy: a program that changed them while its host was away leaves
+ * them stale. In xterm 6.0.0, in this order:
  */
 const SNAPSHOT_DRAWING_STATE = [
 	// Synchronized output off: a frame left open holds the drawing back.
@@ -705,7 +707,8 @@ export function useTerminal(
 		const tail = msg.tail ?? [];
 		// A screen kept by every attach and replaced only because the answer is
 		// live (#1010) is not reset: a reset would drop the input modes the
-		// program set, and the scrollback, neither of which the snapshot carries.
+		// program set, as xterm last saw them, and the scrollback, neither of
+		// which the snapshot carries.
 		// What decides how the snapshot is drawn is put back instead, in xterm's
 		// stream: in order after what it has not parsed yet, as the snapshot.
 		const resetFirst = waiting.some((entry) => !entry.preserveContent);

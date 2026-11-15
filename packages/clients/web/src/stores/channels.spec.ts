@@ -1864,40 +1864,41 @@ describe("useChannelsStore — several terminals brought back at once (#605)", (
 // ATTACH refused, a write lock denied, an input refused. Most name no host, and
 // a SPAWN waiting on its answer took the first of them for its own failure.
 
-describe("useChannelsStore — a SPAWN answered by its own answers only (#777)", () => {
-	function socket(): {
-		emit: (msg: Record<string, unknown>) => void;
-		/** The request ids of the SPAWNs sent, in order. */
-		spawns: () => unknown[];
-	} {
-		const listeners = new Map<string, ((msg: unknown) => void)[]>();
-		const send = vi.fn();
-		const sessionStore = useSessionStore();
-		// @ts-expect-error — overwrite reactive wsClient for test
-		sessionStore.wsClient = {
-			on: vi.fn((type: string, cb: (msg: unknown) => void) => {
-				listeners.set(type, [...(listeners.get(type) ?? []), cb]);
-				return () => {
-					listeners.set(
-						type,
-						(listeners.get(type) ?? []).filter((c) => c !== cb),
-					);
-				};
-			}),
-			send,
-		};
-		return {
-			emit: (msg) => {
-				for (const cb of listeners.get(msg.type as string) ?? []) cb(msg);
-			},
-			spawns: () =>
-				send.mock.calls
-					.map(([msg]) => msg as Record<string, unknown>)
-					.filter((msg) => msg.type === "SPAWN")
-					.map((msg) => msg.requestId),
-		};
-	}
+/** A socket the test answers as the hub, for the store's SPAWNs. */
+function socket(): {
+	emit: (msg: Record<string, unknown>) => void;
+	/** The request ids of the SPAWNs sent, in order. */
+	spawns: () => unknown[];
+} {
+	const listeners = new Map<string, ((msg: unknown) => void)[]>();
+	const send = vi.fn();
+	const sessionStore = useSessionStore();
+	// @ts-expect-error — overwrite reactive wsClient for test
+	sessionStore.wsClient = {
+		on: vi.fn((type: string, cb: (msg: unknown) => void) => {
+			listeners.set(type, [...(listeners.get(type) ?? []), cb]);
+			return () => {
+				listeners.set(
+					type,
+					(listeners.get(type) ?? []).filter((c) => c !== cb),
+				);
+			};
+		}),
+		send,
+	};
+	return {
+		emit: (msg) => {
+			for (const cb of listeners.get(msg.type as string) ?? []) cb(msg);
+		},
+		spawns: () =>
+			send.mock.calls
+				.map(([msg]) => msg as Record<string, unknown>)
+				.filter((msg) => msg.type === "SPAWN")
+				.map((msg) => msg.requestId),
+	};
+}
 
+describe("useChannelsStore — a SPAWN answered by its own answers only (#777)", () => {
 	/** ERRORs the hub sends a window about other things than a SPAWN. */
 	const OTHERS = [
 		{
@@ -2174,5 +2175,105 @@ describe("useChannelsStore — the host in view (#594)", () => {
 
 		store.updateChannelStatus("local-dead", "live");
 		expect(store.statusOf("local-dead")).toBe("live");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// A new terminal's spawn belongs to its pending id, whichever pane shows it (#980)
+// ---------------------------------------------------------------------------
+
+describe("useChannelsStore — a new terminal's spawn, whichever pane shows it (#980)", () => {
+	beforeEach(() => {
+		mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve([]) });
+		useSessionStore().hubEchoesSpawnRequestId = true;
+	});
+
+	describe("forgets a pending spawn once no pane shows it and none is in flight", () => {
+		it("forgets a pending spawn once no pane shows it and none is in flight: released before any SPAWN", () => {
+			socket();
+			const store = useChannelsStore();
+			store.registerPendingSpawn("pending-1", "host-1");
+			expect(store.holdPendingSpawn("pending-1")).toBe("host-1");
+
+			store.releasePendingSpawn("pending-1");
+
+			expect(store.holdPendingSpawn("pending-1")).toBeNull();
+		});
+
+		it("forgets a pending spawn once no pane shows it and none is in flight: released after success", async () => {
+			const hub = socket();
+			const store = useChannelsStore();
+			store.registerPendingSpawn("pending-1", "host-1");
+			store.holdPendingSpawn("pending-1");
+			const run = store.runPendingSpawn("pending-1", 80, 24);
+			hub.emit({
+				type: "SPAWN_OK",
+				channelId: "ch-1",
+				hostId: "host-1",
+				requestId: hub.spawns()[0],
+			});
+			await expect(run?.outcome).resolves.toEqual({ channelId: "ch-1", cols: 80, rows: 24 });
+
+			store.releasePendingSpawn("pending-1");
+
+			expect(store.holdPendingSpawn("pending-1")).toBeNull();
+		});
+
+		it("forgets a pending spawn once no pane shows it and none is in flight: released after a failure", async () => {
+			const hub = socket();
+			const store = useChannelsStore();
+			store.registerPendingSpawn("pending-1", "host-1");
+			store.holdPendingSpawn("pending-1");
+			const run = store.runPendingSpawn("pending-1", 80, 24);
+			hub.emit({
+				type: "ERROR",
+				code: "SPAWN_FAILED",
+				message: "the shell could not start",
+				requestId: hub.spawns()[0],
+			});
+			await expect(run?.outcome).rejects.toMatchObject({ code: "SPAWN_FAILED" });
+
+			store.releasePendingSpawn("pending-1");
+
+			expect(store.holdPendingSpawn("pending-1")).toBeNull();
+		});
+
+		it("forgets a pending spawn once no pane shows it and none is in flight: released while running", async () => {
+			const hub = socket();
+			const store = useChannelsStore();
+			store.registerPendingSpawn("pending-1", "host-1");
+			store.holdPendingSpawn("pending-1");
+			const run = store.runPendingSpawn("pending-1", 80, 24);
+			store.releasePendingSpawn("pending-1");
+
+			hub.emit({
+				type: "SPAWN_OK",
+				channelId: "ch-1",
+				hostId: "host-1",
+				requestId: hub.spawns()[0],
+			});
+			await run?.outcome;
+
+			expect(store.holdPendingSpawn("pending-1")).toBeNull();
+		});
+	});
+
+	it("runs two pending spawns on one host apart", async () => {
+		const hub = socket();
+		const store = useChannelsStore();
+		store.registerPendingSpawn("pending-1", "host-1");
+		store.registerPendingSpawn("pending-2", "host-1");
+		store.holdPendingSpawn("pending-1");
+		store.holdPendingSpawn("pending-2");
+
+		const first = store.runPendingSpawn("pending-1", 80, 24);
+		const second = store.runPendingSpawn("pending-2", 100, 30);
+		const [idFirst, idSecond] = hub.spawns();
+		expect(hub.spawns()).toHaveLength(2);
+		hub.emit({ type: "SPAWN_OK", channelId: "ch-2", hostId: "host-1", requestId: idSecond });
+		hub.emit({ type: "SPAWN_OK", channelId: "ch-1", hostId: "host-1", requestId: idFirst });
+
+		await expect(first?.outcome).resolves.toEqual({ channelId: "ch-1", cols: 80, rows: 24 });
+		await expect(second?.outcome).resolves.toEqual({ channelId: "ch-2", cols: 100, rows: 30 });
 	});
 });

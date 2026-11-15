@@ -1009,42 +1009,6 @@ describe("ChannelLifecycleManager — reconcileChannelState", () => {
 	});
 });
 
-// ─── boundTail ───────────────────────────────────────────────────────────────
-//
-// A terminal stream cannot be cut and handed over: a piece starting anywhere
-// but a boundary leaves the emulator in a state nobody chose. So what does not
-// fit is not sent at all, and the pane is told.
-
-describe("ChannelLifecycleManager — boundTail", () => {
-	const chunk = (size: number) => ({ dataBlob: Buffer.alloc(size, 1) });
-
-	it("sends a tail that fits, whole", () => {
-		const { tail, truncated } = ChannelLifecycleManager.boundTail([chunk(10), chunk(20)]);
-		expect(tail.map((t) => t.length)).toEqual([10, 20]);
-		expect(truncated).toBe(false);
-	});
-
-	it("sends none of a tail that does not fit, and says so", () => {
-		const { tail, truncated } = ChannelLifecycleManager.boundTail([
-			chunk(120 * 1024),
-			chunk(100 * 1024),
-		]);
-		// Keeping the newest would start the pane mid-escape-sequence.
-		expect(tail).toEqual([]);
-		expect(truncated).toBe(true);
-	});
-
-	it("drops a single chunk that is over the budget on its own", () => {
-		const { tail, truncated } = ChannelLifecycleManager.boundTail([chunk(2 * 1024 * 1024)]);
-		expect(tail).toEqual([]);
-		expect(truncated).toBe(true);
-	});
-
-	it("says nothing was dropped when there was nothing to send", () => {
-		expect(ChannelLifecycleManager.boundTail([])).toEqual({ tail: [], truncated: false });
-	});
-});
-
 // ─── Taking up what a daemon holds ───────────────────────────────────────────
 //
 // Every way of reaching an SSH host ends here, the automatic reconnect after a

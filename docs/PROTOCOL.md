@@ -807,7 +807,7 @@ sends a frame or disconnects.
   tail: Uint8Array[],          // output since last snapshot
   write_lock_holder: string | null,
   cached: boolean,             // true = from local cache, agent unreachable
-  truncated?: true,            // output after the snapshot was too much to send, and is left out
+  truncated?: true,            // a snapshot or output was not sent (rules below)
   dynamic_title?: string,      // the title the terminal set (OSC 0/2), when it set one
   process_title?: string,      // its foreground process, when known
   display_title: string,       // the title a tab shows
@@ -858,6 +858,15 @@ The tail follows the cached ATTACH_OK's rule: sent when it totals at most 128 Ki
 and `truncated`. A snapshot stored above 256 KiB is not sent (`snapshot: null`, `truncated`): the
 answer stays under the 512 KiB the desktop takes in one message. The pane draws it at `cols` ×
 `rows` under its exit card, read-only.
+
+A cached ATTACH_OK (`cached: true`: the agent is gone, or did not answer the hub's ATTACH) carries
+the same as `last_output`, read under the same rules, with one difference: with no snapshot stored it
+carries nothing (`snapshot: null`, `tail: []`, no `truncated`), not the stream from its first seq,
+since a pane keeps the screen it shows when an ATTACH_OK has no snapshot. So it carries the newest
+snapshot and the output stored after it, the output the hub still held unstored included, as one
+element; a gap after the snapshot, or more than 128 KiB of output, sends the snapshot alone with
+`truncated`; a snapshot stored above 256 KiB sends `snapshot: null`, `tail: []` and `truncated`; one
+that does not parse sends nothing, without `truncated`.
 
 The answer is what a pane shows, and a pane attaches again whenever its socket is replaced: an
 ATTACH_OK from the terminal leaves it uncovered, one with `cached: true` shows it is not connected,

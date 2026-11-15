@@ -491,8 +491,9 @@ channel_id → {
 ```
 
 It is written each time a snapshot is stored (`storeSnapshot`), and deleted with its channel.
-Nothing reads it: an ATTACH, cached or not, finds the latest snapshot in spool.db itself
-(`getLatestSnapshot`) and reads the tail after it, and GC goes by chunk age, size, the
+Nothing reads it: an ATTACH answered from the spool finds the newest snapshot in spool.db itself
+and reads the output after it (`buildAttachPayload`), one answered by the agent relays the agent's
+snapshot, and GC goes by chunk age, size, the
 channel's status and whether meta.db still has the channel (§ 7), never by this table.
 
 ## 7. Garbage Collection

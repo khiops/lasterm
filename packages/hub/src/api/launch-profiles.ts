@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { LaunchProfile } from "@lasterm/shared";
-import { toSnakeCase, validateShell } from "@lasterm/shared";
+import { isPlainObject, toSnakeCase, validateShell } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import { restoreAgentDefaultProfile } from "../session/shell-profile-seed.js";
 import {
@@ -10,6 +10,7 @@ import {
 } from "../shell-discovery.js";
 import type { LaunchProfileUpdate } from "../storage/launch-profiles-dal.js";
 import type { MetaDAL } from "../storage/meta.js";
+import { profileFieldsError } from "./config.js";
 import { parsePagination } from "./pagination.js";
 
 // ─── Validation ──────────────────────────────────────────────────────────────
@@ -132,7 +133,40 @@ function validateProfileFields(
 	) {
 		return "report_directory must be true or false";
 	}
+	// A safe integer: SQLite stores a larger one, which node:sqlite then refuses
+	// to read back, every profile list included (#916, as the host override, #798).
+	if (
+		body.sort_order !== undefined &&
+		body.sort_order !== null &&
+		!Number.isSafeInteger(body.sort_order)
+	) {
+		return "sort_order must be an integer";
+	}
 	return null;
+}
+
+const BODY_NOT_OBJECT = {
+	code: "VALIDATION_ERROR",
+	message: "body must be an object",
+} as const;
+
+/**
+ * What is wrong with a launch profile's `profile_overrides`, or null. Absent
+ * and null (none, or clears it, #665) pass. Anything else must be an object,
+ * which goes through the check of every terminal profile write
+ * (`profileFieldsError`, #848) at the scope of one terminal: the overrides
+ * describe a terminal's profile, never a host's. A PUT replaces them whole, so
+ * what is written is what is stored (#916). Keys are camelCase, as the web
+ * client sends them; a response gives them in snake_case.
+ */
+export function launchProfileOverridesError(
+	value: unknown,
+): { code: "VALIDATION_ERROR" | "INVALID_VALUE"; message: string } | null {
+	if (value === undefined || value === null) return null;
+	if (!isPlainObject(value)) {
+		return { code: "VALIDATION_ERROR", message: "profile_overrides must be an object" };
+	}
+	return profileFieldsError(value, value, "channel");
 }
 
 // ─── Env masking (INV-12) ────────────────────────────────────────────────────
@@ -233,11 +267,14 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 
 	// PUT /api/launch-profiles/order — reorder launch profiles
 	// MUST be before /:id to avoid param collision.
-	server.put<{ Body: { ids: string[] } }>("/api/launch-profiles/order", async (request, reply) => {
-		const { ids } = request.body;
-		if (!Array.isArray(ids)) {
+	server.put<{ Body: unknown }>("/api/launch-profiles/order", async (request, reply) => {
+		const body: unknown = request.body;
+		if (!isPlainObject(body)) return reply.code(400).send({ error: BODY_NOT_OBJECT });
+		const { ids } = body;
+		// Checked whole before the first UPDATE: a refusal reorders nothing (#916).
+		if (!Array.isArray(ids) || !ids.every((id) => typeof id === "string")) {
 			return reply.code(400).send({
-				error: { code: "VALIDATION_ERROR", message: "ids must be an array" },
+				error: { code: "VALIDATION_ERROR", message: "ids must be an array of strings" },
 			});
 		}
 		metaDal.reorderLaunchProfiles(ids);
@@ -245,8 +282,10 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 	});
 
 	// POST /api/launch-profiles
-	server.post<{ Body: CreateLaunchProfileBody }>("/api/launch-profiles", async (request, reply) => {
-		const body = request.body;
+	server.post<{ Body: unknown }>("/api/launch-profiles", async (request, reply) => {
+		const raw: unknown = request.body;
+		if (!isPlainObject(raw)) return reply.code(400).send({ error: BODY_NOT_OBJECT });
+		const body = raw as unknown as CreateLaunchProfileBody;
 
 		const validationError = validateCreateBody(body);
 		if (validationError) {
@@ -254,6 +293,8 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 				error: { code: "VALIDATION_ERROR", message: validationError },
 			});
 		}
+		const overridesError = launchProfileOverridesError(body.profile_overrides);
+		if (overridesError) return reply.code(400).send({ error: overridesError });
 
 		// Duplicate name check (case-insensitive via COLLATE NOCASE in DB)
 		const existing = metaDal.getLaunchProfileByName(body.name.trim());
@@ -304,7 +345,7 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 	});
 
 	// PUT /api/launch-profiles/:id
-	server.put<{ Params: { id: string }; Body: UpdateLaunchProfileBody }>(
+	server.put<{ Params: { id: string }; Body: unknown }>(
 		"/api/launch-profiles/:id",
 		async (request, reply) => {
 			const existing = metaDal.getLaunchProfile(request.params.id);
@@ -314,7 +355,9 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 				});
 			}
 
-			const body = request.body;
+			const raw: unknown = request.body;
+			if (!isPlainObject(raw)) return reply.code(400).send({ error: BODY_NOT_OBJECT });
+			const body = raw as unknown as UpdateLaunchProfileBody;
 
 			const validationError = validateUpdateBody(body);
 			if (validationError) {
@@ -322,6 +365,8 @@ export function registerLaunchProfileRoutes(server: FastifyInstance, metaDal: Me
 					error: { code: "VALIDATION_ERROR", message: validationError },
 				});
 			}
+			const overridesError = launchProfileOverridesError(body.profile_overrides);
+			if (overridesError) return reply.code(400).send({ error: overridesError });
 
 			// Duplicate name check (excluding self)
 			if (body.name !== undefined) {

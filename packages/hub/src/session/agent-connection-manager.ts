@@ -571,9 +571,12 @@ export class AgentConnectionManager {
 		const host = this.ctx.metaDal.getHost(hostId);
 		// The method this connection signed in with, which an edit made while it
 		// connected does not change (#917). `start` refuses a host without one, so
-		// a connection that authenticated always has it.
+		// a connection that authenticated has it; one without fails here, loudly,
+		// rather than leaving the security log without its connect and disconnect.
 		const authMethod = agent.authMethod;
-		if (authMethod === undefined) return;
+		if (authMethod === undefined) {
+			throw new Error("A connected SSH agent has no sign-in method");
+		}
 		this.ctx.security.sshConnected({
 			hostId,
 			hostLabel: host?.label ?? "",

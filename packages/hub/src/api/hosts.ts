@@ -242,8 +242,9 @@ export function isBlankKeyPath(keyPath: string | null | undefined): boolean {
 /**
  * The method an SSH host signs in with when its writer names none (#917): the
  * key it names, else the agent, as an import reads a `~/.ssh/config` entry with
- * or without an `IdentityFile`. Every SSH host is stored with a method, so the
- * direct connect and a jump through it use the same one.
+ * or without an `IdentityFile`. Create, import and an edit from local to SSH
+ * store it, as migration 027 did for the rows before, so the direct connect and
+ * a jump through the host use the same one.
  */
 export function sshAuthFor(keyPath: string | null | undefined): "agent" | "key" {
 	return isBlankKeyPath(keyPath) ? "agent" : "key";

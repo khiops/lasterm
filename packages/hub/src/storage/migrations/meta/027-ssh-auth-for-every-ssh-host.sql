@@ -5,8 +5,8 @@
 -- read it two ways: as key auth when connecting to it, and as the agent when
 -- going through it to reach another host.
 --
--- From now on the hub stores a method whenever an SSH host is written without
--- one: `key` when it has a key path, otherwise `agent`, as an import reads an
+-- From now on the routes that create, import or turn a host into an SSH one
+-- store a method when none is sent: `key` when it has a key path, otherwise `agent`, as an import reads an
 -- entry with or without an `IdentityFile`. The readers no longer pick one.
 --
 -- An SSH host already here without a method is given it by the same rule. A key

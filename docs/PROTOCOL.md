@@ -2517,12 +2517,14 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 left out keeps its stored value; `null` clears one that may be empty, such as `ssh_port` (back
 to 22), `ssh_user`, `ssh_key_path` or `color` (#792).
 
-An SSH host is always stored with its sign-in method (#917). CreateHost on an SSH host without
+The routes store a sign-in method for every SSH host they write (#917). CreateHost on an SSH host without
 `ssh_auth` stores `key` when `ssh_key_path` names a file, and `agent` otherwise; a key path made
 only of ASCII whitespace names none. UpdateHost that turns a local host with no method into an SSH
 one does the same, on the key path sent or, if none is sent, the stored one. Any other edit changes
 the stored method only when `ssh_auth` is sent: `{ ssh_key_path }` alone on a host on `agent`
-leaves it on `agent`. `ssh_auth: null` is refused.
+leaves it on `agent`. `ssh_auth: null` is refused on an SSH host. A host stored without a method
+otherwise (by an internal writer, or copied from one by duplicate) keeps none: connecting to it, or
+through it, is refused.
 
 Both routes answer 400 `VALIDATION_ERROR` for a field of another type than the one above, or a
 value outside its choices (#795). An edit gets CreateHost's rules: each field it sends is checked

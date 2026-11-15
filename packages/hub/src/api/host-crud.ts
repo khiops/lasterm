@@ -119,7 +119,7 @@ export function registerHostCrudRoutes(
 			label: body.label.trim(),
 			...(body.ssh_host !== undefined && { sshHost: body.ssh_host }),
 			...(body.ssh_port !== undefined && { sshPort: body.ssh_port }),
-			// An SSH host is always stored with its method (#917).
+			// An SSH host is created with its method, sent or `sshAuthFor` (#917).
 			...(body.ssh_auth !== undefined
 				? { sshAuth: body.ssh_auth }
 				: body.type === "ssh" && { sshAuth: sshAuthFor(body.ssh_key_path) }),

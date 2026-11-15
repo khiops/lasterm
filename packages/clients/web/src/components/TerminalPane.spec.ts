@@ -1473,6 +1473,56 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		expect(attaches()).toHaveLength(2);
 	});
 
+	// A screen answered from memory is the spool's copy: the terminal's own,
+	// once the host is back, replaces it (#1010).
+	it("draws the live answer over a screen answered from memory when the hub says the terminal is live (#1010)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
+	it("draws the live answer to a Reconnect over a screen answered from memory (#1010)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
+	// What it drew live through the end it watched stays (#927).
+	it("keeps the screen it watched end when the terminal is brought back live", async () => {
+		await openLive();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "BACK");
+		await settle();
+
+		expect(xterm.events).not.toContain("<reset>");
+		expect(xterm.events).not.toContain("BACK");
+	});
+
 	it("attaches again when a terminal it saw end is brought back from elsewhere", async () => {
 		await openLive();
 		endIt();

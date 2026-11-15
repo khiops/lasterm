@@ -714,7 +714,7 @@ function takeAnswer(chId: string, facts: AttachFacts): void {
  */
 async function attachAndCover(
 	chId: string,
-	opts?: { preserveContent?: boolean; keepScreenIfEnded?: boolean },
+	opts?: { preserveContent?: boolean; replaceIfLive?: boolean; keepScreenIfEnded?: boolean },
 ): Promise<AttachResult | null> {
 	let result: AttachResult;
 	try {
@@ -752,7 +752,9 @@ async function onReconnect(): Promise<void> {
 	if (chId === null || reattaching) return;
 	reattaching = true;
 	try {
-		await attachAndCover(chId, { preserveContent: true });
+		// Over a screen answered from memory, the live answer replaces it: it
+		// holds what the terminal printed while its host was away (#1010).
+		await attachAndCover(chId, { preserveContent: true, replaceIfLive: isDetached.value });
 	} catch {
 		// Still unreachable. The banner is already saying so.
 	} finally {

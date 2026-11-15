@@ -51,6 +51,8 @@ interface PendingAttach {
 	channelId: string;
 	/** Reconnect and Restart keep the screen; the hub's answer does not replace it. */
 	preserveContent: boolean;
+	/** Keeping the screen, a live answer replaces it all the same (#1010). */
+	replaceIfLive: boolean;
 	/** Keep the screen if the hub answers that the terminal has ended. */
 	keepScreenIfEnded: boolean;
 	stillWanted: () => boolean;
@@ -640,7 +642,8 @@ export function useTerminal(
 	/**
 	 * The terminal attached. Its answer is written once for every attach that
 	 * waited on it, by the one that keeps least: the screen is replaced unless
-	 * every one of them keeps it (#929, #930).
+	 * every one of them keeps it (#929, #930), and one that keeps a copy from
+	 * the hub's memory does not keep it from a live answer (#1010).
 	 */
 	function takeAttachOk(msg: UiAttachOkMessage): void {
 		const waiting = answeredBy(msg.channelId);
@@ -668,7 +671,9 @@ export function useTerminal(
 		// Restore the snapshot and its tail before binding the terminal: no
 		// RESIZE goes out while they are written. A replay: a bell in it
 		// already rang (#927).
-		const replaceScreen = waiting.some((entry) => !entry.preserveContent);
+		const replaceScreen = waiting.some(
+			(entry) => !entry.preserveContent || (entry.replaceIfLive && msg.cached !== true),
+		);
 		const tail = msg.tail ?? [];
 		replay(() => {
 			const term = terminal.value;
@@ -794,6 +799,12 @@ export function useTerminal(
 			/** Keep the screen and write what the terminal prints meanwhile (Reconnect, Restart). */
 			preserveContent?: boolean;
 			/**
+			 * Keeping the screen, replace it if the hub answers live: it is a copy
+			 * from the hub's memory, older than the agent's snapshot, which holds
+			 * everything the terminal printed before it (#1010, #931).
+			 */
+			replaceIfLive?: boolean;
+			/**
 			 * Keep the screen if the hub answers that the terminal has ended; an
 			 * ATTACH_OK replaces it as usual. For a pane over an ending it watched.
 			 */
@@ -839,6 +850,7 @@ export function useTerminal(
 				request,
 				channelId: id,
 				preserveContent,
+				replaceIfLive: opts?.replaceIfLive === true,
 				keepScreenIfEnded: opts?.keepScreenIfEnded === true && !elsewhere,
 				stillWanted: opts?.stillWanted ?? (() => true),
 				timer: setTimeout(() => onDeadline(entry), 10_000),

@@ -1080,14 +1080,15 @@ export class ChannelLifecycleManager {
 	 * the socket refused it, and the whole connection went down — taking every
 	 * pane's attach with it, each stuck on "Connecting…" for ever.
 	 *
-	 * The newest chunks are the ones that continue the screen, so those are the
-	 * ones kept. Scrollback older than this is lost to the pane; a bounded tail
-	 * beats a dead connection.
+	 * Output that does not fit is not sent at all: a stream cut anywhere but a
+	 * boundary leaves the emulator in a state nobody chose. The snapshot goes
+	 * alone, said `truncated`; a bounded answer beats a dead connection.
 	 */
 	private static readonly MAX_ATTACH_TAIL_BYTES = 128 * 1024;
 
 	/**
-	 * The largest stored snapshot an ended terminal's answer carries (#927).
+	 * The largest stored snapshot an answer read from the spool carries, an
+	 * ended terminal's (#927) or a cached ATTACH_OK (#1004).
 	 * With the tail's 128 KiB, the answer stays under the 512 KiB the desktop
 	 * takes in one message; a snapshot stores more than MessagePack sends, since
 	 * JSON escapes every control byte. A dead terminal's snapshot never changes:
@@ -1096,49 +1097,21 @@ export class ChannelLifecycleManager {
 	 */
 	private static readonly MAX_ENDED_SNAPSHOT_BYTES = 256 * 1024;
 
-	/** Output rows whose sizes one step of an ended terminal's read looks at. */
+	/** Output rows whose sizes one step of a read from the spool looks at. */
 	private static readonly ENDED_WALK_ROWS = 512;
 
 	/**
-	 * The output after a snapshot, or nothing when there is too much of it.
-	 *
-	 * Cutting a terminal stream is not like cutting a log. Escape sequences set
-	 * attributes, move the cursor, enter and leave the alternate screen; a piece
-	 * starting anywhere but a boundary leaves the emulator in a state nobody
-	 * chose, and it renders something wrong without saying so.
-	 *
-	 * So when it does not fit, none of it is sent. The snapshot alone is a
-	 * coherent screen, older than the truth, and `truncated` is how the pane
-	 * gets to say that the rest is missing.
-	 */
-	static boundTail(chunks: ReadonlyArray<{ dataBlob: Buffer }>): {
-		tail: Uint8Array[];
-		truncated: boolean;
-	} {
-		let total = 0;
-		for (const chunk of chunks) {
-			total += chunk.dataBlob.length;
-			if (total > ChannelLifecycleManager.MAX_ATTACH_TAIL_BYTES) {
-				return { tail: [], truncated: true };
-			}
-		}
-		return { tail: chunks.map((c) => new Uint8Array(c.dataBlob)), truncated: false };
-	}
-
-	/**
-	 * A cached ATTACH_OK's screen: the newest snapshot and the output after it,
-	 * what the chunker still holds included, within `boundTail`'s bound. With
-	 * no snapshot stored, nothing.
+	 * A cached ATTACH_OK's screen (#1004): the newest snapshot and the output
+	 * stored after it, what the chunker still holds included, under the rules
+	 * of an ended terminal's (`readScreen`). With no snapshot stored, nothing:
+	 * the pane keeps the screen it has when an answer has none, and a stream
+	 * from its first seq would be drawn over it.
 	 */
 	buildAttachPayload(channelId: string): {
 		snapshot: UiAttachOkMessage["snapshot"];
 		tail: Uint8Array[];
 		truncated: boolean;
 	} {
-		let snapshot: UiAttachOkMessage["snapshot"] = null;
-		let tail: Uint8Array[] = [];
-		let truncated = false;
-
 		// What the chunker still holds is output the hub has received: a pane
 		// drops the OUTPUT it hears while its ATTACH waits, so an answer read
 		// from the spool before that output is stored would lose it (#956).
@@ -1152,46 +1125,47 @@ export class ChannelLifecycleManager {
 				code: (err as { code?: unknown } | null)?.code ?? "unknown",
 			});
 		}
-		const snapshotChunk = this.ctx.spoolDal.getLatestSnapshot(channelId);
-		if (snapshotChunk) {
-			try {
-				snapshot = JSON.parse(
-					snapshotChunk.dataBlob.toString("utf8"),
-				) as UiAttachOkMessage["snapshot"];
-			} catch {
-				snapshot = null;
-			}
-			const tailChunks = this.ctx.spoolDal.getChunksByChannel(channelId, {
-				kind: "output",
-				afterSeq: snapshotChunk.seq,
-			});
-			const bounded = ChannelLifecycleManager.boundTail(tailChunks);
-			tail = bounded.tail;
-			truncated = bounded.truncated;
-		}
-
-		return { snapshot, tail, truncated };
+		const screen = this.readScreen(channelId, false);
+		return {
+			snapshot: screen.snapshot as UiAttachOkMessage["snapshot"],
+			tail: screen.tail,
+			truncated: screen.truncated === true,
+		};
 	}
 
 	/**
 	 * What an ended terminal last printed, for the CHANNEL_DEAD that answers an
-	 * ATTACH (#927), at `size`, the terminal's last.
-	 *
-	 * The newest snapshot and the output stored after it; with no snapshot, all
-	 * the output from the stream's first seq. Only what continues where it
-	 * starts is sent: output after a snapshot is numbered from the snapshot's
-	 * seq + 1, and a stream from 1, and the GC deletes a channel's rows from its
-	 * lowest seq up, so a missing seq is output the GC took. A fragment would be
-	 * drawn on a screen it was not written for, so the snapshot goes alone, said
-	 * `truncated`, or nothing does.
-	 *
-	 * Sizes are read before data, and the walk stops at the bound: every mount
-	 * and every reconnect of an ended pane makes this read, and its cost must
-	 * follow what it may send, not what the channel stores.
+	 * ATTACH (#927), at `size`, the terminal's last: `readScreen`, and with no
+	 * snapshot, all the output from the stream's first seq.
 	 */
 	buildEndedOutput(channelId: string, size: { cols: number; rows: number }): EndedOutput {
+		return { ...this.readScreen(channelId, true), ...size };
+	}
+
+	/**
+	 * The newest snapshot and the output stored after it, as an answer read from
+	 * the spool carries them; with no snapshot, the whole stream from its first
+	 * seq when `streamWithoutSnapshot`, else nothing.
+	 *
+	 * Only what continues where it starts is sent: output after a snapshot is
+	 * numbered from the snapshot's seq + 1, and a stream from 1, and the GC
+	 * deletes a channel's rows from its lowest seq up, so a missing seq is
+	 * output the GC took. A fragment would be drawn on a screen it was not
+	 * written for, so the snapshot goes alone, said `truncated`, or nothing
+	 * does. The same holds past `MAX_ATTACH_TAIL_BYTES`. A snapshot stored over
+	 * `MAX_ENDED_SNAPSHOT_BYTES` is not sent either, said `truncated`, and one
+	 * that cannot be read sends nothing.
+	 *
+	 * Sizes are read before data, and the walk stops at the bound: every attach
+	 * of a pane makes this read, and its cost must follow what it may send, not
+	 * what the channel stores.
+	 */
+	private readScreen(
+		channelId: string,
+		streamWithoutSnapshot: boolean,
+	): { snapshot: SnapshotData | null; tail: Uint8Array[]; truncated?: true } {
 		const spool = this.ctx.spoolDal;
-		const nothing: EndedOutput = { snapshot: null, tail: [], ...size };
+		const nothing = { snapshot: null, tail: [] };
 		let snapshot: SnapshotData | null = null;
 		let start = 0;
 		const newest = spool.getNewestSnapshotRef(channelId);
@@ -1208,8 +1182,9 @@ export class ChannelLifecycleManager {
 				return nothing;
 			}
 			start = newest.seq;
-		} else if (spool.getMinSeq(channelId) !== 1) {
-			// No row, or a stream whose start the GC already took.
+		} else if (!streamWithoutSnapshot || spool.getMinSeq(channelId) !== 1) {
+			// No snapshot, and no stream asked for; or no row, or a stream whose
+			// start the GC already took.
 			return nothing;
 		}
 
@@ -1224,20 +1199,16 @@ export class ChannelLifecycleManager {
 			for (const row of rows) {
 				total += row.bytes;
 				if (row.seq !== last + 1 || total > ChannelLifecycleManager.MAX_ATTACH_TAIL_BYTES) {
-					return { snapshot, tail: [], truncated: true, ...size };
+					return { snapshot, tail: [], truncated: true };
 				}
 				last = row.seq;
 			}
 			if (rows.length < ChannelLifecycleManager.ENDED_WALK_ROWS) break;
 		}
-		if (last === start) return { snapshot, tail: [], ...size };
+		if (last === start) return { snapshot, tail: [] };
 		// One element: MessagePack frames each, and many small chunks would
 		// weigh up to three times their bytes.
-		return {
-			snapshot,
-			tail: [new Uint8Array(spool.readOutput(channelId, start, last))],
-			...size,
-		};
+		return { snapshot, tail: [new Uint8Array(spool.readOutput(channelId, start, last))] };
 	}
 
 	/**

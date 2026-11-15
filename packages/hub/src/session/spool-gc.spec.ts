@@ -79,6 +79,19 @@ describe("SpoolGarbageCollector (#726)", () => {
 		).n;
 	}
 
+	/** A screen an ATTACH can replay: the seeded blobs are not JSON. */
+	const SCREEN = { serialized: "<screen>", cols: 80, rows: 24, cursorX: 0, cursorY: 0 };
+
+	/** Make a channel's newest snapshot one an ATTACH can replay; its seq. */
+	function replayable(channelId: string): number {
+		const newest = spoolDal.getLatestSnapshotSize(channelId);
+		if (newest === undefined) throw new Error("expected a snapshot");
+		dbs.spool
+			.prepare("UPDATE chunks SET data_blob = ? WHERE channel_id = ? AND seq = ?")
+			.run(Buffer.from(JSON.stringify(SCREEN)), channelId, newest.seq);
+		return newest.seq;
+	}
+
 	/** What an ATTACH answered from the spool carries (`buildAttachPayload`). */
 	function attachPayload(channelId: string) {
 		const lifecycle = new ChannelLifecycleManager(
@@ -116,15 +129,20 @@ describe("SpoolGarbageCollector (#726)", () => {
 			chunks.push({ kind: "snapshot", bytes: 300 }, { kind: "output", bytes: 50 });
 		}
 		seed("ch", chunks);
-		const before = attachPayload("ch");
-		expect(before.snapshot).toBeNull(); // the seeded blob is not JSON
+		expect(replayable("ch")).toBe(399);
+		// The output after it: seq 400, 50 bytes the fixture fills with 400 % 251.
+		const replayed = {
+			snapshot: SCREEN,
+			tail: [new Uint8Array(Buffer.alloc(50, 149))],
+			truncated: false,
+		};
+		expect(attachPayload("ch")).toEqual(replayed);
 		const latest = spoolDal.getLatestSnapshot("ch");
 
 		await makeGc().collect();
 
 		expect(spoolDal.getLatestSnapshot("ch")).toEqual(latest);
-		expect(attachPayload("ch")).toEqual(before);
-		expect(before.tail).toHaveLength(1);
+		expect(attachPayload("ch")).toEqual(replayed);
 	});
 
 	// ── Size cap ──────────────────────────────────────────────────────────────
@@ -384,7 +402,22 @@ describe("SpoolGarbageCollector (#726)", () => {
 
 	it("cleans 65,000 snapshots without holding the event loop", async () => {
 		seedOwnersProfile();
-		const tail = attachPayload("live");
+		expect(replayable("live")).toBe(64_909);
+		// The 11 outputs after it, seqs 64,910 to 64,920, 1 KiB each, filled with seq % 251.
+		const replayed = {
+			snapshot: SCREEN,
+			tail: [
+				new Uint8Array(
+					Buffer.concat(
+						[152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162].map((fill) =>
+							Buffer.alloc(KiB, fill),
+						),
+					),
+				),
+			],
+			truncated: false,
+		};
+		expect(attachPayload("live")).toEqual(replayed);
 		expect(count("live", "snapshot")).toBe(64_509);
 
 		const watch = watchEventLoop();
@@ -394,7 +427,7 @@ describe("SpoolGarbageCollector (#726)", () => {
 		expect(count("live", "snapshot")).toBe(1);
 		expect(count("live", "output")).toBe(411);
 		expect(rows("stale")).toEqual([{ seq: 2_001, kind: "snapshot" }]);
-		expect(attachPayload("live")).toEqual(tail);
+		expect(attachPayload("live")).toEqual(replayed);
 		expect(stats.completed).toBe(true);
 		// Before the fix the whole pass was one stretch of several seconds.
 		expect(loop.turns).toBeGreaterThan(1);

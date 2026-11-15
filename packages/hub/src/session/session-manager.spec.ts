@@ -2743,6 +2743,37 @@ describe("SessionManager", () => {
 		expect(errMsg.code).toBe("CHANNEL_DEAD");
 	});
 
+	// ─── Spool rows and the reads of them, for the #956 and #927 describes ────
+
+	function store(id: string, seq: number, kind: "output" | "snapshot", data: string | Buffer) {
+		const dataBlob = typeof data === "string" ? Buffer.from(data) : data;
+		new SpoolDAL(dbManager.spool).insertChunk({
+			channelId: id,
+			seq,
+			kind,
+			dataBlob,
+			uncompressedLen: dataBlob.length,
+		});
+	}
+
+	const spies: Array<{ mockRestore(): void }> = [];
+
+	/** Spies on every SpoolDAL read that returns a chunk's data. */
+	function dataReads() {
+		const reads = {
+			byChannel: vi.spyOn(SpoolDAL.prototype, "getChunksByChannel"),
+			one: vi.spyOn(SpoolDAL.prototype, "getChunk"),
+			output: vi.spyOn(SpoolDAL.prototype, "readOutput"),
+			latest: vi.spyOn(SpoolDAL.prototype, "getLatestSnapshot"),
+		};
+		spies.push(...Object.values(reads));
+		return reads;
+	}
+
+	afterEach(() => {
+		for (const spy of spies.splice(0)) spy.mockRestore();
+	});
+
 	// ─── An ATTACH answered from the spool (#956) ────────────────────────────
 	//
 	// The hub stores a channel's output a second after it arrives, or once
@@ -2879,6 +2910,257 @@ describe("SessionManager", () => {
 
 			expect(cachedAnswer(received).tail.join("")).toBe("before while waiting");
 		});
+
+		// ─── The rules of #927's ended output, for a cached answer too (#1004) ──
+		//
+		// The newest snapshot and the output stored after it, without a gap and
+		// within the bounds, or the snapshot alone said `truncated`; a snapshot
+		// over 256 KiB is not sent; one that cannot be read sends nothing; and the
+		// reads follow what may be sent, not what the channel stores.
+
+		const KIB = 1024;
+
+		let terminals = 0;
+
+		/** An SSH terminal whose agent went away, with nothing in its spool yet. */
+		async function terminalWhoseAgentLeft(): Promise<string> {
+			const host = new MetaDAL(dbManager.meta).createHost({
+				type: "ssh",
+				label: `test-ssh-1004-${++terminals}`,
+				sshHost: "user@localhost",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+			});
+			sm.addClient(makeClient("writer", []));
+			const channelId = await sm.handleSpawn("writer", { type: "SPAWN", hostId: host.id });
+			if (channelId === null) throw new Error("expected an SSH channel");
+			const agent = mockSshAgentInstance;
+			if (agent === null) throw new Error("expected the SSH agent");
+			agent.simulateClose();
+			await new Promise((r) => setImmediate(r));
+			return channelId;
+		}
+
+		/** The whole cached ATTACH_OK a fresh pane gets. */
+		async function attachCached(channelId: string): Promise<UiAttachOkMessage> {
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("reader", received));
+			expect(await sm.handleAttach("reader", channelId)).toBe(true);
+			const ok = received.find((m) => m.type === "ATTACH_OK") as UiAttachOkMessage | undefined;
+			if (ok === undefined) throw new Error("expected an ATTACH_OK");
+			expect(ok.cached).toBe(true);
+			return ok;
+		}
+
+		/** The screen part of an answer: what decides what the pane draws. */
+		function screenOf(ok: UiAttachOkMessage) {
+			return {
+				snapshot: ok.snapshot,
+				tail: (ok.tail ?? []).map((part) => Buffer.from(part).toString()),
+				truncated: "truncated" in ok ? ok.truncated : "absent",
+			};
+		}
+
+		/** A snapshot whose stored JSON is exactly `bytes` long. */
+		function snapshotOfSize(bytes: number) {
+			const frame = { serialized: "", cols: 80, rows: 24, cursorX: 0, cursorY: 0 };
+			const room = bytes - JSON.stringify(frame).length;
+			return { ...frame, serialized: "x".repeat(room) };
+		}
+
+		it.each([
+			["inside the output", [11, 13]],
+			["at its start", [12]],
+		] as const)(
+			"sends the snapshot alone when the output after it has a gap %s",
+			async (_, seqs) => {
+				const channelId = await terminalWhoseAgentLeft();
+				store(channelId, 10, "snapshot", JSON.stringify(SCREEN));
+				for (const seq of seqs) store(channelId, seq, "output", `row-${seq}`);
+
+				expect(screenOf(await attachCached(channelId))).toEqual({
+					snapshot: SCREEN,
+					tail: [],
+					truncated: true,
+				});
+			},
+		);
+
+		it("drops a snapshot over 256 KiB, and says so", async () => {
+			const at = await terminalWhoseAgentLeft();
+			const fits = snapshotOfSize(256 * KIB);
+			expect(JSON.stringify(fits).length).toBe(262_144);
+			store(at, 10, "snapshot", JSON.stringify(fits));
+			expect(screenOf(await attachCached(at))).toEqual({
+				snapshot: fits,
+				tail: [],
+				truncated: "absent",
+			});
+
+			const over = await terminalWhoseAgentLeft();
+			store(over, 10, "snapshot", JSON.stringify(snapshotOfSize(256 * KIB + 1)));
+			store(over, 11, "output", "after");
+			expect(screenOf(await attachCached(over))).toEqual({
+				snapshot: null,
+				tail: [],
+				truncated: true,
+			});
+		});
+
+		it("sends the output after the snapshot up to 128 KiB, as one element", async () => {
+			const small = await terminalWhoseAgentLeft();
+			store(small, 10, "snapshot", JSON.stringify(SCREEN));
+			store(small, 11, "output", "ab");
+			store(small, 12, "output", "cd");
+			expect(screenOf(await attachCached(small))).toEqual({
+				snapshot: SCREEN,
+				tail: ["abcd"],
+				truncated: "absent",
+			});
+
+			const full = await terminalWhoseAgentLeft();
+			store(full, 10, "snapshot", JSON.stringify(SCREEN));
+			store(full, 11, "output", Buffer.alloc(64 * KIB, 0x61));
+			store(full, 12, "output", Buffer.alloc(64 * KIB, 0x62));
+			const whole = await attachCached(full);
+			expect(whole.tail.map((part) => part.length)).toEqual([131_072]);
+			expect("truncated" in whole).toBe(false);
+
+			const over = await terminalWhoseAgentLeft();
+			store(over, 10, "snapshot", JSON.stringify(SCREEN));
+			store(over, 11, "output", Buffer.alloc(64 * KIB, 0x61));
+			store(over, 12, "output", Buffer.alloc(64 * KIB, 0x62));
+			store(over, 13, "output", "c");
+			expect(screenOf(await attachCached(over))).toEqual({
+				snapshot: SCREEN,
+				tail: [],
+				truncated: true,
+			});
+		});
+
+		it("sends a snapshot with nothing after it as it is", async () => {
+			const channelId = await terminalWhoseAgentLeft();
+			store(channelId, 10, "snapshot", JSON.stringify(SCREEN));
+
+			expect(screenOf(await attachCached(channelId))).toEqual({
+				snapshot: SCREEN,
+				tail: [],
+				truncated: "absent",
+			});
+		});
+
+		it("sends nothing after a snapshot it cannot read", async () => {
+			const channelId = await terminalWhoseAgentLeft();
+			store(channelId, 10, "snapshot", "not json");
+			store(channelId, 11, "output", "after");
+
+			expect(screenOf(await attachCached(channelId))).toEqual({
+				snapshot: null,
+				tail: [],
+				truncated: "absent",
+			});
+		});
+
+		it("sends nothing without a snapshot, and reads no output", async () => {
+			const channelId = await terminalWhoseAgentLeft();
+			store(channelId, 1, "output", "first");
+			store(channelId, 2, "output", "second");
+			const reads = dataReads();
+
+			expect(screenOf(await attachCached(channelId))).toEqual({
+				snapshot: null,
+				tail: [],
+				truncated: "absent",
+			});
+			expect(reads.output).not.toHaveBeenCalled();
+			expect(reads.one).not.toHaveBeenCalled();
+			expect(reads.byChannel).not.toHaveBeenCalled();
+		});
+
+		describe("reads no output it does not send", () => {
+			function sizeReads() {
+				const spy = vi.spyOn(SpoolDAL.prototype, "listOutputSizesAfter");
+				spies.push(spy);
+				return spy;
+			}
+
+			/** A terminal with a snapshot at seq 10 and `rows` outputs after it, `skip` left out. */
+			async function withRows(rows: number, bytes: number, skip?: number): Promise<string> {
+				const channelId = await terminalWhoseAgentLeft();
+				store(channelId, 10, "snapshot", JSON.stringify(SCREEN));
+				for (let i = 1; i <= rows; i++) {
+					if (i !== skip) store(channelId, 10 + i, "output", Buffer.alloc(bytes, 0x61));
+				}
+				return channelId;
+			}
+
+			it("stops at the first batch's row past 128 KiB, with the snapshot its only data read", async () => {
+				const channelId = await withRows(600, KIB);
+				const reads = dataReads();
+				const sizes = sizeReads();
+
+				expect(screenOf(await attachCached(channelId))).toEqual({
+					snapshot: SCREEN,
+					tail: [],
+					truncated: true,
+				});
+				expect(reads.byChannel).not.toHaveBeenCalled();
+				expect(reads.output).not.toHaveBeenCalled();
+				expect(reads.latest).not.toHaveBeenCalled();
+				expect(reads.one).toHaveBeenCalledTimes(1);
+				expect(sizes).toHaveBeenCalledTimes(1);
+				expect(sizes.mock.calls[0]?.[2]).toBe(512);
+			});
+
+			it("reads no snapshot data over 256 KiB", async () => {
+				const channelId = await terminalWhoseAgentLeft();
+				store(channelId, 10, "snapshot", JSON.stringify(snapshotOfSize(300 * KIB)));
+				const reads = dataReads();
+
+				await attachCached(channelId);
+
+				expect(reads.one).not.toHaveBeenCalled();
+				expect(reads.latest).not.toHaveBeenCalled();
+			});
+
+			it("reads no output on a gap", async () => {
+				const channelId = await terminalWhoseAgentLeft();
+				store(channelId, 10, "snapshot", JSON.stringify(SCREEN));
+				store(channelId, 11, "output", "row-11");
+				store(channelId, 13, "output", "row-13");
+				const reads = dataReads();
+
+				await attachCached(channelId);
+
+				expect(reads.output).not.toHaveBeenCalled();
+				expect(reads.byChannel).not.toHaveBeenCalled();
+			});
+
+			it("walks on past a full batch, and sends what fits as one element", async () => {
+				const channelId = await withRows(600, 100);
+				const sizes = sizeReads();
+
+				const ok = await attachCached(channelId);
+
+				expect(ok.snapshot).toEqual(SCREEN);
+				expect(ok.tail.map((part) => part.length)).toEqual([60_000]);
+				expect("truncated" in ok).toBe(false);
+				expect(sizes).toHaveBeenCalledTimes(2);
+			});
+
+			it.each([
+				["the bound is passed in the second batch", 256, undefined],
+				["the second batch starts after a gap", 100, 513],
+			] as const)("refuses the output when %s", async (_, bytes, skip) => {
+				const channelId = await withRows(600, bytes, skip);
+
+				expect(screenOf(await attachCached(channelId))).toEqual({
+					snapshot: SCREEN,
+					tail: [],
+					truncated: true,
+				});
+			});
+		});
 	});
 
 	// ─── An ended terminal's last output (#927) ──────────────────────────────
@@ -2908,17 +3190,6 @@ describe("SessionManager", () => {
 			return dal;
 		}
 
-		function store(id: string, seq: number, kind: "output" | "snapshot", data: string | Buffer) {
-			const dataBlob = typeof data === "string" ? Buffer.from(data) : data;
-			new SpoolDAL(dbManager.spool).insertChunk({
-				channelId: id,
-				seq,
-				kind,
-				dataBlob,
-				uncompressedLen: dataBlob.length,
-			});
-		}
-
 		async function attachFresh(id: string, clientId = `pane-${id}`) {
 			const received: ProtocolMessage[] = [];
 			const client = makeClient(clientId, received);
@@ -2937,24 +3208,6 @@ describe("SessionManager", () => {
 		}
 
 		const text = (tail: Uint8Array[]) => tail.map((part) => Buffer.from(part).toString());
-
-		const spies: Array<{ mockRestore(): void }> = [];
-
-		/** Spies on every SpoolDAL read that returns a chunk's data. */
-		function dataReads() {
-			const reads = {
-				byChannel: vi.spyOn(SpoolDAL.prototype, "getChunksByChannel"),
-				one: vi.spyOn(SpoolDAL.prototype, "getChunk"),
-				output: vi.spyOn(SpoolDAL.prototype, "readOutput"),
-				latest: vi.spyOn(SpoolDAL.prototype, "getLatestSnapshot"),
-			};
-			spies.push(...Object.values(reads));
-			return reads;
-		}
-
-		afterEach(() => {
-			for (const spy of spies.splice(0)) spy.mockRestore();
-		});
 
 		it("answers an ended terminal with what it last printed, and starts nothing", async () => {
 			const dal = endedTerminal("ended-h1", 120, 40);

@@ -211,4 +211,26 @@ describe("TerminalPane: a new terminal whose passphrase was not given (#875)", (
 		await nextTick();
 		expect(spawns).toHaveLength(2);
 	});
+
+	// Remounted while the hub cannot be reached, it showed the connection's
+	// error instead, and the connection's return asked again, unasked.
+	it("keeps Connect when its pane remounts while the hub cannot be reached", async () => {
+		const key = ref(0);
+		await openNewTerminal(key);
+		vi.mocked(useSessionStore().connect).mockRejectedValue(new Error("WebSocket closed"));
+
+		key.value++;
+		await nextTick();
+		await vi.waitFor(() =>
+			expect(paneText()).toContain("Not connected: the passphrase was not given"),
+		);
+		expect(button("Connect")).toBeDefined();
+
+		vi.mocked(useSessionStore().connect).mockResolvedValue();
+		useSessionStore().reconnectCount++;
+		await nextTick();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(spawns).toHaveLength(1);
+		expect(paneText()).toContain("Not connected: the passphrase was not given");
+	});
 });

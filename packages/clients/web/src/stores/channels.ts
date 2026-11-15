@@ -1025,6 +1025,11 @@ export const useChannelsStore = defineStore("channels", () => {
 		return run;
 	}
 
+	/** The run `tempId`'s spawn has had, if any, without starting one. */
+	function pendingSpawnRun(tempId: string): PendingSpawnRun | null {
+		return pendingSpawns.get(tempId)?.run ?? null;
+	}
+
 	/** Retry or Connect: a failed spawn is sent again, by the next pane to ask. */
 	function clearFailedPendingSpawn(tempId: string): void {
 		const record = pendingSpawns.get(tempId);
@@ -1682,6 +1687,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		holdPendingSpawn,
 		releasePendingSpawn,
 		runPendingSpawn,
+		pendingSpawnRun,
 		clearFailedPendingSpawn,
 		registerChannelHost,
 		addGroup,

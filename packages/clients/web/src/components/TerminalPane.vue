@@ -936,6 +936,14 @@ watch(isDead, (dead) => {
  */
 async function openChannel(cols: number, rows: number): Promise<void> {
 	try {
+		// The spawn it owes failed already, before a split or a move remounted
+		// it: shown as it is, with Retry or Connect, without the hub. A
+		// connection failing meanwhile would show its own error instead, which
+		// the connection's return retries, Connect's included (#980).
+		if (spawnFor !== null && pendingHostId.value !== null && props.channelId === spawnFor) {
+			const earlier = channelsStore.pendingSpawnRun(spawnFor);
+			if (earlier?.state === 'failed') await earlier.outcome;
+		}
 		await sessionStore.connect();
 
 		if (props.channelId !== null && props.channelId !== undefined) {

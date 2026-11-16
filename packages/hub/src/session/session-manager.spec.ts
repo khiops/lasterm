@@ -2978,15 +2978,31 @@ describe("SessionManager", () => {
 				},
 			});
 			agents.set(hostId as string, replacement);
-			// The next chunk finds another agent: the paste is lost.
+			// The replaced agent closes, its close no longer the current one's:
+			// the paste it took is lost all the same, once.
+			agent.simulateDisconnect();
+			expect(pastes(c1)).toEqual([
+				{ type: "PASTE_CLOSED", channelId: CH, pasteId: 3, reason: "agent_lost" },
+			]);
+			// A new paste goes to the replacement, untouched by the old close.
+			sm.handlePaste("c1", chunk(4, 0));
+			expect(
+				(replacement.send as ReturnType<typeof vi.fn>).mock.calls.map(([m]) => m.type),
+			).toEqual(["PASTE"]);
+			expect(pastes(c1)).toHaveLength(1);
+			expect(toAgent().filter((m) => m.type === "PASTE")).toHaveLength(1);
+		});
+
+		it("HB5: tells it agent_lost when a chunk finds another agent than the one that took the paste", async () => {
+			const { c1, agent } = await terminal();
+			sm.handlePaste("c1", chunk(3, 0));
+			const agents = (sm as unknown as { ctx: { agents: Map<string, unknown> } }).ctx.agents;
+			const [hostId] = [...agents.keys()];
+			agents.set(hostId as string, Object.create(agent, { send: { value: vi.fn() } }));
 			sm.handlePaste("c1", chunk(3, 1));
 			expect(pastes(c1)).toEqual([
 				{ type: "PASTE_CLOSED", channelId: CH, pasteId: 3, reason: "agent_lost" },
 			]);
-			sm.handlePaste("c1", chunk(4, 0));
-			agent.simulateDisconnect();
-			expect(pastes(c1)).toHaveLength(1);
-			expect(toAgent().filter((m) => m.pasteId !== undefined)).toHaveLength(1);
 		});
 
 		it("HB6: gives two windows' pastes with the same id different ids toward the agent", async () => {

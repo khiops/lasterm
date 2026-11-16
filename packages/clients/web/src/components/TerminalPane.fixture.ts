@@ -33,6 +33,8 @@ export interface StandInTerminal {
 	element: HTMLElement;
 	/** Its helper textarea, where the keyboard and a paste arrive. */
 	textarea: HTMLTextAreaElement;
+	/** Where its view is in its buffer: `scrollToBottom` brings `viewportY` to `baseY`. */
+	buffer: { active: { viewportY: number; baseY: number; length: number } };
 	/** The key handler xterm was last given: xterm keeps one. */
 	keyHandler: ((ev: KeyboardEvent) => boolean) | null;
 	dataListeners: Array<(data: string) => void>;

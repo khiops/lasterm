@@ -594,7 +594,7 @@ const layout = useLayout();
 if (layout.loadedSavedLayout) {
 	channelsStore.forgetPendingSpawnsNotIn(
 		new Set(
-			Object.values(layout.layouts.value).flatMap((root) =>
+			layout.tabs.value.map((tab) => layout.layouts.value[tab.id]).flatMap((root) =>
 				root === null || root === undefined ? [] : collectTerminalChannelIds(root),
 			),
 		),

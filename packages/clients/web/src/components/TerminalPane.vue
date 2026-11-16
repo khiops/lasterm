@@ -1123,6 +1123,13 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			});
 		}
 	} catch (err) {
+		// A restored spawn's Retry that ended before its SPAWN, its connection
+		// refused: the record shows that failure again, so a pane remounted over
+		// the id waits for a click too, also one that replaced this pane while it
+		// waited (#992). The store keeps any run already there.
+		if (spawnFor !== null && props.channelId === spawnFor) {
+			channelsStore.failRestoredSpawnBeforeSend(spawnFor, err);
+		}
 		// Unmounted meanwhile: nobody is shown what came of it.
 		if (unmounted) return;
 		// A spawn that failed after the pane was given another terminal: not
@@ -1132,12 +1139,6 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			pendingHostId.value = null;
 			await openChannel(cols, rows);
 			return;
-		}
-		// A restored spawn's Retry that ended before its SPAWN, its connection
-		// refused: the record shows that failure again, so a pane remounted over
-		// the id waits for a click too (#992).
-		if (holdsSpawn.value && spawnFor !== null && props.channelId === spawnFor) {
-			channelsStore.failRestoredSpawnBeforeSend(spawnFor, err);
 		}
 		const msg = err instanceof Error ? err.message : String(err);
 		const code = (err as { code?: string } | null)?.code;

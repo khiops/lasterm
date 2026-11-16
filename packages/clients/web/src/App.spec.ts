@@ -1825,6 +1825,18 @@ describe("a new terminal's pane after a reload", () => {
 		expect(hostInView()).toBe(label);
 	}
 
+	/**
+	 * Drop the socket and bring it back, and check the window took the reconnection to its end:
+	 * the session store reads the profile last, then counts it, which the panes watch.
+	 */
+	async function reconnectFully(hub: FakeHub): Promise<void> {
+		const profileReads = hub.calls("GET", "/api/config/cascade").length;
+		hub.drop();
+		await hub.reconnect();
+		await settle();
+		expect(hub.calls("GET", "/api/config/cascade").length).toBeGreaterThan(profileReads);
+	}
+
 	/** The frames of a type sent for one id. */
 	function sentFor(hub: FakeHub, type: string, id: string): unknown[] {
 		return hub.frames(type).filter((f) => f.channelId === id);
@@ -2120,9 +2132,7 @@ describe("a new terminal's pane after a reload", () => {
 		const first = await startingOnAlpha();
 		const hub = await reload(first.hub);
 
-		hub.drop();
-		await hub.reconnect();
-		await settle();
+		await reconnectFully(hub);
 
 		expect(hub.frames("SPAWN")).toEqual([]);
 		expect(sentFor(hub, "ATTACH", first.pendingId)).toEqual([]);
@@ -2139,9 +2149,7 @@ describe("a new terminal's pane after a reload", () => {
 		await settle();
 		expect(box().lines).toEqual(["SPAWN_FAILED: The shell could not start."]);
 
-		hub.drop();
-		await hub.reconnect();
-		await settle();
+		await reconnectFully(hub);
 
 		expect(hub.frames("SPAWN")).toHaveLength(1);
 	});
@@ -2152,9 +2160,7 @@ describe("a new terminal's pane after a reload", () => {
 
 		await runPaletteRow("Split Right");
 		await settle();
-		hub.drop();
-		await hub.reconnect();
-		await settle();
+		await reconnectFully(hub);
 
 		expect(hub.frames("SPAWN")).toEqual([]);
 		expect(sentFor(hub, "ATTACH", first.pendingId)).toEqual([]);
@@ -2171,14 +2177,16 @@ describe("a new terminal's pane after a reload", () => {
 		expect(hub.frames("SPAWN")).toEqual([]);
 		expect(stored()?.[first.pendingId]).toEqual({ hostId: HOST_A, sent: true });
 		hub.dialing = null;
-		await hub.reconnect();
-		await settle();
+		await reconnectFully(hub);
 		expect(hub.frames("SPAWN")).toEqual([]);
 
 		await runPaletteRow("Split Right");
 		await settle();
 		expect(hub.frames("SPAWN")).toEqual([]);
 		expect(boxes().length).toBeGreaterThan(0);
+		// The pane mounted over the id after the split waits for a click too.
+		await reconnectFully(hub);
+		expect(hub.frames("SPAWN")).toEqual([]);
 
 		hub.answersSpawns = false;
 		await clickInBox("Retry");
@@ -2277,6 +2285,27 @@ describe("a new terminal's pane after a reload", () => {
 		await reload(firstHub);
 		expect(boxes().flatMap((b) => b.lines)).not.toContain(NEVER_STARTED);
 		expect(stored()?.[pendingId ?? ""]).toBeUndefined();
+	});
+
+	it("records the start again when a later Retry can write it", async () => {
+		const { hub: firstHub } = await mountWindow({
+			layout: { tabs: [{ id: "TAB1", root: vacant("V1") }] },
+		});
+		firstHub.answersSpawns = false;
+		refuseWrites([2]);
+		await pickInEmptyPane("alpha");
+		await vi.waitFor(() => expect(firstHub.frames("SPAWN")).toHaveLength(1));
+		const [pendingId] = savedLeafIds();
+		expect(stored()?.[pendingId ?? ""]).toBeUndefined();
+		refuse(firstHub, firstHub.frames("SPAWN")[0]);
+		await settle();
+
+		await clickInBox("Retry");
+		await vi.waitFor(() => expect(firstHub.frames("SPAWN")).toHaveLength(2));
+		expect(stored()?.[pendingId ?? ""]).toEqual({ hostId: HOST_A, sent: true });
+
+		await reload(firstHub);
+		expect(box().lines[0]).toBe(UNCONFIRMED);
 	});
 
 	it("removes the whole record when neither write is accepted", async () => {

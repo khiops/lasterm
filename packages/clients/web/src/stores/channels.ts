@@ -1061,7 +1061,8 @@ export const useChannelsStore = defineStore("channels", () => {
 
 	/**
 	 * Keep the records for the next page. A storage that refuses is ignored, as
-	 * the layout's is: no pane of this page depends on it.
+	 * the layout's is: no pane of this page depends on it, and the next page finds
+	 * what was last accepted.
 	 */
 	function storePendingSpawns(): void {
 		try {
@@ -1075,8 +1076,9 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * The next page must never offer to start a terminal whose SPAWN went out:
 	 * the hub may have made it. If the write saying so is refused, a refused
 	 * write keeps the value before it, which says no SPAWN went out, so the
-	 * record is taken out of storage instead, whole key if need be. That page
-	 * then knows nothing of it, as before #992.
+	 * record is taken out of storage instead, whole key if need be, and that page
+	 * knows nothing of it, as before #992. A storage that refuses even the removal
+	 * keeps what it last accepted.
 	 */
 	function storeSent(tempId: string): void {
 		try {
@@ -1094,7 +1096,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		try {
 			localStorage.removeItem(PENDING_SPAWNS_KEY);
 		} catch {
-			// A storage refusing even that refuses everything: nothing was kept.
+			// Refused too: what it last accepted stays, which nothing here can change.
 		}
 	}
 
@@ -1174,11 +1176,10 @@ export const useChannelsStore = defineStore("channels", () => {
 		if (record === undefined) return null;
 		if (record.run !== null) return record.run;
 		// Its SPAWN may go out from here: a page that loads it after this must not
-		// offer to start a second terminal (#992).
-		if (!record.sent) {
-			record.sent = true;
-			storeSent(tempId);
-		}
+		// offer to start a second terminal (#992). Written for every run: one that
+		// a refused write took out of storage comes back once storage accepts.
+		record.sent = true;
+		storeSent(tempId);
 		// What its SPAWN_OK said of the agent's input (#1012).
 		let adaptsInput = false;
 		let streamsPaste = false;

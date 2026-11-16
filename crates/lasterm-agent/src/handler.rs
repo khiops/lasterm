@@ -2552,7 +2552,8 @@ mod stdio_tests {
         let release = std::env::temp_dir().join(format!("lasterm-954-{}", std::process::id()));
         let _ = std::fs::remove_file(&release);
         let script = format!(
-            "printf '$ \\033[?200'; while [ ! -e '{}' ]; do sleep 0.05; done; printf '4hX'; sleep 20",
+            // The wait gives up after 20 s, so a red run leaves no shell behind.
+            "printf '$ \\033[?200'; n=0; while [ ! -e '{}' ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done; printf '4hX'; sleep 20",
             release.display()
         );
         let mut events = start_shell_in(

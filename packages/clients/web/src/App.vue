@@ -588,6 +588,18 @@ const writeLockStore = useWriteLockStore();
 
 const autoSwitch = useAutoSwitch();
 const layout = useLayout();
+// The spawns the page before this one owed are kept for the panes that show
+// them; one whose id the saved layout no longer holds has none, and goes (#992).
+// A layout that could not be read says nothing of them: they stay.
+if (layout.loadedSavedLayout) {
+	channelsStore.forgetPendingSpawnsNotIn(
+		new Set(
+			layout.tabs.value.map((tab) => layout.layouts.value[tab.id]).flatMap((root) =>
+				root === null || root === undefined ? [] : collectTerminalChannelIds(root),
+			),
+		),
+	);
+}
 
 /**
  * The tabs the bar shows, by id, or null when it shows them all.
@@ -1615,12 +1627,15 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 }
 
 // Settings gives the keyboard back to where it was when it opened; opened from the palette,
-// that was nowhere any more, and the keyboard goes to the pane (#637).
+// that was nowhere any more, and the keyboard goes to the pane (#637). The panel stays in the page
+// for its leave transition, its control still focused: a keyboard still in it was given back
+// nowhere, and would fall to the page once the panel is gone (#940).
 watch(showSettings, (open) => {
 	if (open) return;
 	void nextTick(() => {
 		const active = document.activeElement;
-		if (active === null || active === document.body) focusActivePane();
+		if (active === null || active === document.body || active.closest('.settings-panel') !== null)
+			focusActivePane();
 	});
 });
 

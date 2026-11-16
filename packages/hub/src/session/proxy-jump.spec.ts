@@ -7,11 +7,20 @@ describe("parseJumpSpec", () => {
 	it("reads the plain form ssh_config uses", () => {
 		expect(parseJumpSpec("bastion")).toEqual({
 			kind: "spec",
-			spec: { user: null, host: "bastion", port: 22 },
+			spec: { user: null, host: "bastion", port: 22, portGiven: false },
 		});
 		expect(parseJumpSpec("jump@bastion.example.com:2222")).toEqual({
 			kind: "spec",
-			spec: { user: "jump", host: "bastion.example.com", port: 2222 },
+			spec: { user: "jump", host: "bastion.example.com", port: 2222, portGiven: true },
+		});
+		// Whether a port is written, which a link to a saved bastion compares (#1040).
+		expect(parseJumpSpec("gw")).toEqual({
+			kind: "spec",
+			spec: { user: null, host: "gw", port: 22, portGiven: false },
+		});
+		expect(parseJumpSpec("gw:2200")).toEqual({
+			kind: "spec",
+			spec: { user: null, host: "gw", port: 2200, portGiven: true },
 		});
 	});
 
@@ -19,11 +28,11 @@ describe("parseJumpSpec", () => {
 	it("reads the bracketed form", () => {
 		expect(parseJumpSpec("me@[bastion]:2222")).toEqual({
 			kind: "spec",
-			spec: { user: "me", host: "bastion", port: 2222 },
+			spec: { user: "me", host: "bastion", port: 2222, portGiven: true },
 		});
 		expect(parseJumpSpec("[bastion]")).toEqual({
 			kind: "spec",
-			spec: { user: null, host: "bastion", port: 22 },
+			spec: { user: null, host: "bastion", port: 22, portGiven: false },
 		});
 	});
 
@@ -31,11 +40,11 @@ describe("parseJumpSpec", () => {
 	it("does not mistake an IPv6 address for a host and a port", () => {
 		expect(parseJumpSpec("fe80::1")).toEqual({
 			kind: "spec",
-			spec: { user: null, host: "fe80::1", port: 22 },
+			spec: { user: null, host: "fe80::1", port: 22, portGiven: false },
 		});
 		expect(parseJumpSpec("[fe80::1]:2222")).toEqual({
 			kind: "spec",
-			spec: { user: null, host: "fe80::1", port: 2222 },
+			spec: { user: null, host: "fe80::1", port: 2222, portGiven: true },
 		});
 	});
 
@@ -78,7 +87,7 @@ describe("planJump", () => {
 	it("goes through a bastion named as a spec", () => {
 		expect(planJump({ sshProxySpec: "jump@bastion:2222" })).toEqual({
 			kind: "spec",
-			spec: { user: "jump", host: "bastion", port: 2222 },
+			spec: { user: "jump", host: "bastion", port: 2222, portGiven: true },
 		});
 	});
 
@@ -100,6 +109,8 @@ describe("resolveJump", () => {
 			type: "ssh",
 			label: id,
 			sshHost: `me@${id}.example.com`,
+			// With a method, as POST /api/hosts and the import store an SSH host (#917).
+			sshAuth: "agent",
 			iconType: "auto",
 			trustRemoteHints: "ignore",
 			sortOrder: 0,
@@ -150,35 +161,39 @@ describe("resolveJump", () => {
 		expect(resolveJump(sshHost("target"), known([]), false)).toEqual({ kind: "direct" });
 	});
 
-	it("goes through a known host with its own address, authentication and pinned key", () => {
-		const bastion = sshHost("bastion", {
-			sshPort: 2222,
-			sshConfigHost: "alias",
-			sshUser: "jumper",
-			sshAuth: "key",
-			sshKeyPath: "/keys/bastion",
-		});
-		const target = sshHost("target", { sshProxyHostId: "bastion" });
+	// The method it signs in with is the one connecting to it directly uses (#917).
+	it.each(["agent", "key", "password"] as const)(
+		"goes through a known host with its own address, authentication and pinned key: %s",
+		(method) => {
+			const bastion = sshHost("bastion", {
+				sshPort: 2222,
+				sshConfigHost: "alias",
+				sshUser: "jumper",
+				sshAuth: method,
+				sshKeyPath: "/keys/bastion",
+			});
+			const target = sshHost("target", { sshProxyHostId: "bastion" });
 
-		expect(resolveJump(target, known([bastion], { bastion: "SHA256:pinned" }), true)).toEqual({
-			kind: "jump",
-			jump: {
-				jump: { host: "bastion.example.com", port: 2222, username: "jumper" },
-				knownHostsNames: ["bastion.example.com", "alias"],
-				// The alias goes with its authentication: its `IdentityAgent none`
-				// keeps the agent from signing the bastion's key (#876).
-				auth: { method: "key", keyPath: "/keys/bastion", sshConfigHost: "alias" },
-				promptHostId: "bastion",
-				pinnedFingerprint: "SHA256:pinned",
-				trustKnownHosts: true,
-				pinTo: {
-					kind: "host",
-					hostId: "bastion",
-					expectedRoute: targetRoute(bastion, () => undefined),
+			expect(resolveJump(target, known([bastion], { bastion: "SHA256:pinned" }), true)).toEqual({
+				kind: "jump",
+				jump: {
+					jump: { host: "bastion.example.com", port: 2222, username: "jumper" },
+					knownHostsNames: ["bastion.example.com", "alias"],
+					// The alias goes with its authentication: its `IdentityAgent none`
+					// keeps the agent from signing the bastion's key (#876).
+					auth: { method, keyPath: "/keys/bastion", sshConfigHost: "alias" },
+					promptHostId: "bastion",
+					pinnedFingerprint: "SHA256:pinned",
+					trustKnownHosts: true,
+					pinTo: {
+						kind: "host",
+						hostId: "bastion",
+						expectedRoute: targetRoute(bastion, () => undefined),
+					},
 				},
-			},
-		});
-	});
+			});
+		},
+	);
 
 	it("goes through a bastion named as a spec, with the agent, as the host's user by default", () => {
 		const target = sshHost("target", {
@@ -191,12 +206,25 @@ describe("resolveJump", () => {
 			jump: {
 				jump: { host: "bastion.example.com", port: 2200, username: "me" },
 				knownHostsNames: ["bastion.example.com"],
-				auth: { method: "agent" },
+				// Its own name, for its `IdentityAgent none` in ~/.ssh/config (#1038).
+				auth: { method: "agent", sshConfigHost: "bastion.example.com" },
 				promptHostId: "target",
 				pinnedFingerprint: "SHA256:spec-pin",
 				trustKnownHosts: false,
 				pinTo: { kind: "spec", hostId: "target" },
 			},
+		});
+	});
+
+	it("refuses a jump through a host with no sign-in method", () => {
+		const bastion = sshHost("bastion");
+		Reflect.deleteProperty(bastion, "sshAuth");
+		expect(
+			resolveJump(sshHost("target", { sshProxyHostId: "bastion" }), known([bastion]), false),
+		).toEqual({
+			kind: "refused",
+			message:
+				"The host this one is reached through has no sign-in method. Edit it and choose one.",
 		});
 	});
 

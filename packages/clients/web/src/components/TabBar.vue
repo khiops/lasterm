@@ -16,8 +16,8 @@
 			:key="tab.id"
 			role="tab"
 			:aria-selected="idx === activeTabIndex"
-			:draggable="editingTabIndex !== idx"
-			:class="['tab', { 'tab--active': idx === activeTabIndex, 'tab--drop-before': dropInsertIndex === idx, 'tab--drop-after': dropInsertIndex === idx + 1 && idx === lastVisibleIndex, 'tab--dragging': dragTabIndex === idx, 'tab--host-edge': hostMarkerStyle === 'edge' && hostMarkers.has(tab.id) }]"
+			:draggable="editingTabId !== tab.id"
+			:class="['tab', { 'tab--active': idx === activeTabIndex, 'tab--drop-before': dropInsertIndex === idx, 'tab--drop-after': dropInsertIndex === idx + 1 && idx === lastVisibleIndex, 'tab--dragging': dragTabId === tab.id, 'tab--host-edge': hostMarkerStyle === 'edge' && hostMarkers.has(tab.id) }]"
 			:style="hostMarkers.get(tab.id) ? { '--tab-host-color': hostMarkers.get(tab.id)?.color } : undefined"
 			:title="tabTooltip(tab.id)"
 			:tabindex="tab.id === rovingTabId ? 0 : -1"
@@ -27,8 +27,8 @@
 			@focus="keyboardTabId = tab.id"
 			@keydown="onTabKeydown($event, tab.id, idx)"
 			@mousedown.middle.prevent="emit('close-tab', idx)"
-			@contextmenu.prevent="onTabContextMenu(idx, $event)"
-			@dragstart="onTabDragStart(idx, $event)"
+			@contextmenu.prevent="onTabContextMenu(tab.id, $event)"
+			@dragstart="onTabDragStart(tab.id, $event)"
 			@dragend="onTabDragEnd"
 		>
 			<span v-if="isWelcomeTab(tab.id)" class="tab__welcome-star" title="Welcome Tab">&#x2605;</span>
@@ -43,8 +43,8 @@
 				:aria-label="`On ${hostMarkers.get(tab.id)?.label}`"
 			>{{ hostMarkers.get(tab.id)?.initials }}</span>
 			<input
-				v-if="editingTabIndex === idx"
-				ref="editInput"
+				v-if="editingTabId === tab.id"
+				:ref="setEditInput"
 				v-model="editValue"
 				class="tab-rename-input"
 				@keydown.enter="commitRename"
@@ -52,7 +52,7 @@
 				@blur="commitRename"
 				@click.stop
 			/>
-			<span v-else class="tab__label" @dblclick="startRename(idx)">{{ getTabLabel(tab.id) }}</span>
+			<span v-else class="tab__label" @dblclick="startRename(tab.id)">{{ getTabLabel(tab.id) }}</span>
 			<span
 				v-if="notificationStore.activityDots.get(getActiveChannelId(tab.id) ?? '') && idx !== activeTabIndex"
 				class="tab__activity-dot"
@@ -102,11 +102,11 @@
 			:visible="ctxMenu.visible"
 			:x="ctxMenu.x"
 			:y="ctxMenu.y"
-			:tab="ctxMenu.tabIndex >= 0 ? tabs[ctxMenu.tabIndex] ?? null : null"
-			:active-channel-id="ctxMenu.tabIndex >= 0 && tabs[ctxMenu.tabIndex] ? getActiveChannelId(tabs[ctxMenu.tabIndex]!.id) : null"
-			:tab-index="ctxMenu.tabIndex"
+			:tab="ctxTab"
+			:active-channel-id="ctxTab ? getActiveChannelId(ctxTab.id) : null"
+			:tab-index="ctxTabIndex"
 			:tab-count="tabs.length"
-			:is-welcome="ctxMenu.tabIndex >= 0 && tabs[ctxMenu.tabIndex] ? isWelcomeTab(tabs[ctxMenu.tabIndex]!.id) : false"
+			:is-welcome="ctxTab ? isWelcomeTab(ctxTab.id) : false"
 			:is-custom-title="isCtxTabCustomTitle"
 			@close="ctxMenu.visible = false"
 			@rename="onCtxRename"
@@ -124,7 +124,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch, nextTick } from "vue";
+import { type ComponentPublicInstance, computed, nextTick, reactive, ref, watch } from "vue";
 import type { Host } from "@lasterm/shared";
 import type { Tab } from "../composables/useLayout.js";
 import { getColorFromLabel, getInitials } from "../composables/useHostIcon.js";
@@ -380,31 +380,33 @@ watch(
 // Inline rename
 // -------------------------------------------------------------------------
 
-const editingTabIndex = ref<number | null>(null);
+// By id: closing another tab moves the tabs after it, and a field kept by position would move to
+// the neighbour with the text typed (#990).
+const editingTabId = ref<string | null>(null);
+// The channel whose name the field shows, taken when it opens: the tab's active pane can change
+// before the commit (its terminal ends, a chord moves the focus), and the name is for this one.
+let editingChannelId: string | null = null;
 
 const { editValue, editInput, isEditing, startRename: startRenameRaw, commitRename, cancelRename } = useRename({
 	onCommit: (newValue) => {
-		if (editingTabIndex.value === null) return;
-		const tab = props.tabs[editingTabIndex.value];
-		if (tab !== undefined) {
-			// Rename operates on the active pane's channel
-			const channelId = props.getActiveChannelId(tab.id);
-			if (channelId !== null) {
-				emit("rename-tab", channelId, newValue);
-			}
-		}
+		if (editingChannelId === null || !props.tabs.some((t) => t.id === editingTabId.value)) return;
+		emit("rename-tab", editingChannelId, newValue);
 	},
 });
 
+// A string ref inside the tabs' v-for would hold an array; only the tab being renamed has the field.
+function setEditInput(el: Element | ComponentPublicInstance | null): void {
+	editInput.value = el instanceof HTMLInputElement ? el : null;
+}
+
 watch(isEditing, (editing) => {
-	if (!editing) editingTabIndex.value = null;
+	if (!editing) editingTabId.value = null;
 });
 
-function startRename(idx: number): void {
-	const tab = props.tabs[idx];
-	if (tab === undefined) return;
-	editingTabIndex.value = idx;
-	startRenameRaw(props.getTabLabel(tab.id));
+function startRename(tabId: string): void {
+	editingTabId.value = tabId;
+	editingChannelId = props.getActiveChannelId(tabId);
+	startRenameRaw(props.getTabLabel(tabId));
 }
 
 // -------------------------------------------------------------------------
@@ -420,24 +422,34 @@ function isWelcomeTab(tabId: string): boolean {
 // Context menu
 // -------------------------------------------------------------------------
 
-const ctxMenu = reactive({ visible: false, x: 0, y: 0, tabIndex: -1 });
+// By id, as the rename: a tab closing before it would move the menu's actions to its neighbour.
+const ctxMenu = reactive({ visible: false, x: 0, y: 0, tabId: null as string | null });
 
-function onTabContextMenu(idx: number, event: MouseEvent): void {
+/** The menu's tab, where it is now. */
+const ctxTabIndex = computed(() => props.tabs.findIndex((t) => t.id === ctxMenu.tabId));
+const ctxTab = computed(() => props.tabs[ctxTabIndex.value] ?? null);
+
+// A menu whose tab has closed would still offer Close Others and Close All, for no tab.
+watch(ctxTab, (tab) => {
+	if (tab === null) ctxMenu.visible = false;
+});
+
+function onTabContextMenu(tabId: string, event: MouseEvent): void {
 	ctxMenu.x = event.clientX;
 	ctxMenu.y = event.clientY;
-	ctxMenu.tabIndex = idx;
+	ctxMenu.tabId = tabId;
 	ctxMenu.visible = true;
 }
 
 function onCtxRename(channelId: string): void {
 	// Find the tab whose active channel matches
-	const idx = props.tabs.findIndex((t) => props.getActiveChannelId(t.id) === channelId);
-	if (idx !== -1) startRename(idx);
+	const tab = props.tabs.find((t) => props.getActiveChannelId(t.id) === channelId);
+	if (tab !== undefined) startRename(tab.id);
 }
 
 /** Whether the context-menu'd tab has a user-set custom title. */
 const isCtxTabCustomTitle = computed(() => {
-	const tab = ctxMenu.tabIndex >= 0 ? props.tabs[ctxMenu.tabIndex] : undefined;
+	const tab = ctxTab.value;
 	if (!tab) return false;
 	const channelId = props.getActiveChannelId(tab.id);
 	if (channelId === null) return false;
@@ -502,8 +514,9 @@ function onTabBarDrop(event: DragEvent): void {
 	const tabData = event.dataTransfer.getData("text/x-lasterm-tab");
 	if (tabData !== "") {
 		event.stopPropagation();
-		const fromIndex = Number.parseInt(tabData, 10);
-		if (Number.isNaN(fromIndex)) return;
+		// By id: a tab closing during the drag moves the tabs after it.
+		const fromIndex = props.tabs.findIndex((t) => t.id === tabData);
+		if (fromIndex === -1) return;
 		const toIndex = getDropInsertIndex(event);
 		// When dragging right, the removal shifts indices left by 1
 		const adjustedTo = toIndex > fromIndex ? toIndex - 1 : toIndex;
@@ -533,19 +546,19 @@ function onTabBarDrop(event: DragEvent): void {
 // Tab DnD reorder
 // -------------------------------------------------------------------------
 
-const dragTabIndex = ref<number | null>(null);
+const dragTabId = ref<string | null>(null);
 
-function onTabDragStart(idx: number, event: DragEvent): void {
+function onTabDragStart(tabId: string, event: DragEvent): void {
 	// Don't drag while renaming
-	if (editingTabIndex.value === idx) return;
+	if (editingTabId.value === tabId) return;
 	if (!event.dataTransfer) return;
-	dragTabIndex.value = idx;
+	dragTabId.value = tabId;
 	event.dataTransfer.effectAllowed = "move";
-	event.dataTransfer.setData("text/x-lasterm-tab", String(idx));
+	event.dataTransfer.setData("text/x-lasterm-tab", tabId);
 }
 
 function onTabDragEnd(): void {
-	dragTabIndex.value = null;
+	dragTabId.value = null;
 	dropInsertIndex.value = null;
 }
 </script>

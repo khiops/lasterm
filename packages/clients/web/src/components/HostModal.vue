@@ -275,6 +275,26 @@
 							</div>
 
 							<div class="field">
+								<label class="field-label" for="host-connect-timeout">Connection timeout (seconds)</label>
+								<!-- Text, as the port: digits only, 20 to 120 (#1034). -->
+								<input
+									id="host-connect-timeout"
+									v-model="form.connectTimeout"
+									type="text"
+									inputmode="numeric"
+									class="field-input"
+									placeholder="Default"
+									:aria-invalid="connectTimeoutError !== null"
+								/>
+								<span v-if="connectTimeoutError" class="field-error">{{ connectTimeoutError }}</span>
+								<p class="field-hint auth-note">
+									Each step of connecting to this host — reaching its SSH server, starting
+									the agent, its first answer — may take this long. Empty: ConnectTimeout
+									from ~/.ssh/config when it is 20 s or more, otherwise Lasterm's defaults.
+								</p>
+							</div>
+
+							<div class="field">
 								<label class="field-label">Keep an agent running there</label>
 								<p v-if="sshRemoteDaemonUnavailable" class="field-hint auth-note">
 									Not available on Windows hosts.
@@ -398,7 +418,7 @@
 							<div class="field field-test">
 								<button
 									class="btn btn-test"
-									:disabled="!form.sshHost || testing || portError !== null"
+									:disabled="!form.sshHost || testing || portError !== null || connectTimeoutError !== null"
 									@click="testConnectionInline"
 								>
 									{{ testing ? "Testing..." : "Test Connection" }}
@@ -628,7 +648,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch, type PropType } from "vue";
-import { type Host, isPlainObject, type VisualProfile } from "@lasterm/shared";
+import { type Host, isPlainObject, parseJumpSpec, type VisualProfile } from "@lasterm/shared";
 import { useHostForm } from "../composables/useHostForm.js";
 import { getHostColor } from "../composables/useHostIcon.js";
 import { useHostsStore } from "../stores/hosts.js";
@@ -735,12 +755,29 @@ const proxyCandidates = computed(() =>
 	hostsStore.hosts.filter((candidate) => candidate.type === 'ssh' && candidate.id !== props.editHost?.id),
 );
 
-/** What the field is understood to mean, said back in the person's words. */
+/**
+ * What the field is understood to mean, said back in the person's words: as
+ * Test Connection and Add Host send it, a host's id or a spec (#1042).
+ */
 const proxyHint = computed(() => {
 	const value = form.value.sshProxy.trim();
 	if (value === '') return 'Connected to directly.';
-	const known = proxyCandidates.value.find((candidate) => candidate.id === value);
-	if (known) return `Through ${known.label}, which brings its own key and sign-in.`;
+	if (proxyIsHostId.value) {
+		const known = hostsStore.hosts.find((candidate) => candidate.id === value);
+		if (known) return `Through ${known.label}, which brings its own key and sign-in.`;
+		return 'The host chosen as the jump is no longer saved.';
+	}
+	// A spec naming a saved host's alias was kept as written (#1040): the agent
+	// signs in, not that host.
+	const parsed = parseJumpSpec(value);
+	if (
+		parsed.kind === 'spec' &&
+		hostsStore.hosts.some(
+			(candidate) => candidate.type === 'ssh' && candidate.sshConfigHost === parsed.spec.host,
+		)
+	) {
+		return `Through ${value}, using your SSH agent, not a saved host's sign-in.`;
+	}
 	return `Through ${value}, using your SSH agent. Add it as a host to give it a key of its own.`;
 });
 const {
@@ -750,6 +787,7 @@ const {
 	sshConfigEntries,
 	sshConfigHasInclude,
 	selectedSshConfigHost,
+	proxyIsHostId,
 	loadingSshConfig,
 	sshConfigError,
 	testResult,
@@ -762,6 +800,7 @@ const {
 	portText,
 	portError,
 	setPortText,
+	connectTimeoutError,
 	canSave,
 	previewInitials,
 	newGroupName,
@@ -873,6 +912,7 @@ const connectionTabHasError = computed(() => {
 		if (!form.value.sshHost) return true;
 		if (form.value.sshAuth === "key" && !form.value.sshKeyPath) return true;
 		if (portError.value) return true;
+		if (connectTimeoutError.value) return true;
 	}
 	return false;
 });

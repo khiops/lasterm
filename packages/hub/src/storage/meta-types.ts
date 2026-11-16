@@ -35,6 +35,8 @@ export interface CreateHostInput {
 	sshProxySpec?: string | null;
 	/** Whether this host may keep an agent of its own running. Null defers to `[ssh] remote_daemon`. */
 	sshRemoteDaemon?: boolean | null;
+	/** Seconds each wait of a connection may last (#1034); null for the default. */
+	connectTimeoutSeconds?: number | null;
 	sshProxyFingerprint?: string | null;
 	sshUser?: string | null;
 	elevationMethod?: ElevationMethod | null;

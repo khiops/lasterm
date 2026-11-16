@@ -29,6 +29,7 @@ import { computeTargetStatus } from "./agent-status.js";
 import { AskAgainError } from "./ask-again.js";
 import { AuthCancelledError } from "./auth-cancelled.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
+import { connectTimeoutMsFor } from "./connect-timeout.js";
 import { agentSignerFailure } from "./key-agent-signer.js";
 import { passwordRefusal } from "./password-auth.js";
 import {
@@ -773,8 +774,21 @@ export class SshConnectionManager {
 		if (resolution.kind === "refused") return { ok: false, message: resolution.message };
 		const jump = resolution.kind === "jump" ? resolution.jump : undefined;
 		const jumpAuth = jump ? await buildJumpAuth(jump, promptAuth) : undefined;
-		const namesToLookUp = [parsed.hostname, savedRoute ? saved.sshConfigHost : undefined].filter(
+		// The alias the request carries for an entry picked from ~/.ssh/config,
+		// else the saved host's while its route is unchanged (#1037).
+		const sshConfigHost = msg.sshConfigHost ?? (savedRoute ? saved.sshConfigHost : undefined);
+		const namesToLookUp = [parsed.hostname, sshConfigHost].filter(
 			(name): name is string => typeof name === "string" && name.length > 0,
+		);
+		// The form's connection timeout, else ~/.ssh/config's for the saved host's
+		// alias, which an edit keeps whatever else it changes, then the hostname
+		// (#1034). An unsaved host has no alias here.
+		const connectTimeoutMs = connectTimeoutMsFor(
+			{
+				connectTimeoutSeconds: msg.connectTimeoutSeconds ?? null,
+				sshConfigHost: saved?.sshConfigHost ?? null,
+			},
+			parsed.hostname,
 		);
 		let successfulJumpFingerprint: string | undefined;
 		const attemptOnce = async (trusted: ReadonlySet<string>) => {
@@ -787,7 +801,9 @@ export class SshConnectionManager {
 				pinnedFingerprint: jump.pinnedFingerprint,
 				trustKnownHosts: jump.trustKnownHosts,
 				destination: { host: parsed.hostname, port: msg.port },
-				timeoutMs: SSH_TEST_TIMEOUT_MS,
+				...(connectTimeoutMs === undefined
+					? { timeoutMs: SSH_TEST_TIMEOUT_MS }
+					: { waitTimeoutMs: connectTimeoutMs }),
 			});
 			try {
 				const result = await attemptSshTest(
@@ -839,9 +855,9 @@ export class SshConnectionManager {
 		try {
 			connectConfig = await buildSshConnectConfig(
 				{
-					method: msg.sshAuth ?? "key",
+					method: msg.sshAuth,
 					keyPath: msg.sshKeyPath,
-					sshConfigHost: savedRoute ? saved.sshConfigHost : undefined,
+					sshConfigHost,
 				},
 				parsed.hostname,
 				msg.port,
@@ -857,7 +873,7 @@ export class SshConnectionManager {
 				message: err instanceof Error ? err.message : "Authentication error",
 			};
 		}
-		connectConfig.readyTimeout = SSH_TEST_TIMEOUT_MS;
+		connectConfig.readyTimeout = connectTimeoutMs ?? SSH_TEST_TIMEOUT_MS;
 
 		const storedFingerprint = savedRoute
 			? this.ctx.metaDal.getHostFingerprint(msg.hostId, hostKey)
@@ -974,7 +990,7 @@ export function attemptSshTest(
 		const timer = setTimeout(() => {
 			sshClient.destroy();
 			finish({ ok: false, message: "Connection timed out" });
-		}, SSH_TEST_TIMEOUT_MS);
+		}, connectConfig.readyTimeout ?? SSH_TEST_TIMEOUT_MS);
 
 		sshClient.on("ready", () => {
 			// Connected: what is left is reading the remote system, under its own bounds.

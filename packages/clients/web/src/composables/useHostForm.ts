@@ -1,5 +1,12 @@
 import type { Host, SshConfigEntry, TestConnectPlatform } from "@lasterm/shared";
-import { ErrorCode, generateId, sshPortFromText } from "@lasterm/shared";
+import {
+	connectTimeoutFromText,
+	ErrorCode,
+	generateId,
+	jumpLinkFor,
+	sshAuthFor,
+	sshPortFromText,
+} from "@lasterm/shared";
 import { computed, readonly, ref, shallowRef, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useHostsStore } from "../stores/hosts.js";
@@ -58,6 +65,11 @@ export interface HostFormData {
 	 * outlive the connection. "" follows the global setting.
 	 */
 	sshRemoteDaemon: "" | "yes" | "no";
+	/**
+	 * The Connection timeout field's text, in seconds (#1034): "" for the
+	 * default. Saved and tested only while it names 20 to 120 whole seconds.
+	 */
+	connectTimeout: string;
 	iconType: "auto" | "emoji" | "image";
 	iconValue: string;
 	color: string;
@@ -88,6 +100,7 @@ function formOf(host?: Host): HostFormData {
 					: host.sshRemoteDaemon
 						? "yes"
 						: "no",
+		connectTimeout: host?.connectTimeoutSeconds == null ? "" : String(host.connectTimeoutSeconds),
 		iconType: host?.iconType ?? "auto",
 		iconValue: host?.iconValue ?? "",
 		color: host?.color ?? "",
@@ -104,6 +117,9 @@ function formOf(host?: Host): HostFormData {
 
 /** Why the Port field's text cannot be saved (#901). */
 export const PORT_ERROR = "Port must be a number from 1 to 65535, in digits only";
+
+/** Why the Connection timeout field's text cannot be saved (#1034). */
+export const CONNECT_TIMEOUT_ERROR = "Enter a whole number of seconds from 20 to 120";
 
 /** A port as the Port field shows it: nothing for none, which is 22. */
 function portTextOf(port: number | undefined): string {
@@ -159,6 +175,24 @@ export function useHostForm(editHost?: Host) {
 	const form = ref<HostFormData>(formOf(editHost));
 
 	/**
+	 * Whether the Jump host field's value names a saved host by its id, decided
+	 * when the value is set (a pick, a choice from the list, typing, the dialog
+	 * opening) against the hosts known then, and kept until the value changes.
+	 * Test Connection and Add Host both send it so: a host list that gains or
+	 * loses that host in between does not turn the one into the other (#1042).
+	 */
+	const proxyIsHostId = ref(false);
+	watch(
+		() => form.value.sshProxy,
+		(value) => {
+			const chosen = value.trim();
+			proxyIsHostId.value =
+				chosen !== "" && hostsStore.hosts.some((candidate) => candidate.id === chosen);
+		},
+		{ immediate: true, flush: "sync" },
+	);
+
+	/**
 	 * The Port field's text, as typed: the form reads the port from it (#901).
 	 * `form.sshPort` follows it while it names a port, and an empty field is no
 	 * port. Any other text keeps the port as it was and refuses the save: read
@@ -168,6 +202,14 @@ export function useHostForm(editHost?: Host) {
 
 	const portError = computed(() =>
 		portText.value === "" || sshPortFromText(portText.value) !== null ? null : PORT_ERROR,
+	);
+
+	const connectTimeoutError = computed(() =>
+		form.value.type !== "ssh" ||
+		form.value.connectTimeout === "" ||
+		connectTimeoutFromText(form.value.connectTimeout) !== null
+			? null
+			: CONNECT_TIMEOUT_ERROR,
 	);
 
 	/**
@@ -283,6 +325,16 @@ export function useHostForm(editHost?: Host) {
 	const sshConfigEntries = ref<SshConfigEntry[]>([]);
 	const sshConfigHasInclude = ref(false);
 	const selectedSshConfigHost = ref<string>("");
+	/**
+	 * The alias of the ~/.ssh/config entry the form comes from: the test sends
+	 * it and the new host stores it, so the hub applies the entry's settings to
+	 * both (#1037). None once the source is Manual or the pick is cleared.
+	 */
+	const pickedSshConfigHost = computed(() =>
+		source.value === "ssh-config" && selectedSshConfigHost.value !== ""
+			? selectedSshConfigHost.value
+			: undefined,
+	);
 	const loadingSshConfig = ref(false);
 	/** Why the SSH config could not be read, as the hub said it, or that it did not answer (#734). */
 	const sshConfigError = ref<string | null>(null);
@@ -347,6 +399,7 @@ export function useHostForm(editHost?: Host) {
 			if (!form.value.sshHost) return false;
 			if (form.value.sshAuth === "key" && !form.value.sshKeyPath) return false;
 			if (portError.value) return false;
+			if (connectTimeoutError.value) return false;
 		}
 		return true;
 	});
@@ -387,21 +440,36 @@ export function useHostForm(editHost?: Host) {
 		const entry = sshConfigEntries.value.find((e) => e.name === name);
 		if (!entry) return;
 		selectedSshConfigHost.value = name;
-		if (entry.hostname) form.value.sshHost = entry.hostname;
+		form.value.sshHost = entry.hostname ?? name;
 		setPortText(portTextOf(entry.port));
-		if (entry.user) form.value.sshUser = entry.user;
-		if (entry.identityFile) {
-			form.value.sshKeyPath = entry.identityFile;
-			form.value.sshAuth = "key";
-		}
+		form.value.sshUser = entry.user ?? "";
+		// The jump an import would give the entry: its saved bastion when the
+		// link reaches what ssh would, else the ProxyJump as written (#1040, #1042).
+		const bastion =
+			entry.proxyJump == null ? undefined : jumpLinkFor(entry.proxyJump, hostsStore.hosts);
+		form.value.sshProxy = bastion?.id ?? entry.proxyJump ?? "";
+		// The field may already hold that text, which the watch above does not
+		// see as a change: a linked pick is a host id whatever was there before.
+		if (bastion) proxyIsHostId.value = true;
+		// The entry's own method, whatever the form held, by the rule the import
+		// stores it with: its IdentityFile, else the agent (#1009, #917).
+		form.value.sshAuth = sshAuthFor(entry.identityFile);
+		form.value.sshKeyPath = form.value.sshAuth === "key" ? (entry.identityFile ?? "") : "";
 		if (!form.value.label) form.value.label = name;
 	}
 
 	function formProxyFields(chosen = form.value.sshProxy) {
-		return proxyFields(
-			chosen,
-			hostsStore.hosts.map((candidate) => candidate.id),
+		const selectedEntry = sshConfigEntries.value.find(
+			(entry) => entry.name === selectedSshConfigHost.value,
 		);
+		if (
+			source.value === "ssh-config" &&
+			selectedEntry?.proxyJump != null &&
+			chosen === selectedEntry.proxyJump
+		) {
+			return { ssh_proxy_host_id: null, ssh_proxy_spec: selectedEntry.proxyJump };
+		}
+		return proxyFields(chosen, proxyIsHostId.value ? [chosen.trim()] : []);
 	}
 
 	async function testConnectionInline(): Promise<void> {
@@ -412,7 +480,7 @@ export function useHostForm(editHost?: Host) {
 			const { useSessionStore } = await import("../stores/session.js");
 			// The port may have turned invalid while the store loaded: the button
 			// is disabled for one, and nothing is tested on it (#901).
-			if (portError.value) return;
+			if (portError.value || connectTimeoutError.value) return;
 			const sessionStore = useSessionStore();
 			const wsClient = sessionStore.wsClient;
 
@@ -429,6 +497,8 @@ export function useHostForm(editHost?: Host) {
 			const sshUser = form.value.sshUser;
 			const sshProxy = form.value.sshProxy;
 			const proxy = formProxyFields(sshProxy);
+			const sshConfigHost = pickedSshConfigHost.value;
+			const connectTimeoutSeconds = connectTimeoutFromText(form.value.connectTimeout);
 
 			// Null when nothing was tested: the person cancelled the password or
 			// passphrase asked for (#815).
@@ -468,6 +538,8 @@ export function useHostForm(editHost?: Host) {
 					...(sshUser && { sshUser }),
 					...(proxy.ssh_proxy_host_id && { sshProxyHostId: proxy.ssh_proxy_host_id }),
 					...(proxy.ssh_proxy_spec && { sshProxySpec: proxy.ssh_proxy_spec }),
+					...(sshConfigHost && { sshConfigHost }),
+					...(connectTimeoutSeconds !== null && { connectTimeoutSeconds }),
 				});
 			});
 
@@ -506,8 +578,14 @@ export function useHostForm(editHost?: Host) {
 			type: f.type,
 			...(f.type === "ssh" && {
 				ssh_host: f.sshHost,
+				...(pickedSshConfigHost.value && { ssh_config_host: pickedSshConfigHost.value }),
 				// Only a valid port reaches here: canSave refuses an invalid one (#901).
 				...(f.sshPort !== undefined && { ssh_port: f.sshPort }),
+				// Only a valid one reaches here, as for the port; an emptied field is
+				// left out, which an edit sends as null (`changedFields`, #1034).
+				...(connectTimeoutFromText(f.connectTimeout) !== null && {
+					connect_timeout_seconds: connectTimeoutFromText(f.connectTimeout),
+				}),
 				...(f.sshUser && { ssh_user: f.sshUser }),
 				ssh_auth: f.sshAuth,
 				...(f.sshAuth === "key" && {
@@ -564,6 +642,7 @@ export function useHostForm(editHost?: Host) {
 			if (!canSave.value) {
 				saveError.value =
 					portError.value ??
+					connectTimeoutError.value ??
 					labelError.value ??
 					"Not saved: a required field was emptied meanwhile";
 				return null;
@@ -673,6 +752,7 @@ export function useHostForm(editHost?: Host) {
 		sshConfigEntries,
 		sshConfigHasInclude,
 		selectedSshConfigHost,
+		proxyIsHostId: readonly(proxyIsHostId),
 		loadingSshConfig,
 		sshConfigError,
 		testResult,
@@ -686,6 +766,7 @@ export function useHostForm(editHost?: Host) {
 		portText: readonly(portText),
 		portError,
 		setPortText,
+		connectTimeoutError,
 		canSave,
 		previewInitials,
 		newGroupName,

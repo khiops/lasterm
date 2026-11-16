@@ -105,6 +105,23 @@ pub enum AgentToHub {
         /// show it; it must not act on those channels.
         other_owner_channels: u32,
     },
+    /// The terminal took chunk `seq` of paste `paste_id`; for a bracketed
+    /// paste's last chunk, its end marker too (`paste-stream`, #1014).
+    #[serde(rename = "PASTE_ACK")]
+    PasteAck {
+        channel_id: String,
+        paste_id: u32,
+        seq: u32,
+    },
+    /// Paste `paste_id` ended before its end (`reason`), after `written` of
+    /// its data bytes reached the terminal; or it was never open (`unknown`).
+    #[serde(rename = "PASTE_CLOSED")]
+    PasteClosed {
+        channel_id: String,
+        paste_id: u32,
+        reason: String,
+        written: u64,
+    },
     #[serde(rename = "ERROR")]
     Error {
         code: String,
@@ -215,6 +232,19 @@ pub enum HubToAgent {
         #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
+    /// Chunk `seq` of paste `paste_id` (`paste-stream`, #1014): the paste's
+    /// text, without markers, which the agent writes itself.
+    #[serde(rename = "PASTE")]
+    Paste {
+        channel_id: String,
+        paste_id: u32,
+        seq: u32,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+        last: bool,
+    },
+    #[serde(rename = "PASTE_CANCEL")]
+    PasteCancel { channel_id: String, paste_id: u32 },
     #[serde(rename = "RESIZE")]
     Resize {
         channel_id: String,
@@ -264,6 +294,14 @@ pub struct SnapshotData {
     pub rows: u16,
     pub cursor_x: u16,
     pub cursor_y: u16,
+    /// The program is in the alternate screen (#1012). An older agent leaves
+    /// it out.
+    #[serde(default)]
+    pub alternate_screen: bool,
+    /// The program's input modes, as escape sequences that set every one of
+    /// them (#1012). An older agent leaves it out.
+    #[serde(default)]
+    pub input_modes: String,
 }
 
 /// Standard error codes

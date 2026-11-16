@@ -206,6 +206,9 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 	const expectedPassword = Buffer.from(password);
 	const clients = new Set<Connection>();
 	const handles = new Map<string, fs.FileHandle>();
+	/** OPENs whose file is not open yet: close waits for them, so none outlives the server. */
+	const opening = new Set<Promise<void>>();
+	let closing = false;
 	const dirs = new Map<string, { names: string[]; from: string }>();
 	let nextHandle = 0;
 	const server = new Server({ hostKeys: [privateKey] }, (client) => {
@@ -356,16 +359,26 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 							sftp.status(id, codes.BAD_MESSAGE, "Bad message");
 							return;
 						}
-						void resolve(path)
+						const opened = resolve(path)
 							.then((mapped) => fs.open(mapped, mode))
 							.then(
-								(file) => {
+								async (file) => {
+									if (closing) {
+										await file.close();
+										return;
+									}
 									const handle = String(nextHandle++);
 									handles.set(handle, file);
 									sftp.handle(id, Buffer.from(handle));
 								},
-								(error) => status(id, error),
-							);
+								(error) => {
+									if (!closing) status(id, error);
+								},
+							)
+							// A failure here must neither escape as unhandled nor stop close.
+							.catch(() => {});
+						opening.add(opened);
+						void opened.finally(() => opening.delete(opened));
 					});
 					sftp.on("OPENDIR", (id, path) => {
 						if (intercept("OPENDIR")) return;
@@ -552,8 +565,10 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 		firedRequest: () => firedRequest,
 		sftpClosed,
 		close: async () => {
+			closing = true;
 			for (const client of clients) client.end();
 			await new Promise<void>((resolve) => server.close(() => resolve()));
+			await Promise.all(opening);
 			await Promise.all([...handles.values()].map((handle) => handle.close()));
 		},
 	};

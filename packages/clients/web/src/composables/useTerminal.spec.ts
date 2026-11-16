@@ -26,6 +26,8 @@ const xterm = vi.hoisted(() => ({
 vi.mock("@xterm/xterm", () => ({
 	Terminal: class {
 		options: Record<string, unknown>;
+		/** As xterm's parser: handlers for sequences, which this double never calls (#1012). */
+		parser = { registerCsiHandler: () => ({ dispose() {} }) };
 		cols = 80;
 		rows = 24;
 		unicode = { activeVersion: "" };
@@ -61,6 +63,12 @@ vi.mock("@xterm/xterm", () => ({
 			for (const listener of this.resizeListeners) listener({ cols, rows });
 		}
 		onTitleChange() {
+			return { dispose() {} };
+		}
+		onBell() {
+			return { dispose() {} };
+		}
+		onScroll() {
 			return { dispose() {} };
 		}
 		reset(): void {

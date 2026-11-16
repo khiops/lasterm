@@ -23,7 +23,7 @@ vi.mock("../ssh/ssh-config-parser.js", () => ({
 }));
 
 // Whether an agent is running is a fact about the machine the tests happen to
-// run on, and the import reads it. Held here so each case states its own.
+// run on. Held here so no case depends on it.
 vi.mock("../session/ssh-agent-address.js", () => ({
 	sshAgentAddress: vi.fn(() => null),
 	windowsAgentPipeExists: vi.fn(() => false),
@@ -147,6 +147,64 @@ describe("POST /api/hosts", () => {
 		expect(body.ssh_key_path).toBe("/home/user/.ssh/id_ed25519");
 		expect(body.color).toBe("#ff0000");
 		expect(body.trust_remote_hints).toBe("ask");
+	});
+
+	// POST stores a method for each SSH host it creates, sent or implied by its
+	// key path, so connecting to it and going through it sign in the same way; a
+	// local host gets only the one sent (#917).
+	it("stores the method an SSH host left without one signs in with", async () => {
+		async function stored(payload: Record<string, unknown>): Promise<unknown> {
+			const res = await server.inject({ method: "POST", url: "/api/hosts", payload });
+			expect(res.statusCode, res.body).toBe(201);
+			return dbs.meta
+				.prepare("SELECT ssh_auth, ssh_key_path FROM hosts WHERE id = ?")
+				.get(res.json<{ id: string }>().id);
+		}
+		const ssh = { type: "ssh", ssh_host: "10.0.0.21" };
+
+		expect(await stored({ ...ssh, label: "no-key" })).toEqual({
+			ssh_auth: "agent",
+			ssh_key_path: null,
+		});
+		expect(await stored({ ...ssh, label: "key-path", ssh_key_path: "~/.ssh/id_x" })).toEqual({
+			ssh_auth: "key",
+			ssh_key_path: "~/.ssh/id_x",
+		});
+		expect(
+			await stored({ ...ssh, label: "sent-agent", ssh_auth: "agent", ssh_key_path: "~/.ssh/id_x" }),
+		).toEqual({ ssh_auth: "agent", ssh_key_path: "~/.ssh/id_x" });
+		expect(await stored({ ...ssh, label: "blank-path", ssh_key_path: " \t" })).toEqual({
+			ssh_auth: "agent",
+			ssh_key_path: " \t",
+		});
+		expect(await stored({ type: "local", label: "local-none" })).toEqual({
+			ssh_auth: null,
+			ssh_key_path: null,
+		});
+		expect(await stored({ type: "local", label: "local-sent", ssh_auth: "password" })).toEqual({
+			ssh_auth: "password",
+			ssh_key_path: null,
+		});
+	});
+
+	it("refuses a null sign-in method and creates nothing", async () => {
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts",
+			payload: { type: "ssh", label: "null-auth", ssh_host: "10.0.0.22", ssh_auth: null },
+		});
+		expect(res.statusCode).toBe(400);
+		expect(res.json()).toEqual({
+			error: {
+				code: "VALIDATION_ERROR",
+				message: "ssh_auth must be 'agent', 'key', or 'password'",
+			},
+		});
+		expect(
+			dbs.meta.prepare("SELECT COUNT(*) AS n FROM hosts WHERE label = 'null-auth'").get(),
+		).toEqual({
+			n: 0,
+		});
 	});
 
 	// Each rule of validateCreateHost is unit-tested in hosts.spec.ts; this
@@ -484,6 +542,68 @@ describe("PUT /api/hosts/:id", () => {
 		expect(row).toEqual({ ssh_port: null });
 	});
 
+	// The validator is unit-tested in hosts.spec.ts; these prove the routes
+	// store the value and consult the rule (#1034).
+	it("stores, keeps and clears a host's connection timeout (#1034)", async () => {
+		const created = await server.inject({
+			method: "POST",
+			url: "/api/hosts",
+			payload: {
+				type: "ssh",
+				label: "slow-link",
+				ssh_host: "10.0.0.15",
+				connect_timeout_seconds: 30,
+			},
+		});
+		expect(created.statusCode).toBe(201);
+		const id = created.json<{ id: string }>().id;
+		const read = async (): Promise<unknown> =>
+			(await server.inject({ method: "GET", url: `/api/hosts/${id}` })).json<
+				Record<string, unknown>
+			>().connect_timeout_seconds;
+		expect(await read()).toBe(30);
+
+		const put = (payload: Record<string, unknown>) =>
+			server.inject({ method: "PUT", url: `/api/hosts/${id}`, payload });
+		expect((await put({ connect_timeout_seconds: 60 })).statusCode).toBe(200);
+		expect(await read()).toBe(60);
+		expect((await put({ label: "slow-link-2" })).statusCode).toBe(200);
+		expect(await read()).toBe(60);
+		expect((await put({ connect_timeout_seconds: null })).statusCode).toBe(200);
+		expect(await read()).toBeNull();
+	});
+
+	it("refuses a connection timeout outside 20-120 whole seconds (#1034)", async () => {
+		const created = (
+			await server.inject({
+				method: "POST",
+				url: "/api/hosts",
+				payload: {
+					type: "ssh",
+					label: "slow-refused",
+					ssh_host: "10.0.0.16",
+					connect_timeout_seconds: 45,
+				},
+			})
+		).json<{ id: string }>();
+		const refused = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${created.id}`,
+			payload: { connect_timeout_seconds: 19 },
+		});
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual({
+			error: {
+				code: "VALIDATION_ERROR",
+				message: "connect_timeout_seconds must be an integer between 20 and 120",
+			},
+		});
+		const row = dbs.meta
+			.prepare("SELECT connect_timeout_seconds FROM hosts WHERE id = ?")
+			.get(created.id);
+		expect(row).toEqual({ connect_timeout_seconds: 45 });
+	});
+
 	// An edit is checked on the host as it will be once saved, the stored
 	// values under the body's, with the rules a new host keeps (#795).
 	describe("the sign-in, as the edit leaves it (#795)", () => {
@@ -613,6 +733,85 @@ describe("PUT /api/hosts/:id", () => {
 				payload: { label: "moved", host_group_id: null },
 			});
 			expect(res.statusCode).toBe(200);
+		});
+
+		// A local host with no method, turned into an SSH one without `ssh_auth`,
+		// gets `key` on the key path sent or stored, else `agent`; any other edit
+		// changes the stored method only when it sends one (#917).
+		it("an edit to SSH stores the method a host left without one signs in with", async () => {
+			async function local(label: string, fields: Record<string, unknown> = {}): Promise<string> {
+				const res = await server.inject({
+					method: "POST",
+					url: "/api/hosts",
+					payload: { type: "local", label, ...fields },
+				});
+				expect(res.statusCode, res.body).toBe(201);
+				return res.json<{ id: string }>().id;
+			}
+			async function put(id: string, payload: Record<string, unknown>): Promise<unknown> {
+				const res = await server.inject({ method: "PUT", url: `/api/hosts/${id}`, payload });
+				expect(res.statusCode, res.body).toBe(200);
+				return signIn(id);
+			}
+			const toSsh = { type: "ssh", ssh_host: "10.0.0.31" };
+
+			expect(await put(await local("to-ssh-none"), toSsh)).toEqual({
+				ssh_auth: "agent",
+				ssh_key_path: null,
+			});
+			expect(await put(await local("to-ssh-sent"), { ...toSsh, ssh_key_path: "~/.ssh/k" })).toEqual(
+				{ ssh_auth: "key", ssh_key_path: "~/.ssh/k" },
+			);
+			expect(await put(await local("to-ssh-stored", { ssh_key_path: "~/.ssh/k" }), toSsh)).toEqual({
+				ssh_auth: "key",
+				ssh_key_path: "~/.ssh/k",
+			});
+			expect(
+				await put(await local("to-ssh-cleared", { ssh_key_path: "~/.ssh/k" }), {
+					...toSsh,
+					ssh_key_path: null,
+				}),
+			).toEqual({ ssh_auth: "agent", ssh_key_path: null });
+			expect(
+				await put(await local("to-ssh-sent-method"), { ...toSsh, ssh_auth: "password" }),
+			).toEqual({ ssh_auth: "password", ssh_key_path: null });
+			expect(
+				await put(await local("to-ssh-stored-method", { ssh_auth: "password" }), toSsh),
+			).toEqual({ ssh_auth: "password", ssh_key_path: null });
+
+			// A stored method changes only when one is sent.
+			const password = await sshHost({ ssh_auth: "password" });
+			expect(await put(password, { label: "renamed" })).toEqual({
+				ssh_auth: "password",
+				ssh_key_path: null,
+			});
+			expect(await put(password, { ssh_key_path: "~/.ssh/k" })).toEqual({
+				ssh_auth: "password",
+				ssh_key_path: "~/.ssh/k",
+			});
+			const agent = (
+				await server.inject({
+					method: "POST",
+					url: "/api/hosts",
+					payload: { type: "ssh", label: "stays-agent", ssh_host: "10.0.0.32", ssh_auth: "agent" },
+				})
+			).json<{ id: string }>().id;
+			expect(await put(agent, { ssh_key_path: "~/.ssh/k" })).toEqual({
+				ssh_auth: "agent",
+				ssh_key_path: "~/.ssh/k",
+			});
+
+			// An SSH row an internal writer left without a method is not given one by
+			// an edit that sends none: the readers refuse it instead.
+			const bare = new MetaDAL(dbs.meta).createHost({
+				type: "ssh",
+				label: "bare",
+				sshHost: "10.0.0.33",
+			}).id;
+			expect(await put(bare, { label: "bare-renamed" })).toEqual({
+				ssh_auth: null,
+				ssh_key_path: null,
+			});
 		});
 	});
 
@@ -2364,40 +2563,6 @@ describe("POST /api/hosts/import — the auth an entry is imported with", () => 
 		expect(hosts[0]?.ssh_key_path).toBe("/home/user/.ssh/id_ed25519");
 	});
 
-	// An entry naming no key is one `ssh` logs into with whatever the agent
-	// holds. Imported with no method at all, it could only ask for a password
-	// on a host that has never needed one (#436).
-	it("imports an entry with no identityFile as agent auth when an agent is running", async () => {
-		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
-		const { sshAgentAddress } = await import("../session/ssh-agent-address.js");
-		vi.mocked(sshAgentAddress).mockReturnValueOnce("//./pipe/openssh-ssh-agent");
-		vi.mocked(readSshConfig).mockReturnValueOnce({
-			entries: [
-				{
-					name: "agentonly",
-					hostname: "10.0.0.3",
-					port: 22,
-					user: "pi",
-					identityFile: null,
-					proxyJump: null,
-					isGitHost: false,
-				},
-			],
-			hasInclude: false,
-		});
-
-		const res = await server.inject({
-			method: "POST",
-			url: "/api/hosts/import",
-			payload: { entries: [{ name: "agentonly", label: "agent-only-host" }] },
-		});
-
-		expect(res.statusCode).toBe(201);
-		const hosts = res.json<Array<{ ssh_auth: string | null; ssh_key_path?: string }>>();
-		expect(hosts[0]?.ssh_auth).toBe("agent");
-		expect(hosts[0]?.ssh_key_path).toBeUndefined();
-	});
-
 	// A bastion is usually a host of its own, imported in the same breath.
 	// Linking to it is what lets it carry its own key and its own sign-in.
 	it("links an imported ProxyJump to the host it names", async () => {
@@ -2448,8 +2613,12 @@ describe("POST /api/hosts/import — the auth an entry is imported with", () => 
 		expect(behind?.ssh_proxy_spec).toBeUndefined();
 	});
 
-	it("does not set sshAuth when identityFile is absent and no agent is running", async () => {
+	// No agent running at import time does not change how the entry signs in:
+	// connecting then says no agent answers, as for any agent host (#917).
+	it("imports an entry with no identityFile as agent auth even when no agent is running", async () => {
 		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		const { sshAgentAddress } = await import("../session/ssh-agent-address.js");
+		vi.mocked(sshAgentAddress).mockReturnValue(null);
 		vi.mocked(readSshConfig).mockReturnValueOnce({
 			entries: [
 				{
@@ -2474,10 +2643,230 @@ describe("POST /api/hosts/import — the auth an entry is imported with", () => 
 		});
 
 		expect(res.statusCode).toBe(201);
-		const hosts = res.json<Array<{ ssh_auth: string | null }>>();
-		// ssh_auth should be null/undefined (not set to "key")
-		expect(hosts[0]).toBeDefined();
-		expect(hosts[0]?.ssh_auth == null).toBe(true);
+		const hosts = res.json<Array<{ ssh_auth: string | null; ssh_key_path?: string }>>();
+		expect(hosts[0]?.ssh_auth).toBe("agent");
+		expect(hosts[0]?.ssh_key_path).toBeUndefined();
+	});
+});
+
+// A ProxyJump is linked to the saved bastion it names only when the link
+// reaches what `ssh` would: through the bastion's alias, and with any user or
+// port it writes being the bastion's. Otherwise it is kept as written (#1040).
+describe("POST /api/hosts/import — linking a ProxyJump to a saved bastion (#1040)", () => {
+	type Entry = {
+		name: string;
+		hostname: string | null;
+		port: number;
+		user: string | null;
+		identityFile: null;
+		proxyJump: string | null;
+		isGitHost: false;
+	};
+	function entry(name: string, values: Partial<Entry> = {}): Entry {
+		return {
+			name,
+			hostname: null,
+			port: 22,
+			user: null,
+			identityFile: null,
+			proxyJump: null,
+			isGitHost: false,
+			...values,
+		};
+	}
+	type Imported = {
+		id: string;
+		label: string;
+		ssh_proxy_host_id?: string;
+		ssh_proxy_spec?: string;
+	};
+
+	async function importEntries(entries: Entry[], names = entries.map((e) => e.name)) {
+		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		vi.mocked(readSshConfig).mockReturnValue({ entries, hasInclude: false });
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: { entries: names.map((name) => ({ name, label: `${name}-host` })) },
+		});
+		expect(res.statusCode, res.body).toBe(201);
+		return res.json<Imported[]>();
+	}
+
+	async function saveHost(body: Record<string, unknown>): Promise<string> {
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts",
+			payload: { type: "ssh", ssh_auth: "agent", ...body },
+		});
+		expect(res.statusCode, res.body).toBe(201);
+		return res.json<{ id: string }>().id;
+	}
+
+	/** The bastion `gw`, imported with the target: gateway.example as base on 2222. */
+	async function importWithGw(proxyJump: string, gw: Partial<Entry> = {}) {
+		const hosts = await importEntries([
+			entry("gw", { hostname: "gateway.example", user: "base", port: 2222, ...gw }),
+			entry("target", { hostname: "target.example", proxyJump }),
+		]);
+		const bastion = hosts.find((host) => host.label === "gw-host");
+		const target = hosts.find((host) => host.label === "target-host");
+		if (!bastion || !target) throw new Error("the import did not answer both hosts");
+		return { gw: bastion, target };
+	}
+
+	it.each([
+		{ variant: "user", proxyJump: "relay@gw", gw: {} },
+		{ variant: "port", proxyJump: "gw:2200", gw: {} },
+		{ variant: "no-bastion-user", proxyJump: "relay@gw", gw: { user: null } },
+	])(
+		"keeps an imported ProxyJump whose user or port differs from the bastion's as written ($variant)",
+		async ({ proxyJump, gw }) => {
+			const { target } = await importWithGw(proxyJump, gw);
+			expect(target?.ssh_proxy_spec).toBe(proxyJump);
+			expect(target?.ssh_proxy_host_id).toBeUndefined();
+		},
+	);
+
+	it("keeps an imported ProxyJump whose user differs from the one in the bastion's address as written (sshhost-user)", async () => {
+		await saveHost({
+			label: "gw-saved",
+			ssh_host: "base@gateway.example",
+			ssh_config_host: "gw",
+			ssh_port: 2222,
+		});
+		const [target] = await importEntries([
+			entry("target", { hostname: "target.example", proxyJump: "relay@gw" }),
+		]);
+		expect(target?.ssh_proxy_spec).toBe("relay@gw");
+		expect(target?.ssh_proxy_host_id).toBeUndefined();
+	});
+
+	it.each([
+		{ variant: "same", proxyJump: "base@gw:2222" },
+		{ variant: "port-default", proxyJump: "gw" },
+	])(
+		"links an imported ProxyJump that agrees with the bastion's user and port ($variant)",
+		async ({ proxyJump }) => {
+			const { gw, target } = await importWithGw(proxyJump);
+			expect(target?.ssh_proxy_host_id).toBe(gw?.id);
+			expect(target?.ssh_proxy_spec).toBeUndefined();
+		},
+	);
+
+	it.each([
+		{ variant: "sshhost-user", sshHost: "base@gateway.example", sshUser: undefined },
+		{ variant: "sshuser-first", sshHost: "old@gateway.example", sshUser: "base" },
+	])(
+		"links an imported ProxyJump that agrees with the bastion's user and port ($variant)",
+		async ({ sshHost, sshUser }) => {
+			const gwId = await saveHost({
+				label: "gw-saved",
+				ssh_host: sshHost,
+				ssh_config_host: "gw",
+				ssh_port: 2222,
+				...(sshUser !== undefined && { ssh_user: sshUser }),
+			});
+			const [target] = await importEntries([
+				entry("target", { hostname: "target.example", proxyJump: "base@gw" }),
+			]);
+			expect(target?.ssh_proxy_host_id).toBe(gwId);
+			expect(target?.ssh_proxy_spec).toBeUndefined();
+		},
+	);
+
+	it.each([
+		{ variant: "both-compatible", users: ["base", "base"], proxyJump: "gw" },
+		{ variant: "one-compatible", users: ["base", "relay"], proxyJump: "base@gw" },
+	])(
+		"keeps an imported ProxyJump that names two saved hosts as written ($variant)",
+		async ({ users, proxyJump }) => {
+			for (const [index, user] of users.entries()) {
+				await saveHost({
+					label: `gw-${index}`,
+					ssh_host: `gateway-${index}.example`,
+					ssh_config_host: "gw",
+					ssh_user: user,
+				});
+			}
+			const [target] = await importEntries([
+				entry("target", { hostname: "target.example", proxyJump }),
+			]);
+			expect(target?.ssh_proxy_spec).toBe(proxyJump);
+			expect(target?.ssh_proxy_host_id).toBeUndefined();
+		},
+	);
+
+	it("keeps an imported ProxyJump naming the bastion's address as written", async () => {
+		await saveHost({ label: "gw-saved", ssh_host: "gateway.example", ssh_config_host: "gw" });
+		const [target] = await importEntries([
+			entry("target", { hostname: "target.example", proxyJump: "gateway.example" }),
+		]);
+		expect(target?.ssh_proxy_spec).toBe("gateway.example");
+		expect(target?.ssh_proxy_host_id).toBeUndefined();
+	});
+
+	it("links an imported ProxyJump only to another host carrying its alias (no-name)", async () => {
+		await saveHost({
+			label: "other-saved",
+			ssh_host: "gateway.example",
+			ssh_config_host: "other",
+			ssh_user: "base",
+			ssh_port: 2222,
+		});
+		const [target] = await importEntries([
+			entry("target", { hostname: "target.example", proxyJump: "gw" }),
+		]);
+		expect(target?.ssh_proxy_spec).toBe("gw");
+		expect(target?.ssh_proxy_host_id).toBeUndefined();
+	});
+
+	it("links an imported ProxyJump only to another host carrying its alias (self)", async () => {
+		const gwId = await saveHost({
+			label: "gw-saved",
+			ssh_host: "gateway.example",
+			ssh_config_host: "gw",
+		});
+		const [target] = await importEntries([
+			entry("gw", { hostname: "target.example", proxyJump: "gw" }),
+		]);
+		expect(target?.ssh_proxy_host_id).toBe(gwId);
+		expect(target?.ssh_proxy_spec).toBeUndefined();
+	});
+
+	it("keeps an imported ProxyJump chain as written", async () => {
+		await saveHost({ label: "gw-saved", ssh_host: "gateway.example", ssh_config_host: "gw" });
+		const [target] = await importEntries([
+			entry("target", { hostname: "target.example", proxyJump: "gw,other" }),
+		]);
+		expect(target?.ssh_proxy_spec).toBe("gw,other");
+		expect(target?.ssh_proxy_host_id).toBeUndefined();
+	});
+
+	it("reads no hosts to link an import with no ProxyJump", async () => {
+		const listHosts = vi.spyOn(MetaDAL.prototype, "listHosts");
+		try {
+			await importEntries([entry("a", { hostname: "a.example" })]);
+			expect(listHosts).not.toHaveBeenCalled();
+		} finally {
+			listHosts.mockRestore();
+		}
+	});
+
+	it("reads the hosts once to link an import's ProxyJumps", async () => {
+		await saveHost({ label: "gw-saved", ssh_host: "gateway.example", ssh_config_host: "gw" });
+		const listHosts = vi.spyOn(MetaDAL.prototype, "listHosts");
+		try {
+			const hosts = await importEntries([
+				entry("a", { hostname: "a.example", proxyJump: "gw" }),
+				entry("b", { hostname: "b.example", proxyJump: "gw" }),
+				entry("c", { hostname: "c.example", proxyJump: "gw" }),
+			]);
+			expect(hosts.map((host) => host.ssh_proxy_host_id).every(Boolean)).toBe(true);
+			expect(listHosts).toHaveBeenCalledTimes(1);
+		} finally {
+			listHosts.mockRestore();
+		}
 	});
 });
 

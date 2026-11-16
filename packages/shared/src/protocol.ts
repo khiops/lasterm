@@ -34,6 +34,13 @@ export interface SnapshotData {
 	rows: number;
 	cursorX: number;
 	cursorY: number;
+	/** The program is in the alternate screen (#1012). Absent from an older agent. */
+	alternateScreen?: boolean;
+	/**
+	 * Every input mode the program set, as escape sequences that set each one
+	 * whatever a terminal held before (#1012). Absent from an older agent.
+	 */
+	inputModes?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +140,62 @@ export interface InputMessage {
 	type: "INPUT";
 	channelId: string;
 	data: Uint8Array;
+}
+
+/**
+ * UI → Hub, and Hub → Agent: chunk `seq` of a paste (#1014), the text without
+ * markers, which the agent writes itself. The UI's `pasteId` is its own; the
+ * hub sends the agent an id of its own and maps the answers back.
+ */
+export interface PasteMessage {
+	type: "PASTE";
+	channelId: string;
+	pasteId: number;
+	seq: number;
+	data: Uint8Array;
+	last: boolean;
+}
+
+/** UI → Hub, and Hub → Agent: stop a paste (#1014). */
+export interface PasteCancelMessage {
+	type: "PASTE_CANCEL";
+	channelId: string;
+	pasteId: number;
+}
+
+/**
+ * Agent → Hub, and Hub → UI: the terminal took chunk `seq` of the paste; for
+ * a bracketed paste's last chunk, its end marker too (#1014).
+ */
+export interface PasteAckMessage {
+	type: "PASTE_ACK";
+	channelId: string;
+	pasteId: number;
+	seq: number;
+}
+
+/** Why a paste ended before its end (#1014). */
+export type PasteClosedReason =
+	| "cancelled"
+	| "superseded"
+	| "out_of_order"
+	| "overflow"
+	| "connection"
+	| "unknown"
+	| "unsupported"
+	| "agent_lost";
+
+/**
+ * Agent → Hub, and Hub → UI: the paste ended before its end (#1014).
+ * `written` is how many of its data bytes reached the terminal, from the
+ * agent; absent when the hub closed it (`unsupported`, `agent_lost`).
+ */
+export interface PasteClosedMessage {
+	type: "PASTE_CLOSED";
+	channelId: string;
+	pasteId: number;
+	reason: PasteClosedReason;
+	written?: number;
 }
 
 /** Agent → Hub (also Hub → UI): PTY output data */
@@ -494,6 +557,10 @@ export interface UiSpawnOkMessage {
 	sessionId: string;
 	/** The SPAWN's, echoed; absent when it named none (#777). */
 	requestId?: string;
+	/** As on ATTACH_OK (#1012): the pane brackets its pastes itself. Absent from an older hub. */
+	adaptsInput?: boolean;
+	/** As on ATTACH_OK (#1014): the pane sends its pastes as PASTE chunks. Absent from an older hub. */
+	streamsPaste?: boolean;
 }
 
 /** UI → Hub: attach this client to an existing channel */
@@ -543,6 +610,18 @@ export interface UiAttachOkMessage {
 	 * hub keeps it. Absent from a hub older than that.
 	 */
 	filesPanel?: FilesPanelState;
+	/**
+	 * Whether the agent that takes this terminal's input now writes paste
+	 * markers and cursor keys in its program's form, so the pane brackets its
+	 * pastes itself (#1012). Absent from an older hub.
+	 */
+	adaptsInput?: boolean;
+	/**
+	 * Whether the agent that takes this terminal's input takes a paste as
+	 * PASTE chunks, so the pane streams its pastes (#1014). Absent from an
+	 * older hub.
+	 */
+	streamsPaste?: boolean;
 }
 
 /**
@@ -1005,6 +1084,18 @@ export interface PromptCancelMessage {
 	promptId: string;
 }
 
+/**
+ * Hub → UI: the SPAWN carrying `requestId` waits while the hub connects
+ * `hostId` (#1034). Sent once per such SPAWN, before the connection's first
+ * wait. Each wait of a connection has its own bound, and a host's may be longer
+ * than the pane's own clock, so the pane waits for the SPAWN's answer instead.
+ */
+export interface HostConnectingMessage {
+	type: "HOST_CONNECTING";
+	hostId: string;
+	requestId?: string;
+}
+
 /** UI → Hub: test SSH connectivity (with optional auth prompting) */
 export interface TestConnectMessage {
 	type: "TEST_CONNECT";
@@ -1016,6 +1107,17 @@ export interface TestConnectMessage {
 	sshUser?: string;
 	sshProxyHostId?: string;
 	sshProxySpec?: string;
+	/**
+	 * The `~/.ssh/config` alias of the entry the host was picked from, for the
+	 * settings the hub resolves through it (`IdentityAgent none`, known_hosts
+	 * names), as a session of the saved host applies them (#1037).
+	 */
+	sshConfigHost?: string;
+	/**
+	 * The connection timeout in the form, in seconds (#1034). The hub ignores a
+	 * value that is not a whole number from 20 to 120, as if absent.
+	 */
+	connectTimeoutSeconds?: number;
 }
 
 /** Hub → UI: test connectivity succeeded */
@@ -1078,7 +1180,9 @@ export type AgentMessage =
 	| AgentNotificationMessage
 	| AgentLogMessage
 	| AgentEnvMessage
-	| ErrorMessage;
+	| ErrorMessage
+	| PasteAckMessage
+	| PasteClosedMessage;
 
 /** All messages that the Hub sends to the Agent */
 export type HubToAgentMessage =
@@ -1087,6 +1191,8 @@ export type HubToAgentMessage =
 	| AgentSpawnMessage
 	| AgentEnvQueryMessage
 	| InputMessage
+	| PasteMessage
+	| PasteCancelMessage
 	| ResizeMessage
 	| SnapshotReqMessage
 	| AgentAttachMessage
@@ -1102,6 +1208,8 @@ export type UiMessage =
 	| UiAttachMessage
 	| DetachMessage
 	| InputMessage
+	| PasteMessage
+	| PasteCancelMessage
 	| ResizeMessage
 	| FilesPanelMessage
 	| WriteClaimMessage
@@ -1146,10 +1254,13 @@ export type HubToUiMessage =
 	| AgentBellMessage
 	| AgentNotificationMessage
 	| InputDroppedMessage
+	| PasteAckMessage
+	| PasteClosedMessage
 	| PongMessage
 	| HostVerifyMessage
 	| AuthPromptMessage
 	| PromptCancelMessage
+	| HostConnectingMessage
 	| TestConnectOkMessage
 	| TestConnectFailMessage
 	| AgentBinaryVerifyMessage
@@ -1226,6 +1337,11 @@ export type ProtocolMessage =
 	| AgentBellMessage
 	| AgentNotificationMessage
 	| InputDroppedMessage
+	| PasteMessage
+	| PasteCancelMessage
+	| PasteAckMessage
+	| PasteClosedMessage
+	| HostConnectingMessage
 	| TestConnectMessage
 	| TestConnectOkMessage
 	| TestConnectFailMessage

@@ -163,8 +163,9 @@ export interface Host {
 	sshProxyHostId?: string | null;
 	/**
 	 * The bastion this one is reached through, written as `~/.ssh/config` writes
-	 * it: `user@host:port`. For a jump that is not a host here — imported, or
-	 * one nobody wants in the list.
+	 * it: `user@host:port`. For a jump not linked to a host here — a bastion
+	 * that is none, one nobody wants in the list, or one the spec reaches with
+	 * another user or port than its saved host's (#1040).
 	 */
 	sshProxySpec?: string | null;
 	/**
@@ -179,6 +180,13 @@ export interface Host {
 	 * because leaving a process behind is a decision about *this* machine.
 	 */
 	sshRemoteDaemon?: boolean | null;
+	/**
+	 * How long each wait of a connection to this host may last, in whole
+	 * seconds from 20 to 120 (#1034): the jump, the SSH server, reaching the
+	 * agent, its HELLO. Null takes `ConnectTimeout` from `~/.ssh/config` when it
+	 * is 20 s or more, otherwise the hub's own limits.
+	 */
+	connectTimeoutSeconds?: number | null;
 	/** SHA256 of the pinned remote agent binary (null = not yet verified). */
 	agentSha256?: string | null;
 	createdAt: string; // ISO 8601

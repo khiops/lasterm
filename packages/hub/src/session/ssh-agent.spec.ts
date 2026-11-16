@@ -1,16 +1,23 @@
 import { generateKeyPairSync } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { connect as netConnect } from "node:net";
+import {
+	createServer as createNetServer,
+	type Server as NetServer,
+	connect as netConnect,
+	type Socket,
+} from "node:net";
 import { join } from "node:path";
 import type { HelloMessage, Host } from "@lasterm/shared";
 import { ErrorCode, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import { Server, type Server as SshServer, utils } from "ssh2";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { fingerprintOf } from "../ssh/fingerprint.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { windowsLaunchCommand } from "./agent-deployer.js";
 import { AuthCancelledError } from "./auth-cancelled.js";
+import { type ResolvedJump, resolveJump } from "./proxy-jump.js";
 import { type AuthPromptFn, buildJumpAuth, SshAgent } from "./ssh-agent.js";
+import { noSshAgentMessage, sshAgentAddress } from "./ssh-agent-address.js";
 import { sshExec } from "./ssh-exec.js";
 
 // ─── Mock agent-deployer.js for Fix B deploy-fallback tests ─────────────────
@@ -28,6 +35,12 @@ vi.mock("./agent-deployer.js", async (importOriginal) => {
 			arch: null,
 		}),
 	};
+});
+
+// Whether an agent answers is the machine's; a case that needs none says so.
+vi.mock("./ssh-agent-address.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("./ssh-agent-address.js")>();
+	return { ...actual, sshAgentAddress: vi.fn(actual.sshAgentAddress) };
 });
 
 const TEST_TIMEOUT = 10_000;
@@ -931,6 +944,99 @@ describe("SshAgent", () => {
 			agents.push(agent);
 
 			await expect(agent.start()).rejects.toThrow();
+		},
+		TEST_TIMEOUT,
+	);
+
+	// An SSH host stored without a method, as an internal writer can leave it, is
+	// not given either (#917), which would sign in one way here and another as a
+	// jump.
+	it(
+		"refuses a host with no sign-in method before dialling",
+		async () => {
+			const seen = { connections: 0, refused: 0 };
+			const { server, port } = await createMockSshServer(() => {}, { seen });
+			servers.push(server);
+			const host = makeHost(port);
+			Reflect.deleteProperty(host, "sshAuth");
+			const agent = new SshAgent(host);
+			agents.push(agent);
+
+			await expect(agent.start()).rejects.toThrow("Host has no sign-in method configured");
+			expect(seen.connections).toBe(0);
+		},
+		TEST_TIMEOUT,
+	);
+
+	// A host stored as agent signs in with the agent, whatever key path it also
+	// keeps: here no agent answers, so it says so, and never reads the key (#917).
+	it(
+		"signs in with the agent a host stored as agent, its key path notwithstanding",
+		async () => {
+			vi.mocked(sshAgentAddress).mockReturnValueOnce(null);
+			const seen = { connections: 0, refused: 0 };
+			const { server, port } = await createMockSshServer(() => {}, { seen });
+			servers.push(server);
+			const agent = new SshAgent(makeHost(port, { sshAuth: "agent" }));
+			agents.push(agent);
+
+			await expect(agent.start()).rejects.toThrow(noSshAgentMessage(process.platform));
+			expect(seen.connections).toBe(0);
+		},
+		TEST_TIMEOUT,
+	);
+
+	// `IdentityAgent none` keeps the agent out of a host stored as agent too, as
+	// ssh keeps it out of `ssh box`: refused before anything is dialled (#1038).
+	it(
+		"refuses the agent for a host whose alias says IdentityAgent none",
+		async () => {
+			const home = makeTempDir("lasterm-agent-none-");
+			const actualAddress = vi.mocked(sshAgentAddress).getMockImplementation();
+			try {
+				mkdirSync(join(home, ".ssh"));
+				writeFileSync(join(home, ".ssh", "config"), "Host box\n  IdentityAgent none\n");
+				vi.stubEnv("HOME", home);
+				vi.stubEnv("USERPROFILE", home);
+				const seen = { connections: 0, refused: 0 };
+				const { server, port } = await createMockSshServer(() => {}, { seen });
+				servers.push(server);
+				const refusal =
+					"IdentityAgent none in ~/.ssh/config keeps the SSH agent out of box, and this host signs in with the agent. Choose a key or a password for it.";
+
+				vi.mocked(sshAgentAddress).mockReturnValueOnce(join(home, "agent.sock"));
+				const withAgent = new SshAgent(makeHost(port, { sshAuth: "agent", sshConfigHost: "box" }));
+				agents.push(withAgent);
+				await expect(withAgent.start()).rejects.toMatchObject({ message: refusal });
+
+				vi.mocked(sshAgentAddress).mockClear();
+				vi.mocked(sshAgentAddress).mockReturnValueOnce(null);
+				const noAgent = new SshAgent(makeHost(port, { sshAuth: "agent", sshConfigHost: "box" }));
+				agents.push(noAgent);
+				await expect(noAgent.start()).rejects.toMatchObject({ message: refusal });
+				expect(sshAgentAddress).not.toHaveBeenCalled();
+				expect(seen.connections).toBe(0);
+				// The null queued above was never taken: drop it.
+				vi.mocked(sshAgentAddress).mockReset();
+
+				// Another alias of the same file is not concerned: it dials as before,
+				// with an agent that holds nothing, and the server refuses it.
+				vi.mocked(sshAgentAddress).mockReturnValue(join(home, "agent.sock"));
+				const other = new SshAgent(makeHost(port, { sshAuth: "agent", sshConfigHost: "other" }));
+				agents.push(other);
+				const otherFailure = await other.start().then(
+					() => null,
+					(error: unknown) => error,
+				);
+				expect(otherFailure).toBeInstanceOf(Error);
+				expect((otherFailure as Error).message).not.toBe(refusal);
+				expect(seen.connections).toBe(1);
+			} finally {
+				vi.mocked(sshAgentAddress).mockReset();
+				if (actualAddress) vi.mocked(sshAgentAddress).mockImplementation(actualAddress);
+				vi.unstubAllEnvs();
+				await removeTempDir(home);
+			}
 		},
 		TEST_TIMEOUT,
 	);
@@ -2140,4 +2246,726 @@ describe("deploy failure → cleanup() called before rejection (Fix C)", () => {
 		},
 		TEST_TIMEOUT,
 	);
+});
+
+// ─── The host's connection timeout (#1034) ──────────────────────────────────
+//
+// Each wait of a connection lasts up to the host's connection timeout T, from
+// 20 to 120 s, instead of the hub's own limits. These cases wait in real time:
+// ssh2 and the hub use real timers, and T is never under 20 s.
+
+/** Listen on a free loopback port; resolves with the server and its port. */
+function listenLoopback(server: NetServer): Promise<number> {
+	return new Promise((resolve) => {
+		server.listen(0, "127.0.0.1", () => resolve((server.address() as { port: number }).port));
+	});
+}
+
+/** A TCP front for `targetPort` that connects to it only `delayMs` after each accept: a slow link. */
+async function slowLink(
+	targetPort: number,
+	delayMs: number,
+): Promise<{ server: NetServer; port: number }> {
+	const sockets: Socket[] = [];
+	const server = createNetServer((socket) => {
+		sockets.push(socket);
+		socket.pause();
+		socket.on("error", () => {});
+		setTimeout(() => {
+			if (socket.destroyed) return;
+			const onward = netConnect(targetPort, "127.0.0.1");
+			sockets.push(onward);
+			onward.on("error", () => socket.destroy());
+			socket.on("error", () => onward.destroy());
+			socket.pipe(onward).pipe(socket);
+			socket.resume();
+		}, delayMs);
+	});
+	server.on("close", () => {
+		for (const socket of sockets) socket.destroy();
+	});
+	return { server, port: await listenLoopback(server) };
+}
+
+/** A TCP server that accepts and says nothing, or says its banner then closes. */
+async function rawServer(
+	behaviour: "silent" | "banner-then-close",
+): Promise<{ server: NetServer; port: number }> {
+	const sockets: Socket[] = [];
+	const server = createNetServer((socket) => {
+		sockets.push(socket);
+		socket.on("error", () => {});
+		if (behaviour === "banner-then-close") {
+			socket.write("SSH-2.0-lasterm-test\r\n");
+			setTimeout(() => socket.end(), 100);
+		}
+	});
+	server.on("close", () => {
+		for (const socket of sockets) socket.destroy();
+	});
+	return { server, port: await listenLoopback(server) };
+}
+
+/**
+ * A mock SSH server whose exec answers as told: `execDelayMs` before it is
+ * accepted (never when null), then HELLO `helloDelayMs` after (never when
+ * null). `closeOnReady` ends the connection once authentication succeeded.
+ */
+async function timedSshServer(options: {
+	execDelayMs?: number | null;
+	helloDelayMs?: number | null;
+	closeOnReady?: boolean;
+}): Promise<{ server: SshServer; port: number }> {
+	const timers: ReturnType<typeof setTimeout>[] = [];
+	const server = new Server({ hostKeys: [HOST_KEY] }, (client) => {
+		client.on("error", () => {});
+		client.on("authentication", (ctx) => ctx.accept());
+		client.on("ready", () => {
+			if (options.closeOnReady) {
+				timers.push(setTimeout(() => client.end(), 50));
+				return;
+			}
+			client.on("session", (accept) => {
+				const session = accept();
+				session.on("exec", (acceptExec) => {
+					const execDelayMs = options.execDelayMs ?? 0;
+					if (options.execDelayMs === null) return;
+					timers.push(
+						setTimeout(() => {
+							const stream = acceptExec();
+							if (options.helloDelayMs === null) return;
+							timers.push(
+								setTimeout(() => {
+									try {
+										stream.write(makeHelloFrame());
+									} catch {
+										// The connection is gone: the assertion says so.
+									}
+								}, options.helloDelayMs ?? 0),
+							);
+						}, execDelayMs),
+					);
+				});
+			});
+		});
+	});
+	server.on("error", () => {});
+	server.on("close", () => {
+		for (const timer of timers) clearTimeout(timer);
+	});
+	return new Promise((resolve) => {
+		server.listen(0, "127.0.0.1", () => {
+			resolve({ server, port: (server.address() as { port: number }).port });
+		});
+	});
+}
+
+/**
+ * A bastion that routes to `targetPort`: it answers a channel open
+ * `channelDelayMs` after it is asked, never when null.
+ */
+async function timedBastion(
+	targetPort: number,
+	channelDelayMs: number | null,
+): Promise<{ server: SshServer; port: number }> {
+	const timers: ReturnType<typeof setTimeout>[] = [];
+	const server = new Server({ hostKeys: [HOST_KEY] }, (conn) => {
+		conn.on("error", () => {});
+		conn.on("authentication", (ctx) => ctx.accept());
+		conn.on("ready", () => {
+			conn.on("tcpip", (accept) => {
+				if (channelDelayMs === null) return;
+				timers.push(
+					setTimeout(() => {
+						const stream = accept();
+						const onward = netConnect(targetPort, "127.0.0.1");
+						onward.on("error", () => stream.destroy());
+						stream.on("error", () => onward.destroy());
+						stream.pipe(onward).pipe(stream);
+					}, channelDelayMs),
+				);
+			});
+		});
+	});
+	server.on("error", () => {});
+	server.on("close", () => {
+		for (const timer of timers) clearTimeout(timer);
+	});
+	return new Promise((resolve) => {
+		server.listen(0, "127.0.0.1", () => {
+			resolve({ server, port: (server.address() as { port: number }).port });
+		});
+	});
+}
+
+/** The jump `start` takes, for a bastion on `port` reached with its key. */
+function jumpThrough(port: number, fingerprint: string): ResolvedJump {
+	return {
+		jump: { host: "127.0.0.1", port, username: "ops" },
+		knownHostsNames: ["127.0.0.1"],
+		auth: { method: "key", keyPath: CLIENT_KEY_PATH },
+		promptHostId: "host-bastion",
+		pinnedFingerprint: fingerprint,
+		trustKnownHosts: false,
+		pinTo: { kind: "host", hostId: "host-bastion", expectedRoute: null },
+	};
+}
+
+/** How long `promise` takes to settle, and how: the value or the error's message. */
+async function timed<T>(
+	promise: Promise<T>,
+): Promise<{ ms: number; ok: boolean; message: string }> {
+	const started = Date.now();
+	try {
+		await promise;
+		return { ms: Date.now() - started, ok: true, message: "" };
+	} catch (err) {
+		return {
+			ms: Date.now() - started,
+			ok: false,
+			message: err instanceof Error ? err.message : String(err),
+		};
+	}
+}
+
+describe("SshAgent — the host's connection timeout (#1034)", () => {
+	let fingerprint = "";
+	const closers: Array<() => void> = [];
+	const agents: SshAgent[] = [];
+	/** An empty home: no ~/.ssh/config gives any of these hosts a timeout. */
+	const emptyHome = makeTempDir("lasterm-1034-home-");
+	const SLOW = 40_000;
+
+	beforeAll(async () => {
+		vi.stubEnv("HOME", emptyHome);
+		vi.stubEnv("USERPROFILE", emptyHome);
+		const { server, port } = await createMockSshServer((stream) => stream.write(makeHelloFrame()));
+		fingerprint = await getServerFingerprint(port);
+		server.close();
+	});
+
+	afterAll(async () => {
+		for (const agent of agents) {
+			try {
+				agent.close();
+			} catch {
+				// already closed
+			}
+		}
+		for (const close of closers) close();
+		vi.unstubAllEnvs();
+		await removeTempDir(emptyHome);
+	});
+
+	/** Keep `server` until the block ends. */
+	function keep<S extends { close: () => unknown }>(server: S): S {
+		closers.push(() => {
+			try {
+				server.close();
+			} catch {
+				// already closed
+			}
+		});
+		return server;
+	}
+
+	function agentFor(port: number, overrides: Partial<Host> = {}, remoteDaemon = false): SshAgent {
+		const agent = new SshAgent(
+			makeHost(port, overrides),
+			undefined,
+			undefined,
+			undefined,
+			remoteDaemon,
+		);
+		agents.push(agent);
+		return agent;
+	}
+
+	describe.concurrent("without ~/.ssh/config", () => {
+		it(
+			"waits for a slow server as long as the host's connection timeout (#1034)",
+			async () => {
+				const target = await timedSshServer({});
+				keep(target.server);
+				const link = await slowLink(target.port, 21_000);
+				keep(link.server);
+				const { hello } = await agentFor(link.port, { connectTimeoutSeconds: 25 }).start(
+					fingerprint,
+				);
+				expect(hello.type).toBe("HELLO");
+			},
+			SLOW,
+		);
+
+		it(
+			"still gives up on a silent server at the connection timeout (#1034)",
+			async () => {
+				const silent = await rawServer("silent");
+				keep(silent.server);
+				const result = await timed(
+					agentFor(silent.port, { connectTimeoutSeconds: 20 }).start(fingerprint),
+				);
+				expect(result.ok).toBe(false);
+				expect(result.message).toContain("Timed out while waiting for handshake");
+				expect(result.ms).toBeGreaterThanOrEqual(19_000);
+				expect(result.ms).toBeLessThan(23_000);
+			},
+			SLOW,
+		);
+
+		it(
+			"keeps ssh2's 20 s without a connection timeout (#1034)",
+			async () => {
+				const target = await timedSshServer({});
+				keep(target.server);
+				const link = await slowLink(target.port, 21_000);
+				keep(link.server);
+				const result = await timed(agentFor(link.port).start(fingerprint));
+				expect(result.ok).toBe(false);
+				expect(result.message).toContain("Timed out while waiting for handshake");
+			},
+			SLOW,
+		);
+
+		it(
+			"waits for HELLO as long as the connection timeout (#1034)",
+			async () => {
+				const target = await timedSshServer({ helloDelayMs: 21_000 });
+				keep(target.server);
+				const { hello } = await agentFor(target.port, {
+					connectTimeoutSeconds: 25,
+					os: "linux",
+				}).start(fingerprint);
+				expect(hello.type).toBe("HELLO");
+			},
+			SLOW,
+		);
+
+		it(
+			"waits for a Windows agent's HELLO as long as the connection timeout (#1034)",
+			async () => {
+				const target = await timedSshServer({ helloDelayMs: 21_000 });
+				keep(target.server);
+				const { hello } = await agentFor(target.port, {
+					connectTimeoutSeconds: 25,
+					os: "windows",
+				}).start(fingerprint);
+				expect(hello.type).toBe("HELLO");
+			},
+			SLOW,
+		);
+
+		it(
+			"still gives up on a silent agent at the connection timeout (#1034)",
+			async () => {
+				const target = await timedSshServer({ helloDelayMs: null });
+				keep(target.server);
+				const result = await timed(
+					agentFor(target.port, { connectTimeoutSeconds: 20 }).start(fingerprint),
+				);
+				expect(result.ok).toBe(false);
+				expect(result.message).toContain("Agent HELLO timeout");
+				expect(result.ms).toBeGreaterThanOrEqual(19_000);
+				expect(result.ms).toBeLessThan(23_000);
+			},
+			SLOW,
+		);
+
+		it(
+			"waits for the agent's command as long as the connection timeout (#1034)",
+			async () => {
+				const target = await timedSshServer({ execDelayMs: 21_000 });
+				keep(target.server);
+				const { hello } = await agentFor(target.port, { connectTimeoutSeconds: 25 }).start(
+					fingerprint,
+				);
+				expect(hello.type).toBe("HELLO");
+			},
+			SLOW,
+		);
+
+		it(
+			"still gives up on an unanswered command at the connection timeout (#1034)",
+			async () => {
+				const target = await timedSshServer({ execDelayMs: null });
+				keep(target.server);
+				const result = await timed(
+					agentFor(target.port, { connectTimeoutSeconds: 20 }).start(fingerprint),
+				);
+				expect(result.ok).toBe(false);
+				expect(result.message).toContain("The remote agent could not be reached");
+				expect(result.ms).toBeGreaterThanOrEqual(19_000);
+				expect(result.ms).toBeLessThan(23_000);
+			},
+			SLOW,
+		);
+
+		it(
+			"gives each wait its own connection timeout (#1034)",
+			async () => {
+				const target = await timedSshServer({ helloDelayMs: 12_000 });
+				keep(target.server);
+				const link = await slowLink(target.port, 12_000);
+				keep(link.server);
+				const { hello } = await agentFor(link.port, { connectTimeoutSeconds: 20 }).start(
+					fingerprint,
+				);
+				expect(hello.type).toBe("HELLO");
+			},
+			SLOW,
+		);
+
+		for (const [label, overrides] of [
+			["no T", {}],
+			["T=20", { connectTimeoutSeconds: 20 }],
+		] as const) {
+			it(
+				`fails when the server closes before the connection is ready, ${label} (#1034)`,
+				async () => {
+					const server = await rawServer("banner-then-close");
+					keep(server.server);
+					const result = await timed(agentFor(server.port, overrides).start(fingerprint));
+					expect(result).toMatchObject({
+						ok: false,
+						message: "The SSH server closed the connection before it was ready",
+					});
+					expect(result.ms).toBeLessThan(2_000);
+				},
+				SLOW,
+			);
+
+			it(
+				`fails when the jump closes before the route is open, ${label} (#1034)`,
+				async () => {
+					const target = await timedSshServer({});
+					keep(target.server);
+					const bastion = await rawServer("banner-then-close");
+					keep(bastion.server);
+					const result = await timed(
+						agentFor(target.port, overrides).start(
+							fingerprint,
+							null,
+							undefined,
+							jumpThrough(bastion.port, fingerprint),
+						),
+					);
+					expect(result).toMatchObject({
+						ok: false,
+						message: "The jump host 127.0.0.1 closed the connection before the route was open",
+					});
+					expect(result.ms).toBeLessThan(2_000);
+				},
+				SLOW,
+			);
+		}
+
+		it(
+			"fails when the server closes after it is ready and before HELLO (#1034)",
+			async () => {
+				const target = await timedSshServer({ closeOnReady: true });
+				keep(target.server);
+				const result = await timed(agentFor(target.port).start(fingerprint));
+				expect(result.ok).toBe(false);
+				expect(result.ms).toBeLessThan(2_000);
+			},
+			SLOW,
+		);
+
+		it(
+			"gives the daemon its share of the connection timeout (#1034)",
+			async () => {
+				let launchedAt: number | null = null;
+				const { server, port } = await createMockSshServerWithSocket(
+					(stream, command) => {
+						if (command.includes("XDG_STATE_HOME")) stream.write("/home/pi/.local/state/lasterm");
+						if (command.includes("--daemon")) launchedAt = Date.now();
+						(stream as unknown as { exit: (code: number) => void }).exit(0);
+						stream.end();
+					},
+					() => launchedAt !== null && Date.now() - launchedAt >= 8_000,
+					(stream) => stream.write(makeHelloFrame()),
+				);
+				keep(server);
+				const { hello } = await agentFor(
+					port,
+					{ connectTimeoutSeconds: 25, os: "linux" },
+					true,
+				).start(fingerprint);
+				expect(hello.type).toBe("HELLO");
+			},
+			SLOW,
+		);
+
+		it(
+			"stops retrying a silent daemon 15 s short of the connection timeout (#1034)",
+			async () => {
+				const { server, port } = await createMockSshServerWithSocket(
+					(stream, command) => {
+						if (command.includes("XDG_STATE_HOME")) stream.write("/home/pi/.local/state/lasterm");
+						(stream as unknown as { exit: (code: number) => void }).exit(0);
+						stream.end();
+					},
+					() => false,
+					() => {},
+				);
+				keep(server);
+				const result = await timed(
+					agentFor(port, { connectTimeoutSeconds: 25, os: "linux" }, true).start(fingerprint),
+				);
+				expect(result.ok).toBe(false);
+				expect(result.message).toContain("within 10000ms");
+				expect(result.ms).toBeGreaterThanOrEqual(10_000);
+				expect(result.ms).toBeLessThan(15_000);
+			},
+			SLOW,
+		);
+
+		for (const [label, directoryMs, launchMs, reached] of [
+			["a slow launch", 0, 15_000, true],
+			["a slow directory then a slow launch", 6_000, 21_000, false],
+		] as const) {
+			it(
+				`gives the daemon's launch command the connection timeout: ${label} (#1034)`,
+				async () => {
+					let launched = false;
+					const { server, port } = await createMockSshServerWithSocket(
+						(stream, command) => {
+							const answer = (ms: number, text: string, after?: () => void) =>
+								setTimeout(() => {
+									try {
+										if (text !== "") stream.write(text);
+										after?.();
+										(stream as unknown as { exit: (code: number) => void }).exit(0);
+										stream.end();
+									} catch {
+										// The connection is gone: the assertion says so.
+									}
+								}, ms);
+							if (command.includes("XDG_STATE_HOME"))
+								answer(directoryMs, "/home/pi/.local/state/lasterm");
+							else if (command.includes("--daemon"))
+								answer(launchMs, "", () => {
+									launched = true;
+								});
+							else answer(0, "");
+						},
+						() => launched,
+						(stream) => stream.write(makeHelloFrame()),
+					);
+					keep(server);
+					const result = await timed(
+						agentFor(port, { connectTimeoutSeconds: 25, os: "linux" }, true).start(fingerprint),
+					);
+					if (reached) {
+						expect(result).toMatchObject({ ok: true });
+					} else {
+						expect(result).toMatchObject({
+							ok: false,
+							message: "The remote agent could not be reached",
+						});
+						expect(result.ms).toBeGreaterThanOrEqual(24_000);
+						expect(result.ms).toBeLessThan(28_000);
+					}
+				},
+				SLOW,
+			);
+		}
+
+		it(
+			"waits for a slow jump as long as the host's connection timeout (#1034)",
+			async () => {
+				const target = await timedSshServer({});
+				keep(target.server);
+				const bastion = await timedBastion(target.port, 0);
+				keep(bastion.server);
+				const link = await slowLink(bastion.port, 21_000);
+				keep(link.server);
+				// The jump is a saved host with a connection timeout of its own, 20 s,
+				// resolved as a session resolves it: the route to this target takes
+				// the target's 25 s, not the jump's.
+				const jumpHost = makeHost(link.port, {
+					id: "01HZ00000000000000000JUMP1",
+					label: "bastion",
+					connectTimeoutSeconds: 20,
+				});
+				const targetHost = makeHost(target.port, {
+					connectTimeoutSeconds: 25,
+					sshProxyHostId: jumpHost.id,
+				});
+				const resolution = resolveJump(
+					targetHost,
+					{
+						getHost: (id) => (id === jumpHost.id ? jumpHost : undefined),
+						getHostFingerprint: () => fingerprint,
+					},
+					false,
+				);
+				if (resolution.kind !== "jump") throw new Error(`no jump: ${resolution.kind}`);
+				const agent = new SshAgent(targetHost);
+				agents.push(agent);
+				const { hello } = await agent.start(fingerprint, null, undefined, resolution.jump);
+				expect(hello.type).toBe("HELLO");
+			},
+			SLOW,
+		);
+
+		it(
+			"gives up on a jump that never opens the route (#1034)",
+			async () => {
+				const target = await timedSshServer({});
+				keep(target.server);
+				const bastion = await timedBastion(target.port, null);
+				keep(bastion.server);
+				const result = await timed(
+					agentFor(target.port, { connectTimeoutSeconds: 20 }).start(
+						fingerprint,
+						null,
+						undefined,
+						jumpThrough(bastion.port, fingerprint),
+					),
+				);
+				expect(result.ok).toBe(false);
+				expect(result.message).toContain("The jump host 127.0.0.1 did not open a route");
+				expect(result.ms).toBeGreaterThanOrEqual(19_000);
+				expect(result.ms).toBeLessThan(23_000);
+			},
+			SLOW,
+		);
+
+		it(
+			"gives the jump's connection and its channel each the connection timeout (#1034)",
+			async () => {
+				const target = await timedSshServer({});
+				keep(target.server);
+				const bastion = await timedBastion(target.port, 12_000);
+				keep(bastion.server);
+				const link = await slowLink(bastion.port, 12_000);
+				keep(link.server);
+				const { hello } = await agentFor(target.port, { connectTimeoutSeconds: 20 }).start(
+					fingerprint,
+					null,
+					undefined,
+					jumpThrough(link.port, fingerprint),
+				);
+				expect(hello.type).toBe("HELLO");
+			},
+			SLOW,
+		);
+
+		it(
+			"stops waiting for a jump's channel when the connection is cancelled (#1034)",
+			async () => {
+				const target = await timedSshServer({});
+				keep(target.server);
+				const bastion = await timedBastion(target.port, null);
+				keep(bastion.server);
+				const cancel = new AbortController();
+				setTimeout(() => cancel.abort(), 1_000);
+				const result = await timed(
+					agentFor(target.port).start(
+						fingerprint,
+						null,
+						cancel.signal,
+						jumpThrough(bastion.port, fingerprint),
+					),
+				);
+				expect(result).toMatchObject({ ok: false, message: "SSH connect aborted" });
+				expect(result.ms).toBeLessThan(3_000);
+			},
+			SLOW,
+		);
+
+		it(
+			"leaves a jump's channel unbounded without a connection timeout (#1034)",
+			async () => {
+				const target = await timedSshServer({});
+				keep(target.server);
+				const bastion = await timedBastion(target.port, 25_000);
+				keep(bastion.server);
+				const { hello } = await agentFor(target.port).start(
+					fingerprint,
+					null,
+					undefined,
+					jumpThrough(bastion.port, fingerprint),
+				);
+				expect(hello.type).toBe("HELLO");
+			},
+			SLOW,
+		);
+	});
+
+	// These write ~/.ssh/config, so each has a home of its own, one after another.
+	describe("with ~/.ssh/config", () => {
+		async function withConfig(config: string, run: () => Promise<void>): Promise<void> {
+			const home = makeTempDir("lasterm-1034-config-");
+			mkdirSync(join(home, ".ssh"));
+			writeFileSync(join(home, ".ssh", "config"), config);
+			vi.stubEnv("HOME", home);
+			vi.stubEnv("USERPROFILE", home);
+			try {
+				await run();
+			} finally {
+				vi.stubEnv("HOME", emptyHome);
+				vi.stubEnv("USERPROFILE", emptyHome);
+				await removeTempDir(home);
+			}
+		}
+
+		async function slowTarget(): Promise<number> {
+			const target = await timedSshServer({});
+			keep(target.server);
+			const link = await slowLink(target.port, 21_000);
+			keep(link.server);
+			return link.port;
+		}
+
+		it(
+			"takes ConnectTimeout from ~/.ssh/config when the host sets none (#1034)",
+			async () => {
+				const port = await slowTarget();
+				await withConfig(
+					"Host slow\n  ConnectTimeout 25\nHost 127.0.0.1\n  ConnectTimeout 20\n",
+					async () => {
+						const { hello } = await agentFor(port, { sshConfigHost: "slow" }).start(fingerprint);
+						expect(hello.type).toBe("HELLO");
+					},
+				);
+			},
+			SLOW,
+		);
+
+		it(
+			"matches ~/.ssh/config against the hostname of a host not imported from it (#1034)",
+			async () => {
+				const port = await slowTarget();
+				await withConfig(
+					"Host other\n  User me\nHost 127.0.0.1\n  ConnectTimeout = 25 # slow link\n",
+					async () => {
+						const [plain, aliased] = await Promise.all([
+							agentFor(port).start(fingerprint),
+							agentFor(port, { sshConfigHost: "other" }).start(fingerprint),
+						]);
+						expect(plain.hello.type).toBe("HELLO");
+						expect(aliased.hello.type).toBe("HELLO");
+					},
+				);
+			},
+			SLOW,
+		);
+
+		it(
+			"prefers the host's own value to ~/.ssh/config (#1034)",
+			async () => {
+				const port = await slowTarget();
+				await withConfig("Host 127.0.0.1\n  ConnectTimeout 120\n", async () => {
+					const result = await timed(
+						agentFor(port, { connectTimeoutSeconds: 20 }).start(fingerprint),
+					);
+					expect(result.ok).toBe(false);
+					expect(result.message).toContain("Timed out while waiting for handshake");
+				});
+			},
+			SLOW,
+		);
+	});
 });

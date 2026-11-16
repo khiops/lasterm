@@ -26,8 +26,13 @@
 		<div v-if="error" class="terminal-error">
 			<div class="terminal-error__box">
 				<span>{{ error }}</span>
+				<!-- A spawn the page before this one sent: its terminal may be running,
+				     listed under its host, which the sidebar may not be showing (#992). -->
+				<span v-if="interrupted === 'unconfirmed'">
+					If it started, it is listed under {{ paneHost?.label ?? 'this host' }}.
+				</span>
 				<div class="terminal-error__actions">
-					<button class="exit-btn" @click="onRetry">Retry</button>
+					<button class="exit-btn" @click="onRetry">{{ interrupted === 'never-sent' ? 'Start' : 'Retry' }}</button>
 					<button class="exit-btn" @click="onClosePaneFromOverlay">Close</button>
 				</div>
 			</div>
@@ -238,7 +243,7 @@ import { useVisualProfile } from '../composables/useVisualProfile.js';
 import { useWaitForHost } from '../composables/useWaitForHost.js';
 import { useWaitingAnswer } from '../composables/useWaitingAnswer.js';
 import { useWindowFocus } from '../composables/useWindowFocus.js';
-import { useChannelsStore } from '../stores/channels.js';
+import { type InterruptedSpawnError, SPAWN_INTERRUPTED, useChannelsStore } from '../stores/channels.js';
 import { useConfigStore } from '../stores/config.js';
 import { useFilesPanelStore } from '../stores/files-panel.js';
 import { useHostsStore } from '../stores/hosts.js';
@@ -338,10 +343,14 @@ const channelsStore = useChannelsStore();
  * A pane still owing its spawn has no channel yet: there it is the host the
  * spawn is for, which an empty pane's picker or the palette may have chosen on
  * another host than the one in view (#625), and the host in view otherwise.
+ *
+ * The spawn is the pending id's, not this pane's: a split or a move mounts
+ * another pane over the same id, which takes it up where this one left it
+ * (#980). So the pane holds the id's record while it shows the id.
  */
 const spawnHostId: string | null =
 	props.channelId !== null && props.channelId !== undefined
-		? channelsStore.consumePendingSpawn(props.channelId)
+		? channelsStore.holdPendingSpawn(props.channelId)
 		: null;
 const paneHostId = computed<string | undefined>(() => {
 	const channelId = props.channelId;
@@ -359,6 +368,12 @@ const terminalContainer = ref<HTMLElement | null>(null);
 const ready = ref(false);
 const error = ref<string | null>(null);
 /**
+ * The error shown is a spawn the page before this one owed (#992): one whose
+ * SPAWN never went out, so nothing started, or one whose start was never
+ * confirmed. Null for any other error.
+ */
+const interrupted = ref<'never-sent' | 'unconfirmed' | null>(null);
+/**
  * Why the terminal this pane was to start is not there: its host asked for a
  * password or passphrase and none was given (#875). No shell started, so it is
  * neither an end nor a failure; Connect asks again.
@@ -375,7 +390,27 @@ const pendingHostId = ref<string | null>(spawnHostId);
  * say, it shows that one, and the spawn is no business of it (#971).
  */
 const spawnFor: string | null = spawnHostId !== null ? (props.channelId ?? null) : null;
-/** The BEL handler is registered on the terminal, so once is enough. */
+/**
+ * Whether it still holds that id's record: until it shows another id, or is
+ * unmounted, whichever comes first. Released in `onUnmounted`, after the pane
+ * mounted over the id in the same render has taken hold of it.
+ */
+const holdsSpawn = ref(spawnFor !== null);
+function releaseSpawn(): void {
+	if (!holdsSpawn.value || spawnFor === null) return;
+	holdsSpawn.value = false;
+	channelsStore.releasePendingSpawn(spawnFor);
+}
+watch(
+	() => props.channelId,
+	(id) => {
+		if (id !== spawnFor) releaseSpawn();
+	},
+	{ flush: 'sync' },
+);
+/** Unmounted: an open still running has nobody to open for, and starts nothing. */
+let unmounted = false;
+/** The BEL handler is told of every xterm's bells by `useTerminal`, so once is enough. */
 let bellBound = false;
 /** A reconnect landed while this pane was still opening: what it sent went out
  * on a socket that is gone, so the failure to come is not the channel's fault. */
@@ -386,8 +421,9 @@ let askAgainOnNewSocket = false;
 
 const hostsStore = useHostsStore();
 
-// Resolve per-host theme override (SC-03) from host.profileJson
-const hostThemeName = (() => {
+// Per-host theme override (SC-03) from host.profileJson: the host of the
+// terminal shown now, as its profile says now (#997).
+const hostThemeName = computed<string | undefined>(() => {
 	const paneHost = paneHostId.value;
 	if (!paneHost) return undefined;
 	const host = hostsStore.hosts.find((h) => h.id === paneHost);
@@ -398,7 +434,7 @@ const hostThemeName = (() => {
 	} catch {
 		return undefined;
 	}
-})();
+});
 
 const { profile: resolvedProfile, resolvedFor } = useResolvedProfile(
 	computed(() => paneHostId.value),
@@ -413,6 +449,8 @@ const {
 	isBoundTo,
 	turnMouseReportingOff,
 	bellMuted,
+	onBell,
+	onScroll,
 	applyProfile,
 	suppressNextResize,
 	syncChannelSize,
@@ -674,6 +712,16 @@ function takeAnswer(chId: string, facts: AttachFacts): void {
 }
 
 /**
+ * The screen stopped following the terminal, which ran on: answered from the
+ * hub's memory, or its host disconnected by its user. It stays so until a live
+ * answer, however the pane comes back (its Reconnect, the host connected from
+ * elsewhere, the hub's news), and that answer replaces it (#1010). Its
+ * scrollback goes with it: the agent's snapshot is its screen, and the only
+ * record of what the terminal printed meanwhile.
+ */
+let missedOutput = false;
+
+/**
  * Attach to the terminal, and let the hub's answer decide what covers it.
  *
  * Every attach goes through here: the pane opening, Reconnect, Restart, a new
@@ -688,7 +736,7 @@ function takeAnswer(chId: string, facts: AttachFacts): void {
  */
 async function attachAndCover(
 	chId: string,
-	opts?: { preserveContent?: boolean; keepScreenIfEnded?: boolean },
+	opts?: { preserveContent?: boolean; replaceIfLive?: boolean; keepScreenIfEnded?: boolean },
 ): Promise<AttachResult | null> {
 	let result: AttachResult;
 	try {
@@ -711,6 +759,8 @@ async function attachAndCover(
 		return null;
 	}
 	takeAnswer(chId, factsFromAttachOk(result.cached));
+	// A live answer: the screen follows the terminal again, kept or replaced.
+	if (result.cached !== true) missedOutput = false;
 	return result;
 }
 
@@ -726,7 +776,9 @@ async function onReconnect(): Promise<void> {
 	if (chId === null || reattaching) return;
 	reattaching = true;
 	try {
-		await attachAndCover(chId, { preserveContent: true });
+		// Over a screen that stopped following the terminal, the live answer
+		// replaces it: it holds what the terminal printed meanwhile (#1010).
+		await attachAndCover(chId, { preserveContent: true, replaceIfLive: missedOutput });
 	} catch {
 		// Still unreachable. The banner is already saying so.
 	} finally {
@@ -863,13 +915,30 @@ const hostDisconnectedByUser = computed(() => {
 	return hostId !== undefined && hostsStore.isDisconnectedByUser(hostId);
 });
 
+// Whether the screen missed output (#1010); its declaration is above
+// attachAndCover, which reads it. Nor is the pane attached live while its
+// host's user keeps the host disconnected: the hub's news that the terminal is
+// live again, the host connected from anywhere, brings it back.
+watch(
+	() => isDetached.value || hostDisconnectedByUser.value,
+	(away) => {
+		if (!away) return;
+		missedOutput = true;
+		attachedLive = false;
+	},
+	{ immediate: true },
+);
+
 /** What the pane lays over its terminal, if anything. */
 const cover = computed(() =>
 	paneCover({
 		status: channelsStore.statusOf(effectiveChannelId.value),
 		ended: hasEnded.value,
 		gone: isGone.value,
-		detached: isDetached.value || hostDisconnectedByUser.value,
+		// Still owed its spawn, it has no terminal to reconnect to: Reconnect
+		// would ask the hub for the pending id. Retry or Connect is its way back
+		// (#980).
+		detached: !holdsSpawn.value && (isDetached.value || hostDisconnectedByUser.value),
 	}),
 );
 
@@ -909,6 +978,14 @@ watch(isDead, (dead) => {
  */
 async function openChannel(cols: number, rows: number): Promise<void> {
 	try {
+		// The spawn it owes failed already, before a split or a move remounted
+		// it: shown as it is, with Retry or Connect, without the hub. A
+		// connection failing meanwhile would show its own error instead, which
+		// the connection's return retries, Connect's included (#980).
+		if (spawnFor !== null && pendingHostId.value !== null && props.channelId === spawnFor) {
+			const earlier = channelsStore.pendingSpawnRun(spawnFor);
+			if (earlier?.state === 'failed') await earlier.outcome;
+		}
 		await sessionStore.connect();
 
 		if (props.channelId !== null && props.channelId !== undefined) {
@@ -917,25 +994,44 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			if (pendingHostId.value !== null && opened !== spawnFor) pendingHostId.value = null;
 			const hostId = pendingHostId.value;
 
-			if (hostId !== null) {
+			if (hostId !== null && spawnFor !== null) {
+				// Closed before it was asked for: nobody wants it any more.
+				if (unmounted) return;
 				// Fresh spawn — PTY is created with actual terminal dimensions
-				// so no RESIZE is needed → no SIGWINCH → no duplicate prompt
-				const realId = await channelsStore.spawnChannel(hostId, {
-					cols,
-					rows,
-					select: false,
-				});
+				// so no RESIZE is needed → no SIGWINCH → no duplicate prompt.
+				// Or the one a pane before this one over the same id started, or
+				// what came of it (#980).
+				const run = channelsStore.runPendingSpawn(spawnFor, cols, rows);
+				if (run === null) return;
+				const startedBefore = run.state === 'succeeded';
+				const spawned = await run.outcome;
+				// Unmounted meanwhile, or this very pane took it already: a Retry
+				// clicked twice opens twice, and both opens wait on the one run.
+				if (unmounted || pendingHostId.value === null) return;
 				pendingHostId.value = null;
+				const realId = spawned.channelId;
 				// Given another terminal while the spawn took its time: the new
 				// terminal is not this pane's, and the one it shows now is attached
 				// below. Its parent is told nothing: the pending id is in no layout
 				// any more, and the new terminal is in the sidebar's list (#971).
-				if (props.channelId === spawnFor) {
+				if (props.channelId === spawnFor && startedBefore) {
+					// It started before this pane asked: what it printed meanwhile
+					// went to nobody here. Its parent puts the terminal in place of
+					// the pending id, and the pane, once ready, attaches it below with
+					// the hub's snapshot. Ready before that, both the report saying it
+					// runs and the new id would attach it too.
+					emit('channel-spawned', spawnFor, realId);
+					await nextTick();
+				} else if (props.channelId === spawnFor) {
 					internalChannelId.value = realId;
-					// PTY was spawned at these dims — suppress the RESIZE that
-					// attachChannel would otherwise send (prevents SIGWINCH)
-					suppressNextResize(cols, rows);
-					attachChannel(realId);
+					// PTY was spawned at the run's dims — suppress the RESIZE that
+					// attachChannel would otherwise send (prevents SIGWINCH). A pane
+					// of another size sends its own.
+					suppressNextResize(spawned.cols, spawned.rows);
+					attachChannel(realId, {
+						adaptsInput: spawned.adaptsInput,
+						streamsPaste: spawned.streamsPaste,
+					});
 					attachedLive = true;
 					// Watched from its very start.
 					endWatch.starting(realId);
@@ -998,20 +1094,21 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 				});
 			}
 			// Register xterm.js BEL handler — fires on \x07 from PTY output
+			// In whichever xterm the pane has, for the terminal that xterm holds (#966).
 			if (bellBound) return;
 			bellBound = true;
-			terminal.value?.onBell(() => {
+			onBell((chId) => {
 				// A bell in what the hub kept rang when it was printed (#927).
 				if (bellMuted()) return;
-				const chId = props.channelId;
 				// Increment bell badge (agent BELL WS message not reliable for all shells)
-				if (chId != null && resolvedProfile.value.bellBadge !== false) {
+				if (resolvedProfile.value.bellBadge !== false) {
 					notificationStore.incrementBellCount(chId);
-					// Auto-clear badge after 1s if this is the active channel
+					// Auto-clear badge after 1s if this is the active channel: the
+					// terminal that rang, not the one the pane shows by then (#966).
 					if (chId === channelsStore.selectedChannelId) {
 						setTimeout(() => {
-							if (props.channelId === channelsStore.selectedChannelId) {
-								notificationStore.clearBellAndActivity(props.channelId!);
+							if (chId === channelsStore.selectedChannelId) {
+								notificationStore.clearBellAndActivity(chId);
 							}
 						}, 1000);
 					}
@@ -1026,6 +1123,15 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			});
 		}
 	} catch (err) {
+		// A restored spawn's Retry that ended before its SPAWN, its connection
+		// refused: the record shows that failure again, so a pane remounted over
+		// the id waits for a click too, also one that replaced this pane while it
+		// waited (#992). The store keeps any run already there.
+		if (spawnFor !== null && props.channelId === spawnFor) {
+			channelsStore.failRestoredSpawnBeforeSend(spawnFor, err);
+		}
+		// Unmounted meanwhile: nobody is shown what came of it.
+		if (unmounted) return;
 		// A spawn that failed after the pane was given another terminal: not
 		// that terminal's failure. The pane owes nothing now, and opens what it
 		// shows (#971).
@@ -1036,6 +1142,14 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 		}
 		const msg = err instanceof Error ? err.message : String(err);
 		const code = (err as { code?: string } | null)?.code;
+		// The page before this one owed this spawn and went away before its
+		// terminal was known to have started (#992). Shown, and nothing more:
+		// only a click starts it.
+		if (code === SPAWN_INTERRUPTED) {
+			interrupted.value = (err as InterruptedSpawnError).neverSent ? 'never-sent' : 'unconfirmed';
+			error.value = msg;
+			return;
+		}
 		// The channel died between page load and ATTACH: the pane shows it dead,
 		// which is a state, not an error.
 		if (code === 'CHANNEL_DEAD' || msg.includes('is dead') || msg.includes('CHANNEL_DEAD')) {
@@ -1089,7 +1203,11 @@ onMounted(async () => {
 /** Try again: the error's Retry, and Connect once a password or passphrase was not given. */
 async function onRetry(): Promise<void> {
 	error.value = null;
+	interrupted.value = null;
 	notConnected.value = null;
+	// The spawn it owes failed: cleared as it is clicked, so the open below sends
+	// it again, or a pane remounted over the id while this one waits does (#980).
+	if (holdsSpawn.value && spawnFor !== null) channelsStore.clearFailedPendingSpawn(spawnFor);
 	const term = terminal.value;
 	await openChannel(term?.cols ?? 80, term?.rows ?? 24);
 }
@@ -1139,6 +1257,12 @@ watch(
 		// trying again would ask again, unasked (#875).
 		if (!ready.value) {
 			if (notConnected.value !== null) return;
+			// A spawn the page before this one owed starts on a click only, also
+			// after a Retry that failed: it may have left a terminal (#992).
+			if (holdsSpawn.value && spawnFor !== null && channelsStore.pendingSpawnRestored(spawnFor)) {
+				if (error.value === null) reconnectedWhileOpening = true;
+				return;
+			}
 			if (error.value !== null) await onRetry();
 			// Still opening: the attempt in flight speaks to a socket that is
 			// gone, so let it fail and try again then.
@@ -1171,6 +1295,8 @@ watch(
 );
 
 onUnmounted(() => {
+	unmounted = true;
+	releaseSpawn();
 	dispose();
 });
 
@@ -1761,26 +1887,26 @@ useSearchShortcuts(search.isOpen, {
 // Wire natural scroll-to-bottom detection (EFF-07 / F-007).
 // When the viewport reaches the bottom of the scrollback buffer,
 // clear unread badges and hide the unread lines bar.
-watch(terminal, (term) => {
-	if (!term) return;
-	term.onScroll(() => {
-		const buf = term.buffer.active;
-		// Viewport is at bottom when baseY equals the scrollback position
-		// (i.e., no lines are hidden below the viewport)
-		if (buf.baseY === buf.viewportY) {
-			onNaturalScrollToBottom();
-		}
-	});
+// Every xterm the pane makes, and none it has left for another terminal (#966).
+onScroll((term) => {
+	const buf = term.buffer.active;
+	// Viewport is at bottom when baseY equals the scrollback position
+	// (i.e., no lines are hidden below the viewport)
+	if (buf.baseY === buf.viewportY) {
+		onNaturalScrollToBottom();
+	}
 });
 
 // The terminal that becomes the selected one takes the keyboard: a new
 // terminal, or a tab switched to, left it on the page body, so the first keys
 // went nowhere until a click.
+// Once the pane has an xterm, not each time it makes a new one for another
+// terminal: that one takes the keyboard only if the old one had it (#966).
 watch(
-	[isActiveTab, terminal],
-	([active, term]) => {
+	[isActiveTab, () => terminal.value !== null],
+	([active, present]) => {
 		// Over a terminal that has ended, the keyboard goes to the overlay's card.
-		if (active && term) void nextTick(() => (exitCard.value ?? term).focus());
+		if (active && present) void nextTick(() => (exitCard.value ?? terminal.value)?.focus());
 	},
 	{ immediate: true },
 );

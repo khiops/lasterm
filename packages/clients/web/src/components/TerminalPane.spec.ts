@@ -14,9 +14,10 @@
  * element) is in TerminalPane.browser.spec.ts.
  */
 import { BUNDLED_THEMES, type Channel } from "@lasterm/shared";
+import type { Terminal } from "@xterm/xterm";
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { type Ref, ref } from "vue";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { defineComponent, h, type Ref, ref } from "vue";
 import "../styles/base.css";
 import { useChannelsStore } from "../stores/channels.js";
 import { useConfigStore } from "../stores/config.js";
@@ -24,6 +25,7 @@ import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
 import { useSessionStore } from "../stores/session.js";
 import { contrastRatio, TEXT_CONTRAST_AA, useThemeStore } from "../stores/theme.js";
+import { useToastStore } from "../stores/toast.js";
 import { useWriteLockStore } from "../stores/writelock.js";
 import {
 	attaches,
@@ -32,6 +34,9 @@ import {
 	button,
 	CLIENT,
 	closePane,
+	drain,
+	dropConnection,
+	dropQueueOf,
 	emitted,
 	type Frame,
 	freshWindow,
@@ -43,13 +48,17 @@ import {
 	MOUSE_OFF,
 	mount,
 	mountPane,
+	mountRoot,
 	type PaneProps,
 	paneProfile,
 	paneText,
+	parseOf,
 	press,
 	refuse,
 	root,
 	S,
+	type StandInSearch,
+	type StandInTerminal,
 	sent,
 	settle,
 	spawnOk,
@@ -60,16 +69,24 @@ import {
 	type,
 	xterm,
 } from "./TerminalPane.fixture.js";
+import TerminalPane from "./TerminalPane.vue";
 
 /** Another host: the one the rail has selected, or one a spawn is for. */
 const PI = "01HZZZZZZZZZZZZZZZZZZZZZP3";
 /** A terminal on HOST the client knows nothing of yet. */
 const U = "01HZZZZZZZZZZZZZZZZZZZZZU4";
+/** A third terminal on HOST (#1012). */
+const V = "01HZZZZZZZZZZZZZZZZZZZZZV6";
 /** The id App gives a pane that owes its spawn, and the one the hub gives the terminal. */
 const NEW = "pending-1";
 const REAL = "01HZZZZZZZZZZZZZZZZZZZZZR5";
 /** Another window of the same hub. */
 const OTHER_CLIENT = "01HZZZZZZZZZZZZZZZZZZZZCL2";
+/**
+ * RIS: what the pane writes before a live snapshot over a screen it kept, in
+ * order after what xterm has not parsed yet (#1010).
+ */
+const FULL_RESET = "\u001bc";
 
 // ─── The window around the pane ──────────────────────────────────────────────
 
@@ -176,6 +193,51 @@ function openNew(on: string, props: Omit<PaneProps, "channel"> = {}): Ref<string
 	const channel = ref<string | null>(NEW);
 	mount({ channel, ...props });
 	return channel;
+}
+
+/**
+ * A pane that owes its spawn on HOST, under a parent that remounts it over the
+ * same pending id, as a split or a move does: `remount` gives it a new key.
+ * The parent swaps the pending id for the new terminal, as App does.
+ */
+function openNewRemountable(): { channel: Ref<string | null>; remount(): Promise<void> } {
+	freshWindow();
+	useChannelsStore().registerPendingSpawn(NEW, HOST);
+	const channel = ref<string | null>(NEW);
+	const key = ref(0);
+	mountRoot(
+		defineComponent({
+			setup: () => () =>
+				h(TerminalPane, {
+					key: key.value,
+					channelId: channel.value,
+					hostId: HOST,
+					onChannelSpawned: (tempId: string, realId: string) => {
+						emitted.push(["channel-spawned", tempId, realId]);
+						if (channel.value === tempId) channel.value = realId;
+					},
+				}),
+		}),
+	);
+	return {
+		channel,
+		remount: async () => {
+			key.value++;
+			await settle();
+		},
+	};
+}
+
+/** The window's connection opens only when the returned function is called: for the next pane to ask. */
+function holdConnection(): () => void {
+	let open: () => void = () => {};
+	vi.mocked(useSessionStore().connect).mockImplementationOnce(
+		() =>
+			new Promise<void>((resolve) => {
+				open = resolve;
+			}),
+	);
+	return () => open();
 }
 
 // ─── What the pane shows and sends ───────────────────────────────────────────
@@ -563,6 +625,129 @@ describe("TerminalPane that failed to open, given another terminal (#971)", () =
 	});
 });
 
+// A split or a move mounts another pane over a new terminal's pending id. The
+// spawn was the first pane's: the next one attached the pending id, and said
+// its terminal was gone, while the terminal the spawn started was in no pane.
+// The spawn is the pending id's now, whichever pane shows it.
+describe("TerminalPane remounted over its new terminal (#980)", () => {
+	it("a new terminal that failed keeps its failure and Retry when its pane remounts", async () => {
+		const { remount } = openNewRemountable();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+
+		await remount();
+
+		await vi.waitFor(() => expect(errorBox()?.textContent).toContain("the shell could not start"));
+		expect(button("Retry")).toBeDefined();
+		expect(attaches()).toEqual([]);
+		expect(spawns()).toHaveLength(1);
+	});
+
+	it("a pane remounted while its terminal starts sends its own size once it starts", async () => {
+		paneHasASize();
+		const { remount } = openNewRemountable();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ hostId: HOST, cols: 80, rows: 24 });
+
+		// Remounted in a larger pane, before the hub answers.
+		xterm.fit = { cols: 100, rows: 30 };
+		await remount();
+		spawnOk(REAL);
+		useWriteLockStore().handleWriteLock(REAL, CLIENT);
+
+		await vi.waitFor(() => expect(resizes()).toEqual([{ channelId: REAL, cols: 100, rows: 30 }]));
+		await resizesSettle();
+		expect(resizes()).toHaveLength(1);
+		expect(spawns()).toHaveLength(1);
+	});
+
+	// The pane it replaced was waiting for the same connection: unmounted, it
+	// starts nothing, and the remounted pane asks at its own size.
+	it("a pane remounted before its terminal is asked for asks for it at its own size", async () => {
+		const { remount } = openNewRemountable();
+		let open: () => void = () => {};
+		const opened = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		vi.mocked(useSessionStore().connect).mockImplementation(() => opened);
+		await vi.waitFor(() => expect(useSessionStore().connect).toHaveBeenCalledTimes(1));
+
+		xterm.fit = { cols: 100, rows: 30 };
+		await remount();
+		await vi.waitFor(() => expect(useSessionStore().connect).toHaveBeenCalledTimes(2));
+		open();
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		await settle();
+		expect(spawns()).toHaveLength(1);
+		expect(spawns()[0]).toMatchObject({ hostId: HOST, cols: 100, rows: 30 });
+	});
+
+	it("a new terminal closed before it is asked for is never asked for", async () => {
+		openNew(HOST);
+		const open = holdConnection();
+		await vi.waitFor(() => expect(useSessionStore().connect).toHaveBeenCalledTimes(1));
+
+		closePane();
+		open();
+		await settle();
+
+		expect(spawns()).toEqual([]);
+	});
+
+	it("a pane that takes its terminal after it started shows what it printed", async () => {
+		const { channel, remount } = openNewRemountable();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		const open = holdConnection();
+		await remount();
+
+		// Before the remounted pane asks: the hub reports the terminal running,
+		// as the session store routes CHANNEL_STATE, answers the SPAWN, and the
+		// terminal prints.
+		useChannelsStore().updateChannelStatus(REAL, "live");
+		spawnOk(REAL);
+		print(REAL, "EARLY");
+		await settle();
+		open();
+
+		await vi.waitFor(() => expect(attachedTo()).toEqual([REAL]));
+		expect(channel.value).toBe(REAL);
+		expect(emitted).toContainEqual(["channel-spawned", NEW, REAL]);
+		xterm.events.length = 0;
+		attachOk(REAL, "SNAPSHOT-WITH-EARLY");
+		await settle();
+		expect(xterm.events).toEqual(["<reset>", "SNAPSHOT-WITH-EARLY"]);
+		expect(attachedTo()).toEqual([REAL]);
+	});
+
+	it("a Retry clicked before its pane remounts is sent by the remounted pane", async () => {
+		const { channel, remount } = openNewRemountable();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+		// The connection is held from the Retry until after the remount.
+		let open: () => void = () => {};
+		const opened = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		vi.mocked(useSessionStore().connect).mockImplementation(() => opened);
+
+		button("Retry")?.click();
+		await settle();
+		await remount();
+		open();
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(2));
+		spawnOk(REAL);
+		await settle();
+		expect(channel.value).toBe(REAL);
+		expect(emitted).toContainEqual(["channel-spawned", NEW, REAL]);
+		expect(errorBox()).toBeNull();
+		expect(spawns()).toHaveLength(2);
+	});
+});
+
 // ─── Spawn size ──────────────────────────────────────────────────────────────
 
 describe("TerminalPane spawn size", () => {
@@ -691,6 +876,19 @@ describe("TerminalPane recovery", () => {
 		expect(errorBox()?.textContent).toContain("SPAWN timeout");
 	});
 
+	it("tries its spawn again when the connection comes back after it failed", async () => {
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+
+		useSessionStore().reconnectCount++;
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(2));
+		expect(errorBox()).toBeNull();
+		expect(attaches()).toEqual([]);
+	});
+
 	it("tries again on its own when the connection comes back", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		mountPane(ref(T), "live");
@@ -783,6 +981,93 @@ describe("TerminalPane host", () => {
 });
 
 // ─── Restart ─────────────────────────────────────────────────────────────────
+
+// ─── Options changed while shown (#997, #998) ────────────────────────────────
+
+// Some of what the pane draws with was read once, when its xterm was made, and
+// never again: a profile or host changed later left it as it was.
+describe("TerminalPane takes what it draws with when it changes", () => {
+	it("stops the cursor blinking when its style turns to underline, and back", async () => {
+		await openLive();
+		expect(terminal().options).toMatchObject({ cursorStyle: "block", cursorBlink: true });
+
+		paneProfile().profile.value = { ...paneProfile().profile.value, cursorStyle: "underline" };
+		await settle();
+		expect(terminal().options).toMatchObject({ cursorStyle: "underline", cursorBlink: false });
+
+		paneProfile().profile.value = { ...paneProfile().profile.value, cursorStyle: "bar" };
+		await settle();
+		expect(terminal().options).toMatchObject({ cursorStyle: "bar", cursorBlink: true });
+	});
+
+	it("takes its host's theme when the host is given one while it is shown", async () => {
+		await openLive({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [host(HOST, "pi")];
+			},
+		});
+
+		useHostsStore().hosts = [host(HOST, "pi", JSON.stringify({ theme: "nord" }))];
+		await settle();
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES.nord!.colors),
+		);
+	});
+
+	it("keeps its host's theme when the active theme changes", async () => {
+		await openLive({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [host(HOST, "pi", JSON.stringify({ theme: "nord" }))];
+			},
+		});
+
+		useThemeStore().applyTheme(BUNDLED_THEMES.dracula!);
+		await settle();
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES.nord!.colors),
+		);
+	});
+
+	it("goes back to the active theme when its host's own is taken away", async () => {
+		await openLive({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [host(HOST, "pi", JSON.stringify({ theme: "nord" }))];
+			},
+		});
+		useThemeStore().applyTheme(BUNDLED_THEMES.dracula!);
+		await settle();
+
+		useHostsStore().hosts = [host(HOST, "pi")];
+		await settle();
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES.dracula!.colors),
+		);
+	});
+
+	// The themes are fetched from the hub: a pane mounted before they came
+	// never found its host's.
+	it("takes its host's theme once the themes it names arrive", async () => {
+		await openLive({
+			setUp: () => {
+				useThemeStore().availableThemes = [];
+				useHostsStore().hosts = [host(HOST, "pi", JSON.stringify({ theme: "nord" }))];
+			},
+		});
+
+		useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+		await settle();
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES.nord!.colors),
+		);
+	});
+});
 
 describe("TerminalPane restart", () => {
 	// A Pi terminal came back — prompt on screen, write lock held — under an
@@ -1285,6 +1570,168 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		expect(attaches()).toHaveLength(2);
 	});
 
+	// A screen answered from memory is the spool's copy: the terminal's own,
+	// once the host is back, replaces it (#1010).
+	it("draws the live answer over a screen answered from memory when the hub says the terminal is live (#1010)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP", { tail: [new TextEncoder().encode("TAIL")] });
+		await settle();
+
+		// A reset written in the stream, after what xterm has not parsed yet, then
+		// the snapshot, which sets the program's modes again (#1010, #1012).
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP", "TAIL"]);
+		expect(banner()).toBeNull();
+	});
+
+	it("draws the live answer to a Reconnect over a screen answered from memory (#1010)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
+	// Only a live answer ends the missed output: a Reconnect answered from
+	// memory again leaves the copy to be replaced (#930, #1010).
+	it("draws the live answer after a Reconnect answered from memory again (#1010)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "AGAIN", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
+	// A Reconnect that gets no answer at all changes nothing either: the next
+	// one, answered live, still replaces the copy (#1010).
+	it("draws the live answer to a Reconnect after one that got no answer (#1010)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		xterm.events.length = 0;
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
+	// The socket back over a live screen, answered from memory: the live
+	// answer after it replaces that copy as well (#1010).
+	it("draws the live answer over a copy from memory its socket's return brought (#1010)", async () => {
+		await openLive();
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
+	// What it drew live through the end it watched stays (#927).
+	it("keeps the screen it watched end when the terminal is brought back live", async () => {
+		await openLive();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "BACK");
+		await settle();
+
+		expect(card()).toBeNull();
+		expect(xterm.events).toEqual([]);
+	});
+
+	// A live answer ends the missed output: what the pane drew live after it,
+	// through an end it watched, stays as well (#927, #1010).
+	it("keeps the screen it watched end after a recovery from memory, when the terminal is brought back live", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "BACK");
+		await settle();
+
+		expect(card()).toBeNull();
+		expect(xterm.events).toEqual([]);
+	});
+
+	// Any live answer ends it, the socket's return's as well as a Reconnect's.
+	it("keeps the screen it watched end after a recovery by its socket's return, when the terminal is brought back live", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "BACK");
+		await settle();
+
+		expect(card()).toBeNull();
+		expect(xterm.events).toEqual([]);
+	});
+
 	it("attaches again when a terminal it saw end is brought back from elsewhere", async () => {
 		await openLive();
 		endIt();
@@ -1407,6 +1854,176 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		await settle();
 
 		expect(xterm.events).toEqual(["<reset>", "LAST-SCREEN", "fail: no such file", MOUSE_OFF]);
+	});
+});
+
+// ─── The live screen over one from memory, as xterm draws it (#1010) ─────────
+
+/** What vt100's `contents_formatted` starts with: the cursor shown, plain attributes, a clear screen. */
+const CLEAR = "\u001b[?25h\u001b[m\u001b[H\u001b[J";
+
+/**
+ * xterm itself (6.0.0), unopened, at the PTY's size: it parses every write and
+ * reset the pane's stand-in takes, in the order the pane makes them.
+ */
+async function realXterm(): Promise<Terminal> {
+	const { Terminal: Xterm } = await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
+	const real = new Xterm({ cols: 100, rows: 30, allowProposedApi: true });
+	onTestFinished(() => real.dispose());
+	xterm.onWrite = (_term, text) => real.write(text);
+	xterm.onReset = () => real.reset();
+	return real;
+}
+
+/** Let `real` parse all it took: xterm parses on a timer, which these tests fake. */
+async function parsedBy(real: Terminal): Promise<void> {
+	let parsed = false;
+	real.write("", () => {
+		parsed = true;
+	});
+	for (let tick = 0; !parsed && tick < 100; tick++) await vi.advanceTimersByTimeAsync(1);
+	expect(parsed).toBe(true);
+}
+
+/**
+ * A pane over T, answered from memory with a copy whose tail ends in `left`,
+ * then answered live, once the hub says T is live, with `snapshot` and `tail`:
+ * xterm, having parsed all the pane wrote.
+ */
+async function liveOverRemembered(
+	left: string,
+	snapshot: string,
+	tail = "",
+	during = "",
+	inputModes = "",
+): Promise<Terminal> {
+	mountPane(ref(T), "live");
+	const real = await realXterm();
+	await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+	attachOk(T, `${CLEAR}REMEMBERED`, { cached: true, tail: [new TextEncoder().encode(left)] });
+	await settle();
+
+	useChannelsStore().updateChannelStatus(T, "live");
+	await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+	// Printed while the attach waits: the live snapshot holds it (#931).
+	if (during !== "") print(T, during);
+	attachOk(T, snapshot, {
+		tail: tail === "" ? [] : [new TextEncoder().encode(tail)],
+		...(inputModes !== "" && {
+			snapshot: { serialized: snapshot, cols: 100, rows: 30, cursorX: 0, cursorY: 0, inputModes },
+		}),
+	});
+	await settle();
+	await parsedBy(real);
+	return real;
+}
+
+/** The screen's first `count` rows, as xterm holds them, trailing blanks dropped. */
+function screenRows(real: Terminal, count: number): string[] {
+	const buffer = real.buffer.active;
+	return Array.from(
+		{ length: count },
+		(_, row) => buffer.getLine(buffer.baseY + row)?.translateToString(true) ?? "",
+	);
+}
+
+// The copy from memory ends in whatever its program left set. The live answer
+// replaces it as an attach that resets does: the snapshot assumes how a reset
+// draws text, and carries the input modes the program has now (#1012).
+describe("TerminalPane drawing the live screen over one from memory (#1010)", () => {
+	it("draws what was printed while it waited before the snapshot, which covers it", async () => {
+		const real = await liveOverRemembered("", `${CLEAR}live`, "", "DURING");
+
+		expect(xterm.events.slice(-3)).toEqual(["DURING", FULL_RESET, `${CLEAR}live`]);
+		expect(screenRows(real, 2)).toEqual(["live", ""]);
+	});
+
+	it("draws it from the top, whatever scrolling region and origin mode the copy left", async () => {
+		const real = await liveOverRemembered(
+			"\u001b[2;4r\u001b[?6h",
+			`${CLEAR}one\r\ntwo\r\nthree\r\nfour\r\nfive`,
+			// The program sets a region, then goes to the screen's top left corner.
+			"\u001b[3;5r\u001b[HX",
+		);
+
+		expect(screenRows(real, 6)).toEqual(["Xne", "two", "three", "four", "five", ""]);
+	});
+
+	it("draws it in ASCII, whatever character set the copy left in use", async () => {
+		const real = await liveOverRemembered(
+			// DEC line drawing in G0 and G1, and G1 in use.
+			"\u001b(0\u001b)0\u000e",
+			`${CLEAR}live`,
+			// The program readies line drawing in G1, as a terminal's `enacs` does,
+			// and goes on writing in G0.
+			"\u001b)0 now",
+		);
+
+		expect(screenRows(real, 1)).toEqual(["live now"]);
+	});
+
+	it("wraps its long rows, whatever the copy left of autowrap", async () => {
+		const real = await liveOverRemembered("\u001b[?7l", `${CLEAR}${"a".repeat(100)}bc`);
+
+		expect(screenRows(real, 2)).toEqual(["a".repeat(100), "bc"]);
+	});
+
+	it("writes over its text, whatever the copy left of insert mode", async () => {
+		const real = await liveOverRemembered("\u001b[4h", `${CLEAR}live\u001b[H`, "L");
+
+		expect(screenRows(real, 1)).toEqual(["Live"]);
+	});
+
+	it("draws it in the main buffer, as an attach that resets does", async () => {
+		const real = await liveOverRemembered(`\u001b[?1049h${CLEAR}ALT`, `${CLEAR}live`);
+
+		expect(real.buffer.active.type).toBe("normal");
+		expect(screenRows(real, 1)).toEqual(["live"]);
+	});
+
+	it("draws it at once, whatever frame the copy left open", async () => {
+		const real = await liveOverRemembered("\u001b[?2026h", `${CLEAR}live`);
+
+		expect(real.modes.synchronizedOutputMode).toBe(false);
+	});
+
+	it("links none of it, whatever hyperlink the copy left open", async () => {
+		const real = await liveOverRemembered(
+			"\u001b]8;;https://example.invalid/\u001b\\",
+			`${CLEAR}live`,
+		);
+
+		expect(screenRows(real, 1)).toEqual(["live"]);
+		// xterm keeps a cell's link in its own cell data, which its API leaves out.
+		const cell = real.buffer.active.getLine(real.buffer.active.baseY)?.getCell(0) as unknown as {
+			extended: { urlId: number };
+		};
+		expect(cell.extended.urlId).toBe(0);
+	});
+
+	it("takes the input modes the program has now from the live snapshot, not those of the copy", async () => {
+		const real = await liveOverRemembered(
+			"\u001b[?1h\u001b=\u001b[?1000h",
+			`${CLEAR}live`,
+			"",
+			"",
+			"\u001b[?2004h\u001b[?1004h",
+		);
+
+		expect(real.modes).toMatchObject({
+			applicationCursorKeysMode: false,
+			applicationKeypadMode: false,
+			bracketedPasteMode: true,
+			mouseTrackingMode: "none",
+			sendFocusMode: true,
+		});
+	});
+
+	it("drops the copy's scrollback, as an attach that resets does", async () => {
+		const real = await liveOverRemembered(`${"\r\n".repeat(30)}older`, `${CLEAR}live`);
+
+		expect(real.buffer.active.baseY).toBe(0);
+		expect(screenRows(real, 1)).toEqual(["live"]);
 	});
 });
 
@@ -1790,6 +2407,800 @@ describe("TerminalPane takes only the answers for the terminal it shows (#929)",
 
 		expect(errorBox()).toBeNull();
 		expect(attachedTo()).toEqual([T, U]);
+	});
+});
+
+// ─── A pane switched to another terminal (#966) ──────────────────────────────
+
+// xterm parses a write later than it takes it, and the pane kept one xterm
+// across terminals: what the terminal it left printed just before a switch was
+// parsed once the next one had bound it. xterm's answer to its query was typed
+// into the next terminal, its title and modes stayed, and a screen with no
+// snapshot to replace it stayed up under the new binding. Each terminal now
+// gets an xterm of its own, and the one it left is disposed.
+describe("TerminalPane switched to another terminal (#966)", () => {
+	const QUERY = "\u001b[6n";
+	const REPLY = "\u001b[1;1R";
+	/** A third terminal on HOST. */
+	const V = "01HZZZZZZZZZZZZZZZZZZZZZV6";
+	const xterms = () => [...root.querySelectorAll(".xterm")];
+	/** The pane's one `.xterm`, the same element and not one that merely looks like it. */
+	function theXterm(): Element | undefined {
+		const all = xterms();
+		expect(all).toHaveLength(1);
+		return all[0];
+	}
+	const size = () => [terminal().cols, terminal().rows];
+	const bells = (id: string) => useNotificationStore().bellCounts.get(id) ?? 0;
+	const unread = (id: string) => useNotificationStore().unreadLines.get(id) ?? 0;
+	const searchInput = () =>
+		root.querySelector<HTMLInputElement>('input[aria-label="Search terminal"]');
+	const searchShown = () =>
+		root.querySelector<HTMLElement>('[role="search"]')?.style.display !== "none";
+	const counts = () =>
+		root.querySelector(".search-overlay__match-count")?.textContent?.trim() ?? null;
+	const regexOn = () =>
+		root
+			.querySelector('button[title="Use Regular Expression"]')
+			?.classList.contains("search-overlay__toggle--active") ?? false;
+	const regexError = () =>
+		root.querySelector(".search-overlay__regex-error")?.textContent?.trim() ?? "";
+	const searches = () => xterm.searches as StandInSearch[];
+
+	/** U and V run on HOST too. */
+	function withTerminals(): void {
+		const channels = useChannelsStore();
+		channels.registerChannelHost(U, HOST);
+		channels.registerChannelHost(V, HOST);
+	}
+
+	/** T and U are listed, with the titles the hub computed for them. */
+	function listBoth(): void {
+		useChannelsStore().channels = [
+			listed(T, "live", { displayTitle: "T-NAME" }),
+			listed(U, "live", { displayTitle: "U-NAME" }),
+		];
+	}
+
+	/** This window holds both T's and U's write locks: the pane decides their size. */
+	function writesBoth(): void {
+		writer();
+		useWriteLockStore().handleWriteLock(U, CLIENT);
+	}
+
+	/** A pane showing T, whose ATTACH_OK writes `T-SCREEN` and carries `answer`. */
+	async function showingT({
+		setUp,
+		answer = {},
+	}: {
+		setUp?: () => void;
+		answer?: Partial<Frame>;
+	} = {}): Promise<Ref<string>> {
+		const channel = ref(T);
+		mountPane(channel, "live", {
+			setUp: () => {
+				withTerminals();
+				setUp?.();
+			},
+		});
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "T-SCREEN", answer);
+		await settle();
+		return channel;
+	}
+
+	/** The pane given U: its ATTACH sent, not answered. */
+	async function givenU(channel: Ref<string>): Promise<void> {
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo().at(-1)).toBe(U));
+	}
+
+	/** The pane given U, which answers with `U-SCREEN`. */
+	async function switched(channel: Ref<string>, over: Partial<Frame> = {}): Promise<void> {
+		await givenU(channel);
+		attachOk(U, "U-SCREEN", over);
+		await settle();
+	}
+
+	async function openSearch(): Promise<void> {
+		press({ ctrlKey: true, shiftKey: true, key: "F" }, "\u0006");
+		await settle();
+	}
+
+	async function typeSearch(query: string): Promise<void> {
+		const input = searchInput();
+		if (input === null) throw new Error("the search box is not shown");
+		input.value = query;
+		input.dispatchEvent(new Event("input"));
+		await settle();
+	}
+
+	async function toggleRegex(): Promise<void> {
+		root.querySelector<HTMLButtonElement>('button[title="Use Regular Expression"]')?.click();
+		await settle();
+	}
+
+	it("sends the terminal it switched to nothing xterm answers for the one it left", async () => {
+		const channel = await showingT({ setUp: writesBoth });
+		xterm.answer = (text) => (text.includes(QUERY) ? REPLY : null);
+		xterm.parse = "later";
+		print(T, QUERY);
+		await switched(channel);
+
+		drain();
+		await settle();
+
+		expect(inputsTo()).toEqual([]);
+	});
+
+	it("shows the terminal it switched to in a new xterm and keeps only that one", async () => {
+		const channel = await showingT();
+		const before = terminal();
+
+		await switched(channel);
+
+		expect(terminal()).not.toBe(before);
+		expect(theXterm()).toBe(terminal().element);
+		expect(before.disposed).toBe(true);
+	});
+
+	it("shows an empty screen for a terminal switched to without a snapshot", async () => {
+		const channel = await showingT();
+
+		await switched(channel, { snapshot: null, tail: [], cached: true });
+
+		expect(terminal().parsed).toEqual([]);
+	});
+
+	it("shows the title of the terminal it switched to, not the one it left", async () => {
+		const channel = await showingT({ setUp: listBoth, answer: { dynamicTitle: "T-TITLE" } });
+		expect(paneTitleText()).toBe("T-TITLE");
+
+		await switched(channel);
+
+		expect(paneTitleText()).toBe("U-NAME");
+	});
+
+	it("keeps the keyboard when it switches to another terminal", async () => {
+		const channel = await showingT();
+		terminal().focus();
+
+		await switched(channel);
+
+		expect(terminal().element.contains(document.activeElement)).toBe(true);
+	});
+
+	it("leaves the keyboard elsewhere when it switches without it", async () => {
+		const channel = await showingT({ setUp: () => useChannelsStore().selectChannel(T) });
+		const elsewhere = document.body.appendChild(document.createElement("button"));
+		onTestFinished(() => elsewhere.remove());
+		await givenU(channel);
+		useChannelsStore().selectChannel(U);
+		await settle();
+		elsewhere.focus();
+
+		attachOk(U, "U-SCREEN");
+		await settle();
+
+		expect(document.activeElement).toBe(elsewhere);
+	});
+
+	/** T's ATTACH_OK replay begun in its xterm: its opening marker parsed, not its closing one. */
+	async function replayBegun(): Promise<{ channel: Ref<string>; left: StandInTerminal }> {
+		const channel = ref(T);
+		mountPane(channel, "live", { setUp: withTerminals });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		xterm.parse = "later";
+		attachOk(T, "T-SCREEN");
+		await settle();
+		const left = terminal();
+		parseOf(left, 1);
+		return { channel, left };
+	}
+
+	it("rings the bell of the terminal it switched to while the one it left never finishes its replay", async () => {
+		const { channel, left } = await replayBegun();
+		await switched(channel);
+		dropQueueOf(left);
+		parseOf(terminal());
+
+		print(U, "\u0007");
+		parseOf(terminal());
+
+		expect(bells(U)).toBe(1);
+	});
+
+	it("keeps the bells of the terminal it switched to's replay muted while the one it left finishes its own", async () => {
+		const { channel, left } = await replayBegun();
+		await givenU(channel);
+		attachOk(U, "U-SCREEN\u0007");
+		await settle();
+		const shown = terminal();
+
+		parseOf(shown, 1);
+		parseOf(left);
+		parseOf(shown);
+
+		expect(bells(U)).toBe(0);
+	});
+
+	it("searches the terminal it switched to", async () => {
+		const channel = await showingT();
+		const [left] = searches();
+		await switched(channel);
+
+		await openSearch();
+		await typeSearch("needle");
+
+		const shown = searches().at(-1);
+		expect(shown).not.toBe(left);
+		expect(shown?.findNext).toHaveBeenCalledWith(
+			"needle",
+			expect.objectContaining({ incremental: true }),
+		);
+		expect(left?.dispose).toHaveBeenCalled();
+	});
+
+	it("searches an open query again in the terminal it switched to", async () => {
+		const channel = await showingT();
+		await openSearch();
+		await toggleRegex();
+		await typeSearch("ne+dle");
+		searches()[0]?.report(3, 0);
+		await settle();
+		expect(counts()).toBe("1/3");
+
+		await switched(channel);
+
+		const shown = searches().at(-1);
+		expect(searchInput()?.value).toBe("ne+dle");
+		expect(regexOn()).toBe(true);
+		expect(shown?.findNext).toHaveBeenCalledWith(
+			"ne+dle",
+			expect.objectContaining({ regex: true }),
+		);
+		expect(counts()).toBe("0/0");
+		shown?.report(5, 1);
+		await settle();
+		expect(counts()).toBe("2/5");
+	});
+
+	it("shows no count of the terminal it left for an invalid search", async () => {
+		const channel = await showingT();
+		await openSearch();
+		await toggleRegex();
+		await typeSearch("needle");
+		searches()[0]?.report(3, 0);
+		await settle();
+		await typeSearch("(");
+		expect(counts()).toBe("1/3");
+		expect(regexError()).not.toBe("");
+
+		await switched(channel);
+
+		expect(counts()).toBe("0/0");
+		expect(searchInput()?.value).toBe("(");
+		expect(regexError()).not.toBe("");
+		expect(searches().at(-1)?.findNext).not.toHaveBeenCalled();
+	});
+
+	it("draws the terminal it switched to with the profile applied last", async () => {
+		const channel = await showingT({
+			setUp: () => {
+				useThemeStore().appearance.scrollbar.style = "hidden";
+			},
+		});
+		paneProfile().profile.value = {
+			...paneProfile().profile.value,
+			fontSize: 18,
+			fontFamily: '"Fira Code"',
+			cursorStyle: "underline",
+			scrollback: 1234,
+			scrollbarMarkers: false,
+		};
+		await settle();
+
+		await switched(channel);
+
+		expect(terminal().options).toMatchObject({
+			fontSize: 18,
+			fontFamily: '"Fira Code"',
+			cursorStyle: "underline",
+			cursorBlink: false,
+			scrollback: 1234,
+			overviewRuler: { width: 1 },
+		});
+	});
+
+	it("draws the terminal it switched to in the theme set last", async () => {
+		const channel = await showingT();
+		const later = BUNDLED_THEMES.nord!;
+		useThemeStore().applyTheme(later);
+		await settle();
+
+		await switched(channel);
+
+		expect(terminal().options.theme).toEqual(useThemeStore().toXtermTheme(later.colors));
+	});
+
+	it("draws the terminal it switched to at its PTY size", async () => {
+		const channel = await showingT();
+
+		await switched(channel, { cols: 120, rows: 40 });
+
+		expect(size()).toEqual([120, 40]);
+	});
+
+	it("sizes the scrollbar of the terminal it switched to", async () => {
+		const channel = await showingT();
+		await switched(channel);
+
+		useThemeStore().appearance.scrollbar.widthThin = 9;
+		window.dispatchEvent(new Event("nt:scrollbar-changed"));
+
+		expect(terminal().options.overviewRuler).toMatchObject({ width: 9 });
+	});
+
+	it("draws the terminal it switched to in its host's theme", async () => {
+		const own = BUNDLED_THEMES.nord!;
+		const channel = await showingT({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [host(HOST, "pi", JSON.stringify({ theme: own.name }))];
+			},
+		});
+		useThemeStore().applyTheme(BUNDLED_THEMES.dracula!);
+		await settle();
+
+		await switched(channel);
+
+		expect(terminal().options.theme).toEqual(useThemeStore().toXtermTheme(own.colors));
+	});
+
+	// The pane read its host's theme once, at mount: a terminal on another host
+	// was drawn in the first host's theme (#997).
+	it("draws a terminal on another host in that host's theme", async () => {
+		const channel = await showingT({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [
+					host(HOST, "pi", JSON.stringify({ theme: "nord" })),
+					host(PI, "other", JSON.stringify({ theme: "gruvbox-dark" })),
+				];
+			},
+		});
+		useChannelsStore().registerChannelHost(U, PI);
+
+		await switched(channel);
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES["gruvbox-dark"]!.colors),
+		);
+	});
+
+	it("draws a terminal on a host with no theme of its own in the active theme", async () => {
+		const channel = await showingT({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [
+					host(HOST, "pi", JSON.stringify({ theme: "nord" })),
+					host(PI, "other"),
+				];
+			},
+		});
+		useThemeStore().applyTheme(BUNDLED_THEMES.dracula!);
+		await settle();
+		useChannelsStore().registerChannelHost(U, PI);
+
+		await switched(channel);
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES.dracula!.colors),
+		);
+	});
+
+	it("fits the terminal it switched to to its pane", async () => {
+		paneHasASize();
+		const channel = await showingT({ setUp: writesBoth });
+		expect(size()).toEqual([80, 24]);
+		await givenU(channel);
+		xterm.fit = { cols: 90, rows: 28 };
+
+		attachOk(U, "U-SCREEN");
+		await settle();
+
+		expect(size()).toEqual([90, 28]);
+		expect(terminal().unicode.activeVersion).toBe("11");
+	});
+
+	it("keeps the size of a pane out of sight that switches", async () => {
+		xterm.fit = { cols: 132, rows: 43 };
+		const channel = await showingT({ setUp: writesBoth });
+		expect(size()).toEqual([132, 43]);
+		await givenU(channel);
+		xterm.fit = { cols: 90, rows: 28 };
+
+		attachOk(U, "U-SCREEN");
+		await settle();
+
+		expect(size()).toEqual([132, 43]);
+	});
+
+	it("fits its terminal again once the font settles", async () => {
+		paneHasASize();
+		mountPane(ref(T), "live", { setUp: writer });
+		// Promises only: the frames the refit waits for have not passed.
+		await settle();
+		expect(size()).toEqual([80, 24]);
+
+		xterm.fit = { cols: 90, rows: 28 };
+
+		await vi.waitFor(() => expect(size()).toEqual([90, 28]));
+	});
+
+	it("fits the terminal it switched to again once the font settles", async () => {
+		paneHasASize();
+		const channel = await showingT({ setUp: writesBoth });
+		await switched(channel);
+		expect(size()).toEqual([80, 24]);
+
+		xterm.fit = { cols: 90, rows: 28 };
+
+		await vi.waitFor(() => expect(size()).toEqual([90, 28]));
+	});
+
+	/**
+	 * T attached from what the hub remembers (the banner shows), then U given and
+	 * its ATTACH timed out: the banner stays over T's screen. Reconnect asks for U.
+	 */
+	async function reconnectingOverT(): Promise<void> {
+		const channel = await showingT({ answer: { cached: true } });
+		expect(banner()).not.toBeNull();
+		await givenU(channel);
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, U]));
+	}
+
+	it("writes the snapshot of a terminal reconnected over another's screen", async () => {
+		await reconnectingOverT();
+		const before = terminal();
+		print(U, "U-OUT");
+
+		attachOk(U, "U-SCREEN");
+		await settle();
+
+		expect(terminal()).not.toBe(before);
+		expect(terminal().parsed).toContain("U-SCREEN");
+		expect(xterm.events).not.toContain("U-OUT");
+	});
+
+	it("shows an ended terminal it switched to in a new xterm", async () => {
+		const channel = await showingT();
+		const before = terminal();
+		await givenU(channel);
+
+		refuse(U, lastOutput());
+		await settle();
+
+		expect(terminal()).not.toBe(before);
+		expect(before.disposed).toBe(true);
+		expect(terminal().parsed).toContain("LAST-SCREEN");
+	});
+
+	it("shows the last output of a terminal reconnected over another's screen", async () => {
+		await reconnectingOverT();
+
+		refuse(U, lastOutput());
+		await settle();
+
+		expect(terminal().parsed).toContain("LAST-SCREEN");
+	});
+
+	it("shows an ended terminal it switched to over nothing of the one it left when the hub kept nothing", async () => {
+		const channel = await showingT();
+		const before = terminal();
+		await givenU(channel);
+
+		refuse(U);
+		await settle();
+
+		expect(terminal()).not.toBe(before);
+		expect(terminal().parsed).not.toContain("T-SCREEN");
+	});
+
+	it("shows a terminal it switched to that is gone over nothing of the one it left", async () => {
+		const channel = await showingT();
+		const before = terminal();
+		await givenU(channel);
+
+		hear({ type: "ERROR", code: "CHANNEL_NOT_FOUND", message: "No such terminal.", channelId: U });
+		await settle();
+
+		expect(terminal()).not.toBe(before);
+		expect(terminal().parsed).toEqual([]);
+	});
+
+	describe("keeps its xterm when the terminal it shows is attached again", () => {
+		it("by a Reconnect", async () => {
+			await showingT({ answer: { cached: true } });
+			const before = terminal().element;
+
+			button("Reconnect")?.click();
+			await vi.waitFor(() => expect(attachedTo()).toEqual([T, T]));
+			attachOk(T, "T-AGAIN");
+			await settle();
+
+			expect(theXterm()).toBe(before);
+		});
+
+		it("by a Restart", async () => {
+			await openEnded();
+			const before = terminal().element;
+
+			button("Restart")?.click();
+			await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+			spawnOk(T);
+			await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+			attachOk(T, "AGAIN");
+			await settle();
+
+			expect(theXterm()).toBe(before);
+		});
+
+		it("by the socket coming back", async () => {
+			await openLive();
+			const before = terminal().element;
+
+			useSessionStore().reconnectCount++;
+			await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+			attachOk(T, "AGAIN");
+			await settle();
+
+			expect(theXterm()).toBe(before);
+		});
+	});
+
+	it("rings the bell of the terminal it switched to", async () => {
+		const channel = await showingT();
+		await switched(channel);
+
+		print(U, "\u0007");
+
+		expect(bells(U)).toBe(1);
+	});
+
+	it("takes its shortcuts in the terminal it switched to", async () => {
+		const channel = await showingT();
+		await switched(channel);
+
+		expect(press({ ctrlKey: true, shiftKey: true, key: "F" }, "\u0006")).toBe(false);
+		await settle();
+
+		expect(searchShown()).toBe(true);
+	});
+
+	it("leaves no xterm when it closes after a switch", async () => {
+		const channel = await showingT();
+		await switched(channel);
+		const shown = terminal();
+
+		closePane();
+
+		expect(root.querySelectorAll(".xterm")).toHaveLength(0);
+		expect(shown.disposed).toBe(true);
+	});
+
+	it("rings nothing for a bell of the terminal it left while it waits for the next", async () => {
+		xterm.profile = { bellSound: "system" };
+		const channel = await showingT({ setUp: () => useChannelsStore().selectChannel(T) });
+		xterm.parse = "later";
+		print(T, "\u0007");
+		await givenU(channel);
+
+		drain();
+
+		expect(bells(U)).toBe(0);
+		expect(bells(T)).toBe(0);
+		expect(bellSound).not.toHaveBeenCalled();
+	});
+
+	it("rings again for the terminal it holds once it asks for it again", async () => {
+		const channel = await showingT();
+		xterm.parse = "later";
+		print(T, "\u0007");
+		await givenU(channel);
+		channel.value = T;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, T]));
+
+		drain();
+
+		expect(bells(T)).toBe(1);
+	});
+
+	it("clears the badge of the selected terminal that rang", async () => {
+		await showingT({ setUp: () => useChannelsStore().selectChannel(T) });
+		useNotificationStore().setActivity(T);
+		print(T, "\u0007");
+		expect(bells(T)).toBe(1);
+
+		await vi.advanceTimersByTimeAsync(1_000);
+
+		expect(bells(T)).toBe(0);
+		expect(useNotificationStore().activityDots.get(T) ?? false).toBe(false);
+	});
+
+	it("clears only the badge of the terminal that rang", async () => {
+		const channel = await showingT({ setUp: () => useChannelsStore().selectChannel(T) });
+		print(T, "\u0007");
+		await givenU(channel);
+		useChannelsStore().selectChannel(U);
+		await settle();
+		useNotificationStore().incrementBellCount(U);
+
+		await vi.advanceTimersByTimeAsync(1_000);
+
+		expect(bells(U)).toBe(1);
+		expect(bells(T)).toBe(1);
+	});
+
+	it("keeps its xterm while it waits for the terminal it was given", async () => {
+		const channel = await showingT();
+		const before = terminal().element;
+
+		await givenU(channel);
+
+		expect(theXterm()).toBe(before);
+	});
+
+	it("keeps its xterm when the terminal it waits for is superseded", async () => {
+		const channel = await showingT();
+		const before = terminal().element;
+		await givenU(channel);
+
+		channel.value = V;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, V]));
+
+		expect(theXterm()).toBe(before);
+	});
+
+	it("keeps its xterm when the terminal it was given never answers", async () => {
+		const channel = await showingT();
+		const before = terminal().element;
+		await givenU(channel);
+
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+
+		expect(theXterm()).toBe(before);
+	});
+
+	it("keeps its xterm when its attach for the terminal it was given cannot be sent", async () => {
+		const channel = await showingT();
+		const before = terminal();
+		vi.mocked(useSessionStore().wsClient.send).mockImplementation((msg) => {
+			if (msg.type === "ATTACH") throw new Error("WebSocket not connected");
+			sent.push(msg as Frame);
+		});
+
+		channel.value = U;
+		await settle();
+
+		expect(theXterm()).toBe(before.element);
+		expect(before.disposed).toBe(false);
+	});
+
+	it("clears unread lines on a scroll in the terminal it switched to", async () => {
+		const channel = await showingT();
+		await givenU(channel);
+		useChannelsStore().selectChannel(U);
+		attachOk(U, "U-SCREEN");
+		await settle();
+		useNotificationStore().addUnreadLines(U, 7);
+
+		print(U, "one\r\ntwo");
+
+		expect(unread(U)).toBe(0);
+	});
+
+	it("shows the title of the terminal it was given while it waits for it", async () => {
+		const channel = await showingT({ setUp: listBoth, answer: { dynamicTitle: "T-TITLE" } });
+		xterm.parse = "later";
+		print(T, "\u001b]0;T-LATE\u0007");
+		await givenU(channel);
+
+		drain();
+		await settle();
+
+		expect(paneTitleText()).toBe("U-NAME");
+	});
+
+	it("shows the title of the terminal it was given when it never answers", async () => {
+		const channel = await showingT({ setUp: listBoth, answer: { dynamicTitle: "T-TITLE" } });
+		xterm.parse = "later";
+		print(T, "\u001b]0;T-LATE\u0007");
+		await givenU(channel);
+		drain();
+
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+
+		expect(paneTitleText()).toBe("U-NAME");
+	});
+
+	it("takes the titles of the terminal it holds again once it asks for it again", async () => {
+		const channel = await showingT({ setUp: listBoth, answer: { dynamicTitle: "T-TITLE" } });
+		xterm.parse = "later";
+		print(T, "\u001b]0;T-NEW\u0007");
+		await givenU(channel);
+		channel.value = T;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, T]));
+		expect(paneTitleText()).toBe("T-NAME");
+
+		drain();
+		await settle();
+
+		expect(paneTitleText()).toBe("T-NEW");
+	});
+
+	it("keeps the unread lines of the terminal it was given when the one it left scrolls", async () => {
+		const channel = await showingT();
+		useNotificationStore().addUnreadLines(U, 7);
+		xterm.parse = "later";
+		print(T, "one\r\ntwo");
+		await givenU(channel);
+		useChannelsStore().selectChannel(U);
+		await settle();
+
+		drain();
+
+		expect(unread(U)).toBe(7);
+	});
+
+	it("clears unread lines on a scroll once it asks again for the terminal it holds", async () => {
+		const channel = await showingT({ setUp: () => useChannelsStore().selectChannel(T) });
+		xterm.parse = "later";
+		print(T, "one\r\ntwo");
+		await givenU(channel);
+		channel.value = T;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, T]));
+		useNotificationStore().addUnreadLines(T, 5);
+
+		drain();
+
+		expect(unread(T)).toBe(0);
+	});
+
+	it("replaces an xterm that only listened to the terminal it left", async () => {
+		const channel = ref(T);
+		mountPane(channel, "dead", { setUp: withTerminals });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		refuse(T);
+		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+		const before = terminal();
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnOk(T);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		print(T, "T-EARLY");
+		expect(before.parsed).toContain("T-EARLY");
+
+		await switched(channel);
+
+		expect(terminal()).not.toBe(before);
+		expect(terminal().parsed).not.toContain("T-EARLY");
+	});
+
+	it("draws nothing the terminal it left printed on the screen of the one it switched to", async () => {
+		const channel = await showingT();
+		xterm.parse = "later";
+		print(T, "T-LATE");
+		await switched(channel);
+
+		drain();
+
+		expect(terminal().parsed).toEqual(["U-SCREEN"]);
 	});
 });
 
@@ -2736,6 +4147,64 @@ describe("TerminalPane over a host its user disconnected (#648)", () => {
 		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
 	});
 
+	// The terminal ran on while its host was disconnected: what it printed
+	// then is in the live snapshot only (#1010).
+	it("draws the live answer to its Reconnect over what it last showed (#1010)", async () => {
+		await openLive();
+		useHostsStore().setDisconnectedByUser([HOST]);
+		await settle();
+		xterm.events.length = 0;
+		// Connecting the host clears its disconnection before the attach goes.
+		vi.spyOn(useHostsStore(), "connectHost").mockImplementation(async () => {
+			useHostsStore().setDisconnectedByUser([]);
+			return { ok: true, status: 200, body: {} };
+		});
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
+	it("draws the live answer to its Reconnect when it opened over a host already disconnected (#1010)", async () => {
+		mountPane(ref(T), "live", { setUp: () => useHostsStore().setDisconnectedByUser([HOST]) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+		vi.spyOn(useHostsStore(), "connectHost").mockImplementation(async () => {
+			useHostsStore().setDisconnectedByUser([]);
+			return { ok: true, status: 200, body: {} };
+		});
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+	});
+
+	it("draws the live answer over what it last showed when its host is connected from elsewhere (#1010)", async () => {
+		await openLive();
+		useHostsStore().setDisconnectedByUser([HOST]);
+		useChannelsStore().updateChannelStatus(T, "orphan");
+		await settle();
+		xterm.events.length = 0;
+
+		useHostsStore().setDisconnectedByUser([]);
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
 	it("attaches at once on a Reconnect whose host nobody disconnected", async () => {
 		mountPane(ref(T), "live");
 		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
@@ -2747,6 +4216,68 @@ describe("TerminalPane over a host its user disconnected (#648)", () => {
 
 		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
 		expect(connect).not.toHaveBeenCalled();
+	});
+
+	// A pane still owed its spawn has no terminal yet: its Reconnect asked the
+	// hub for the pending id, and the pane then said its terminal was gone
+	// (#980). Retry or Connect is its way back.
+	it("shows no Not connected banner while it is owed its spawn: while its spawn runs", async () => {
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+
+		useHostsStore().setDisconnectedByUser([HOST]);
+		await settle();
+
+		expect(banner()).toBeNull();
+		expect(button("Reconnect")).toBeUndefined();
+		expect(attaches()).toEqual([]);
+	});
+
+	it("shows no Not connected banner while it is owed its spawn: after its spawn failed", async () => {
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("SPAWN_FAILED", "the shell could not start");
+		await vi.waitFor(() => expect(errorBox()).not.toBeNull());
+
+		useHostsStore().setDisconnectedByUser([HOST]);
+		await settle();
+
+		expect(banner()).toBeNull();
+		expect(button("Reconnect")).toBeUndefined();
+		expect(errorBox()?.textContent).toContain("the shell could not start");
+		expect(button("Retry")).toBeDefined();
+		expect(attaches()).toEqual([]);
+	});
+
+	it("shows no Not connected banner while it is owed its spawn: after its host's password or passphrase was not given", async () => {
+		openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnRefused("AUTH_CANCELLED", "Authentication cancelled by user");
+		await vi.waitFor(() => expect(button("Connect")).toBeDefined());
+
+		useHostsStore().setDisconnectedByUser([HOST]);
+		await settle();
+
+		expect(banner()).toBeNull();
+		expect(button("Reconnect")).toBeUndefined();
+		expect(button("Connect")).toBeDefined();
+		expect(attaches()).toEqual([]);
+	});
+
+	it("shows no Not connected banner while it is owed its spawn: once it started", async () => {
+		const channel = openNew(HOST);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		spawnOk(REAL);
+		await settle();
+		expect(channel.value).toBe(REAL);
+
+		useHostsStore().setDisconnectedByUser([HOST]);
+		await settle();
+		expect(banner()?.textContent).toContain("Not connected.");
+		vi.spyOn(useHostsStore(), "connectHost").mockResolvedValue({ ok: true, status: 200, body: {} });
+		button("Reconnect")?.click();
+
+		await vi.waitFor(() => expect(attachedTo()).toEqual([REAL]));
 	});
 });
 
@@ -3045,4 +4576,657 @@ describe("TerminalPane overlay card colours (#574)", () => {
 			expect(contrastOf(line), "quiet line").toBeGreaterThanOrEqual(TEXT_CONTRAST_AA);
 		});
 	}
+});
+
+// ─── Pasting through an agent that adapts input (#1012) ──────────────────────
+//
+// While the hub says the terminal's agent writes input in its program's form,
+// the pane brackets every paste itself, with the markers in its text taken
+// out, and xterm pastes nothing of its own. Otherwise xterm pastes as always.
+
+describe("TerminalPane pasting through an agent that adapts input (#1012)", () => {
+	const START = "\u001b[200~";
+	const END = "\u001b[201~";
+
+	/** A paste of `text` on the pane's xterm, as the browser fires it at its textarea. */
+	function paste(text: string): Event {
+		const event = new Event("paste", { bubbles: true, cancelable: true });
+		Object.defineProperty(event, "clipboardData", { value: { getData: () => text } });
+		terminal().textarea.dispatchEvent(event);
+		return event;
+	}
+
+	/** A pane over T, the writer, attached with what the hub says of its agent. */
+	async function attachedSaying(adaptsInput: boolean | undefined): Promise<void> {
+		mountPane(ref(T), "live", { setUp: writer });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "LIVE", adaptsInput === undefined ? {} : { adaptsInput });
+		await settle();
+	}
+
+	it("sends a paste bracketed by the pane, its own markers taken out, and nothing from xterm", async () => {
+		await attachedSaying(true);
+
+		paste(`a\nb${END}c${START}d`);
+
+		expect(inputs()).toEqual([`${START}a\rbcd${END}`]);
+	});
+
+	// Removing them until none is left took a pass per level of nesting: a
+	// clipboard of nested markers made it quadratic, before any size check.
+	it("takes out deeply nested markers in time linear in the text", async () => {
+		await attachedSaying(true);
+		const depth = 100_000;
+		const nested = `${"\u001b[20".repeat(depth)}\u001b[201~${"1~".repeat(depth)}x`;
+
+		const started = performance.now();
+		paste(nested);
+		const took = performance.now() - started;
+
+		expect(inputs()).toEqual([`${START}x${END}`]);
+		expect(took).toBeLessThan(1000);
+	});
+
+	it("takes out a marker its text would form again once another is taken out", async () => {
+		await attachedSaying(true);
+
+		paste("\u001b[20\u001b[201~1~rm -rf ~\r");
+
+		expect(inputs()).toEqual([`${START}rm -rf ~\r${END}`]);
+	});
+
+	it("leaves the paste to xterm when the agent does not adapt input", async () => {
+		await attachedSaying(false);
+
+		paste("a\nb");
+
+		expect(inputs()).toEqual(["a\rb"]);
+	});
+
+	it("leaves the paste to xterm when an older hub says nothing of it", async () => {
+		await attachedSaying(undefined);
+
+		paste("a\nb");
+
+		expect(inputs()).toEqual(["a\rb"]);
+	});
+
+	it("sends nothing, and lets xterm paste nothing, without the write lock", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "LIVE", { adaptsInput: true });
+		await settle();
+
+		const event = paste("a");
+
+		expect(event.defaultPrevented).toBe(true);
+		expect(inputs()).toEqual([]);
+	});
+
+	it("sends nothing, and lets xterm paste nothing, while the socket is down", async () => {
+		await attachedSaying(true);
+		(useSessionStore().wsClient as unknown as { isConnected: boolean }).isConnected = false;
+
+		const event = paste("a");
+
+		expect(event.defaultPrevented).toBe(true);
+		expect(inputs()).toEqual([]);
+	});
+
+	it("refuses a paste too large for one INPUT, in bytes, with a toast and nothing written", async () => {
+		await attachedSaying(true);
+		xterm.events.length = 0;
+
+		paste("x".repeat(65_530));
+		paste("€".repeat(30_000));
+
+		expect(inputs()).toEqual([]);
+		expect(xterm.events).toEqual([]);
+		expect(useToastStore().messages.map((m) => m.text)).toEqual([
+			"This paste is too large to send (64 KiB at most).",
+			"This paste is too large to send (64 KiB at most).",
+		]);
+	});
+
+	it("brackets a paste on the terminal it spawned, from what its SPAWN_OK said", async () => {
+		openNew(HOST);
+		useWriteLockStore().handleWriteLock(REAL, CLIENT);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		hear({
+			type: "SPAWN_OK",
+			channelId: REAL,
+			requestId: spawns().at(-1)?.requestId,
+			adaptsInput: true,
+		});
+		await settle();
+
+		paste("a");
+
+		expect(attaches()).toEqual([]);
+		expect(inputs()).toEqual([`${START}a${END}`]);
+	});
+
+	it("follows the terminal it shows: true to false, false to true, true to true", async () => {
+		const channel = ref(T);
+		mountPane(channel, "live", {
+			setUp: () => {
+				withU();
+				useChannelsStore().registerChannelHost(V, HOST);
+				const lock = useWriteLockStore();
+				for (const id of [T, U, V]) lock.handleWriteLock(id, CLIENT);
+			},
+		});
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "T", { adaptsInput: true });
+		await settle();
+
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		attachOk(U, "U", { adaptsInput: false });
+		await settle();
+		paste("to-u");
+
+		channel.value = T;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, T]));
+		attachOk(T, "T", { adaptsInput: true });
+		await settle();
+		paste("to-t");
+
+		channel.value = V;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, T, V]));
+		attachOk(V, "V", { adaptsInput: true });
+		await settle();
+		paste("to-v");
+
+		expect(inputs()).toEqual(["to-u", `${START}to-t${END}`, `${START}to-v${END}`]);
+	});
+
+	it("follows a later answer for the same terminal", async () => {
+		await attachedSaying(true);
+
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE", { adaptsInput: false });
+		await settle();
+		paste("plain");
+
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "LIVE", { adaptsInput: true });
+		await settle();
+		paste("bracketed");
+
+		expect(inputs()).toEqual(["plain", `${START}bracketed${END}`]);
+	});
+
+	it("writes a snapshot from an older agent as before: no screen or mode state", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		xterm.events.length = 0;
+
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "LIVE-SNAP"]);
+	});
+});
+
+// ─── Streaming a paste (#1014) ───────────────────────────────────────────────
+//
+// While the hub says the terminal's agent takes a paste as PASTE chunks, the
+// pane sends it so: no markers (the agent writes them), at most 256 KiB not
+// yet acknowledged, what is typed meanwhile held behind it, its progress shown
+// after a second, and its outcome said when it ends early.
+
+describe("TerminalPane streaming a paste (#1014)", () => {
+	const CHUNK = 32 * 1024;
+	type PasteFrame = {
+		pasteId: number;
+		seq: number;
+		data: Uint8Array;
+		last: boolean;
+		channelId: string;
+	};
+
+	function paste(text: string): Event {
+		const event = new Event("paste", { bubbles: true, cancelable: true });
+		Object.defineProperty(event, "clipboardData", { value: { getData: () => text } });
+		terminal().textarea.dispatchEvent(event);
+		return event;
+	}
+	const chunks = () => sent.filter((m) => m.type === "PASTE") as unknown as PasteFrame[];
+	const cancels = () => sent.filter((m) => m.type === "PASTE_CANCEL");
+	const pasteId = () => chunks().at(-1)?.pasteId as number;
+	const toasts = () => useToastStore().messages.map((m) => m.text);
+	/** The order of what the pane sent of pastes and input. */
+	const order = () =>
+		sent
+			.filter((m) => m.type === "PASTE" || m.type === "PASTE_CANCEL" || m.type === "INPUT")
+			.map((m) =>
+				m.type === "INPUT"
+					? `INPUT ${new TextDecoder().decode(m.data as Uint8Array)}`
+					: m.type === "PASTE"
+						? `PASTE ${(m as unknown as PasteFrame).seq}`
+						: "CANCEL",
+			);
+	function ack(seq: number, id = pasteId(), channelId = T): void {
+		hear({ type: "PASTE_ACK", channelId, pasteId: id, seq });
+	}
+	function closed(reason: string, written?: number, id = pasteId()): void {
+		hear({
+			type: "PASTE_CLOSED",
+			channelId: T,
+			pasteId: id,
+			reason,
+			...(written === undefined ? {} : { written }),
+		});
+	}
+
+	/** A pane over T, the writer, its agent streaming pastes (or what `over` says). */
+	async function streaming(
+		over: Record<string, unknown> = { adaptsInput: true, streamsPaste: true },
+	) {
+		mountPane(ref(T), "live", { setUp: writer });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "LIVE", over);
+		await settle();
+	}
+
+	it("WB1: sends a window of 8 chunks, then one more per acknowledgement, the last marked, no markers", async () => {
+		await streaming();
+		const text = "a".repeat(1024 * 1024);
+
+		paste(text);
+
+		expect(chunks()).toHaveLength(8);
+		expect(chunks().map((c) => [c.seq, c.data.byteLength, c.last])).toEqual(
+			[0, 1, 2, 3, 4, 5, 6, 7].map((seq) => [seq, CHUNK, false]),
+		);
+		ack(0);
+		expect(chunks()).toHaveLength(9);
+		for (let seq = 1; seq < 32; seq++) ack(seq);
+		expect(chunks()).toHaveLength(32);
+		expect(chunks().at(-1)?.last).toBe(true);
+		expect(chunks().filter((c) => c.last)).toHaveLength(1);
+		const joined = new TextDecoder().decode(Uint8Array.from(chunks().flatMap((c) => [...c.data])));
+		expect(joined).toBe(text);
+		expect(inputs()).toEqual([]);
+	});
+
+	it("WB2: strips the markers and turns line ends into CR before chunking, even across a chunk boundary", async () => {
+		await streaming();
+		const before = "x".repeat(CHUNK - 3);
+		// The nested marker straddles the first chunk's end once stripped text is cut.
+		paste(`${before}\u001b[20\u001b[201~1~a\r\nb\nc`);
+		for (let seq = 0; seq < chunks().length; seq++) ack(seq);
+
+		const joined = new TextDecoder().decode(Uint8Array.from(chunks().flatMap((c) => [...c.data])));
+		expect(joined).toBe(`${before}a\rb\rc`);
+	});
+
+	it("WB2: applies the bound to the normalised bytes, not the raw text", async () => {
+		await streaming();
+
+		paste("a\r\n".repeat(6_000_000));
+
+		expect(toasts()).toEqual([]);
+		expect(chunks()).toHaveLength(8);
+	});
+
+	it("WB2: brings the view down and clears the selection, with no INPUT", async () => {
+		await streaming();
+		const active = terminal().buffer.active;
+		active.baseY = 70;
+		active.viewportY = 50;
+		xterm.selection = true;
+
+		paste("x");
+
+		expect(active.viewportY).toBe(70);
+		expect(xterm.selection).toBe(false);
+		expect(inputs()).toEqual([]);
+	});
+
+	it("WB3: holds what is typed behind unsent chunks, and sends it after the last one", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		type("ab");
+		expect(inputs()).toEqual([]);
+
+		ack(0);
+
+		expect(order().slice(-2)).toEqual(["PASTE 8", "INPUT ab"]);
+	});
+
+	it("WB3: cancels on Ctrl+C, then sends what was held, then the Ctrl+C", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		type("a");
+
+		type("\u0003");
+
+		expect(order().slice(-3)).toEqual(["CANCEL", "INPUT a", "INPUT \u0003"]);
+		ack(0);
+		expect(chunks()).toHaveLength(8);
+	});
+
+	it("WB3: sends what was held when the agent closes the paste", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		type("a");
+
+		closed("overflow", 4096);
+
+		expect(inputs()).toEqual(["a"]);
+	});
+
+	it("WB3: drops what was held when the agent is lost", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		type("a");
+
+		closed("agent_lost");
+
+		expect(inputs()).toEqual([]);
+	});
+
+	it("WB3: drops what was held when the write lock is lost, even once it comes back", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		type("a");
+
+		useWriteLockStore().handleWriteLock(T, OTHER_CLIENT);
+		await settle();
+		useWriteLockStore().handleWriteLock(T, CLIENT);
+		await settle();
+		ack(0);
+
+		expect(inputs()).toEqual([]);
+		expect(chunks()).toHaveLength(8);
+	});
+
+	it("WB3: drops what was held when the pane leaves the terminal, sending it nowhere", async () => {
+		const channel = ref(T);
+		mountPane(channel, "live", {
+			setUp: () => {
+				withU();
+				const lock = useWriteLockStore();
+				for (const id of [T, U]) lock.handleWriteLock(id, CLIENT);
+			},
+		});
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "T", { adaptsInput: true, streamsPaste: true });
+		await settle();
+		paste("a".repeat(9 * CHUNK));
+		type("a");
+
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		attachOk(U, "U", { adaptsInput: true, streamsPaste: true });
+		await settle();
+		// The paste left behind holds nothing more: what is typed now goes, alone, to U.
+		type("b");
+
+		expect(inputs()).toEqual(["b"]);
+		expect(inputsTo()).toEqual([U]);
+	});
+
+	it("WB3: refuses a second paste while chunks are unsent, and in its tail before the last acknowledgement", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		paste("second");
+		for (let seq = 0; seq < 8; seq++) ack(seq);
+		expect(chunks()).toHaveLength(9);
+		paste("third");
+
+		expect(chunks()).toHaveLength(9);
+		expect(toasts()).toEqual([
+			"A paste is still being sent to this terminal.",
+			"A paste is still being sent to this terminal.",
+		]);
+	});
+
+	it("WB3: cancels on Ctrl+C a paste whose chunks are all sent and not yet acknowledged", async () => {
+		await streaming();
+		paste("a".repeat(100 * 1024));
+		expect(chunks().at(-1)?.last).toBe(true);
+
+		type("\u0003");
+
+		expect(order().slice(-2)).toEqual(["CANCEL", "INPUT \u0003"]);
+	});
+
+	it("WB3: holds what another pane showing the terminal types, and takes its Ctrl+C", async () => {
+		freshWindow();
+		writer();
+		mountRoot(
+			defineComponent({
+				setup: () => () =>
+					h("div", [
+						h(TerminalPane, { channelId: T, hostId: HOST }),
+						h(TerminalPane, { channelId: T, hostId: HOST }),
+					]),
+			}),
+		);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE", { adaptsInput: true, streamsPaste: true });
+		await settle();
+		const [first, second] = (xterm.terminals as StandInTerminal[]).filter((x) => !x.disposed);
+		const event = new Event("paste", { bubbles: true, cancelable: true });
+		Object.defineProperty(event, "clipboardData", {
+			value: { getData: () => "a".repeat(9 * CHUNK) },
+		});
+		first?.textarea.dispatchEvent(event);
+		const typeIn = (term: typeof first, data: string) => {
+			for (const listener of [...(term?.dataListeners ?? [])]) listener(data);
+		};
+
+		typeIn(second, "x");
+		expect(inputs()).toEqual([]);
+		typeIn(second, "");
+
+		expect(order().slice(-3)).toEqual(["CANCEL", "INPUT x", "INPUT "]);
+	});
+
+	it("WB3: holds xterm's own reports behind unsent chunks, as typed keys", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+
+		type("\u001b[I");
+		expect(inputs()).toEqual([]);
+		ack(0);
+
+		expect(inputs()).toEqual(["\u001b[I"]);
+	});
+
+	it("WB4: shows the progress after a second, updates it, keeps it until the last acknowledgement", async () => {
+		await streaming();
+		paste("a".repeat(1024 * 1024));
+		expect(toasts()).toEqual([]);
+
+		vi.advanceTimersByTime(1000);
+		expect(toasts()).toEqual(["Pasting 0 B of 1 MB (0 %)"]);
+		expect(useToastStore().messages[0]?.action?.label).toBe("Cancel");
+		for (let seq = 0; seq < 16; seq++) ack(seq);
+		expect(toasts()).toEqual(["Pasting 512 KB of 1 MB (50 %)"]);
+
+		vi.advanceTimersByTime(10_000);
+		expect(toasts()).toHaveLength(1);
+		for (let seq = 16; seq < 32; seq++) ack(seq);
+		expect(toasts()).toEqual([]);
+	});
+
+	it("WB4: its Cancel sends PASTE_CANCEL, then what was held, sends no more chunks, and says what went", async () => {
+		await streaming();
+		paste("a".repeat(1024 * 1024));
+		type("a");
+		vi.advanceTimersByTime(1000);
+		ack(0);
+		ack(1);
+
+		const progress = useToastStore().messages[0];
+		useToastStore().act(progress?.id as number);
+		ack(2);
+
+		expect(order().slice(-2)).toEqual(["CANCEL", "INPUT a"]);
+		expect(chunks()).toHaveLength(10);
+		expect(toasts()).toEqual([
+			"Paste cancelled: at least 65,536 bytes of 1,048,576 bytes reached the terminal.",
+		]);
+	});
+
+	it("WB4: says what went after a Ctrl+C too", async () => {
+		await streaming();
+		paste("a".repeat(1024 * 1024));
+		ack(0);
+
+		type("\u0003");
+
+		expect(toasts()).toEqual([
+			"Paste cancelled: at least 32,768 bytes of 1,048,576 bytes reached the terminal.",
+		]);
+	});
+
+	it("WB4: dismissing the progress only hides it: the paste goes on", async () => {
+		await streaming();
+		paste("a".repeat(1024 * 1024));
+		vi.advanceTimersByTime(1000);
+
+		useToastStore().dismiss(useToastStore().messages[0]?.id as number);
+		for (let seq = 0; seq < 32; seq++) ack(seq);
+
+		expect(cancels()).toEqual([]);
+		expect(chunks()).toHaveLength(32);
+		expect(toasts()).toEqual([]);
+	});
+
+	it("WB5: says exactly how much went when the agent says, and sends no more", async () => {
+		await streaming();
+		paste("a".repeat(1024 * 1024));
+
+		closed("overflow", 98_304);
+		ack(0);
+
+		expect(chunks()).toHaveLength(8);
+		expect(toasts()).toEqual([
+			"Paste interrupted: 98,304 bytes of 1,048,576 bytes reached the terminal.",
+		]);
+	});
+
+	it("WB5: says at least what was acknowledged when the agent is lost, or the socket drops", async () => {
+		await streaming();
+		paste("a".repeat(1024 * 1024));
+		for (let seq = 0; seq < 3; seq++) ack(seq);
+		closed("agent_lost");
+
+		paste("b".repeat(1024 * 1024));
+		for (let seq = 0; seq < 3; seq++) ack(seq);
+		dropConnection();
+
+		expect(toasts()).toEqual([
+			"Paste interrupted: at least 98,304 bytes of 1,048,576 bytes reached the terminal.",
+			"Paste interrupted: at least 98,304 bytes of 1,048,576 bytes reached the terminal.",
+		]);
+		expect(cancels()).toEqual([]);
+	});
+
+	it("WB6: cancels when the pane switches terminals, sends no more, and says what went", async () => {
+		const channel = ref(T);
+		mountPane(channel, "live", {
+			setUp: () => {
+				withU();
+				const lock = useWriteLockStore();
+				for (const id of [T, U]) lock.handleWriteLock(id, CLIENT);
+			},
+		});
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "T", { adaptsInput: true, streamsPaste: true });
+		await settle();
+		paste("a".repeat(1024 * 1024));
+		vi.advanceTimersByTime(1000);
+		const id = pasteId();
+
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		ack(0, id);
+
+		expect(cancels()).toEqual([{ type: "PASTE_CANCEL", channelId: T, pasteId: id }]);
+		expect(chunks()).toHaveLength(8);
+		expect(toasts()).toEqual([
+			"Paste interrupted: at least 0 bytes of 1,048,576 bytes reached the terminal.",
+		]);
+	});
+
+	it("WB6: a pane remounted for the same terminal gives its next paste a greater id", async () => {
+		const { channel, remount } = openNewRemountable();
+		useWriteLockStore().handleWriteLock(REAL, CLIENT);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		hear({
+			type: "SPAWN_OK",
+			channelId: REAL,
+			requestId: spawns().at(-1)?.requestId,
+			streamsPaste: true,
+		});
+		await settle();
+		expect(channel.value).toBe(REAL);
+		paste("first");
+		const first = pasteId();
+		ack(0, first, REAL);
+
+		await remount();
+		await vi.waitFor(() => expect(attaches().length).toBeGreaterThan(0));
+		attachOk(REAL, "REAL", { streamsPaste: true });
+		await settle();
+		paste("second");
+
+		expect(pasteId()).toBeGreaterThan(first);
+	});
+
+	it("WB6: ignores an old paste's answers: the current one goes on, its credit unchanged", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		const old = pasteId();
+		type("\u0003");
+		paste("b".repeat(9 * CHUNK));
+		expect(chunks()).toHaveLength(16);
+
+		ack(0, old);
+		closed("cancelled", 0, old);
+
+		expect(chunks()).toHaveLength(16);
+		expect(toasts().filter((t) => t.startsWith("Paste interrupted"))).toEqual([]);
+		ack(0);
+		expect(chunks()).toHaveLength(17);
+	});
+
+	it("WB7: keeps #1012's single frame when the agent adapts input but does not stream pastes", async () => {
+		await streaming({ adaptsInput: true, streamsPaste: false });
+
+		paste("a");
+		paste("x".repeat(65_530));
+
+		expect(chunks()).toEqual([]);
+		expect(inputs()).toEqual(["\u001b[200~a\u001b[201~"]);
+		expect(toasts()).toEqual(["This paste is too large to send (64 KiB at most)."]);
+	});
+
+	it("WB7: leaves the paste to xterm when the agent does neither", async () => {
+		await streaming({});
+
+		paste("a\nb");
+
+		expect(chunks()).toEqual([]);
+		expect(inputs()).toEqual(["a\rb"]);
+	});
+
+	it("WB8: refuses a paste over 16 MiB of UTF-8, and sends one of exactly 16 MiB", async () => {
+		await streaming();
+
+		paste("€".repeat(5_592_406)); // 16 777 218 bytes
+		expect(chunks()).toEqual([]);
+		expect(toasts()).toEqual(["This paste is too large to send (16 MiB at most)."]);
+
+		paste("x".repeat(16 * 1024 * 1024));
+		expect(chunks()).toHaveLength(8);
+	});
 });

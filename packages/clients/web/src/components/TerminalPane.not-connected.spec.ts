@@ -12,7 +12,7 @@
 import { ErrorCode } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type App, createApp, h, nextTick, ref } from "vue";
+import { type App, createApp, h, nextTick, type Ref, ref } from "vue";
 
 vi.mock("../composables/useTerminal.js", async () => {
 	const { useTerminalSearch } = await import("../composables/useTerminalSearch.js");
@@ -32,6 +32,8 @@ vi.mock("../composables/useTerminal.js", async () => {
 			setDecidesSize: () => {},
 			dispose: () => {},
 			fitAddon: {},
+			onBell: () => {},
+			onScroll: () => {},
 		}),
 	};
 });
@@ -96,8 +98,11 @@ function hubWhosePassphraseIsCancelled(): void {
 	vi.spyOn(sessionStore, "connect").mockResolvedValue();
 }
 
-/** The pane App.vue opens for "New channel": a spawn it owes, under a temporary id. */
-async function openNewTerminal(): Promise<void> {
+/**
+ * The pane App.vue opens for "New channel": a spawn it owes, under a temporary
+ * id. A change of `key` remounts it over the same id, as a split or a move does.
+ */
+async function openNewTerminal(key?: Ref<number>): Promise<void> {
 	const pinia = createPinia();
 	setActivePinia(pinia);
 	hubWhosePassphraseIsCancelled();
@@ -107,6 +112,7 @@ async function openNewTerminal(): Promise<void> {
 	app = createApp({
 		render: () =>
 			h(TerminalPane, {
+				key: key?.value ?? 0,
 				channelId: TEMP_ID,
 				hostId: HOST,
 				onClosePane: (...args: unknown[]) => closed.push(args),
@@ -181,6 +187,51 @@ describe("TerminalPane: a new terminal whose passphrase was not given (#875)", (
 		await nextTick();
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
+		expect(spawns).toHaveLength(1);
+		expect(paneText()).toContain("Not connected: the passphrase was not given");
+	});
+
+	// A split or a move mounts another pane over the same id (#980).
+	it("keeps Connect when its pane remounts", async () => {
+		const key = ref(0);
+		await openNewTerminal(key);
+
+		key.value++;
+		await nextTick();
+		await vi.waitFor(() =>
+			expect(paneText()).toContain("Not connected: the passphrase was not given"),
+		);
+		expect(button("Connect")).toBeDefined();
+		expect(button("Retry")).toBeUndefined();
+
+		useSessionStore().reconnectCount++;
+		await nextTick();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(spawns).toHaveLength(1);
+
+		button("Connect")?.click();
+		await nextTick();
+		expect(spawns).toHaveLength(2);
+	});
+
+	// Remounted while the hub cannot be reached, it showed the connection's
+	// error instead, and the connection's return asked again, unasked.
+	it("keeps Connect when its pane remounts while the hub cannot be reached", async () => {
+		const key = ref(0);
+		await openNewTerminal(key);
+		vi.mocked(useSessionStore().connect).mockRejectedValue(new Error("WebSocket closed"));
+
+		key.value++;
+		await nextTick();
+		await vi.waitFor(() =>
+			expect(paneText()).toContain("Not connected: the passphrase was not given"),
+		);
+		expect(button("Connect")).toBeDefined();
+
+		vi.mocked(useSessionStore().connect).mockResolvedValue();
+		useSessionStore().reconnectCount++;
+		await nextTick();
+		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(spawns).toHaveLength(1);
 		expect(paneText()).toContain("Not connected: the passphrase was not given");
 	});

@@ -1015,6 +1015,22 @@ describe("TerminalPane takes what it draws with when it changes", () => {
 		);
 	});
 
+	it("keeps its host's theme when the active theme changes", async () => {
+		await openLive({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [host(HOST, "pi", JSON.stringify({ theme: "nord" }))];
+			},
+		});
+
+		useThemeStore().applyTheme(BUNDLED_THEMES.dracula!);
+		await settle();
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES.nord!.colors),
+		);
+	});
+
 	it("goes back to the active theme when its host's own is taken away", async () => {
 		await openLive({
 			setUp: () => {

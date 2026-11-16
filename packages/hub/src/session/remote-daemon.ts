@@ -507,6 +507,11 @@ function describeRefusedDaemon(daemon: RefusedDaemon, paths: RemoteDaemonPaths):
 
 /** How long to keep trying the socket after starting the daemon. */
 const READY_DEADLINE_MS = 5_000;
+/**
+ * How far short of the caller's transport wait the socket's retries stop, so
+ * that the daemon's own diagnosis usually comes first: 20 s less 5 s today.
+ */
+export const DAEMON_DIAGNOSIS_MARGIN_MS = 15_000;
 /** How long to wait between those attempts. */
 const READY_POLL_MS = 150;
 /**
@@ -530,6 +535,14 @@ export interface AttachRemoteDaemonOptions {
 	open?: (client: Client, socketPath: string) => Promise<Duplex>;
 	now?: () => number;
 	sleep?: (ms: number) => Promise<void>;
+	/**
+	 * The host's connection timeout, when it sets one (#1034): each command
+	 * this call runs gets that long (plus the shell's start-up allowance), and
+	 * a retry of the socket may begin until 15 s short of it, so that the
+	 * caller's transport wait, which is that long and covers this whole call,
+	 * alone bounds it. Absent: `sshExec`'s own 10 s and `READY_DEADLINE_MS`.
+	 */
+	connectTimeoutMs?: number;
 }
 
 export interface RemoteDaemonAttachment {
@@ -560,7 +573,11 @@ export interface RemoteDaemonAttachment {
 export async function attachRemoteDaemon(
 	options: AttachRemoteDaemonOptions,
 ): Promise<RemoteDaemonAttachment> {
-	const exec = options.exec ?? (await defaultExec());
+	const exec = options.exec ?? (await defaultExec(options.connectTimeoutMs));
+	const readyDeadlineMs =
+		options.connectTimeoutMs === undefined
+			? READY_DEADLINE_MS
+			: options.connectTimeoutMs - DAEMON_DIAGNOSIS_MARGIN_MS;
 	const open = options.open ?? openRemoteSocket;
 	const now = options.now ?? Date.now;
 	const sleep = options.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
@@ -631,7 +648,7 @@ export async function attachRemoteDaemon(
 	}
 
 	const placement = parseRemoteDaemonPlacement(launch.stdout);
-	const deadline = now() + READY_DEADLINE_MS;
+	const deadline = now() + readyDeadlineMs;
 	let lastError: unknown;
 	while (now() < deadline) {
 		await sleep(READY_POLL_MS);
@@ -655,7 +672,7 @@ export async function attachRemoteDaemon(
 		}
 	}
 	throw new Error(
-		`The remote agent daemon did not answer on ${paths.socket} within ${READY_DEADLINE_MS}ms. ` +
+		`The remote agent daemon did not answer on ${paths.socket} within ${readyDeadlineMs}ms. ` +
 			`Its log is at ${paths.log}. Last error: ${String(lastError)}` +
 			(await logTail(exec, options.conn, paths.log)) +
 			// The remote could not say whether the daemon listens: the one cause
@@ -714,9 +731,9 @@ async function logTail(
 }
 
 /** The real exec, loaded lazily so this module stays testable without ssh2. */
-async function defaultExec(): Promise<
-	(client: Client, command: string) => Promise<{ stdout: string; exitCode: number }>
-> {
+async function defaultExec(
+	timeoutMs?: number,
+): Promise<(client: Client, command: string) => Promise<{ stdout: string; exitCode: number }>> {
 	const { sshExec } = await import("./ssh-exec.js");
-	return (client, command) => sshExec(client, command);
+	return (client, command) => sshExec(client, command, timeoutMs);
 }

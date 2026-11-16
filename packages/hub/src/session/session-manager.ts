@@ -34,6 +34,7 @@ import type {
 	EnvMode,
 	ErrorMessage,
 	Host,
+	HostConnectingMessage,
 	InputMessage,
 	LiveCwd,
 	PasteCancelMessage,
@@ -177,7 +178,11 @@ export function answeringSpawn(client: WsClient, requestId: string | undefined):
 		id: client.id,
 		attachedChannels: client.attachedChannels,
 		send: (msg) =>
-			client.send(msg.type === "ERROR" || msg.type === "SPAWN_OK" ? { ...msg, requestId } : msg),
+			client.send(
+				msg.type === "ERROR" || msg.type === "SPAWN_OK" || msg.type === "HOST_CONNECTING"
+					? { ...msg, requestId }
+					: msg,
+			),
 	};
 }
 
@@ -1186,6 +1191,8 @@ export class SessionManager {
 							hostId,
 							acqId: acq.id,
 						});
+						// The pane stops its own clock until the hub answers (#1034).
+						client.send({ type: "HOST_CONNECTING", hostId } satisfies HostConnectingMessage);
 						try {
 							session = await acq.connectPromise;
 						} catch (err) {
@@ -1239,6 +1246,10 @@ export class SessionManager {
 						[...this.ctx.channels.values()].some(
 							(ch) => session != null && ch.sessionId === session.id,
 						);
+					// The pane stops its own clock until the hub answers: each wait of
+					// the connection below has its own bound, and the host's may be
+					// longer than the pane's 15 s (#1034).
+					client.send({ type: "HOST_CONNECTING", hostId } satisfies HostConnectingMessage);
 					try {
 						// getOrCreateSession is async; the session object is created here.
 						const sessionState = await this.agentMgr.getOrCreateSession(hostId, true, spawnFence);
@@ -1267,6 +1278,25 @@ export class SessionManager {
 								lease,
 								releaseConnectingLease,
 							);
+							// A cancelled connection is answered nowhere else
+							// (`_connectSshAgent` sends nothing once its signal is aborted),
+							// and this pane, told HOST_CONNECTING, waits for an answer (#1034).
+							if (connectingAcq.controller.signal.aborted) {
+								client.send(
+									this.ctx.userDisconnectedHosts.has(hostId)
+										? hostDisconnectedMessage(
+												hostId,
+												host.label,
+												this.ctx.sessions.get(hostId)?.status ?? "closed",
+												reuseChannelId,
+											)
+										: ({
+												type: "ERROR",
+												code: "SSH_CONNECT_FAILED",
+												message: `The connection to ${host.label} was cancelled.`,
+											} satisfies ErrorMessage),
+								);
+							}
 							return null;
 						}
 

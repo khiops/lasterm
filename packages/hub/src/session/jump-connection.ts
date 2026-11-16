@@ -36,6 +36,13 @@ export interface JumpTarget {
 export interface JumpOptions {
 	/** How long opening the route may take, from connecting to the open channel; none when absent. */
 	timeoutMs?: number;
+	/**
+	 * How long each of the route's two waits may take apart, when the host it
+	 * leads to sets a connection timeout (#1034): the jump's own connection, up
+	 * to `ready` (ssh2's `readyTimeout`, 20 s when absent), and its channel to
+	 * the host, from `forwardOut` to its answer (unbounded when absent).
+	 */
+	waitTimeoutMs?: number;
 	/** Where the jump is, and who it is reached as. */
 	jump: JumpTarget;
 	/** Names used for revocation and trust lookup in `known_hosts`. */
@@ -125,13 +132,36 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 			);
 		});
 
+		// The jump went away before it handed out the route: ssh2 says nothing
+		// else when the server closes after its banner (#1034), and nothing else
+		// would settle this.
+		client.on("close", () => {
+			fail(
+				new Error(
+					`The jump host ${options.jump.host} closed the connection before the route was open`,
+				),
+			);
+		});
+
 		client.on("ready", () => {
+			const channelTimer =
+				options.waitTimeoutMs === undefined
+					? undefined
+					: setTimeout(() => {
+							fail(
+								new Error(
+									`The jump host ${options.jump.host} did not open a route to ${options.destination.host}:${options.destination.port} within ${options.waitTimeoutMs}ms`,
+								),
+							);
+							client.destroy();
+						}, options.waitTimeoutMs);
 			client.forwardOut(
 				"127.0.0.1",
 				0,
 				options.destination.host,
 				options.destination.port,
 				(error, stream) => {
+					clearTimeout(channelTimer);
 					if (error) {
 						fail(
 							new Error(
@@ -206,6 +236,7 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 				port: options.jump.port,
 				username: options.jump.username,
 				hostVerifier,
+				...(options.waitTimeoutMs !== undefined && { readyTimeout: options.waitTimeoutMs }),
 			});
 		} catch (error) {
 			fail(error instanceof Error ? error : new Error(String(error)));

@@ -1085,6 +1085,18 @@ export interface PromptCancelMessage {
 }
 
 /** UI → Hub: test SSH connectivity (with optional auth prompting) */
+/**
+ * Hub → UI: the SPAWN carrying `requestId` waits while the hub connects
+ * `hostId` (#1034). Sent once per such SPAWN, before the connection's first
+ * wait. Each wait of a connection has its own bound, and a host's may be longer
+ * than the pane's own clock, so the pane waits for the SPAWN's answer instead.
+ */
+export interface HostConnectingMessage {
+	type: "HOST_CONNECTING";
+	hostId: string;
+	requestId?: string;
+}
+
 export interface TestConnectMessage {
 	type: "TEST_CONNECT";
 	hostId: string; // real host ID for saved hosts, client-generated temp ID for unsaved
@@ -1095,6 +1107,11 @@ export interface TestConnectMessage {
 	sshUser?: string;
 	sshProxyHostId?: string;
 	sshProxySpec?: string;
+	/**
+	 * The connection timeout in the form, in seconds (#1034). The hub ignores a
+	 * value that is not a whole number from 20 to 120, as if absent.
+	 */
+	connectTimeoutSeconds?: number;
 }
 
 /** Hub → UI: test connectivity succeeded */
@@ -1237,6 +1254,7 @@ export type HubToUiMessage =
 	| HostVerifyMessage
 	| AuthPromptMessage
 	| PromptCancelMessage
+	| HostConnectingMessage
 	| TestConnectOkMessage
 	| TestConnectFailMessage
 	| AgentBinaryVerifyMessage
@@ -1317,6 +1335,7 @@ export type ProtocolMessage =
 	| PasteCancelMessage
 	| PasteAckMessage
 	| PasteClosedMessage
+	| HostConnectingMessage
 	| TestConnectMessage
 	| TestConnectOkMessage
 	| TestConnectFailMessage

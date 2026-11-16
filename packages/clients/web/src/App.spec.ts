@@ -1970,8 +1970,15 @@ describe("a new terminal's pane after a reload", () => {
 		await selectHost("bravo");
 		hub.answersSpawns = false;
 
-		await clickInBox("Retry");
-		await clickInBox("Retry").catch(() => {});
+		// Clicked twice, on the button as it was, before the hub answers: one attempt.
+		const retry = [...document.querySelectorAll<HTMLElement>(".terminal-error__box button")].find(
+			(b) => b.textContent?.trim() === "Retry",
+		);
+		retry?.click();
+		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(1));
+		// The box is gone by then; the button as it was still answers a click.
+		retry?.click();
+		await settle();
 
 		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(1));
 		await settle();
@@ -2089,6 +2096,24 @@ describe("a new terminal's pane after a reload", () => {
 		const hub = await reload(firstHub);
 		expect(box().lines[0]).toBe(UNCONFIRMED);
 		expect(hub.frames("SPAWN")).toEqual([]);
+	});
+
+	it("keeps the recorded starts of two new terminals opened one after the other", async () => {
+		// Their panes wait for the connection, so nothing but their registrations writes the key.
+		const { hub } = await mountWindow({
+			channels: [live("T1")],
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+		});
+		hub.drop();
+		hub.dialing = () => new Promise<void>(() => {});
+
+		await runPaletteRow("alpha");
+		await runPaletteRow("alpha");
+		await vi.waitFor(() => expect(savedLeafIds()).toHaveLength(3));
+
+		expect(hub.frames("SPAWN")).toEqual([]);
+		const pending = savedLeafIds().filter((id) => id !== "T1");
+		expect(Object.keys(stored() ?? {}).sort()).toEqual(pending.sort());
 	});
 
 	it("waits for Retry when the connection comes back after a reload", async () => {

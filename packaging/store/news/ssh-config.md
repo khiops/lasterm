@@ -1,0 +1,2 @@
+en: Hosts picked or imported from ~/.ssh/config get the settings ssh uses for them (Host * defaults, IdentityAgent none, sign-in method), and Test Connection checks the alias and jump the added host will use.
+fr: Les hôtes choisis ou importés depuis ~/.ssh/config reçoivent les réglages que ssh leur applique (Host *, IdentityAgent none, méthode de connexion), et Tester la connexion vérifie l’alias et le saut qu’utilisera l’hôte ajouté.

@@ -130,6 +130,8 @@ export interface SpawnedTerminal {
 	channelId: string;
 	cols: number;
 	rows: number;
+	/** What its SPAWN_OK said of the agent's input (#1012); false from an older hub. */
+	adaptsInput: boolean;
 }
 
 /** The one spawn a pending id has sent: in flight, or what came of it. */
@@ -1004,13 +1006,22 @@ export const useChannelsStore = defineStore("channels", () => {
 		const record = pendingSpawns.get(tempId);
 		if (record === undefined) return null;
 		if (record.run !== null) return record.run;
+		// What its SPAWN_OK said of the agent's input (#1012).
+		let adaptsInput = false;
 		const run: PendingSpawnRun = {
 			state: "running",
-			outcome: spawnChannel(record.hostId, { cols, rows, select: false }).then(
+			outcome: spawnChannel(record.hostId, {
+				cols,
+				rows,
+				select: false,
+				onAdaptsInput: (adapts) => {
+					adaptsInput = adapts;
+				},
+			}).then(
 				(channelId) => {
 					run.state = "succeeded";
 					forgetIfUnheld(tempId, record);
-					return { channelId, cols, rows };
+					return { channelId, cols, rows, adaptsInput };
 				},
 				(err: unknown) => {
 					run.state = "failed";
@@ -1073,6 +1084,8 @@ export const useChannelsStore = defineStore("channels", () => {
 			 * disconnected is not connected again by it (#648).
 			 */
 			automatic?: boolean;
+			/** Told what the SPAWN_OK said of the agent's input (#1012), before it resolves. */
+			onAdaptsInput?: (adaptsInput: boolean) => void;
 		},
 	): Promise<string> {
 		const sessionStore = useSessionStore();
@@ -1152,6 +1165,7 @@ export const useChannelsStore = defineStore("channels", () => {
 					// on another host than the one in view reads its profile and its
 					// theme from this, and would take the host in view's meanwhile.
 					registerChannelHost(msg.channelId, hostId);
+					opts?.onAdaptsInput?.("adaptsInput" in msg && msg.adaptsInput === true);
 					refreshAfterSpawn(hostId);
 					if (opts?.select !== false) {
 						selectChannel(msg.channelId);

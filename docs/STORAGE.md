@@ -458,12 +458,16 @@ previous one goes there; a backlog an earlier version left is cleared by GC (§ 
   "serialized": "<the agent's vt100 screen, as the escape sequences that draw it>",
   "cols": 120,
   "rows": 40,
-  "cursor_x": 5,
-  "cursor_y": 38
+  "cursorX": 5,
+  "cursorY": 38,
+  "alternateScreen": false,
+  "inputModes": "<the program's input modes, as escape sequences>"
 }
 ```
 
-Stored as JSON in data_blob (kind=snapshot). Codec=raw for MVP.
+Stored as JSON in data_blob (kind=snapshot), codec=raw: the snapshot as the hub decoded it, with its
+keys in camelCase, whatever fields the agent sent. `alternateScreen` and `inputModes` come from an
+agent that says `"input-modes"` (PROTOCOL.md § 3.3, #1012); an older agent's snapshot has neither.
 
 ### 5.3 Resize Chunks
 

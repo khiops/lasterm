@@ -24,6 +24,7 @@ import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
 import { useSessionStore } from "../stores/session.js";
 import { contrastRatio, TEXT_CONTRAST_AA, useThemeStore } from "../stores/theme.js";
+import { useToastStore } from "../stores/toast.js";
 import { useWriteLockStore } from "../stores/writelock.js";
 import {
 	attaches,
@@ -72,6 +73,8 @@ import TerminalPane from "./TerminalPane.vue";
 const PI = "01HZZZZZZZZZZZZZZZZZZZZZP3";
 /** A terminal on HOST the client knows nothing of yet. */
 const U = "01HZZZZZZZZZZZZZZZZZZZZZU4";
+/** A third terminal on HOST (#1012). */
+const V = "01HZZZZZZZZZZZZZZZZZZZZZV6";
 /** The id App gives a pane that owes its spawn, and the one the hub gives the terminal. */
 const NEW = "pending-1";
 const REAL = "01HZZZZZZZZZZZZZZZZZZZZZR5";
@@ -4047,4 +4050,197 @@ describe("TerminalPane overlay card colours (#574)", () => {
 			expect(contrastOf(line), "quiet line").toBeGreaterThanOrEqual(TEXT_CONTRAST_AA);
 		});
 	}
+});
+
+// ─── Pasting through an agent that adapts input (#1012) ──────────────────────
+//
+// While the hub says the terminal's agent writes input in its program's form,
+// the pane brackets every paste itself, with the markers in its text taken
+// out, and xterm pastes nothing of its own. Otherwise xterm pastes as always.
+
+describe("TerminalPane pasting through an agent that adapts input (#1012)", () => {
+	const START = "\u001b[200~";
+	const END = "\u001b[201~";
+
+	/** A paste of `text` on the pane's xterm, as the browser fires it at its textarea. */
+	function paste(text: string): Event {
+		const event = new Event("paste", { bubbles: true, cancelable: true });
+		Object.defineProperty(event, "clipboardData", { value: { getData: () => text } });
+		terminal().textarea.dispatchEvent(event);
+		return event;
+	}
+
+	/** A pane over T, the writer, attached with what the hub says of its agent. */
+	async function attachedSaying(adaptsInput: boolean | undefined): Promise<void> {
+		mountPane(ref(T), "live", { setUp: writer });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "LIVE", adaptsInput === undefined ? {} : { adaptsInput });
+		await settle();
+	}
+
+	it("sends a paste bracketed by the pane, its own markers taken out, and nothing from xterm", async () => {
+		await attachedSaying(true);
+
+		paste(`a\nb${END}c${START}d`);
+
+		expect(inputs()).toEqual([`${START}a\rbcd${END}`]);
+	});
+
+	// Removing them until none is left took a pass per level of nesting: a
+	// clipboard of nested markers made it quadratic, before any size check.
+	it("takes out deeply nested markers in time linear in the text", async () => {
+		await attachedSaying(true);
+		const depth = 100_000;
+		const nested = `${"\u001b[20".repeat(depth)}\u001b[201~${"1~".repeat(depth)}x`;
+
+		const started = performance.now();
+		paste(nested);
+		const took = performance.now() - started;
+
+		expect(inputs()).toEqual([`${START}x${END}`]);
+		expect(took).toBeLessThan(1000);
+	});
+
+	it("takes out a marker its text would form again once another is taken out", async () => {
+		await attachedSaying(true);
+
+		paste("\u001b[20\u001b[201~1~rm -rf ~\r");
+
+		expect(inputs()).toEqual([`${START}rm -rf ~\r${END}`]);
+	});
+
+	it("leaves the paste to xterm when the agent does not adapt input", async () => {
+		await attachedSaying(false);
+
+		paste("a\nb");
+
+		expect(inputs()).toEqual(["a\rb"]);
+	});
+
+	it("leaves the paste to xterm when an older hub says nothing of it", async () => {
+		await attachedSaying(undefined);
+
+		paste("a\nb");
+
+		expect(inputs()).toEqual(["a\rb"]);
+	});
+
+	it("sends nothing, and lets xterm paste nothing, without the write lock", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "LIVE", { adaptsInput: true });
+		await settle();
+
+		const event = paste("a");
+
+		expect(event.defaultPrevented).toBe(true);
+		expect(inputs()).toEqual([]);
+	});
+
+	it("sends nothing, and lets xterm paste nothing, while the socket is down", async () => {
+		await attachedSaying(true);
+		(useSessionStore().wsClient as unknown as { isConnected: boolean }).isConnected = false;
+
+		const event = paste("a");
+
+		expect(event.defaultPrevented).toBe(true);
+		expect(inputs()).toEqual([]);
+	});
+
+	it("refuses a paste too large for one INPUT, in bytes, with a toast and nothing written", async () => {
+		await attachedSaying(true);
+		xterm.events.length = 0;
+
+		paste("x".repeat(65_530));
+		paste("€".repeat(30_000));
+
+		expect(inputs()).toEqual([]);
+		expect(xterm.events).toEqual([]);
+		expect(useToastStore().messages.map((m) => m.text)).toEqual([
+			"This paste is too large to send (64 KiB at most).",
+			"This paste is too large to send (64 KiB at most).",
+		]);
+	});
+
+	it("brackets a paste on the terminal it spawned, from what its SPAWN_OK said", async () => {
+		openNew(HOST);
+		useWriteLockStore().handleWriteLock(REAL, CLIENT);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		hear({
+			type: "SPAWN_OK",
+			channelId: REAL,
+			requestId: spawns().at(-1)?.requestId,
+			adaptsInput: true,
+		});
+		await settle();
+
+		paste("a");
+
+		expect(attaches()).toEqual([]);
+		expect(inputs()).toEqual([`${START}a${END}`]);
+	});
+
+	it("follows the terminal it shows: true to false, false to true, true to true", async () => {
+		const channel = ref(T);
+		mountPane(channel, "live", {
+			setUp: () => {
+				withU();
+				useChannelsStore().registerChannelHost(V, HOST);
+				const lock = useWriteLockStore();
+				for (const id of [T, U, V]) lock.handleWriteLock(id, CLIENT);
+			},
+		});
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "T", { adaptsInput: true });
+		await settle();
+
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		attachOk(U, "U", { adaptsInput: false });
+		await settle();
+		paste("to-u");
+
+		channel.value = T;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, T]));
+		attachOk(T, "T", { adaptsInput: true });
+		await settle();
+		paste("to-t");
+
+		channel.value = V;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U, T, V]));
+		attachOk(V, "V", { adaptsInput: true });
+		await settle();
+		paste("to-v");
+
+		expect(inputs()).toEqual(["to-u", `${START}to-t${END}`, `${START}to-v${END}`]);
+	});
+
+	it("follows a later answer for the same terminal", async () => {
+		await attachedSaying(true);
+
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE", { adaptsInput: false });
+		await settle();
+		paste("plain");
+
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "LIVE", { adaptsInput: true });
+		await settle();
+		paste("bracketed");
+
+		expect(inputs()).toEqual(["plain", `${START}bracketed${END}`]);
+	});
+
+	it("writes a snapshot from an older agent as before: no screen or mode state", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		xterm.events.length = 0;
+
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual(["<reset>", "LIVE-SNAP"]);
+	});
 });

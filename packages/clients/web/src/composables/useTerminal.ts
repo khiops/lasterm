@@ -1,5 +1,5 @@
 import type { EndedOutput, TerminalProfile, UiAttachOkMessage } from "@lasterm/shared";
-import { sanitizeTitle } from "@lasterm/shared";
+import { MAX_INPUT_SIZE, sanitizeTitle } from "@lasterm/shared";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { Terminal } from "@xterm/xterm";
@@ -7,6 +7,7 @@ import { type Ref, ref, shallowRef } from "vue";
 import type { IWsClient } from "../services/ws-client.js";
 import { useChannelsStore } from "../stores/channels.js";
 import { useThemeStore } from "../stores/theme.js";
+import { useToastStore } from "../stores/toast.js";
 import { terminalScrollbarWidth } from "../utils/terminal-scrollbar.js";
 import { awaitTerminalFont } from "./terminal-font.js";
 import { useTerminalSearch } from "./useTerminalSearch.js";
@@ -30,6 +31,43 @@ const DEFAULT_XTERM_SCROLLBAR_WIDTH = 14;
  * mouse-tracking DECRST sets the protocol to none, so this one is enough.
  */
 const MOUSE_REPORTING_OFF = "\u001b[?1000l";
+
+/** A paste's markers (#1012). */
+const PASTE_START = "\u001b[200~";
+const PASTE_END = "\u001b[201~";
+
+/**
+ * A pasted text with no paste marker left in it (#1012). One pass: each
+ * character is kept, and a marker is dropped as soon as the kept text ends with
+ * one, so that one formed again from the pieces around another is dropped too.
+ * The two markers cannot overlap (each starts with the text's only ESC and
+ * ends with `~`), so this leaves what removing them until none remains would,
+ * in time linear in the text, however deeply its markers nest.
+ */
+function withoutPasteMarkers(text: string): string {
+	const kept: string[] = [];
+	for (let i = 0; i < text.length; i++) {
+		const unit = text.charAt(i);
+		kept.push(unit);
+		const n = kept.length;
+		if (
+			unit === "~" &&
+			n >= PASTE_START.length &&
+			kept[n - 6] === "\u001b" &&
+			kept[n - 5] === "[" &&
+			kept[n - 4] === "2" &&
+			kept[n - 3] === "0" &&
+			(kept[n - 2] === "0" || kept[n - 2] === "1")
+		) {
+			kept.length = n - PASTE_START.length;
+		}
+	}
+	return kept.join("");
+}
+
+/** What xterm reports on a focus change, when the program asked for it (`?1004`). */
+const FOCUS_IN = "\u001b[I";
+const FOCUS_OUT = "\u001b[O";
 
 /** What an ATTACH_OK gives the pane that asked: everything else it already wrote. */
 export interface AttachAnswer {
@@ -89,6 +127,13 @@ export function useTerminal(
 	 * title, a scroll) is about the one left, and goes nowhere (#966).
 	 */
 	let leftHeld = false;
+	/**
+	 * Whether the agent that takes the shown terminal's input writes paste
+	 * markers and cursor keys in its program's form, as the hub said on the
+	 * SPAWN_OK or ATTACH_OK that bound it (#1012). The pane then brackets its
+	 * pastes itself; otherwise xterm pastes as it always did.
+	 */
+	let adaptsInput = false;
 	/** The profile applied last, which a new xterm is made with. */
 	let currentProfile = profile;
 	/** The host's own theme, when the pane has one (SC-03). */
@@ -387,8 +432,74 @@ export function useTerminal(
 			p?.fontSize ?? DEFAULT_FONT_SIZE,
 		);
 
+		// xterm answers a `?1004h` with a focus report at once, inside the call
+		// to its own handler (#1012). A replay's `?1004h` (the snapshot's input
+		// modes) arms this, and the report it makes is not sent: it is not news.
+		// A focus change the user makes, even while a long replay is parsed, and a
+		// program's own live `?1004h`, are sent as before.
+		// One report per `1004` in the sequence: xterm reports for each.
+		let replayFocusReports = 0;
+		term.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
+			if ((replaysParsing.get(term) ?? 0) > 0) {
+				replayFocusReports = params.filter((param) => param === 1004).length;
+			}
+			return false;
+		});
+
+		// The agent decides how a paste reaches its program (#1012): while it
+		// says so, the pane brackets every paste itself, one frame, its own
+		// markers taken out, and xterm pastes nothing of its own.
+		term.element?.addEventListener(
+			"paste",
+			(event) => {
+				if (!adaptsInput) return;
+				event.stopPropagation();
+				event.preventDefault();
+				// No clipboard data: nothing to paste, as xterm sends nothing then.
+				if (event.clipboardData === null) return;
+				const text = event.clipboardData.getData("text/plain");
+				// Each UTF-16 unit left is at least one UTF-8 byte. A marker taken out
+				// is six units holding one ESC, and may join a CR to an LF, which then
+				// make one: a text too long even so is refused before any of it is copied.
+				let escapes = 0;
+				let crlfs = 0;
+				for (let at = 0; at < text.length; at++) {
+					const unit = text.charCodeAt(at);
+					if (unit === 0x1b) escapes++;
+					else if (unit === 0x0a && at > 0 && text.charCodeAt(at - 1) === 0x0d) crlfs++;
+				}
+				const tooLarge = () =>
+					useToastStore().show("warning", "This paste is too large to send (64 KiB at most).");
+				if (
+					text.length - 7 * escapes - crlfs + PASTE_START.length + PASTE_END.length >
+					MAX_INPUT_SIZE
+				) {
+					tooLarge();
+					return;
+				}
+				const stripped = escapes > 0 ? withoutPasteMarkers(text) : text;
+				const form = `${PASTE_START}${stripped.replace(/\r?\n/g, "\r")}${PASTE_END}`;
+				if (new TextEncoder().encode(form).byteLength > MAX_INPUT_SIZE) {
+					tooLarge();
+					return;
+				}
+				// xterm's own user-input path: the view goes to the bottom and the
+				// selection clears, as for a paste xterm makes, and the gate below
+				// sends it.
+				term.input(form, true);
+			},
+			{ capture: true },
+		);
+
 		// Keyboard input → send INPUT to hub (only when holding write lock)
 		term.onData((data: string) => {
+			if (replayFocusReports > 0) {
+				if (data === FOCUS_IN || data === FOCUS_OUT) {
+					replayFocusReports--;
+					return;
+				}
+				replayFocusReports = 0;
+			}
 			if (channelId && wsClient.isConnected && canWrite.value) {
 				wsClient.send({
 					type: "INPUT",
@@ -459,6 +570,7 @@ export function useTerminal(
 	 */
 	function leaveHeld(): void {
 		leftHeld = true;
+		adaptsInput = false;
 		titleStack.length = 0;
 		currentDynamicTitle.value = null;
 	}
@@ -556,12 +668,14 @@ export function useTerminal(
 	 * Subscribe to OUTPUT messages for the given channel and write to terminal.
 	 * Call after init() and after a successful SPAWN.
 	 */
-	function attachChannel(id: string): void {
+	function attachChannel(id: string, opts?: { adaptsInput?: boolean }): void {
 		// A spawn that completes after the pane closed: nothing to bind, and
 		// nothing may listen for a pane that is gone (#971).
 		if (disposed) return;
 		channelId = id;
 		shownId = id;
+		// As the SPAWN_OK that made it said (#1012).
+		adaptsInput = opts?.adaptsInput === true;
 		leaveEndedSize();
 		listenTo(id);
 
@@ -654,6 +768,9 @@ export function useTerminal(
 		// A terminal attached: the size rules of #831 apply again.
 		shownId = id;
 		leaveEndedSize();
+		// What the hub says of the agent that takes this terminal's input now
+		// (#1012); absent from an older hub.
+		adaptsInput = msg.adaptsInput === true;
 
 		// The PTY's size. A pane that does not decide it draws the screen below
 		// at that size, the one it was drawn for (#831). One that decides it
@@ -675,8 +792,14 @@ export function useTerminal(
 			if (!term || !replaceScreen) return;
 			if (msg.snapshot) {
 				term.reset();
+				// The program's screen and input modes (#1012): the alternate screen
+				// before the screen is drawn into it, the modes after, and the tail
+				// after them, so that a mode the tail sets wins. An older agent
+				// sends neither.
+				if (msg.snapshot.alternateScreen === true) term.write("\u001b[?1049h");
 				const serialized = (msg.snapshot as { serialized?: string }).serialized;
 				if (serialized) term.write(serialized);
+				if (msg.snapshot.inputModes) term.write(msg.snapshot.inputModes);
 			}
 			for (const chunk of tail) {
 				term.write(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk as ArrayBuffer));

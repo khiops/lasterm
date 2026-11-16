@@ -34,6 +34,13 @@ export interface SnapshotData {
 	rows: number;
 	cursorX: number;
 	cursorY: number;
+	/** The program is in the alternate screen (#1012). Absent from an older agent. */
+	alternateScreen?: boolean;
+	/**
+	 * Every input mode the program set, as escape sequences that set each one
+	 * whatever a terminal held before (#1012). Absent from an older agent.
+	 */
+	inputModes?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -494,6 +501,8 @@ export interface UiSpawnOkMessage {
 	sessionId: string;
 	/** The SPAWN's, echoed; absent when it named none (#777). */
 	requestId?: string;
+	/** As on ATTACH_OK (#1012): the pane brackets its pastes itself. Absent from an older hub. */
+	adaptsInput?: boolean;
 }
 
 /** UI → Hub: attach this client to an existing channel */
@@ -543,6 +552,12 @@ export interface UiAttachOkMessage {
 	 * hub keeps it. Absent from a hub older than that.
 	 */
 	filesPanel?: FilesPanelState;
+	/**
+	 * Whether the agent that takes this terminal's input now writes paste
+	 * markers and cursor keys in its program's form, so the pane brackets its
+	 * pastes itself (#1012). Absent from an older hub.
+	 */
+	adaptsInput?: boolean;
 }
 
 /**

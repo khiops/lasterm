@@ -161,7 +161,7 @@ agent's default. A default profile the user set (`PUT /api/hosts/:id/profiles/:p
 replaced, and a profile the user hid is never marked (#800). The host's default profile is what a
 new terminal starts there, the local host's as an SSH host's (§ 4.4, #802).
 
-**Capabilities.** The hub logs the list, and gates nothing on it: every agent it can meet has all six, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
+**Capabilities.** The hub logs the list, and gates nothing on it but `adapts_input`, which follows `"input-modes"` (§ 4.2): every agent it can meet has the others but `"hub-identity"`, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"input-modes"` means an agent that sends the terminal's input modes and alternate screen with each snapshot (§ 3.3) and writes paste markers and cursor keys in its program's form (§ 3.4); the hub tells the UI so with `adapts_input` (§ 4.2, § 4.4). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
 
 ### 3.1b AUTH (Hub → Agent, daemon mode)
 
@@ -336,11 +336,26 @@ Re-attach to existing channel (after reconnect).
     cols: number,
     rows: number,
     cursor_x: number,
-    cursor_y: number
+    cursor_y: number,
+    alternate_screen?: boolean, // the program is in the alternate screen (#1012)
+    input_modes?: string        // every input mode the program set, as escape sequences (#1012)
   },
   last_seq: number
 }
 ```
+
+`serialized` draws the visible screen (vt100's `contents_formatted`). An agent that says
+`"input-modes"` also sends `alternate_screen` and `input_modes`; an older one sends neither.
+`input_modes` sets each mode whatever a terminal held before: a reset of the mouse modes, the mouse
+encodings and the cursor style (`ESC[?9l ESC[?1000l ESC[?1002l ESC[?1003l ESC[?1005l ESC[?1006l
+ESC[0 q`), then vt100's `input_mode_formatted` (keypad, cursor keys and bracketed paste in either
+state, then the mouse mode, encoding and cursor style when not the default), then `ESC[?1004h` or
+`ESC[?1004l` for focus reporting, which the agent follows itself. The agent also follows DECSTR
+(`CSI … ! p`, any parameters), which resets cursor keys, the keypad, bracketed paste, focus, the
+cursor style, cursor visibility and the attributes as xterm does, and RIS (`ESC c`), at their place
+in the stream. Not carried: the scroll region, origin mode, the saved cursor, autowrap, insert mode,
+the character sets, the normal screen behind an alternate one, and the mode forms vt100 does not
+follow (`?66`, `?1047`, `?1016`).
 
 An ATTACH the agent cannot answer, for a channel it does not have or cannot see (§ 3.1b), gets
 `ERROR { code: "CHANNEL_NOT_FOUND", channel_id, request_id }`. The hub names every ATTACH with a
@@ -386,6 +401,17 @@ after it until its terminal has taken what is queued. The first one dropped is a
 relays each one to the clients attached to that channel as `INPUT_DROPPED` (§ 4.12), and the pane
 says in its terminal that what was typed was dropped because the terminal is not taking input.
 
+An agent that says `"input-modes"` writes each INPUT in the form its program asked for, from its own
+screen model, whatever the client's terminal believes (#1012):
+
+- **A paste** runs from an `ESC[200~` to the next `ESC[201~` in the same INPUT. Its markers are kept
+  when the program set bracketed paste (`?2004`) and removed otherwise. Nothing inside it is
+  rewritten. A marker without its pair in the INPUT is no paste, and is written as it is.
+- **A cursor key outside a paste**, unmodified (`A`, `B`, `C`, `D`, Home `H`, End `F`), in either its
+  CSI or its SS3 form, is written in SS3 form when the program set application cursor keys (`?1`) and
+  in CSI form otherwise. A sequence with parameters, such as `ESC[1;5A`, is written as it is.
+- Only whole sequences within one INPUT match: one split across two is written unchanged.
+
 ### 3.5 OUTPUT (Agent → Hub)
 
 ```typescript
@@ -428,7 +454,8 @@ Agent MUST resize both the PTY and the channel's `vt100` screen, so the next sna
   type: "SNAPSHOT_RES",
   channel_id: string,
   snapshot: { serialized: string, cols: number, rows: number,
-              cursor_x: number, cursor_y: number },
+              cursor_x: number, cursor_y: number,
+              alternate_screen?: boolean, input_modes?: string },  // as on ATTACH_OK (§ 3.3)
   last_seq: number
 }
 ```
@@ -803,7 +830,8 @@ sends a frame or disconnects.
 {
   type: "ATTACH_OK",
   channel_id: string,
-  snapshot: { serialized, cols, rows, cursor_x, cursor_y } | null,
+  snapshot: { serialized, cols, rows, cursor_x, cursor_y,
+              alternate_screen?, input_modes? } | null,  // the agent's, as § 3.3 has it
   tail: Uint8Array[],          // output since last snapshot
   write_lock_holder: string | null,
   cached: boolean,             // true = from local cache, agent unreachable
@@ -818,7 +846,10 @@ sends a frame or disconnects.
   cwd?: string | null,
   cwd_source?: "shell" | "process" | "start",
   foreground?: string,         // the program holding the terminal, when not the shell
-  files_panel: { open: boolean } // whether the writer's files panel is open on it (§ 4.20, #838)
+  files_panel: { open: boolean }, // whether the writer's files panel is open on it (§ 4.20, #838)
+  // Whether the agent that takes this terminal's input now says "input-modes" (§ 3.1), read when the
+  // answer is sent, from the connected agent INPUT goes to, never from a stored snapshot (#1012).
+  adapts_input: boolean
 }
 
 // UI → Hub
@@ -867,6 +898,23 @@ snapshot includes what the hub had received and not yet stored.
 The answer is what a pane shows, and a pane attaches again whenever its socket is replaced: an
 ATTACH_OK from the terminal leaves it uncovered, one with `cached: true` shows it is not connected,
 and `CHANNEL_DEAD` shows it has ended, whatever the pane showed before.
+
+**What the pane does with them (#1012).**
+
+- **An ATTACH_OK that replaces the screen** (any attach but a Reconnect or Restart over a screen the
+  pane kept): after the reset, the pane writes `ESC[?1049h` when `alternate_screen` is true, then
+  `serialized`, then `input_modes`, then the tail, so a mode the tail sets wins. An attach that keeps
+  the screen writes none of it.
+- **No focus report from a replay:** a focus report xterm makes for the `?1004h` of a replay is not
+  sent.
+- **An ended terminal's last output** (`last_output`) applies neither field.
+- **While `adapts_input` is true** for the terminal it shows, from the ATTACH_OK or SPAWN_OK that bound
+  it:
+  - the pane brackets every paste itself: its text without any paste marker (removed until none is
+    left), line breaks as `\r`, between `ESC[200~` and `ESC[201~`, in one INPUT;
+  - a paste whose bracketed form is over 65,536 bytes is refused with a notice;
+  - xterm pastes nothing of its own.
+- **Otherwise,** xterm pastes as it always did.
 
 ### 4.3 INPUT / OUTPUT / RESIZE / CHANNEL_SIZE
 
@@ -920,7 +968,8 @@ smaller than that scroll rather than scaling the text.
 }
 
 // Hub → UI
-{ type: "SPAWN_OK", channel_id: string, host_id: string, session_id: string, request_id?: string }
+{ type: "SPAWN_OK", channel_id: string, host_id: string, session_id: string, request_id?: string,
+  adapts_input: boolean }  // as on ATTACH_OK (§ 4.2)
 ```
 
 A SPAWN that names neither `shell` nor a launch profile, as the `+` button, the host picker and an

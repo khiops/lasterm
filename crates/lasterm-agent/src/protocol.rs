@@ -264,6 +264,14 @@ pub struct SnapshotData {
     pub rows: u16,
     pub cursor_x: u16,
     pub cursor_y: u16,
+    /// The program is in the alternate screen (#1012). An older agent leaves
+    /// it out.
+    #[serde(default)]
+    pub alternate_screen: bool,
+    /// The program's input modes, as escape sequences that set every one of
+    /// them (#1012). An older agent leaves it out.
+    #[serde(default)]
+    pub input_modes: String,
 }
 
 /// Standard error codes

@@ -170,6 +170,39 @@ describe("encodeMessage / decodeMessage round-trip", () => {
 		expect(decoded.lastSeq).toBe(100);
 	});
 
+	// The snapshot's terminal state and the UI's adaptsInput flag (#1012).
+	it("converts the snapshot's terminal state and adaptsInput to snake_case on the wire, and back", () => {
+		const msg = {
+			type: "ATTACH_OK",
+			channelId: "chan-1",
+			snapshot: {
+				serialized: "S",
+				cols: 80,
+				rows: 24,
+				cursorX: 0,
+				cursorY: 0,
+				alternateScreen: true,
+				inputModes: "\u001b[?2004h",
+			},
+			adaptsInput: true,
+		};
+		expect(toSnakeCase(msg)).toEqual({
+			type: "ATTACH_OK",
+			channel_id: "chan-1",
+			snapshot: {
+				serialized: "S",
+				cols: 80,
+				rows: 24,
+				cursor_x: 0,
+				cursor_y: 0,
+				alternate_screen: true,
+				input_modes: "\u001b[?2004h",
+			},
+			adapts_input: true,
+		});
+		expect(decodeMessage(encodeMessage(msg as unknown as ProtocolMessage))).toEqual(msg);
+	});
+
 	it("round-trips a WRITE_LOCK message with null holder", () => {
 		const msg: ProtocolMessage = {
 			type: "WRITE_LOCK",

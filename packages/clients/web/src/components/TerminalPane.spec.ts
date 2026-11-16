@@ -4085,6 +4085,21 @@ describe("TerminalPane pasting through an agent that adapts input (#1012)", () =
 		expect(inputs()).toEqual([`${START}a\rbcd${END}`]);
 	});
 
+	// Removing them until none is left took a pass per level of nesting: a
+	// clipboard of nested markers made it quadratic, before any size check.
+	it("takes out deeply nested markers in time linear in the text", async () => {
+		await attachedSaying(true);
+		const depth = 100_000;
+		const nested = `${"\u001b[20".repeat(depth)}\u001b[201~${"1~".repeat(depth)}x`;
+
+		const started = performance.now();
+		paste(nested);
+		const took = performance.now() - started;
+
+		expect(inputs()).toEqual([`${START}x${END}`]);
+		expect(took).toBeLessThan(1000);
+	});
+
 	it("takes out a marker its text would form again once another is taken out", async () => {
 		await attachedSaying(true);
 

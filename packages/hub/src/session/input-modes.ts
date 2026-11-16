@@ -8,20 +8,11 @@ export const INPUT_MODES_CAPABILITY = "input-modes";
  * (`SessionManager.handleInput`), writes paste markers and cursor keys in its
  * program's form (#1012). A pane brackets its pastes itself only then. It is
  * read when an answer is sent, never from a stored snapshot: the agent that
- * stored it may not be the one that takes the input. An agent that is not
- * connected takes none, and does not count.
+ * stored it may not be the one that takes the input.
  */
 export function agentAdaptsInput(
-	agents: {
-		get(
-			hostId: string,
-		): { connected: boolean; helloMessage?: HelloMessage | undefined } | undefined;
-	},
+	agents: { get(hostId: string): { helloMessage?: HelloMessage | undefined } | undefined },
 	hostId: string,
 ): boolean {
-	const agent = agents.get(hostId);
-	return (
-		agent?.connected === true &&
-		agent.helloMessage?.capabilities?.includes(INPUT_MODES_CAPABILITY) === true
-	);
+	return agents.get(hostId)?.helloMessage?.capabilities?.includes(INPUT_MODES_CAPABILITY) === true;
 }

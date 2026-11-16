@@ -2854,7 +2854,7 @@ describe("SessionManager", () => {
 			expect(answers(received, "ATTACH_OK")[0]?.adaptsInput).toBe(false);
 		});
 
-		it("answers from memory with the snapshot's state, and says not with no connected agent, whatever agent stored it", async () => {
+		it("answers from memory with the snapshot's state, and says not when the host has no agent, whatever agent stored it", async () => {
 			const { MetaDAL } = await import("../storage/meta.js");
 			const dal = new MetaDAL(dbManager.meta);
 			const host = dal.createHost({

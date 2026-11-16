@@ -37,18 +37,32 @@ const PASTE_START = "\u001b[200~";
 const PASTE_END = "\u001b[201~";
 
 /**
- * A pasted text with no paste marker left in it, removed until none remains,
- * so that a marker cannot be formed again from the pieces around one taken
- * out (#1012).
+ * A pasted text with no paste marker left in it (#1012). One pass: each
+ * character is kept, and a marker is dropped as soon as the kept text ends with
+ * one, so that one formed again from the pieces around another is dropped too.
+ * The two markers cannot overlap (each starts with the text's only ESC and
+ * ends with `~`), so this leaves what removing them until none remains would,
+ * in time linear in the text, however deeply its markers nest.
  */
 function withoutPasteMarkers(text: string): string {
-	let previous: string;
-	let current = text;
-	do {
-		previous = current;
-		current = current.replaceAll(PASTE_START, "").replaceAll(PASTE_END, "");
-	} while (current !== previous);
-	return current;
+	const kept: string[] = [];
+	for (let i = 0; i < text.length; i++) {
+		const unit = text.charAt(i);
+		kept.push(unit);
+		const n = kept.length;
+		if (
+			unit === "~" &&
+			n >= PASTE_START.length &&
+			kept[n - 6] === "\u001b" &&
+			kept[n - 5] === "[" &&
+			kept[n - 4] === "2" &&
+			kept[n - 3] === "0" &&
+			(kept[n - 2] === "0" || kept[n - 2] === "1")
+		) {
+			kept.length = n - PASTE_START.length;
+		}
+	}
+	return kept.join("");
 }
 
 /** What xterm reports on a focus change, when the program asked for it (`?1004`). */

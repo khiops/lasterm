@@ -537,17 +537,41 @@ async fn input_to_a_held_back_terminal_does_not_block_its_connection() {
 /// and published its modes before passing the output on (#1012).
 #[cfg(unix)]
 async fn read_until_printed(hub: &mut TestHub, channel_id: &str, marker: &str) {
-    let mut printed = Vec::new();
+    read_until_each_printed(hub, &[(channel_id, marker)]).await;
+}
+
+/// Read until each terminal has printed its marker. The output of every one
+/// is kept as it comes, whichever prints first: a frame read while waiting for
+/// another terminal is not lost.
+#[cfg(unix)]
+async fn read_until_each_printed(hub: &mut TestHub, waits: &[(&str, &str)]) {
+    let mut printed: Vec<Vec<u8>> = vec![Vec::new(); waits.len()];
+    let done = |printed: &[Vec<u8>]| {
+        waits
+            .iter()
+            .zip(printed)
+            .all(|((_, marker), out)| String::from_utf8_lossy(out).contains(marker))
+    };
     tokio::time::timeout(DEADLINE, async {
-        while !String::from_utf8_lossy(&printed).contains(marker) {
+        while !done(&printed) {
             let frame = hub.next_frame().await;
-            if is_about(&frame, "OUTPUT", channel_id) {
-                printed.extend_from_slice(output_data(&frame));
+            for (index, (channel_id, _)) in waits.iter().enumerate() {
+                if is_about(&frame, "OUTPUT", channel_id) {
+                    printed[index].extend_from_slice(output_data(&frame));
+                }
             }
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("{channel_id} did not print {marker} within {DEADLINE:?}"));
+    .unwrap_or_else(|_| {
+        let missing: Vec<_> = waits
+            .iter()
+            .zip(&printed)
+            .filter(|((_, marker), out)| !String::from_utf8_lossy(out).contains(marker))
+            .map(|((channel_id, marker), _)| format!("{channel_id} ({marker})"))
+            .collect();
+        panic!("{} did not print within {DEADLINE:?}", missing.join(", "))
+    });
 }
 
 /// The bytes a raw program wrote to `path` once it holds `len` of them.
@@ -634,8 +658,7 @@ async fn each_terminal_adapts_its_input_to_its_own_program() {
         ),
     ))
     .await;
-    read_until_printed(&mut hub, "with-decckm", "READY").await;
-    read_until_printed(&mut hub, "without", "READY").await;
+    read_until_each_printed(&mut hub, &[("with-decckm", "READY"), ("without", "READY")]).await;
 
     hub.send(&input("with-decckm", b"\x1b[A".to_vec())).await;
     hub.send(&input("without", b"\x1b[A".to_vec())).await;

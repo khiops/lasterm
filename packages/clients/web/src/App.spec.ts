@@ -30,6 +30,7 @@ import {
 	HOST_B,
 	mountWindow,
 	mouseDown,
+	type PaneNode,
 	pane,
 	panesShown,
 	paneWithKeyboard,
@@ -44,6 +45,7 @@ import {
 	term,
 	unmountWindow,
 	vacant,
+	type WindowSetup,
 } from "./App.fixture.js";
 import { APP_SHORTCUTS, type AppActionId } from "./utils/app-shortcuts.js";
 import { CONFIRMATIONS } from "./utils/confirmations.js";
@@ -1736,57 +1738,612 @@ describe("the host-group dialogs when the hub refuses", () => {
 });
 
 // A pane opened for a new terminal keeps its pending id in the saved layout, while the spawn it
-// owes was kept in memory only: after a reload it attached to that id, and said its terminal was
-// gone (#992).
+// owed was kept in memory only: after a reload it attached to that id and said its terminal was
+// gone (#992). The spawn is kept for the next page now. That page starts nothing by itself: a
+// SPAWN that went out may have left a terminal, so the pane says where it would be listed. One
+// that never went out started nothing, and the pane offers to start it (the idea of keeping
+// whether it went out is lx3133584's, #1032).
 describe("a new terminal's pane after a reload", () => {
-	/** Open a new terminal in the empty pane, then reload the window over the layout it saved. */
-	async function reloadWhileSpawning(answer?: (hub: FakeHub) => void): Promise<{
-		hub: FakeHub;
-		pendingId: string;
-	}> {
-		const first = await mountWindow({ layout: { tabs: [{ id: "TAB1", root: vacant("V1") }] } });
-		first.hub.answersSpawns = false;
-		const row = [...document.querySelectorAll<HTMLElement>('.vacant-pane [role="option"]')].find(
-			(option) => option.querySelector(".host-pick-row__label")?.textContent?.trim() === "alpha",
+	const PENDING_KEY = "lasterm:pending-spawns";
+	const UNCONFIRMED = "The window reloaded before this terminal's start was confirmed.";
+	const NEVER_STARTED = "This terminal was never started.";
+
+	/** What `lasterm:pending-spawns` holds now. */
+	function stored(): Record<string, { hostId: string; sent: boolean }> | null {
+		const raw = localStorage.getItem(PENDING_KEY);
+		return raw === null ? null : JSON.parse(raw);
+	}
+
+	/** The pending ids the saved layout's leaves hold, in the order of its tabs. */
+	function savedLeafIds(): string[] {
+		return savedLeaves().map((leaf) => leaf.channelId);
+	}
+
+	/** The saved layout's terminal leaves, in the order of its tabs. */
+	function savedLeaves(): Array<{ channelId: string; paneId: string }> {
+		const raw = localStorage.getItem("lasterm:layout");
+		if (raw === null) return [];
+		const ids: Array<{ channelId: string; paneId: string }> = [];
+		const walk = (node: PaneNode | null | undefined): void => {
+			if (node === null || node === undefined) return;
+			if (node.type === "terminal") ids.push({ channelId: node.channelId, paneId: node.paneId });
+			if (node.type === "split") {
+				walk(node.first);
+				walk(node.second);
+			}
+		};
+		const saved = JSON.parse(raw) as { tabs: { id: string }[]; layouts: Record<string, PaneNode> };
+		for (const tab of saved.tabs) walk(saved.layouts[tab.id]);
+		return ids;
+	}
+
+	/** Pick a host in the empty pane shown, as a click on its row does. */
+	async function pickInEmptyPane(label: string, within: ParentNode = document): Promise<void> {
+		const row = [...within.querySelectorAll<HTMLElement>('.vacant-pane [role="option"]')].find(
+			(option) => option.querySelector(".host-pick-row__label")?.textContent?.trim() === label,
 		);
-		if (row === undefined) throw new Error('no host "alpha" in the picker');
+		if (row === undefined) throw new Error(`no host "${label}" in the picker`);
 		row.click();
 		await settle();
-		await vi.waitFor(() => expect(first.hub.frames("SPAWN")).toHaveLength(1));
-		answer?.(first.hub);
+	}
+
+	/** The error boxes on screen, each as its lines and its buttons. */
+	function boxes(): Array<{ lines: string[]; buttons: string[] }> {
+		return [...document.querySelectorAll(".terminal-error__box")].map((box) => ({
+			lines: [...box.querySelectorAll(":scope > span")].map((s) => s.textContent?.trim() ?? ""),
+			buttons: [...box.querySelectorAll("button")].map((b) => b.textContent?.trim() ?? ""),
+		}));
+	}
+
+	function box(): { lines: string[]; buttons: string[] } {
+		const shown = boxes();
+		expect(shown).toHaveLength(1);
+		return shown[0] as { lines: string[]; buttons: string[] };
+	}
+
+	/** Click a button of the error box shown. */
+	async function clickInBox(name: string): Promise<void> {
+		const button = [...document.querySelectorAll<HTMLElement>(".terminal-error__box button")].find(
+			(b) => b.textContent?.trim() === name,
+		);
+		if (button === undefined) throw new Error(`no "${name}" in the pane's box`);
+		button.click();
 		await settle();
-		const saved = localStorage.getItem("lasterm:layout");
-		expect(saved).not.toBeNull();
-		const pendingId = (JSON.parse(saved as string).layouts.TAB1 as { channelId: string }).channelId;
+	}
+
+	function hostInView(): string | null {
+		return (
+			document.querySelector('.host-rail [aria-pressed="true"]')?.getAttribute("aria-label") ?? null
+		);
+	}
+
+	async function selectHost(label: string): Promise<void> {
+		const button = document.querySelector<HTMLElement>(`.host-rail [aria-label="${label}"]`);
+		if (button === null) throw new Error(`no "${label}" in the rail`);
+		button.click();
+		await settle();
+		expect(hostInView()).toBe(label);
+	}
+
+	/** The frames of a type sent for one id. */
+	function sentFor(hub: FakeHub, type: string, id: string): unknown[] {
+		return hub.frames(type).filter((f) => f.channelId === id);
+	}
+
+	/** Answer a SPAWN the hub has not answered with an ERROR, as a hub refusing it would. */
+	function refuse(hub: FakeHub, spawn: Record<string, unknown> | undefined): void {
+		hub.hear({
+			type: "ERROR",
+			code: "SPAWN_FAILED",
+			message: "The shell could not start.",
+			hostId: spawn?.hostId,
+			requestId: spawn?.requestId,
+		});
+	}
+
+	/** Answer a SPAWN the hub has not answered with a new terminal. */
+	function accept(
+		hub: FakeHub,
+		spawn: Record<string, unknown> | undefined,
+		channelId: string,
+	): void {
+		hub.channels = [
+			...hub.channels,
+			{ id: channelId, hostId: spawn?.hostId as string, status: "live", title: channelId },
+		];
+		hub.hear({ type: "SPAWN_OK", channelId, hostId: spawn?.hostId, requestId: spawn?.requestId });
+	}
+
+	/**
+	 * Reload the window: what the first one saved is read, its SPAWNs still waiting are ended so
+	 * nothing of it writes after (a real reload leaves no such writer), and a new window is
+	 * mounted over what was read, against a hub holding `setup`.
+	 */
+	async function reload(hub: FakeHub, setup: WindowSetup = {}): Promise<FakeHub> {
+		const storage: Record<string, string> = {};
+		for (const key of ["lasterm:layout", PENDING_KEY]) {
+			const value = localStorage.getItem(key);
+			if (value !== null) storage[key] = value;
+		}
+		for (const spawn of hub.frames("SPAWN")) refuse(hub, spawn);
+		await settle();
 		unmountWindow();
-		const { hub } = await mountWindow({ storage: { "lasterm:layout": saved as string } });
+		const next = await mountWindow({ ...setup, storage: { ...storage, ...setup.storage } });
+		return next.hub;
+	}
+
+	/** A new terminal picked on alpha in an empty pane, its SPAWN left unanswered. */
+	async function startingOnAlpha(
+		setup: WindowSetup = {},
+	): Promise<{ hub: FakeHub; pendingId: string }> {
+		const { hub } = await mountWindow({
+			layout: { tabs: [{ id: "TAB1", root: vacant("V1") }] },
+			...setup,
+		});
+		hub.answersSpawns = false;
+		await pickInEmptyPane("alpha");
+		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(1));
+		const [pendingId] = savedLeafIds();
+		if (pendingId === undefined) throw new Error("no pending leaf saved");
 		return { hub, pendingId };
 	}
 
-	function paneSays(): string {
-		return document.querySelector(".terminal-pane")?.textContent ?? "";
-	}
+	const BOTH: WindowSetup = { hosts: [ALPHA, BRAVO] };
 
 	it("does not say the terminal is gone after a reload while its spawn ran", async () => {
-		const { hub, pendingId } = await reloadWhileSpawning();
+		const first = await startingOnAlpha();
+		expect(stored()?.[first.pendingId]).toEqual({ hostId: HOST_A, sent: true });
 
-		expect(hub.frames("ATTACH").filter((f) => f.channelId === pendingId)).toEqual([]);
-		expect(paneSays()).not.toContain("This terminal no longer exists.");
+		const hub = await reload(first.hub);
+
+		expect(box()).toEqual({
+			lines: [UNCONFIRMED, "If it started, it is listed under alpha."],
+			buttons: ["Retry", "Close"],
+		});
+		expect(sentFor(hub, "ATTACH", first.pendingId)).toEqual([]);
+		expect(hub.frames("SPAWN")).toEqual([]);
+	});
+
+	it("names the spawn's host while another host is in view after a reload", async () => {
+		const first = await startingOnAlpha(BOTH);
+
+		const hub = await reload(first.hub, BOTH);
+		await selectHost("bravo");
+
+		expect(box().lines).toEqual([UNCONFIRMED, "If it started, it is listed under alpha."]);
+		expect(sentFor(hub, "ATTACH", first.pendingId)).toEqual([]);
+		expect(hub.frames("SPAWN")).toEqual([]);
+	});
+
+	it("names the spawn's host once the hosts list has it", async () => {
+		const first = await startingOnAlpha(BOTH);
+
+		const hub = await reload(first.hub, { hosts: [BRAVO] });
+		expect(box().lines).toEqual([UNCONFIRMED, "If it started, it is listed under this host."]);
+
+		hub.hosts = [ALPHA, BRAVO];
+		hub.hear({ type: "HOSTS_CHANGED" });
+		await vi.waitFor(() =>
+			expect(box().lines).toEqual([UNCONFIRMED, "If it started, it is listed under alpha."]),
+		);
+	});
+
+	it("restores a terminal opened in a new tab from the palette the same way", async () => {
+		const { hub: firstHub } = await mountWindow({
+			...BOTH,
+			channels: [live("T1")],
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+		});
+		firstHub.answersSpawns = false;
+		await runPaletteRow("alpha");
+		await vi.waitFor(() => expect(firstHub.frames("SPAWN")).toHaveLength(1));
+		const pendingId = savedLeafIds().find((id) => id !== "T1");
+		if (pendingId === undefined) throw new Error("no pending leaf saved");
+
+		const hub = await reload(firstHub, { ...BOTH, channels: [live("T1")] });
+		await press("2", { ctrl: true, alt: true, code: "Digit2" });
+
+		expect(box().lines).toEqual([UNCONFIRMED, "If it started, it is listed under alpha."]);
+		expect(sentFor(hub, "ATTACH", pendingId)).toEqual([]);
+		expect(hub.frames("SPAWN")).toEqual([]);
 	});
 
 	it("does not say the terminal is gone after a reload once its spawn failed", async () => {
-		const { hub, pendingId } = await reloadWhileSpawning((first) => {
-			const spawn = first.frames("SPAWN")[0];
-			first.hear({
-				type: "ERROR",
-				code: "SPAWN_FAILED",
-				message: "The shell could not start.",
-				hostId: HOST_A,
-				requestId: spawn?.requestId,
-			});
+		const first = await startingOnAlpha();
+		refuse(first.hub, first.hub.frames("SPAWN")[0]);
+		await settle();
+		expect(box().lines).toEqual(["SPAWN_FAILED: The shell could not start."]);
+
+		const hub = await reload(first.hub);
+
+		expect(box()).toEqual({
+			lines: [UNCONFIRMED, "If it started, it is listed under alpha."],
+			buttons: ["Retry", "Close"],
+		});
+		expect(sentFor(hub, "ATTACH", first.pendingId)).toEqual([]);
+		expect(hub.frames("SPAWN")).toEqual([]);
+	});
+
+	it("starts the terminal on its host when Retry is clicked after a reload", async () => {
+		const first = await startingOnAlpha(BOTH);
+		const hub = await reload(first.hub, BOTH);
+		await selectHost("bravo");
+		hub.answersSpawns = false;
+
+		await clickInBox("Retry");
+		await clickInBox("Retry").catch(() => {});
+
+		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(1));
+		await settle();
+		expect(hub.frames("SPAWN")).toHaveLength(1);
+		expect(hub.frames("SPAWN")[0]).toMatchObject({ hostId: HOST_A });
+
+		accept(hub, hub.frames("SPAWN")[0], "R1");
+		await vi.waitFor(() => expect(savedLeafIds()).toEqual(["R1"]));
+		expect(stored()?.[first.pendingId]).toBeUndefined();
+	});
+
+	it("forgets the terminal's start when its pane is closed after a reload", async () => {
+		const first = await startingOnAlpha();
+		await reload(first.hub);
+
+		await clickInBox("Close");
+
+		expect(document.querySelector(".vacant-pane")).not.toBeNull();
+		expect(stored()?.[first.pendingId]).toBeUndefined();
+	});
+
+	it("forgets a recorded start that no pane shows at load", async () => {
+		await mountWindow({
+			layout: { tabs: [{ id: "TAB1", root: term("P1", "L1") }] },
+			storage: {
+				[PENDING_KEY]: JSON.stringify({
+					P1: { hostId: HOST_A, sent: true },
+					P2: { hostId: HOST_A, sent: true },
+				}),
+			},
 		});
 
-		expect(hub.frames("ATTACH").filter((f) => f.channelId === pendingId)).toEqual([]);
-		expect(paneSays()).not.toContain("This terminal no longer exists.");
+		expect(stored()).toEqual({ P1: { hostId: HOST_A, sent: true } });
+	});
+
+	it("forgets every recorded start when the saved layout holds no panes", async () => {
+		await mountWindow({
+			storage: {
+				"lasterm:layout": "{}",
+				[PENDING_KEY]: JSON.stringify({ P1: { hostId: HOST_A, sent: true } }),
+			},
+		});
+
+		expect(stored()).toEqual({});
+	});
+
+	it("keeps a recorded start whose pane is in a split of a tab not shown", async () => {
+		const { hub } = await mountWindow({
+			channels: [live("T1"), live("T2")],
+			layout: {
+				tabs: [
+					{ id: "TAB1", root: term("T1", "L1") },
+					{ id: "TAB2", root: split("vertical", term("T2", "L2"), term("P1", "L3")) },
+				],
+			},
+			storage: { [PENDING_KEY]: JSON.stringify({ P1: { hostId: HOST_A, sent: true } }) },
+		});
+
+		expect(stored()).toEqual({ P1: { hostId: HOST_A, sent: true } });
+		await press("2", { ctrl: true, alt: true, code: "Digit2" });
+		expect(box().lines).toEqual([UNCONFIRMED, "If it started, it is listed under alpha."]);
+		expect(sentFor(hub, "ATTACH", "P1")).toEqual([]);
+	});
+
+	it("keeps no recorded start once the terminal has started", async () => {
+		const first = await startingOnAlpha();
+
+		accept(first.hub, first.hub.frames("SPAWN")[0], "R1");
+		await vi.waitFor(() => expect(savedLeafIds()).toEqual(["R1"]));
+
+		expect(stored()?.[first.pendingId]).toBeUndefined();
+	});
+
+	it.each([
+		[
+			"success",
+			(hub: FakeHub, spawn: Record<string, unknown> | undefined) => accept(hub, spawn, "R1"),
+		],
+		["an error", refuse],
+	])("keeps no recorded start once a closed pane's spawn ends with %s", async (_, answer) => {
+		const first = await startingOnAlpha();
+		await runPaletteRow("Close Pane");
+		expect(savedLeafIds()).toEqual([]);
+
+		answer(first.hub, first.hub.frames("SPAWN")[0]);
+		await settle();
+
+		expect(stored()?.[first.pendingId]).toBeUndefined();
+	});
+
+	it("keeps one terminal's recorded start when another's is forgotten", async () => {
+		const { hub: firstHub } = await mountWindow({
+			layout: { tabs: [{ id: "TAB1", root: split("vertical", vacant("V1"), vacant("V2")) }] },
+		});
+		firstHub.answersSpawns = false;
+		const [left, right] = [...document.querySelectorAll(".vacant-pane")];
+		await pickInEmptyPane("alpha", left?.parentElement ?? document);
+		await pickInEmptyPane("alpha", right?.parentElement ?? document);
+		await vi.waitFor(() => expect(firstHub.frames("SPAWN")).toHaveLength(2));
+		const [one, other] = savedLeaves();
+		if (one === undefined || other === undefined) throw new Error("two pending leaves expected");
+		expect(Object.keys(stored() ?? {}).sort()).toEqual([one.channelId, other.channelId].sort());
+
+		// Both refused, then one pane closed by its box's Close: its record goes, the other's stays,
+		// held by its pane.
+		for (const spawn of firstHub.frames("SPAWN")) refuse(firstHub, spawn);
+		await settle();
+		const close = [
+			...(pane(one.paneId)?.querySelectorAll<HTMLElement>(".terminal-error__box button") ?? []),
+		].find((b) => b.textContent?.trim() === "Close");
+		close?.click();
+		await settle();
+
+		expect(Object.keys(stored() ?? {})).toEqual([other.channelId]);
+		const hub = await reload(firstHub);
+		expect(box().lines[0]).toBe(UNCONFIRMED);
+		expect(hub.frames("SPAWN")).toEqual([]);
+	});
+
+	it("waits for Retry when the connection comes back after a reload", async () => {
+		const first = await startingOnAlpha();
+		const hub = await reload(first.hub);
+
+		hub.drop();
+		await hub.reconnect();
+		await settle();
+
+		expect(hub.frames("SPAWN")).toEqual([]);
+		expect(sentFor(hub, "ATTACH", first.pendingId)).toEqual([]);
+		expect(box().buttons).toEqual(["Retry", "Close"]);
+	});
+
+	it("waits for Retry when the connection comes back after a Retry failed", async () => {
+		const first = await startingOnAlpha();
+		const hub = await reload(first.hub);
+		hub.answersSpawns = false;
+		await clickInBox("Retry");
+		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(1));
+		refuse(hub, hub.frames("SPAWN")[0]);
+		await settle();
+		expect(box().lines).toEqual(["SPAWN_FAILED: The shell could not start."]);
+
+		hub.drop();
+		await hub.reconnect();
+		await settle();
+
+		expect(hub.frames("SPAWN")).toHaveLength(1);
+	});
+
+	it("waits for Retry when the connection comes back after its pane was split", async () => {
+		const first = await startingOnAlpha();
+		const hub = await reload(first.hub);
+
+		await runPaletteRow("Split Right");
+		await settle();
+		hub.drop();
+		await hub.reconnect();
+		await settle();
+
+		expect(hub.frames("SPAWN")).toEqual([]);
+		expect(sentFor(hub, "ATTACH", first.pendingId)).toEqual([]);
+	});
+
+	it("keeps the terminal's start when Retry cannot reach the hub, and waits for the next", async () => {
+		const first = await startingOnAlpha();
+		const hub = await reload(first.hub);
+		hub.drop();
+		hub.dialing = () => Promise.reject(new Error("the hub cannot be reached"));
+
+		await clickInBox("Retry");
+
+		expect(hub.frames("SPAWN")).toEqual([]);
+		expect(stored()?.[first.pendingId]).toEqual({ hostId: HOST_A, sent: true });
+		hub.dialing = null;
+		await hub.reconnect();
+		await settle();
+		expect(hub.frames("SPAWN")).toEqual([]);
+
+		await runPaletteRow("Split Right");
+		await settle();
+		expect(hub.frames("SPAWN")).toEqual([]);
+		expect(boxes().length).toBeGreaterThan(0);
+
+		hub.answersSpawns = false;
+		await clickInBox("Retry");
+		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(1));
+	});
+
+	it("sends the spawn once the connection a Retry waits on opens", async () => {
+		const first = await startingOnAlpha();
+		const hub = await reload(first.hub);
+		hub.drop();
+		let open: () => void = () => {};
+		hub.dialing = () =>
+			new Promise<void>((resolve) => {
+				open = resolve;
+			});
+		hub.answersSpawns = false;
+
+		await clickInBox("Retry");
+		expect(hub.frames("SPAWN")).toEqual([]);
+
+		open();
+		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(1));
+		expect(hub.frames("SPAWN")[0]).toMatchObject({ hostId: HOST_A });
+	});
+
+	it("keeps the terminal's start across a failed Retry and another reload", async () => {
+		const first = await startingOnAlpha();
+		const second = await reload(first.hub);
+		second.answersSpawns = false;
+		await clickInBox("Retry");
+		await vi.waitFor(() => expect(second.frames("SPAWN")).toHaveLength(1));
+		refuse(second, second.frames("SPAWN")[0]);
+		await settle();
+
+		const hub = await reload(second);
+
+		expect(box()).toEqual({
+			lines: [UNCONFIRMED, "If it started, it is listed under alpha."],
+			buttons: ["Retry", "Close"],
+		});
+		expect(sentFor(hub, "ATTACH", first.pendingId)).toEqual([]);
+	});
+
+	/**
+	 * Make `localStorage` refuse the pending spawns' key: the writes numbered in `refused`, counted
+	 * from 1, and every removal if `removeToo`.
+	 */
+	function refuseWrites(refused: number[], removeToo = false): void {
+		let writes = 0;
+		const setItem = localStorage.setItem.bind(localStorage);
+		vi.spyOn(localStorage, "setItem").mockImplementation((key: string, value: string) => {
+			if (key === PENDING_KEY && refused.includes(++writes)) {
+				throw new DOMException("full", "QuotaExceededError");
+			}
+			setItem(key, value);
+		});
+		if (removeToo) {
+			vi.spyOn(localStorage, "removeItem").mockImplementation(() => {
+				throw new DOMException("refused", "SecurityError");
+			});
+		}
+	}
+
+	it("starts a new terminal when its start cannot be recorded", async () => {
+		const { hub } = await mountWindow({ layout: { tabs: [{ id: "TAB1", root: vacant("V1") }] } });
+		refuseWrites([1, 2, 3, 4, 5, 6]);
+
+		await pickInEmptyPane("alpha");
+
+		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(1));
+		await vi.waitFor(() => expect(savedLeafIds()[0]?.startsWith("NEW")).toBe(true));
+	});
+
+	it("does not say never started when the write saying the spawn went out is refused", async () => {
+		const { hub: firstHub } = await mountWindow({
+			layout: { tabs: [{ id: "TAB1", root: vacant("V1") }] },
+		});
+		firstHub.answersSpawns = false;
+		refuseWrites([2]);
+		let atSpawn: ReturnType<typeof stored> | undefined;
+		firstHub.onSpawn = () => {
+			atSpawn = stored();
+		};
+
+		await pickInEmptyPane("alpha");
+		await vi.waitFor(() => expect(firstHub.frames("SPAWN")).toHaveLength(1));
+		const [pendingId] = savedLeafIds();
+		expect(atSpawn?.[pendingId ?? ""]).toBeUndefined();
+
+		vi.restoreAllMocks();
+		await reload(firstHub);
+		expect(boxes().flatMap((b) => b.lines)).not.toContain(NEVER_STARTED);
+		expect(stored()?.[pendingId ?? ""]).toBeUndefined();
+	});
+
+	it("removes the whole record when neither write is accepted", async () => {
+		const { hub } = await mountWindow({ layout: { tabs: [{ id: "TAB1", root: vacant("V1") }] } });
+		hub.answersSpawns = false;
+		refuseWrites([2, 3]);
+		let atSpawn: string | null | undefined;
+		hub.onSpawn = () => {
+			atSpawn = localStorage.getItem(PENDING_KEY);
+		};
+
+		await pickInEmptyPane("alpha");
+
+		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(1));
+		expect(atSpawn).toBeNull();
+	});
+
+	it("offers to start a terminal whose spawn never went out", async () => {
+		const { hub } = await mountWindow({
+			layout: { tabs: [{ id: "TAB1", root: term("P1", "L1") }] },
+			storage: { [PENDING_KEY]: JSON.stringify({ P1: { hostId: HOST_A, sent: false } }) },
+		});
+		expect(box()).toEqual({ lines: [NEVER_STARTED], buttons: ["Start", "Close"] });
+		expect(sentFor(hub, "ATTACH", "P1")).toEqual([]);
+		expect(hub.frames("SPAWN")).toEqual([]);
+		hub.answersSpawns = false;
+		let atSpawn: ReturnType<typeof stored> | undefined;
+		hub.onSpawn = () => {
+			atSpawn = stored();
+		};
+
+		await clickInBox("Start");
+
+		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(1));
+		expect(hub.frames("SPAWN")[0]).toMatchObject({ hostId: HOST_A });
+		expect(atSpawn?.P1).toEqual({ hostId: HOST_A, sent: true });
+	});
+
+	it("says never started for a terminal the reload caught before its spawn went out", async () => {
+		// Enter on a host in the palette: its pane asks for the connection before its SPAWN, and the
+		// reload comes while it waits. (The empty pane's picker connects a host that is not live its
+		// own way, without a pending id.)
+		const { hub: firstHub } = await mountWindow({
+			channels: [live("T1")],
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+		});
+		firstHub.drop();
+		firstHub.dialing = () => new Promise<void>(() => {});
+
+		await runPaletteRow("alpha");
+		await vi.waitFor(() => expect(savedLeafIds()).toHaveLength(2));
+		expect(firstHub.frames("SPAWN")).toEqual([]);
+
+		await reload(firstHub, { channels: [live("T1")] });
+		expect(tabs()).toHaveLength(2);
+		await press("2", { ctrl: true, alt: true, code: "Digit2" });
+		expect(box()).toEqual({ lines: [NEVER_STARTED], buttons: ["Start", "Close"] });
+	});
+
+	it("reads a recorded start whose sent is not a boolean as one that may have gone out", async () => {
+		await mountWindow({
+			layout: { tabs: [{ id: "TAB1", root: term("P1", "L1") }] },
+			storage: { [PENDING_KEY]: JSON.stringify({ P1: { hostId: HOST_A, sent: "no" } }) },
+		});
+
+		expect(box().lines).toEqual([UNCONFIRMED, "If it started, it is listed under alpha."]);
+	});
+
+	it.each([
+		["not JSON", "not json"],
+		["null", "null"],
+		["an array", "[]"],
+		["an entry that is a string", JSON.stringify({ P1: "x" })],
+		["a host that is a number", JSON.stringify({ P1: { hostId: 42, sent: true } })],
+		["an empty host", JSON.stringify({ P1: { hostId: "", sent: true } })],
+	])("ignores a recorded start it cannot read: %s", async (_, value) => {
+		const { hub } = await mountWindow({
+			layout: { tabs: [{ id: "TAB1", root: term("P1", "L1") }] },
+			storage: { [PENDING_KEY]: value },
+		});
+
+		await vi.waitFor(() => expect(sentFor(hub, "ATTACH", "P1")).toHaveLength(1));
+		expect(boxes()).toEqual([]);
+	});
+
+	it.each([
+		["no layout was saved", undefined],
+		["the saved layout cannot be read", "not json"],
+	])("keeps the recorded starts when %s", async (_, layout) => {
+		const entries = JSON.stringify({ P1: { hostId: HOST_A, sent: true } });
+		await mountWindow({
+			storage: {
+				[PENDING_KEY]: entries,
+				...(layout === undefined ? {} : { "lasterm:layout": layout }),
+			},
+		});
+
+		expect(localStorage.getItem(PENDING_KEY)).toBe(entries);
 	});
 });

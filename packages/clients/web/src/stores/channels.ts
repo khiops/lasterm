@@ -147,6 +147,83 @@ interface PendingSpawn {
 	readonly hostId: string;
 	holders: number;
 	run: PendingSpawnRun | null;
+	/**
+	 * Left by the page before this one (#992). Nothing starts it by itself: not
+	 * the load, not the connection coming back, not a pane remounted over it.
+	 * Only a click on the pane does.
+	 */
+	readonly restored: boolean;
+	/** A run of it was started, so its SPAWN may have gone out. */
+	sent: boolean;
+}
+
+/**
+ * The code of the failure a restored spawn shows: the page that owed it went
+ * away before its terminal was known to have started (#992). No hub sends it.
+ */
+export const SPAWN_INTERRUPTED = "SPAWN_INTERRUPTED";
+
+/** What a restored spawn's pane is told: whether its SPAWN can have gone out. */
+export interface InterruptedSpawnError extends Error {
+	code: typeof SPAWN_INTERRUPTED;
+	/** No SPAWN went out: nothing can have started, so starting it duplicates nothing. */
+	neverSent: boolean;
+}
+
+/**
+ * The spawns new terminals owe, kept for the next page (#992): the layout is
+ * saved with their pending ids, and a page that finds one in it with no record
+ * took it for a terminal and said it was gone.
+ */
+const PENDING_SPAWNS_KEY = "lasterm:pending-spawns";
+
+interface StoredSpawn {
+	hostId: string;
+	sent: boolean;
+}
+
+/** The spawns the page before this one owed. Anything unreadable is left out. */
+function loadStoredSpawns(): Map<string, StoredSpawn> {
+	const stored = new Map<string, StoredSpawn>();
+	let parsed: unknown;
+	try {
+		const raw = localStorage.getItem(PENDING_SPAWNS_KEY);
+		if (raw === null) return stored;
+		parsed = JSON.parse(raw);
+	} catch {
+		return stored;
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return stored;
+	for (const [tempId, entry] of Object.entries(parsed)) {
+		if (typeof entry !== "object" || entry === null) continue;
+		const { hostId, sent } = entry as { hostId?: unknown; sent?: unknown };
+		if (typeof hostId !== "string" || hostId === "") continue;
+		// Anything but a plain false may have sent its SPAWN: it is read as the
+		// one that claims less.
+		stored.set(tempId, { hostId, sent: sent !== false });
+	}
+	return stored;
+}
+
+/** Write the spawns still owed. Throws what `localStorage` throws. */
+function writeStoredSpawns(spawns: ReadonlyMap<string, StoredSpawn>): void {
+	localStorage.setItem(PENDING_SPAWNS_KEY, JSON.stringify(Object.fromEntries(spawns)));
+}
+
+/** A restored spawn's run: failed, with the reason its pane shows. */
+function interruptedRun(neverSent: boolean): PendingSpawnRun {
+	const error = Object.assign(
+		new Error(
+			neverSent
+				? "This terminal was never started."
+				: "The window reloaded before this terminal's start was confirmed.",
+		),
+		{ code: SPAWN_INTERRUPTED, neverSent },
+	) as InterruptedSpawnError;
+	const outcome = Promise.reject<SpawnedTerminal>(error);
+	// No pane may ever show it: one the layout no longer holds is pruned.
+	outcome.catch(() => {});
+	return { state: "failed", outcome };
 }
 
 /** Why the last attempt to bring a terminal back failed. */
@@ -966,10 +1043,96 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * it is in flight. The panes count themselves in and out, so it is no
 	 * reactive state.
 	 */
-	const pendingSpawns = new Map<string, PendingSpawn>();
+	const pendingSpawns = new Map<string, PendingSpawn>(
+		[...loadStoredSpawns()].map(([tempId, { hostId, sent }]) => [
+			tempId,
+			{ hostId, holders: 0, run: interruptedRun(!sent), restored: true, sent },
+		]),
+	);
+
+	/** The records as the next page is to find them. */
+	function storedSpawns(except?: string): Map<string, StoredSpawn> {
+		const spawns = new Map<string, StoredSpawn>();
+		for (const [tempId, { hostId, sent }] of pendingSpawns) {
+			if (tempId !== except) spawns.set(tempId, { hostId, sent });
+		}
+		return spawns;
+	}
+
+	/**
+	 * Keep the records for the next page. A storage that refuses is ignored, as
+	 * the layout's is: no pane of this page depends on it.
+	 */
+	function storePendingSpawns(): void {
+		try {
+			writeStoredSpawns(storedSpawns());
+		} catch {
+			// Nothing to do: the next page finds what was last written.
+		}
+	}
+
+	/**
+	 * The next page must never offer to start a terminal whose SPAWN went out:
+	 * the hub may have made it. If the write saying so is refused, a refused
+	 * write keeps the value before it, which says no SPAWN went out, so the
+	 * record is taken out of storage instead, whole key if need be. That page
+	 * then knows nothing of it, as before #992.
+	 */
+	function storeSent(tempId: string): void {
+		try {
+			writeStoredSpawns(storedSpawns());
+			return;
+		} catch {
+			// Below.
+		}
+		try {
+			writeStoredSpawns(storedSpawns(tempId));
+			return;
+		} catch {
+			// Below.
+		}
+		try {
+			localStorage.removeItem(PENDING_SPAWNS_KEY);
+		} catch {
+			// A storage refusing even that refuses everything: nothing was kept.
+		}
+	}
 
 	function registerPendingSpawn(tempId: string, hostId: string): void {
-		pendingSpawns.set(tempId, { hostId, holders: 0, run: null });
+		pendingSpawns.set(tempId, { hostId, holders: 0, run: null, restored: false, sent: false });
+		storePendingSpawns();
+	}
+
+	/** Whether `tempId`'s record was left by the page before this one (#992). */
+	function pendingSpawnRestored(tempId: string): boolean {
+		return pendingSpawns.get(tempId)?.restored === true;
+	}
+
+	/**
+	 * A load forgets the records of ids its saved layout no longer holds: no pane
+	 * will show them (#992).
+	 */
+	function forgetPendingSpawnsNotIn(heldIds: ReadonlySet<string>): void {
+		let forgot = false;
+		for (const tempId of [...pendingSpawns.keys()]) {
+			if (heldIds.has(tempId)) continue;
+			pendingSpawns.delete(tempId);
+			forgot = true;
+		}
+		if (forgot) storePendingSpawns();
+	}
+
+	/**
+	 * A Retry on a restored record that ended before its SPAWN was asked for,
+	 * its connection refused: the record shows that failure again, so a pane
+	 * remounted over the id waits for a click too, instead of spawning (#992).
+	 */
+	function failRestoredSpawnBeforeSend(tempId: string, err: unknown): void {
+		const record = pendingSpawns.get(tempId);
+		if (record === undefined || !record.restored || record.run !== null) return;
+		const outcome = Promise.reject<SpawnedTerminal>(err);
+		outcome.catch(() => {});
+		record.run = { state: "failed", outcome };
 	}
 
 	/**
@@ -993,7 +1156,9 @@ export const useChannelsStore = defineStore("channels", () => {
 
 	function forgetIfUnheld(tempId: string, record: PendingSpawn): void {
 		if (record.holders > 0 || record.run?.state === "running") return;
-		if (pendingSpawns.get(tempId) === record) pendingSpawns.delete(tempId);
+		if (pendingSpawns.get(tempId) !== record) return;
+		pendingSpawns.delete(tempId);
+		storePendingSpawns();
 	}
 
 	/**
@@ -1008,6 +1173,12 @@ export const useChannelsStore = defineStore("channels", () => {
 		const record = pendingSpawns.get(tempId);
 		if (record === undefined) return null;
 		if (record.run !== null) return record.run;
+		// Its SPAWN may go out from here: a page that loads it after this must not
+		// offer to start a second terminal (#992).
+		if (!record.sent) {
+			record.sent = true;
+			storeSent(tempId);
+		}
 		// What its SPAWN_OK said of the agent's input (#1012).
 		let adaptsInput = false;
 		let streamsPaste = false;
@@ -1710,6 +1881,9 @@ export const useChannelsStore = defineStore("channels", () => {
 		runPendingSpawn,
 		pendingSpawnRun,
 		clearFailedPendingSpawn,
+		pendingSpawnRestored,
+		forgetPendingSpawnsNotIn,
+		failRestoredSpawnBeforeSend,
 		registerChannelHost,
 		addGroup,
 		removeGroup,

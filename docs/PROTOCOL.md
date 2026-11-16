@@ -1413,7 +1413,9 @@ hub's memory, per host and client, for 5 min when it was typed to open an elevat
 
 ### 4.11 TEST_CONNECT (SSH Connectivity Test)
 
-Allows the UI to test SSH connectivity for a host without creating a full session, through its declared jump under the session's jump rules (`docs/SECURITY.md` §3.3b). The hub may send `AUTH_PROMPT` messages for the target or bastion and `HOST_VERIFY` for the target; an unknown bastion is refused without a `HOST_VERIFY`, possibly after its credential was asked for. Invalid proxy fields receive `TEST_CONNECT_FAIL` with the request's `host_id`.
+Allows the UI to test SSH connectivity for a host without creating a full session, through its declared jump under the session's jump rules (`docs/SECURITY.md` §3.3b). The hub may send `AUTH_PROMPT` messages for the target or bastion and `HOST_VERIFY` for the target; an unknown bastion is refused without a `HOST_VERIFY`, possibly after its credential was asked for. Invalid proxy fields or an invalid `ssh_config_host` receive `TEST_CONNECT_FAIL` with the request's `host_id`.
+
+`ssh_config_host` is the `~/.ssh/config` alias of the entry the New Host dialog's picker filled the host from; the dialog sends it only while its source is that picker and an entry is picked, and stores the same alias on the new host. The hub applies it as a session of the saved host does: its `IdentityAgent none` keeps the SSH agent from signing a key file, and it is one of the names an `@revoked` line in `known_hosts` is looked up under. Absent, a saved host's own alias applies while the request keeps its route.
 
 The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`ready`, `download`, `unsupported`, or `unknown`), and `agentVersion`.
 
@@ -1428,7 +1430,8 @@ The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`re
   ssh_key_path?: string,
   ssh_user?: string,
   ssh_proxy_host_id?: string, // saved jump host; mutually exclusive with spec
-  ssh_proxy_spec?: string    // ProxyJump address
+  ssh_proxy_spec?: string,   // ProxyJump address
+  ssh_config_host?: string   // ~/.ssh/config alias of the picked entry, 1-256 characters
 }
 
 // Hub → UI (success)

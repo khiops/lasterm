@@ -773,7 +773,10 @@ export class SshConnectionManager {
 		if (resolution.kind === "refused") return { ok: false, message: resolution.message };
 		const jump = resolution.kind === "jump" ? resolution.jump : undefined;
 		const jumpAuth = jump ? await buildJumpAuth(jump, promptAuth) : undefined;
-		const namesToLookUp = [parsed.hostname, savedRoute ? saved.sshConfigHost : undefined].filter(
+		// The alias the request carries for an entry picked from ~/.ssh/config,
+		// else the saved host's while its route is unchanged (#1037).
+		const sshConfigHost = msg.sshConfigHost ?? (savedRoute ? saved.sshConfigHost : undefined);
+		const namesToLookUp = [parsed.hostname, sshConfigHost].filter(
 			(name): name is string => typeof name === "string" && name.length > 0,
 		);
 		let successfulJumpFingerprint: string | undefined;
@@ -841,7 +844,7 @@ export class SshConnectionManager {
 				{
 					method: msg.sshAuth,
 					keyPath: msg.sshKeyPath,
-					sshConfigHost: savedRoute ? saved.sshConfigHost : undefined,
+					sshConfigHost,
 				},
 				parsed.hostname,
 				msg.port,

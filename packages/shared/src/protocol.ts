@@ -1108,6 +1108,12 @@ export interface TestConnectMessage {
 	sshProxyHostId?: string;
 	sshProxySpec?: string;
 	/**
+	 * The `~/.ssh/config` alias of the entry the host was picked from, for the
+	 * settings the hub resolves through it (`IdentityAgent none`, known_hosts
+	 * names), as a session of the saved host applies them (#1037).
+	 */
+	sshConfigHost?: string;
+	/**
 	 * The connection timeout in the form, in seconds (#1034). The hub ignores a
 	 * value that is not a whole number from 20 to 120, as if absent.
 	 */

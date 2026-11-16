@@ -986,6 +986,61 @@ describe("SshAgent", () => {
 		TEST_TIMEOUT,
 	);
 
+	// `IdentityAgent none` keeps the agent out of a host stored as agent too, as
+	// ssh keeps it out of `ssh box`: refused before anything is dialled (#1038).
+	it(
+		"refuses the agent for a host whose alias says IdentityAgent none",
+		async () => {
+			const home = makeTempDir("lasterm-agent-none-");
+			const actualAddress = vi.mocked(sshAgentAddress).getMockImplementation();
+			try {
+				mkdirSync(join(home, ".ssh"));
+				writeFileSync(join(home, ".ssh", "config"), "Host box\n  IdentityAgent none\n");
+				vi.stubEnv("HOME", home);
+				vi.stubEnv("USERPROFILE", home);
+				const seen = { connections: 0, refused: 0 };
+				const { server, port } = await createMockSshServer(() => {}, { seen });
+				servers.push(server);
+				const refusal =
+					"IdentityAgent none in ~/.ssh/config keeps the SSH agent out of box, and this host signs in with the agent. Choose a key or a password for it.";
+
+				vi.mocked(sshAgentAddress).mockReturnValueOnce(join(home, "agent.sock"));
+				const withAgent = new SshAgent(makeHost(port, { sshAuth: "agent", sshConfigHost: "box" }));
+				agents.push(withAgent);
+				await expect(withAgent.start()).rejects.toMatchObject({ message: refusal });
+
+				vi.mocked(sshAgentAddress).mockClear();
+				vi.mocked(sshAgentAddress).mockReturnValueOnce(null);
+				const noAgent = new SshAgent(makeHost(port, { sshAuth: "agent", sshConfigHost: "box" }));
+				agents.push(noAgent);
+				await expect(noAgent.start()).rejects.toMatchObject({ message: refusal });
+				expect(sshAgentAddress).not.toHaveBeenCalled();
+				expect(seen.connections).toBe(0);
+				// The null queued above was never taken: drop it.
+				vi.mocked(sshAgentAddress).mockReset();
+
+				// Another alias of the same file is not concerned: it dials as before,
+				// with an agent that holds nothing, and the server refuses it.
+				vi.mocked(sshAgentAddress).mockReturnValue(join(home, "agent.sock"));
+				const other = new SshAgent(makeHost(port, { sshAuth: "agent", sshConfigHost: "other" }));
+				agents.push(other);
+				const otherFailure = await other.start().then(
+					() => null,
+					(error: unknown) => error,
+				);
+				expect(otherFailure).toBeInstanceOf(Error);
+				expect((otherFailure as Error).message).not.toBe(refusal);
+				expect(seen.connections).toBe(1);
+			} finally {
+				vi.mocked(sshAgentAddress).mockReset();
+				if (actualAddress) vi.mocked(sshAgentAddress).mockImplementation(actualAddress);
+				vi.unstubAllEnvs();
+				await removeTempDir(home);
+			}
+		},
+		TEST_TIMEOUT,
+	);
+
 	it(
 		"emits error on SSH auth failure",
 		async () => {

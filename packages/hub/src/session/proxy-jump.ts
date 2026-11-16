@@ -143,7 +143,9 @@ export function resolveJump(
 						username: plan.spec.user ?? host.sshUser ?? parseSshHost(host.sshHost ?? "").username,
 					},
 					knownHostsNames: [plan.spec.host],
-					auth: { method: "agent" },
+					// The name the ssh OpenSSH starts for the jump reads its
+					// configuration by: its `IdentityAgent none` holds here too (#1038).
+					auth: { method: "agent", sshConfigHost: plan.spec.host },
 					promptHostId: host.id,
 					pinnedFingerprint: host.sshProxyFingerprint ?? null,
 					trustKnownHosts,

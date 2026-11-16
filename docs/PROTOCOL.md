@@ -1434,7 +1434,9 @@ hub's memory, per host and client, for 5 min when it was typed to open an elevat
 
 ### 4.11 TEST_CONNECT (SSH Connectivity Test)
 
-Allows the UI to test SSH connectivity for a host without creating a full session, through its declared jump under the session's jump rules (`docs/SECURITY.md` §3.3b). The hub may send `AUTH_PROMPT` messages for the target or bastion and `HOST_VERIFY` for the target; an unknown bastion is refused without a `HOST_VERIFY`, possibly after its credential was asked for. Invalid proxy fields receive `TEST_CONNECT_FAIL` with the request's `host_id`.
+Allows the UI to test SSH connectivity for a host without creating a full session, through its declared jump under the session's jump rules (`docs/SECURITY.md` §3.3b). The hub may send `AUTH_PROMPT` messages for the target or bastion and `HOST_VERIFY` for the target; an unknown bastion is refused without a `HOST_VERIFY`, possibly after its credential was asked for. Invalid proxy fields or an invalid `ssh_config_host` receive `TEST_CONNECT_FAIL` with the request's `host_id`.
+
+`ssh_config_host` is the `~/.ssh/config` alias of the entry the New Host dialog's picker filled the host from; the dialog sends it only while its source is that picker and an entry is picked, and stores the same alias on the new host. The hub applies it as a session of the saved host does: its `IdentityAgent none` keeps the SSH agent from signing a key file, and it is one of the names an `@revoked` line in `known_hosts` is looked up under. Absent, a saved host's own alias applies while the request keeps its route.
 
 The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`ready`, `download`, `unsupported`, or `unknown`), and `agentVersion`.
 
@@ -1450,6 +1452,7 @@ The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`re
   ssh_user?: string,
   ssh_proxy_host_id?: string, // saved jump host; mutually exclusive with spec
   ssh_proxy_spec?: string,   // ProxyJump address
+  ssh_config_host?: string,  // ~/.ssh/config alias of the picked entry, 1-256 characters
   connect_timeout_seconds?: number // the form's connection timeout (#1034)
 }
 
@@ -1463,7 +1466,7 @@ The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`re
 The test waits 10 s for the server, its jump's whole route included, unless the host has a
 connection timeout (#1034): `connect_timeout_seconds` when it is a whole number from 20 to 120 (any
 other value is ignored), else a `ConnectTimeout` of 20 s or more that `~/.ssh/config` gives the
-saved host's alias, which an edit keeps, then the hostname. With one, the server, the jump's
+alias the request carries, else the saved host's, which an edit keeps, then the hostname. With one, the server, the jump's
 connection and the jump's channel each get that long, as a session's connection does (§ 4.4).
 
 `code` is `AUTH_CANCELLED` when the person cancelled the password or passphrase asked for (§ 4.10):
@@ -2368,8 +2371,8 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/ssh-config` | ● | `{ entries, has_include }` — parses `~/.ssh/config`. 404 `NOT_FOUND` when there is none |
-| POST | `/api/hosts/import` | ● | `{ entries: { name, label, sshRemoteDaemon?: boolean \| null }[] }` (the key is camelCase) → `Host[]` (201). An entry with an `IdentityFile` is stored as `key` with that path, one without as `agent`, whether or not an SSH agent answers at import time (#917). 409 `CONFLICT` with `error.conflicting_labels` when a label is in use, and nothing is created; 400 `VALIDATION_ERROR` for a `name` not in `~/.ssh/config` |
+| GET | `/api/ssh-config` | ● | `{ entries, has_include }` — parses `~/.ssh/config`: one entry per alias, each field the first value in file order across the parts that apply to it, `Host *` included, as ssh takes it; `identity_file` is the first usable one, as for the import below, `hostname` stays as written, no default is filled in but port 22, `Match` is not evaluated and `Include` not followed (#1038). 404 `NOT_FOUND` when there is none |
+| POST | `/api/hosts/import` | ● | `{ entries: { name, label, sshRemoteDaemon?: boolean \| null }[] }` (the key is camelCase) → `Host[]` (201). An entry is stored as `key` with the path of its first usable `IdentityFile` (not `none`, no `%` or `${` token, an existing file), as `agent` when it has none, whether or not an SSH agent answers at import time (#917, #1038). 409 `CONFLICT` with `error.conflicting_labels` when a label is in use, and nothing is created; 400 `VALIDATION_ERROR` for a `name` not in `~/.ssh/config` |
 
 #### SSH Keys
 

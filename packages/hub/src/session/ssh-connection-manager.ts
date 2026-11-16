@@ -774,16 +774,20 @@ export class SshConnectionManager {
 		if (resolution.kind === "refused") return { ok: false, message: resolution.message };
 		const jump = resolution.kind === "jump" ? resolution.jump : undefined;
 		const jumpAuth = jump ? await buildJumpAuth(jump, promptAuth) : undefined;
-		const namesToLookUp = [parsed.hostname, savedRoute ? saved.sshConfigHost : undefined].filter(
+		// The alias the request carries for an entry picked from ~/.ssh/config,
+		// else the saved host's while its route is unchanged (#1037).
+		const sshConfigHost = msg.sshConfigHost ?? (savedRoute ? saved.sshConfigHost : undefined);
+		const namesToLookUp = [parsed.hostname, sshConfigHost].filter(
 			(name): name is string => typeof name === "string" && name.length > 0,
 		);
-		// The form's connection timeout, else ~/.ssh/config's for the saved host's
-		// alias, which an edit keeps whatever else it changes, then the hostname:
-		// what the host's own connections will take once saved (#1034).
+		// The form's connection timeout, else ~/.ssh/config's for the alias the
+		// request carries (#1037), else the saved host's, which an edit keeps
+		// whatever else it changes, then the hostname: what the host's own
+		// connections will take once saved (#1034).
 		const connectTimeoutMs = connectTimeoutMsFor(
 			{
 				connectTimeoutSeconds: msg.connectTimeoutSeconds ?? null,
-				sshConfigHost: saved?.sshConfigHost ?? null,
+				sshConfigHost: msg.sshConfigHost ?? saved?.sshConfigHost ?? null,
 			},
 			parsed.hostname,
 		);
@@ -854,7 +858,7 @@ export class SshConnectionManager {
 				{
 					method: msg.sshAuth,
 					keyPath: msg.sshKeyPath,
-					sshConfigHost: savedRoute ? saved.sshConfigHost : undefined,
+					sshConfigHost,
 				},
 				parsed.hostname,
 				msg.port,

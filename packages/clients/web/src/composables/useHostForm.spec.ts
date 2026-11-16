@@ -1355,6 +1355,114 @@ describe("the host a chosen SSH config entry saves (#1022)", () => {
 	});
 });
 
+// The alias of an entry picked from ~/.ssh/config goes with the connection test
+// and with the new host, so the hub applies its settings (IdentityAgent none,
+// known_hosts under the alias) to both alike; never once the form no longer
+// comes from a pick (#1037).
+describe("the picked ssh_config alias, tested and stored alike (#1037)", () => {
+	beforeEach(() => {
+		knownHosts.length = 0;
+		daemonConnection.connected = false;
+		createHostSpy.mockClear();
+		testWsClient.on.mockReset();
+		testWsClient.send.mockReset();
+		// A body reads once: each form's load gets its own answer.
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			async () =>
+				new Response(
+					JSON.stringify({
+						entries: [{ name: "prod", hostname: "prod.test", identity_file: null }],
+						has_include: false,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				),
+		);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	/** A new-host form with `prod` picked, as the dialog's source tab and picker leave it. */
+	async function pickedProd() {
+		const form = useHostForm();
+		form.source.value = "ssh-config";
+		await form.loadSshConfig();
+		form.selectedSshConfigHost.value = "prod";
+		form.applySshConfigEntry("prod");
+		return form;
+	}
+
+	/** Run a connection test and return the TEST_CONNECT it sent; the hub answers a failure. */
+	async function testRequest(
+		testConnectionInline: () => Promise<void>,
+	): Promise<Record<string, unknown>> {
+		const failHandlers: Array<(message: Record<string, unknown>) => void> = [];
+		testWsClient.on.mockImplementation(
+			(type: string, handler: (message: Record<string, unknown>) => void) => {
+				if (type === "TEST_CONNECT_FAIL") failHandlers.push(handler);
+				return () => {};
+			},
+		);
+		const done = testConnectionInline();
+		await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledOnce());
+		const sent = testWsClient.send.mock.calls[0]?.[0] as Record<string, unknown>;
+		for (const handler of failHandlers) {
+			handler({ type: "TEST_CONNECT_FAIL", hostId: sent.hostId, message: "failed" });
+		}
+		await done;
+		return sent;
+	}
+
+	async function createBody(save: () => Promise<unknown>): Promise<Record<string, unknown>> {
+		await save();
+		return (createHostSpy.mock.calls[0] as [Record<string, unknown>])[0];
+	}
+
+	it("sends the picked ssh_config alias with a connection test (#1037)", async () => {
+		const { testConnectionInline } = await pickedProd();
+
+		expect(await testRequest(testConnectionInline)).toMatchObject({
+			hostname: "prod.test",
+			sshConfigHost: "prod",
+		});
+	});
+
+	it("sends no alias once the source is back to Manual (#1037)", async () => {
+		const { source, testConnectionInline } = await pickedProd();
+		source.value = "manual";
+
+		expect(await testRequest(testConnectionInline)).not.toHaveProperty("sshConfigHost");
+	});
+
+	it("sends no alias once the pick is cleared (#1037)", async () => {
+		const { selectedSshConfigHost, applySshConfigEntry, testConnectionInline } = await pickedProd();
+		selectedSshConfigHost.value = "";
+		applySshConfigEntry("");
+
+		expect(await testRequest(testConnectionInline)).not.toHaveProperty("sshConfigHost");
+	});
+
+	it("stores the picked alias with a new host, and none from Manual (#1037)", async () => {
+		const picked = await pickedProd();
+		expect(await createBody(picked.save)).toMatchObject({
+			ssh_host: "prod.test",
+			ssh_config_host: "prod",
+		});
+
+		createHostSpy.mockClear();
+		const manual = await pickedProd();
+		manual.source.value = "manual";
+		expect(await createBody(manual.save)).not.toHaveProperty("ssh_config_host");
+
+		createHostSpy.mockClear();
+		const cleared = await pickedProd();
+		cleared.selectedSshConfigHost.value = "";
+		cleared.applySshConfigEntry("");
+		expect(await createBody(cleared.save)).not.toHaveProperty("ssh_config_host");
+	});
+});
+
 // ─── The Port field (#901) ───────────────────────────────────────────────────
 //
 // A port that is not a whole number from 1 to 65535 was taken as an emptied

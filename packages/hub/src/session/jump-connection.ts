@@ -43,6 +43,8 @@ export interface JumpOptions {
 	 * the host, from `forwardOut` to its answer (unbounded when absent).
 	 */
 	waitTimeoutMs?: number;
+	/** Cancels the route: the jump's connection is destroyed and the route refused (#1034). */
+	signal?: AbortSignal;
 	/** Where the jump is, and who it is reached as. */
 	jump: JumpTarget;
 	/** Names used for revocation and trust lookup in `known_hosts`. */
@@ -106,9 +108,22 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
+			options.signal?.removeEventListener("abort", onAbort);
 			client.end();
 			reject(error);
 		};
+
+		// Cancelled, as a Disconnect does while the route opens: nothing else
+		// would end a channel open the jump never answers (#1034).
+		const onAbort = (): void => {
+			fail(Object.assign(new Error("SSH connect aborted"), { name: "AbortError" }));
+			client.destroy();
+		};
+		if (options.signal?.aborted) {
+			onAbort();
+			return;
+		}
+		options.signal?.addEventListener("abort", onAbort, { once: true });
 
 		client.on("error", (error: Error) => {
 			if (routed) {
@@ -176,6 +191,7 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 						return;
 					}
 					clearTimeout(timer);
+					options.signal?.removeEventListener("abort", onAbort);
 					settled = true;
 					routed = true;
 					resolve({

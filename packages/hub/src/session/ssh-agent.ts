@@ -631,6 +631,7 @@ export class SshAgent extends AgentConnection {
 				trustKnownHosts: jump.trustKnownHosts,
 				destination: { host: hostname, port },
 				...(connectTimeoutMs !== undefined && { waitTimeoutMs: connectTimeoutMs }),
+				...(signal !== undefined && { signal }),
 			});
 			this.jumpRoute = route;
 			this.lastJumpFingerprint = jump.pinnedFingerprint ? null : route.fingerprint;
@@ -679,6 +680,8 @@ export class SshAgent extends AgentConnection {
 				let resolved = false;
 				/** The agent answered: from here on, an error is how the connection ends. */
 				let established = false;
+				/** Authentication succeeded: from here on, a close also fails what is pending. */
+				let authenticated = false;
 				const rejectOnce = (err: Error): void => {
 					if (resolved) return;
 					resolved = true;
@@ -766,9 +769,15 @@ export class SshAgent extends AgentConnection {
 				});
 
 				client.on("close", () => {
-					// Closed before the agent answered: after its banner, ssh2 says
-					// nothing else, and the attempt would wait for ever (#1034).
-					rejectOnce(new Error("The SSH server closed the connection before it was ready"));
+					// Closed before the agent answered (#1034). Before authentication,
+					// after its banner, ssh2 says nothing else and the attempt would wait
+					// for ever. After it, ssh2 fails the requests and channels still
+					// pending just after this event, with errors that say more: those
+					// settle it first, and this only if none did.
+					const closedEarly = (): void =>
+						rejectOnce(new Error("The SSH server closed the connection before it was ready"));
+					if (authenticated) setImmediate(closedEarly);
+					else closedEarly();
 					// A connection whose password was refused, closed after the next
 					// one began: its end is not that one's (#815).
 					if (this.client !== null && this.client !== client) return;
@@ -784,6 +793,7 @@ export class SshAgent extends AgentConnection {
 				});
 
 				client.on("ready", () => {
+					authenticated = true;
 					console.error("[lasterm-ssh] SSH ready");
 					this.keySigner = keySignerOf(connectConfig);
 					// SEC-014: zero credentials immediately after successful auth

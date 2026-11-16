@@ -6880,6 +6880,7 @@ describe("SessionManager — elevation support", () => {
 //   - moving getOrCreateSession BEFORE the .set() call → two sessions in ctx.sessions
 
 // Re-import the mocked SshAgent so vi.mocked() can read call counts.
+import { AgentBinaryDecisionNeeded } from "./agent-deployer.js";
 import { SshAgent as _SshAgentForMock } from "./ssh-agent.js";
 
 describe("SessionManager — concurrent SSH connect coalescing", () => {
@@ -7010,6 +7011,64 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(2);
 		expect(connecting(received)).toEqual([
 			{ type: "HOST_CONNECTING", hostId, requestId: "r-once" },
+		]);
+	});
+
+	it("sends one HOST_CONNECTING when an approved agent binary dials again (#1034)", async () => {
+		const hostId = await createSshHost();
+		// The first dial finds a binary nobody approved; once trusted,
+		// _connectSshAgent is entered again and dials anew.
+		nextSshAgent(() =>
+			Promise.reject(
+				new AgentBinaryDecisionNeeded({
+					hostId,
+					hostname: "concurrent-test",
+					remotePath: "/home/user/.local/bin/lasterm-agent",
+					remoteSha256: "ab".repeat(32),
+					os: "linux",
+					arch: "x64",
+					mismatch: false,
+				}),
+			),
+		);
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1034-binary", received));
+
+		const spawn = sm.handleSpawn("c-1034-binary", { type: "SPAWN", hostId, requestId: "r-bin" });
+		const prompt = await vi.waitFor(() => {
+			const asked = received.find((m) => m.type === "AGENT_BINARY_VERIFY") as
+				| { promptId: string }
+				| undefined;
+			if (asked === undefined) throw new Error("not asked yet");
+			return asked;
+		});
+		sm.handleAgentVerifyResponse(prompt.promptId, "trust_once", "c-1034-binary");
+
+		expect(await spawn).not.toBeNull();
+		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(2);
+		expect(connecting(received)).toEqual([{ type: "HOST_CONNECTING", hostId, requestId: "r-bin" }]);
+	});
+
+	it("answers a spawn disconnected during its host-key question as disconnected (#1034)", async () => {
+		const hostId = await createSshHost();
+		nextSshAgent(() => Promise.reject(new Error("SSH_TOFU")), true);
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1034-ask", received));
+
+		const spawn = sm.handleSpawn("c-1034-ask", { type: "SPAWN", hostId, requestId: "r-ask" });
+		await vi.waitFor(() => {
+			if (!received.some((m) => m.type === "HOST_VERIFY")) throw new Error("not asked yet");
+		});
+		sm.disconnectHost(hostId);
+
+		expect(await spawn).toBeNull();
+		expect(received.filter((m) => m.type === "ERROR")).toEqual([
+			expect.objectContaining({
+				type: "ERROR",
+				hostId,
+				requestId: "r-ask",
+				message: "concurrent-ssh is disconnected. Connect it to start its terminals.",
+			}),
 		]);
 	});
 

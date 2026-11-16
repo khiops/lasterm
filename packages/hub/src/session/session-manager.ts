@@ -1246,13 +1246,14 @@ export class SessionManager {
 						[...this.ctx.channels.values()].some(
 							(ch) => session != null && ch.sessionId === session.id,
 						);
-					// The pane stops its own clock until the hub answers: each wait of
-					// the connection below has its own bound, and the host's may be
-					// longer than the pane's 15 s (#1034).
-					client.send({ type: "HOST_CONNECTING", hostId } satisfies HostConnectingMessage);
 					try {
 						// getOrCreateSession is async; the session object is created here.
 						const sessionState = await this.agentMgr.getOrCreateSession(hostId, true, spawnFence);
+						// The pane stops its own clock until the hub answers: each wait of
+						// the connection below has its own bound, and the host's may be
+						// longer than the pane's 15 s (#1034). Every way out of the
+						// connection below answers it.
+						client.send({ type: "HOST_CONNECTING", hostId } satisfies HostConnectingMessage);
 						// B4 fix: _connectSshAgent returns the wired agent WITHOUT setting
 						// ctx.agents — we set it here, atomically with commit(), so no
 						// concurrent SPAWN can observe "agent live + acq live" simultaneously.
@@ -3619,6 +3620,11 @@ export class SessionManager {
 					err.mismatch,
 					err.pinnedSha256,
 				);
+				// Cancelled, as a Disconnect does: the question was withdrawn, and
+				// whoever started this answers it (#1034).
+				if (action === "reject" && signal?.aborted) {
+					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
+				}
 				if (action === "reject") {
 					const message = `Remote agent binary at ${err.remotePath} (sha256: ${err.remoteSha256}) was refused.`;
 					client.send({
@@ -3723,6 +3729,11 @@ export class SessionManager {
 						? { verdict: verdict.kind, file: verdict.file, line: verdict.line }
 						: undefined,
 				);
+				// Cancelled, as a Disconnect does: the question was withdrawn, and
+				// whoever started this answers it (#1034).
+				if (action === "reject" && signal?.aborted) {
+					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
+				}
 				if (action === "reject") {
 					client.send({
 						type: "ERROR",

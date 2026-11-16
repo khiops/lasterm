@@ -1466,7 +1466,7 @@ The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`re
 The test waits 10 s for the server, its jump's whole route included, unless the host has a
 connection timeout (#1034): `connect_timeout_seconds` when it is a whole number from 20 to 120 (any
 other value is ignored), else a `ConnectTimeout` of 20 s or more that `~/.ssh/config` gives the
-alias the request carries, else the saved host's, which an edit keeps, then the hostname. With one, the server, the jump's
+saved host's alias, which an edit keeps, then the hostname. With one, the server, the jump's
 connection and the jump's channel each get that long, as a session's connection does (§ 4.4).
 
 `code` is `AUTH_CANCELLED` when the person cancelled the password or passphrase asked for (§ 4.10):

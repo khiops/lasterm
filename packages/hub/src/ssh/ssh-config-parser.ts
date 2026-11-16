@@ -438,7 +438,9 @@ const CONVTIME_UNIT_SECONDS: Record<string, number> = {
  * summed. `none`, a fraction (`25.5`) or anything else is no value.
  */
 function convtimeSeconds(word: string): number | null {
-	if (!/^(?:[0-9]+[smhdwSMHDW]?)+$/.test(word)) return null;
+	// Every run of digits but the last ends in a unit: one way to read the
+	// word, so matching stays linear however long it is.
+	if (!/^(?:[0-9]+[smhdw])*[0-9]+[smhdw]?$/i.test(word)) return null;
 	let seconds = 0;
 	for (const [, digits, unit] of word.matchAll(/([0-9]+)([smhdwSMHDW]?)/g)) {
 		seconds += Number(digits) * (CONVTIME_UNIT_SECONDS[(unit ?? "").toLowerCase()] ?? 1);

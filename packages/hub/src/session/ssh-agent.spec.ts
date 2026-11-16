@@ -15,7 +15,7 @@ import { fingerprintOf } from "../ssh/fingerprint.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { windowsLaunchCommand } from "./agent-deployer.js";
 import { AuthCancelledError } from "./auth-cancelled.js";
-import type { ResolvedJump } from "./proxy-jump.js";
+import { type ResolvedJump, resolveJump } from "./proxy-jump.js";
 import { type AuthPromptFn, buildJumpAuth, SshAgent } from "./ssh-agent.js";
 import { noSshAgentMessage, sshAgentAddress } from "./ssh-agent-address.js";
 import { sshExec } from "./ssh-exec.js";
@@ -2696,6 +2696,30 @@ describe("SshAgent — the host's connection timeout (#1034)", () => {
 			SLOW,
 		);
 
+		it(
+			"stops retrying a silent daemon 15 s short of the connection timeout (#1034)",
+			async () => {
+				const { server, port } = await createMockSshServerWithSocket(
+					(stream, command) => {
+						if (command.includes("XDG_STATE_HOME")) stream.write("/home/pi/.local/state/lasterm");
+						(stream as unknown as { exit: (code: number) => void }).exit(0);
+						stream.end();
+					},
+					() => false,
+					() => {},
+				);
+				keep(server);
+				const result = await timed(
+					agentFor(port, { connectTimeoutSeconds: 25, os: "linux" }, true).start(fingerprint),
+				);
+				expect(result.ok).toBe(false);
+				expect(result.message).toContain("within 10000ms");
+				expect(result.ms).toBeGreaterThanOrEqual(10_000);
+				expect(result.ms).toBeLessThan(15_000);
+			},
+			SLOW,
+		);
+
 		for (const [label, directoryMs, launchMs, reached] of [
 			["a slow launch", 0, 15_000, true],
 			["a slow directory then a slow launch", 6_000, 21_000, false],
@@ -2756,12 +2780,30 @@ describe("SshAgent — the host's connection timeout (#1034)", () => {
 				keep(bastion.server);
 				const link = await slowLink(bastion.port, 21_000);
 				keep(link.server);
-				const { hello } = await agentFor(target.port, { connectTimeoutSeconds: 25 }).start(
-					fingerprint,
-					null,
-					undefined,
-					jumpThrough(link.port, fingerprint),
+				// The jump is a saved host with a connection timeout of its own, 20 s,
+				// resolved as a session resolves it: the route to this target takes
+				// the target's 25 s, not the jump's.
+				const jumpHost = makeHost(link.port, {
+					id: "01HZ00000000000000000JUMP1",
+					label: "bastion",
+					connectTimeoutSeconds: 20,
+				});
+				const targetHost = makeHost(target.port, {
+					connectTimeoutSeconds: 25,
+					sshProxyHostId: jumpHost.id,
+				});
+				const resolution = resolveJump(
+					targetHost,
+					{
+						getHost: (id) => (id === jumpHost.id ? jumpHost : undefined),
+						getHostFingerprint: () => fingerprint,
+					},
+					false,
 				);
+				if (resolution.kind !== "jump") throw new Error(`no jump: ${resolution.kind}`);
+				const agent = new SshAgent(targetHost);
+				agents.push(agent);
+				const { hello } = await agent.start(fingerprint, null, undefined, resolution.jump);
 				expect(hello.type).toBe("HELLO");
 			},
 			SLOW,
@@ -2806,6 +2848,29 @@ describe("SshAgent — the host's connection timeout (#1034)", () => {
 					jumpThrough(link.port, fingerprint),
 				);
 				expect(hello.type).toBe("HELLO");
+			},
+			SLOW,
+		);
+
+		it(
+			"stops waiting for a jump's channel when the connection is cancelled (#1034)",
+			async () => {
+				const target = await timedSshServer({});
+				keep(target.server);
+				const bastion = await timedBastion(target.port, null);
+				keep(bastion.server);
+				const cancel = new AbortController();
+				setTimeout(() => cancel.abort(), 1_000);
+				const result = await timed(
+					agentFor(target.port).start(
+						fingerprint,
+						null,
+						cancel.signal,
+						jumpThrough(bastion.port, fingerprint),
+					),
+				);
+				expect(result).toMatchObject({ ok: false, message: "SSH connect aborted" });
+				expect(result.ms).toBeLessThan(3_000);
 			},
 			SLOW,
 		);

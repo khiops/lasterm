@@ -780,14 +780,13 @@ export class SshConnectionManager {
 		const namesToLookUp = [parsed.hostname, sshConfigHost].filter(
 			(name): name is string => typeof name === "string" && name.length > 0,
 		);
-		// The form's connection timeout, else ~/.ssh/config's for the alias the
-		// request carries (#1037), else the saved host's, which an edit keeps
-		// whatever else it changes, then the hostname: what the host's own
-		// connections will take once saved (#1034).
+		// The form's connection timeout, else ~/.ssh/config's for the saved host's
+		// alias, which an edit keeps whatever else it changes, then the hostname
+		// (#1034). An unsaved host has no alias here.
 		const connectTimeoutMs = connectTimeoutMsFor(
 			{
 				connectTimeoutSeconds: msg.connectTimeoutSeconds ?? null,
-				sshConfigHost: msg.sshConfigHost ?? saved?.sshConfigHost ?? null,
+				sshConfigHost: saved?.sshConfigHost ?? null,
 			},
 			parsed.hostname,
 		);

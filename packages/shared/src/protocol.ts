@@ -1084,7 +1084,6 @@ export interface PromptCancelMessage {
 	promptId: string;
 }
 
-/** UI → Hub: test SSH connectivity (with optional auth prompting) */
 /**
  * Hub → UI: the SPAWN carrying `requestId` waits while the hub connects
  * `hostId` (#1034). Sent once per such SPAWN, before the connection's first
@@ -1097,6 +1096,7 @@ export interface HostConnectingMessage {
 	requestId?: string;
 }
 
+/** UI → Hub: test SSH connectivity (with optional auth prompting) */
 export interface TestConnectMessage {
 	type: "TEST_CONNECT";
 	hostId: string; // real host ID for saved hosts, client-generated temp ID for unsaved

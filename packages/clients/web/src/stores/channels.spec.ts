@@ -889,7 +889,8 @@ describe("useChannelsStore — spawnChannel waiting on a person", () => {
 			sessionStore.wsClient = { on: ws.on, send: ws.send, onDisconnect };
 			const store = useChannelsStore();
 			const spawn = store.spawnChannel("host-1", { select: false });
-			const requestId = (ws.send.mock.calls[0]?.[0] as { requestId: string }).requestId;
+			const sent = ws.send.mock.calls[0] as [{ requestId: string }];
+			const requestId = sent[0].requestId;
 			const outcome = { settled: false, error: undefined as Error | undefined };
 			void spawn.then(
 				() => {

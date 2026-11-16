@@ -588,6 +588,18 @@ const writeLockStore = useWriteLockStore();
 
 const autoSwitch = useAutoSwitch();
 const layout = useLayout();
+// The spawns the page before this one owed are kept for the panes that show
+// them; one whose id the saved layout no longer holds has none, and goes (#992).
+// A layout that could not be read says nothing of them: they stay.
+if (layout.loadedSavedLayout) {
+	channelsStore.forgetPendingSpawnsNotIn(
+		new Set(
+			layout.tabs.value.map((tab) => layout.layouts.value[tab.id]).flatMap((root) =>
+				root === null || root === undefined ? [] : collectTerminalChannelIds(root),
+			),
+		),
+	);
+}
 
 /**
  * The tabs the bar shows, by id, or null when it shows them all.

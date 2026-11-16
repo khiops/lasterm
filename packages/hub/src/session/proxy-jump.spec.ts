@@ -197,7 +197,8 @@ describe("resolveJump", () => {
 			jump: {
 				jump: { host: "bastion.example.com", port: 2200, username: "me" },
 				knownHostsNames: ["bastion.example.com"],
-				auth: { method: "agent" },
+				// Its own name, for its `IdentityAgent none` in ~/.ssh/config (#1038).
+				auth: { method: "agent", sshConfigHost: "bastion.example.com" },
 				promptHostId: "target",
 				pinnedFingerprint: "SHA256:spec-pin",
 				trustKnownHosts: false,

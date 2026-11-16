@@ -2343,8 +2343,8 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/ssh-config` | ● | `{ entries, has_include }` — parses `~/.ssh/config`. 404 `NOT_FOUND` when there is none |
-| POST | `/api/hosts/import` | ● | `{ entries: { name, label, sshRemoteDaemon?: boolean \| null }[] }` (the key is camelCase) → `Host[]` (201). An entry with an `IdentityFile` is stored as `key` with that path, one without as `agent`, whether or not an SSH agent answers at import time (#917). 409 `CONFLICT` with `error.conflicting_labels` when a label is in use, and nothing is created; 400 `VALIDATION_ERROR` for a `name` not in `~/.ssh/config` |
+| GET | `/api/ssh-config` | ● | `{ entries, has_include }` — parses `~/.ssh/config`: one entry per alias, each field the first value in file order across the parts that apply to it, `Host *` included, as ssh takes it; `identity_file` is the first usable one, as for the import below, `hostname` stays as written, no default is filled in but port 22, `Match` is not evaluated and `Include` not followed (#1038). 404 `NOT_FOUND` when there is none |
+| POST | `/api/hosts/import` | ● | `{ entries: { name, label, sshRemoteDaemon?: boolean \| null }[] }` (the key is camelCase) → `Host[]` (201). An entry is stored as `key` with the path of its first usable `IdentityFile` (not `none`, no `%` or `${` token, an existing file), as `agent` when it has none, whether or not an SSH agent answers at import time (#917, #1038). 409 `CONFLICT` with `error.conflicting_labels` when a label is in use, and nothing is created; 400 `VALIDATION_ERROR` for a `name` not in `~/.ssh/config` |
 
 #### SSH Keys
 

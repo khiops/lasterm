@@ -296,19 +296,21 @@ describe("GET /api/ssh-config and POST /api/hosts/import, as ssh resolves the fi
 	});
 
 	it("skips an IdentityFile that is missing, holds a token or is not a file", async () => {
+		// The ssh_config token, written out: not a JavaScript placeholder.
+		const variable = ["$", "{USER}"].join("");
 		writeConfig(
 			[
 				"Host a",
 				"  IdentityFile ~/.ssh/missing",
 				"  IdentityFile ~",
 				"  IdentityFile ~/.ssh/%h",
-				"  IdentityFile ~/.ssh/${USER}",
+				`  IdentityFile ~/.ssh/${variable}`,
 				"  IdentityFile ~/.ssh/star",
 				"Host b",
 				"  IdentityFile ~/.ssh/missing",
 				"",
 			].join("\n"),
-			["star", "%h", "${USER}"],
+			["star", "%h", variable],
 		);
 
 		expect(await entries()).toEqual([

@@ -1001,24 +1001,30 @@ describe("SshAgent", () => {
 				vi.mocked(sshAgentAddress).mockReturnValueOnce(join(home, "agent.sock"));
 				const withAgent = new SshAgent(makeHost(port, { sshAuth: "agent", sshConfigHost: "box" }));
 				agents.push(withAgent);
-				await expect(withAgent.start()).rejects.toThrow(refusal);
+				await expect(withAgent.start()).rejects.toMatchObject({ message: refusal });
 
 				vi.mocked(sshAgentAddress).mockClear();
 				vi.mocked(sshAgentAddress).mockReturnValueOnce(null);
 				const noAgent = new SshAgent(makeHost(port, { sshAuth: "agent", sshConfigHost: "box" }));
 				agents.push(noAgent);
-				await expect(noAgent.start()).rejects.toThrow(refusal);
+				await expect(noAgent.start()).rejects.toMatchObject({ message: refusal });
 				expect(sshAgentAddress).not.toHaveBeenCalled();
+				expect(seen.connections).toBe(0);
 				// The null queued above was never taken: drop it.
 				vi.mocked(sshAgentAddress).mockReset();
 
-				// Another alias of the same file is not concerned: it goes on as before.
-				vi.mocked(sshAgentAddress).mockReturnValue(null);
+				// Another alias of the same file is not concerned: it dials as before,
+				// with an agent that holds nothing, and the server refuses it.
+				vi.mocked(sshAgentAddress).mockReturnValue(join(home, "agent.sock"));
 				const other = new SshAgent(makeHost(port, { sshAuth: "agent", sshConfigHost: "other" }));
 				agents.push(other);
-				await expect(other.start()).rejects.toThrow(noSshAgentMessage(process.platform));
-
-				expect(seen.connections).toBe(0);
+				const otherFailure = await other.start().then(
+					() => null,
+					(error: unknown) => error,
+				);
+				expect(otherFailure).toBeInstanceOf(Error);
+				expect((otherFailure as Error).message).not.toBe(refusal);
+				expect(seen.connections).toBe(1);
 			} finally {
 				vi.mocked(sshAgentAddress).mockReset();
 				if (actualAddress) vi.mocked(sshAgentAddress).mockImplementation(actualAddress);

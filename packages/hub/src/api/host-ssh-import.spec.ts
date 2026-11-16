@@ -158,6 +158,31 @@ describe("GET /api/ssh-config and POST /api/hosts/import, as ssh resolves the fi
 		};
 	}
 
+	/** The entries `ssh -G` resolves for `OPENSSH_FIXTURE`, as the hub sends them. */
+	function fixtureEntries() {
+		return [
+			entry("web", {
+				hostname: "web.example.com",
+				port: 2201,
+				user: "alice",
+				identity_file: resolve(home, ".ssh/star"),
+			}),
+			entry("db.internal", {
+				port: 2222,
+				user: "deploy",
+				identity_file: resolve(home, ".ssh/db key"),
+				proxy_jump: "gw.internal",
+			}),
+			entry("gw.internal", {
+				port: 2222,
+				user: "deploy",
+				identity_file: resolve(home, ".ssh/star"),
+			}),
+			entry("Web", { port: 2300, user: "upper", identity_file: resolve(home, ".ssh/star") }),
+			entry("skip", { user: "local" }),
+		];
+	}
+
 	beforeEach(async () => {
 		home = makeTempDir("lasterm-1038-home-");
 		vi.stubEnv("HOME", home);
@@ -184,39 +209,13 @@ describe("GET /api/ssh-config and POST /api/hosts/import, as ssh resolves the fi
 		const res = await server.inject({ method: "GET", url: "/api/ssh-config" });
 
 		expect(res.statusCode, res.body).toBe(200);
-		expect(res.json()).toEqual({
-			entries: [
-				entry("web", {
-					hostname: "web.example.com",
-					port: 2201,
-					user: "alice",
-					identity_file: resolve(home, ".ssh/star"),
-				}),
-				entry("db.internal", {
-					port: 2222,
-					user: "deploy",
-					identity_file: resolve(home, ".ssh/db key"),
-					proxy_jump: "gw.internal",
-				}),
-				entry("gw.internal", {
-					port: 2222,
-					user: "deploy",
-					identity_file: resolve(home, ".ssh/star"),
-				}),
-				entry("Web", { port: 2300, user: "upper", identity_file: resolve(home, ".ssh/star") }),
-				entry("skip", { user: "local" }),
-			],
-			has_include: false,
-		});
+		expect(res.json()).toEqual({ entries: fixtureEntries(), has_include: false });
 	});
 
 	it("reads a CRLF file as its LF twin", async () => {
 		writeConfig(OPENSSH_FIXTURE.replaceAll("\n", "\r\n"));
-		const crlf = await entries();
-		writeConfig(OPENSSH_FIXTURE);
 
-		expect(crlf).toEqual(await entries());
-		expect(crlf).toHaveLength(5);
+		expect(await entries()).toEqual(fixtureEntries());
 	});
 
 	it("imports each alias with the values ssh -G resolves", async () => {

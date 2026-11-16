@@ -122,8 +122,8 @@ function directivesOf(content: string): Directive[] {
 		.filter((directive): directive is Directive => directive !== null);
 }
 
-/** Whether one `Host` pattern, `*` and `?` included, takes `name`; case counts, as in ssh. */
-function hostPatternMatches(pattern: string, name: string): boolean {
+/** One `Host` pattern, `*` and `?` included, as a matcher; case counts, as in ssh. */
+function hostPattern(pattern: string): RegExp {
 	const expression = pattern
 		.split("")
 		.map((character) => {
@@ -132,39 +132,113 @@ function hostPatternMatches(pattern: string, name: string): boolean {
 			return character.replace(/[.+^${}()|[\]\\]/g, "\\$&");
 		})
 		.join("");
-	return new RegExp(`^${expression}$`).test(name);
+	return new RegExp(`^${expression}$`);
+}
+
+/** A `Host` line's patterns, compiled once: literal ones by name, the others as matchers. */
+interface HostLine {
+	patterns: string[];
+	literals: Set<string>;
+	wildcards: RegExp[];
+	negatedLiterals: Set<string>;
+	negatedWildcards: RegExp[];
+}
+
+function hostLineOf(patterns: string[]): HostLine {
+	const line: HostLine = {
+		patterns,
+		literals: new Set(),
+		wildcards: [],
+		negatedLiterals: new Set(),
+		negatedWildcards: [],
+	};
+	for (const raw of patterns) {
+		const negated = raw.startsWith("!");
+		const pattern = negated ? raw.slice(1) : raw;
+		if (isWildcard(pattern)) {
+			(negated ? line.negatedWildcards : line.wildcards).push(hostPattern(pattern));
+		} else {
+			(negated ? line.negatedLiterals : line.literals).add(pattern);
+		}
+	}
+	return line;
 }
 
 /**
  * Whether a `Host` line applies to `name`: one of its patterns takes it, and
  * none of its negated ones (`!pattern`) does.
  */
-function hostLineApplies(patterns: string[], name: string): boolean {
-	let applies = false;
-	for (const raw of patterns) {
-		const negated = raw.startsWith("!");
-		if (!hostPatternMatches(negated ? raw.slice(1) : raw, name)) continue;
-		if (negated) return false;
-		applies = true;
+function hostLineApplies(line: HostLine, name: string): boolean {
+	if (line.negatedLiterals.has(name) || line.negatedWildcards.some((re) => re.test(name))) {
+		return false;
 	}
-	return applies;
+	return line.literals.has(name) || line.wildcards.some((re) => re.test(name));
 }
 
 /**
- * The directives that apply to `alias`, in file order: the lines before any
- * `Host`, and those of every `Host` part that applies to it. A `Match` part is
- * not evaluated and counts as not applying.
+ * A part of the file and the lines in it: the lines before any `Host` apply to
+ * every host, those after a `Host` line to the names it takes, and those after
+ * a `Match` line, which is not evaluated, to none.
  */
-function* applyingTo(directives: Directive[], alias: string): Generator<Directive> {
-	let applies = true;
+interface Section {
+	host: HostLine | "every" | "none";
+	lines: Directive[];
+}
+
+/**
+ * The parts of a file, indexed so a name is checked only against the parts that
+ * can apply to it: those its literal patterns name, and those every name has to
+ * be tried against (before any `Host`, or with a `*`/`?` pattern). One pass per
+ * alias over the whole file made a request's cost grow with the square of the
+ * number of hosts.
+ */
+interface Sections {
+	list: Section[];
+	general: number[];
+	byName: Map<string, number[]>;
+}
+
+function sectionsOf(directives: Directive[]): Sections {
+	const list: Section[] = [{ host: "every", lines: [] }];
 	for (const directive of directives) {
 		if (directive.key === "host") {
-			applies = hostLineApplies(directive.args, alias);
+			list.push({ host: hostLineOf(directive.args), lines: [] });
 		} else if (directive.key === "match") {
-			applies = false;
-		} else if (applies) {
-			yield directive;
+			list.push({ host: "none", lines: [] });
+		} else {
+			(list[list.length - 1] as Section).lines.push(directive);
 		}
+	}
+	const general: number[] = [];
+	const byName = new Map<string, number[]>();
+	list.forEach(({ host }, index) => {
+		if (host === "none") return;
+		if (host === "every" || host.wildcards.length > 0) {
+			general.push(index);
+			return;
+		}
+		for (const name of host.literals) {
+			const indexes = byName.get(name);
+			if (indexes === undefined) byName.set(name, [index]);
+			else if (indexes[indexes.length - 1] !== index) indexes.push(index);
+		}
+	});
+	return { list, general, byName };
+}
+
+/** The lines that apply to `alias`, in file order. */
+function* applyingTo(sections: Sections, alias: string): Generator<Directive> {
+	const named = sections.byName.get(alias) ?? [];
+	const { general } = sections;
+	// Both lists ascend: merge them to keep file order.
+	let g = 0;
+	let n = 0;
+	while (g < general.length || n < named.length) {
+		const fromGeneral =
+			n >= named.length || (g < general.length && (general[g] as number) < (named[n] as number));
+		const index = fromGeneral ? (general[g++] as number) : (named[n++] as number);
+		const { host, lines } = sections.list[index] as Section;
+		if (host === "every" || (host !== "none" && hostLineApplies(host, alias))) yield* lines;
 	}
 }
 
@@ -190,22 +264,40 @@ function jumpWithoutUri(value: string): string {
  * The key path of an `IdentityFile` value lasterm can sign with: not `none`, no
  * `%` or `${` token left unexpanded, and naming a file that exists. ssh tries
  * every identity listed and skips one it cannot load; the hub keeps one path.
+ * `checked` keeps each path's answer for the whole file, so a key every alias
+ * inherits is looked at once.
  */
-function usableIdentityFile(value: string, home: string): string | null {
+function usableIdentityFile(
+	value: string,
+	home: string,
+	checked: Map<string, boolean>,
+): string | null {
 	if (value.toLowerCase() === "none" || value.includes("%") || value.includes("${")) return null;
 	const path = resolveIdentityFile(value, home);
-	try {
-		return statSync(path).isFile() ? path : null;
-	} catch {
-		return null;
+	let isFile = checked.get(path);
+	if (isFile === undefined) {
+		try {
+			isFile = statSync(path).isFile();
+		} catch {
+			isFile = false;
+		}
+		checked.set(path, isFile);
 	}
+	return isFile ? path : null;
 }
 
 /**
- * The entry ssh(1) would use for `alias`: for each field, the first value
- * obtained in the parts that apply to it (ssh_config(5)).
+ * The entry for `alias`: for each field, the first value obtained in the parts
+ * that apply to it, in file order, as ssh(1) takes them (ssh_config(5)), within
+ * what lasterm keeps of it: the first usable `IdentityFile` only, `HostName` as
+ * written, no default but port 22, `Match` and `Include` left out.
  */
-function resolveEntry(directives: Directive[], alias: string, home: string): SshConfigEntry {
+function resolveEntry(
+	sections: Sections,
+	alias: string,
+	home: string,
+	checked: Map<string, boolean>,
+): SshConfigEntry {
 	let hostname: string | null | undefined;
 	let user: string | null | undefined;
 	let port: number | undefined;
@@ -213,7 +305,7 @@ function resolveEntry(directives: Directive[], alias: string, home: string): Ssh
 	// ProxyJump and ProxyCommand share one slot: the first of either decides.
 	let proxyJump: string | null | undefined;
 
-	for (const directive of applyingTo(directives, alias)) {
+	for (const directive of applyingTo(sections, alias)) {
 		switch (directive.key) {
 			case "hostname": {
 				const value = onlyArgument(directive);
@@ -232,9 +324,10 @@ function resolveEntry(directives: Directive[], alias: string, home: string): Ssh
 				break;
 			}
 			case "identityfile": {
+				if (identityFile !== undefined) break;
 				const value = onlyArgument(directive);
-				const path = value === null ? null : usableIdentityFile(value, home);
-				if (identityFile === undefined && path !== null) identityFile = path;
+				const path = value === null ? null : usableIdentityFile(value, home, checked);
+				if (path !== null) identityFile = path;
 				break;
 			}
 			case "proxyjump": {
@@ -265,22 +358,24 @@ function resolveEntry(directives: Directive[], alias: string, home: string): Ssh
 
 /**
  * One entry per alias the file names, in the order first named, each resolved
- * as ssh(1) resolves it. An alias is a `Host` pattern with no `*`, `?` or `!`,
- * listed only when its own line applies to it. `Include` is not followed; that
- * there is one is said by `hasInclude`.
+ * by `resolveEntry`. An alias is a `Host` pattern with no `*` or `?` that does
+ * not start with `!`, listed only when its own line applies to it. `Include`
+ * is not followed; that there is one is said by `hasInclude`.
  */
 export function parseSshConfig(content: string, home: string = homedir()): ParseResult {
 	const directives = directivesOf(content);
-	const aliases: string[] = [];
-	for (const directive of directives) {
-		if (directive.key !== "host") continue;
-		for (const pattern of directive.args) {
-			if (isWildcard(pattern) || pattern.startsWith("!") || aliases.includes(pattern)) continue;
-			if (hostLineApplies(directive.args, pattern)) aliases.push(pattern);
+	const sections = sectionsOf(directives);
+	const aliases = new Set<string>();
+	for (const { host } of sections.list) {
+		if (host === "every" || host === "none") continue;
+		for (const pattern of host.patterns) {
+			if (isWildcard(pattern) || pattern.startsWith("!") || aliases.has(pattern)) continue;
+			if (hostLineApplies(host, pattern)) aliases.add(pattern);
 		}
 	}
+	const checked = new Map<string, boolean>();
 	return {
-		entries: aliases.map((alias) => resolveEntry(directives, alias, home)),
+		entries: [...aliases].map((alias) => resolveEntry(sections, alias, home, checked)),
 		hasInclude: directives.some((directive) => directive.key === "include"),
 	};
 }
@@ -300,7 +395,7 @@ export function readSshConfig(home: string = homedir()): ParseResult {
  * `Include` is not followed, as `parseSshConfig` follows none either.
  */
 export function resolveIdentityAgent(content: string, alias: string): string | null {
-	for (const directive of applyingTo(directivesOf(content), alias)) {
+	for (const directive of applyingTo(sectionsOf(directivesOf(content)), alias)) {
 		if (directive.key !== "identityagent") continue;
 		const value = onlyArgument(directive);
 		if (value !== null) return value;

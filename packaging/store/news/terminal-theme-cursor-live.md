@@ -1,0 +1,2 @@
+en: An open terminal now takes its host's theme when you switch its pane to a terminal on another host or change that host's theme, and stops its cursor blinking as soon as you set the cursor style to underline.
+fr: Un terminal ouvert prend désormais le thème de son hôte quand vous faites passer son volet à un terminal d'un autre hôte ou changez le thème de cet hôte, et son curseur cesse de clignoter dès que vous choisissez le style souligné.

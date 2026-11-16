@@ -12,6 +12,7 @@ import { DEFAULT_AGENT_CONFIG, encodeFrame, type ProtocolMessage } from "@laster
 import ssh2, { Client, type ClientChannel, type ConnectConfig, type SyncHostVerifier } from "ssh2";
 import { fingerprintOf } from "../ssh/fingerprint.js";
 import { findHostKeyRevocation } from "../ssh/known-hosts.js";
+import { identityAgentIsNone } from "../ssh/ssh-config-parser.js";
 import { parseSshHost } from "../ssh-route.js";
 import { AgentConnection } from "./agent-connection.js";
 import {
@@ -261,6 +262,13 @@ export async function buildSshConnectConfig(
 			}),
 		);
 	} else if (auth.method === "agent") {
+		// The agent is kept out of an alias whose `IdentityAgent` is none, as ssh
+		// keeps it out of `ssh <alias>`; nothing is dialled (#1038).
+		if (auth.sshConfigHost && identityAgentIsNone(auth.sshConfigHost)) {
+			throw new Error(
+				`IdentityAgent none in ~/.ssh/config keeps the SSH agent out of ${auth.sshConfigHost}, and this host signs in with the agent. Choose a key or a password for it.`,
+			);
+		}
 		const address = sshAgentAddress({
 			env: process.env,
 			platform: process.platform,

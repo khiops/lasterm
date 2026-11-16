@@ -171,6 +171,8 @@ describe("an attach that keeps the screen (#1012)", () => {
 describe("no focus report from a replay (#1012)", () => {
 	it("sends no report for the snapshot's ?1004h", async () => {
 		await attachedWith({ snapshot: { inputModes: `${ESC}[?1004h` } });
+		// The report alone is held back: xterm still takes the mode.
+		expect(xterm().modes.sendFocusMode).toBe(true);
 		print(`${ESC}[?1004l`);
 		await parsed();
 
@@ -244,5 +246,14 @@ describe("a paste through an agent that adapts input (#1012)", () => {
 
 		expect(inputs()).toHaveLength(1);
 		expect(new TextEncoder().encode(inputs()[0]).byteLength).toBe(65_536);
+	});
+
+	it("sends a Windows paste whose CRLF text is over the limit but whose bracketed form is not", async () => {
+		await attachedWith({ adaptsInput: true, snapshot: { inputModes: "" } });
+
+		// 65,536 units of text, a 49,164-byte bracketed form.
+		paste("xx\r\n".repeat(16_384));
+
+		expect(inputs()).toEqual([`${START}${"xx\r".repeat(16_384)}${END}`]);
 	});
 });

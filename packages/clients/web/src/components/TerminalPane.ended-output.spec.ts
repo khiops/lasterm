@@ -69,7 +69,7 @@ describe("TerminalPane over a terminal that has ended (#927)", () => {
 
 		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
 		expect(xterm.events).toContain("LAST-SCREEN");
-		expect(xterm.events).not.toContain("\u001b[?1049h");
+		expect(xterm.events.some((event) => event.includes("\u001b[?1049h"))).toBe(false);
 		expect(xterm.events.some((event) => event.includes("\u001b[?2004h"))).toBe(false);
 	});
 

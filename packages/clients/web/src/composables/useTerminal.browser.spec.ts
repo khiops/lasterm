@@ -192,14 +192,20 @@ describe("no focus report from a replay (#1012)", () => {
 			tail: [new TextEncoder().encode("y".repeat(2_000_000))],
 		});
 		await attached;
-		let during = false;
+		const cursorLine = () =>
+			xterm()
+				.buffer.active.getLine(xterm().buffer.active.baseY + xterm().buffer.active.cursorY)
+				?.translateToString(true) ?? "";
+		// The focus change comes while the replay is still parsed: its tail is not drawn yet.
+		let midReplay = false;
 		setTimeout(() => {
-			during = true;
+			midReplay = !cursorLine().includes("y");
 			xterm().input(`${ESC}[I`, true);
 		}, 0);
 		await parsed();
 
-		expect(during).toBe(true);
+		expect(midReplay).toBe(true);
+		expect(cursorLine()).toContain("y");
 		expect(inputs()).toEqual([`${ESC}[I`]);
 	});
 

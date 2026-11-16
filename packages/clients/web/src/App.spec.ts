@@ -95,8 +95,8 @@ async function cardIn(paneId: string): Promise<HTMLElement> {
 	return pane(paneId)?.querySelector<HTMLElement>(".exit-card") as HTMLElement;
 }
 
-afterEach(() => {
-	unmountWindow();
+afterEach(async () => {
+	await unmountWindow();
 	vi.restoreAllMocks();
 });
 
@@ -1874,19 +1874,17 @@ describe("a new terminal's pane after a reload", () => {
 	}
 
 	/**
-	 * Reload the window: what the first one saved is read, its SPAWNs still waiting are ended so
-	 * nothing of it writes after (a real reload leaves no such writer), and a new window is
-	 * mounted over what was read, against a hub holding `setup`.
+	 * Reload the window: what the first one saved is read, the window is unmounted, which ends its
+	 * SPAWNs still waiting so nothing of it writes after (a real reload leaves no such writer), and
+	 * a new window is mounted over what was read, against a hub holding `setup`.
 	 */
-	async function reload(hub: FakeHub, setup: WindowSetup = {}): Promise<FakeHub> {
+	async function reload(setup: WindowSetup = {}): Promise<FakeHub> {
 		const storage: Record<string, string> = {};
 		for (const key of ["lasterm:layout", PENDING_KEY]) {
 			const value = localStorage.getItem(key);
 			if (value !== null) storage[key] = value;
 		}
-		for (const spawn of hub.frames("SPAWN")) refuse(hub, spawn);
-		await settle();
-		unmountWindow();
+		await unmountWindow();
 		const next = await mountWindow({ ...setup, storage: { ...storage, ...setup.storage } });
 		return next.hub;
 	}
@@ -1913,7 +1911,7 @@ describe("a new terminal's pane after a reload", () => {
 		const first = await startingOnAlpha();
 		expect(stored()?.[first.pendingId]).toEqual({ hostId: HOST_A, sent: true });
 
-		const hub = await reload(first.hub);
+		const hub = await reload();
 
 		await vi.waitFor(() =>
 			expect(box()).toEqual({
@@ -1928,7 +1926,7 @@ describe("a new terminal's pane after a reload", () => {
 	it("names the spawn's host while another host is in view after a reload", async () => {
 		const first = await startingOnAlpha(BOTH);
 
-		const hub = await reload(first.hub, BOTH);
+		const hub = await reload(BOTH);
 		await selectHost("bravo");
 
 		await vi.waitFor(() =>
@@ -1939,9 +1937,9 @@ describe("a new terminal's pane after a reload", () => {
 	});
 
 	it("names the spawn's host once the hosts list has it", async () => {
-		const first = await startingOnAlpha(BOTH);
+		await startingOnAlpha(BOTH);
 
-		const hub = await reload(first.hub, { hosts: [BRAVO] });
+		const hub = await reload({ hosts: [BRAVO] });
 		await vi.waitFor(() =>
 			expect(box().lines).toEqual([UNCONFIRMED, "If it started, it is listed under this host."]),
 		);
@@ -1965,7 +1963,7 @@ describe("a new terminal's pane after a reload", () => {
 		const pendingId = savedLeafIds().find((id) => id !== "T1");
 		if (pendingId === undefined) throw new Error("no pending leaf saved");
 
-		const hub = await reload(firstHub, { ...BOTH, channels: [live("T1")] });
+		const hub = await reload({ ...BOTH, channels: [live("T1")] });
 		await press("2", { ctrl: true, alt: true, code: "Digit2" });
 
 		await vi.waitFor(() =>
@@ -1983,7 +1981,7 @@ describe("a new terminal's pane after a reload", () => {
 			expect(box().lines).toEqual(["SPAWN_FAILED: The shell could not start."]),
 		);
 
-		const hub = await reload(first.hub);
+		const hub = await reload();
 
 		await vi.waitFor(() =>
 			expect(box()).toEqual({
@@ -1997,7 +1995,7 @@ describe("a new terminal's pane after a reload", () => {
 
 	it("starts the terminal on its host when Retry is clicked after a reload", async () => {
 		const first = await startingOnAlpha(BOTH);
-		const hub = await reload(first.hub, BOTH);
+		const hub = await reload(BOTH);
 		await selectHost("bravo");
 		hub.answersSpawns = false;
 
@@ -2021,7 +2019,7 @@ describe("a new terminal's pane after a reload", () => {
 
 	it("forgets the terminal's start when its pane is closed after a reload", async () => {
 		const first = await startingOnAlpha();
-		await reload(first.hub);
+		await reload();
 
 		await clickInBox("Close");
 
@@ -2123,7 +2121,7 @@ describe("a new terminal's pane after a reload", () => {
 		await settle();
 
 		expect(Object.keys(stored() ?? {})).toEqual([other.channelId]);
-		const hub = await reload(firstHub);
+		const hub = await reload();
 		await vi.waitFor(() => expect(box().lines[0]).toBe(UNCONFIRMED));
 		expect(hub.frames("SPAWN")).toEqual([]);
 	});
@@ -2148,7 +2146,7 @@ describe("a new terminal's pane after a reload", () => {
 
 	it("waits for Retry when the connection comes back after a reload", async () => {
 		const first = await startingOnAlpha();
-		const hub = await reload(first.hub);
+		const hub = await reload();
 
 		await reconnectFully(hub);
 
@@ -2163,8 +2161,8 @@ describe("a new terminal's pane after a reload", () => {
 	});
 
 	it("waits for Retry when the connection comes back after a Retry failed", async () => {
-		const first = await startingOnAlpha();
-		const hub = await reload(first.hub);
+		await startingOnAlpha();
+		const hub = await reload();
 		hub.answersSpawns = false;
 		await clickInBox("Retry");
 		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(1));
@@ -2181,7 +2179,7 @@ describe("a new terminal's pane after a reload", () => {
 
 	it("waits for Retry when the connection comes back after its pane was split", async () => {
 		const first = await startingOnAlpha();
-		const hub = await reload(first.hub);
+		const hub = await reload();
 
 		await runPaletteRow("Split Right");
 		await settle();
@@ -2193,7 +2191,7 @@ describe("a new terminal's pane after a reload", () => {
 
 	it("keeps the terminal's start when Retry cannot reach the hub, and waits for the next", async () => {
 		const first = await startingOnAlpha();
-		const hub = await reload(first.hub);
+		const hub = await reload();
 		hub.drop();
 		hub.dialing = () => Promise.reject(new Error("the hub cannot be reached"));
 
@@ -2222,8 +2220,8 @@ describe("a new terminal's pane after a reload", () => {
 	});
 
 	it("sends the spawn once the connection a Retry waits on opens", async () => {
-		const first = await startingOnAlpha();
-		const hub = await reload(first.hub);
+		await startingOnAlpha();
+		const hub = await reload();
 		hub.drop();
 		let open: () => void = () => {};
 		hub.dialing = () =>
@@ -2242,14 +2240,14 @@ describe("a new terminal's pane after a reload", () => {
 
 	it("keeps the terminal's start across a failed Retry and another reload", async () => {
 		const first = await startingOnAlpha();
-		const second = await reload(first.hub);
+		const second = await reload();
 		second.answersSpawns = false;
 		await clickInBox("Retry");
 		await vi.waitFor(() => expect(second.frames("SPAWN")).toHaveLength(1));
 		refuse(second, second.frames("SPAWN")[0]);
 		await settle();
 
-		const hub = await reload(second);
+		const hub = await reload();
 
 		await vi.waitFor(() =>
 			expect(box()).toEqual({
@@ -2312,7 +2310,7 @@ describe("a new terminal's pane after a reload", () => {
 		expect(atSpawn?.[pendingId ?? ""]).toBeUndefined();
 
 		vi.restoreAllMocks();
-		const hub = await reload(firstHub);
+		const hub = await reload();
 		// Nothing recorded for it: the pane attaches its id, as before #992, and says nothing of a
 		// start.
 		await vi.waitFor(() => expect(sentFor(hub, "ATTACH", pendingId ?? "")).toHaveLength(1));
@@ -2337,7 +2335,7 @@ describe("a new terminal's pane after a reload", () => {
 		await vi.waitFor(() => expect(firstHub.frames("SPAWN")).toHaveLength(2));
 		expect(stored()?.[pendingId ?? ""]).toEqual({ hostId: HOST_A, sent: true });
 
-		await reload(firstHub);
+		await reload();
 		await vi.waitFor(() => expect(box().lines[0]).toBe(UNCONFIRMED));
 	});
 
@@ -2394,7 +2392,7 @@ describe("a new terminal's pane after a reload", () => {
 		await vi.waitFor(() => expect(savedLeafIds()).toHaveLength(2));
 		expect(firstHub.frames("SPAWN")).toEqual([]);
 
-		await reload(firstHub, { channels: [live("T1")] });
+		await reload({ channels: [live("T1")] });
 		expect(tabs()).toHaveLength(2);
 		await press("2", { ctrl: true, alt: true, code: "Digit2" });
 		await vi.waitFor(() =>

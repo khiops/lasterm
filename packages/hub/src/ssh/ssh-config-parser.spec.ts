@@ -1,18 +1,30 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { identityAgentIsNone, parseSshConfig, resolveIdentityAgent } from "./ssh-config-parser.js";
 
 describe("SSH Config Parser", () => {
+	// An IdentityFile counts only when its file exists (#1038): the keys the
+	// cases below name are made in a home of their own.
+	const home = makeTempDir("lasterm-ssh-config-");
+	for (const key of [".ssh/id_ed25519", ".ssh/id_rsa", "my-keys/id_rsa", "abs/id_rsa"]) {
+		mkdirSync(join(home, key, ".."), { recursive: true });
+		writeFileSync(join(home, key), "not a real key\n");
+	}
+	const absoluteKey = join(home, "abs", "id_rsa");
+
+	afterAll(async () => {
+		await removeTempDir(home);
+	});
+
 	it("parses a simple host block", () => {
 		const config = `
 Host myserver
   HostName 192.168.1.100
   User admin
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(1);
 		expect(result.entries[0]?.name).toBe("myserver");
 		expect(result.entries[0]?.hostname).toBe("192.168.1.100");
@@ -32,7 +44,7 @@ Host server2
   HostName 10.0.0.2
   User deploy
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(2);
 		expect(result.entries[0]?.name).toBe("server1");
 		expect(result.entries[0]?.hostname).toBe("10.0.0.1");
@@ -49,14 +61,14 @@ Host full-config
   IdentityFile ~/.ssh/id_ed25519
   ProxyJump bastion.example.com
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(1);
 		const entry = result.entries[0];
 		expect(entry?.name).toBe("full-config");
 		expect(entry?.hostname).toBe("example.com");
 		expect(entry?.port).toBe(2222);
 		expect(entry?.user).toBe("deploy");
-		expect(entry?.identityFile).toBe(resolve(homedir(), ".ssh/id_ed25519"));
+		expect(entry?.identityFile).toBe(resolve(home, ".ssh/id_ed25519"));
 		expect(entry?.proxyJump).toBe("bastion.example.com");
 	});
 
@@ -69,7 +81,7 @@ Host *
 Host myserver
   HostName 10.0.0.1
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(1);
 		expect(result.entries[0]?.name).toBe("myserver");
 	});
@@ -80,7 +92,7 @@ Host gh
   HostName github.com
   User git
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(1);
 		expect(result.entries[0]?.isGitHost).toBe(true);
 	});
@@ -91,7 +103,7 @@ Host github.com
   User git
   IdentityFile ~/.ssh/github_key
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(1);
 		expect(result.entries[0]?.isGitHost).toBe(true);
 	});
@@ -103,7 +115,7 @@ Include config.d/*
 Host myserver
   HostName 10.0.0.1
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.hasInclude).toBe(true);
 		expect(result.entries).toHaveLength(1);
 	});
@@ -114,7 +126,7 @@ Host myserver
 # Another comment
 
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(0);
 		expect(result.hasInclude).toBe(false);
 	});
@@ -125,7 +137,7 @@ Host badport
   HostName example.com
   Port abc
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(1);
 		expect(result.entries[0]?.port).toBe(22); // default preserved
 	});
@@ -135,7 +147,7 @@ Host badport
 	it.each(["1.5", "2222abc", "0x16", "0", "70000", "2222#office", "2222 extra"])(
 		"keeps 22 for the malformed Port %j (#902)",
 		(value) => {
-			const result = parseSshConfig(`Host badport\n  Port ${value}\n`);
+			const result = parseSshConfig(`Host badport\n  Port ${value}\n`, home);
 			expect(result.entries[0]?.port).toBe(22);
 		},
 	);
@@ -144,7 +156,7 @@ Host badport
 	// gives port 2222 for this line. Mutation: read the whole value as the port,
 	// and the comment turns it into 22.
 	it("reads the port of a Port line ending in a comment, as OpenSSH does (#902)", () => {
-		const result = parseSshConfig("Host office\n  Port 2222 # office firewall\n");
+		const result = parseSshConfig("Host office\n  Port 2222 # office firewall\n", home);
 		expect(result.entries[0]?.port).toBe(2222);
 	});
 
@@ -153,9 +165,9 @@ Host badport
 Host tilde-test
   IdentityFile ~/my-keys/id_rsa
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(1);
-		expect(result.entries[0]?.identityFile).toBe(resolve(homedir(), "my-keys/id_rsa"));
+		expect(result.entries[0]?.identityFile).toBe(resolve(home, "my-keys/id_rsa"));
 	});
 
 	it("handles multiple patterns on one Host line", () => {
@@ -164,7 +176,7 @@ Host web1 web2 web3
   HostName 10.0.0.1
   User deploy
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(3);
 		expect(result.entries[0]?.name).toBe("web1");
 		expect(result.entries[1]?.name).toBe("web2");
@@ -185,13 +197,13 @@ Host case-test
   IDENTITYFILE ~/.ssh/id_rsa
   PROXYJUMP bastion
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(1);
 		const entry = result.entries[0];
 		expect(entry?.hostname).toBe("example.com");
 		expect(entry?.port).toBe(3333);
 		expect(entry?.user).toBe("admin");
-		expect(entry?.identityFile).toBe(resolve(homedir(), ".ssh/id_rsa"));
+		expect(entry?.identityFile).toBe(resolve(home, ".ssh/id_rsa"));
 		expect(entry?.proxyJump).toBe("bastion");
 	});
 
@@ -200,7 +212,7 @@ Host case-test
 Host *.example.com myserver
   HostName 10.0.0.1
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(1);
 		expect(result.entries[0]?.name).toBe("myserver");
 	});
@@ -219,7 +231,7 @@ Host azure-devops
 Host vs-ssh
   HostName vs-ssh.visualstudio.com
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(4);
 		for (const entry of result.entries) {
 			expect(entry.isGitHost).toBe(true);
@@ -232,7 +244,7 @@ Host=eqtest
   HostName=example.com
   Port=4444
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(1);
 		expect(result.entries[0]?.name).toBe("eqtest");
 		expect(result.entries[0]?.hostname).toBe("example.com");
@@ -240,7 +252,7 @@ Host=eqtest
 	});
 
 	it("handles empty input", () => {
-		const result = parseSshConfig("");
+		const result = parseSshConfig("", home);
 		expect(result.entries).toHaveLength(0);
 		expect(result.hasInclude).toBe(false);
 	});
@@ -248,11 +260,11 @@ Host=eqtest
 	it("handles absolute IdentityFile path without resolving", () => {
 		const config = `
 Host abs-path
-  IdentityFile /etc/ssh/keys/id_rsa
+  IdentityFile ${absoluteKey}
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(1);
-		expect(result.entries[0]?.identityFile).toBe("/etc/ssh/keys/id_rsa");
+		expect(result.entries[0]?.identityFile).toBe(absoluteKey);
 	});
 
 	it("handles alias-only Host block (no HostName directive)", () => {
@@ -263,13 +275,177 @@ Host myalias
   User admin
   Port 2222
 `;
-		const result = parseSshConfig(config);
+		const result = parseSshConfig(config, home);
 		expect(result.entries).toHaveLength(1);
 		const entry = result.entries[0];
 		expect(entry?.name).toBe("myalias");
 		expect(entry?.hostname).toBeNull();
 		expect(entry?.user).toBe("admin");
 		expect(entry?.port).toBe(2222);
+	});
+
+	// ─── Resolved as ssh resolves it (#1038) ───────────────────────────────────
+
+	/** The entries of `lines`, keyed by alias, each reduced to the fields asked for. */
+	function resolved(lines: string[]) {
+		return Object.fromEntries(
+			parseSshConfig(lines.join("\n"), home).entries.map((entry) => [entry.name, entry]),
+		);
+	}
+
+	it("keeps the first value even from a generic block", () => {
+		const { "box.lan": box } = resolved([
+			"Host *.lan",
+			"  HostName gen.example",
+			"  ProxyJump j1",
+			"Host box.lan",
+			"  HostName lit.example",
+			"  ProxyJump j2",
+		]);
+		expect(box).toMatchObject({ hostname: "gen.example", proxyJump: "j1" });
+	});
+
+	it("reads none in any case as no key and no jump", () => {
+		const entries = resolved([
+			"Host a",
+			"  IdentityFile none",
+			"Host b",
+			"  IdentityFile NoNe",
+			"Host c",
+			"  ProxyJump NONE",
+			"Host a c",
+			"  IdentityFile ~/.ssh/id_rsa",
+			"  ProxyJump gw",
+		]);
+		expect(entries.a?.identityFile).toBe(resolve(home, ".ssh/id_rsa"));
+		expect(entries.b?.identityFile).toBeNull();
+		expect(entries.c?.proxyJump).toBeNull();
+	});
+
+	it("lets the first of ProxyCommand and ProxyJump decide the jump", () => {
+		const entries = resolved([
+			"Host a",
+			"  ProxyCommand none",
+			"Host b",
+			"  ProxyCommand nc %h %p",
+			"Host c",
+			"  ProxyJump gw",
+			"  ProxyCommand none",
+			"Host *",
+			"  ProxyJump gw",
+		]);
+		expect(entries.a?.proxyJump).toBeNull();
+		expect(entries.b?.proxyJump).toBeNull();
+		expect(entries.c?.proxyJump).toBe("gw");
+	});
+
+	it("skips a malformed Port line for the next one", () => {
+		const entries = resolved([
+			"Host a",
+			"  Port 2222abc",
+			"Host b",
+			"  Port 22",
+			"Host a b",
+			"  Port 2300",
+			"Host c",
+			"  Port 2222abc",
+		]);
+		expect(entries.a?.port).toBe(2300);
+		expect(entries.b?.port).toBe(22);
+		expect(entries.c?.port).toBe(22);
+	});
+
+	it("splits lines as ssh does: comments, quotes, spaced =, escapes", () => {
+		const entries = resolved([
+			"Host a # production",
+			"  User deploy # account",
+			"  Port = 2222",
+			"  ProxyJump gw # office",
+			'Host "q"',
+			'  Port "2201"',
+			'  User "a b"',
+			'  ProxyJump "j1"',
+			"Host r",
+			"  User 'c d'",
+			'  HostName x"y"',
+			"Host s",
+			"  User DOMAIN\\alice",
+			"Host e1",
+			'  User a\\"b',
+			"Host e2",
+			"  User a\\'b",
+			"Host e3",
+			"  User a\\\\b",
+			"Host h",
+			'  User "#x"',
+			"Host u",
+			'  User "a b',
+			"  User ok",
+			"Host v",
+			"  User one two",
+			"  HostName h1 h2",
+			"  User three",
+		]);
+		expect(Object.keys(entries)).toEqual(["a", "q", "r", "s", "e1", "e2", "e3", "h", "u", "v"]);
+		expect(entries.a).toMatchObject({ user: "deploy", port: 2222, proxyJump: "gw" });
+		expect(entries.q).toMatchObject({ user: "a b", port: 2201, proxyJump: "j1" });
+		expect(entries.r).toMatchObject({ user: "c d", hostname: "xy" });
+		expect(entries.s?.user).toBe("DOMAIN\\alice");
+		expect(entries.e1?.user).toBe('a"b');
+		expect(entries.e2?.user).toBe("a'b");
+		expect(entries.e3?.user).toBe("a\\b");
+		expect(entries.h?.user).toBe("#x");
+		expect(entries.u?.user).toBe("ok");
+		expect(entries.v).toMatchObject({ user: "three", hostname: null });
+	});
+
+	it("expands %h and %% in HostName as ssh does", () => {
+		const entries = resolved([
+			"Host d",
+			"  HostName %%h",
+			"Host c",
+			'  HostName "%h.x"',
+			"Host Up",
+			"  HostName %h.example.com",
+			"Host EthX",
+			"  HostName fe80::1%%%h",
+		]);
+		expect(entries.d?.hostname).toBe("%h");
+		expect(entries.c?.hostname).toBe("c.x");
+		expect(entries.Up?.hostname).toBe("Up.example.com");
+		expect(entries.EthX?.hostname).toBe("fe80::1%EthX");
+	});
+
+	it("lists only the aliases a Host line applies to", () => {
+		expect(parseSshConfig("Host foo !foo\n  User x\n", home).entries).toEqual([]);
+		expect(parseSshConfig("Host * !skip\n  User x\n", home).entries).toEqual([]);
+		expect(parseSshConfig("Host a b\n", home).entries.map((entry) => entry.name)).toEqual([
+			"a",
+			"b",
+		]);
+		expect(resolved(["Host w?b", "  User q", "Host web"]).web?.user).toBe("q");
+	});
+
+	it("detects a git host by a HostName from another block", () => {
+		expect(resolved(["Host gh", "Host g?", "  HostName github.com"]).gh?.isGitHost).toBe(true);
+	});
+
+	it("detects Include in a part that applies to no alias", () => {
+		expect(parseSshConfig("Match all\n  Include extra\nHost a\n", home).hasInclude).toBe(true);
+	});
+
+	it("lists a ProxyJump URI in the form the jump reads", () => {
+		const entries = resolved([
+			"Host t",
+			"  ProxyJump ssh://jump@bastion.example:2222",
+			"Host u",
+			"  ProxyJump ssh://bastion.example/",
+			"Host v",
+			"  ProxyJump ssh://a@h1,ssh://h2:2200",
+		]);
+		expect(entries.t?.proxyJump).toBe("jump@bastion.example:2222");
+		expect(entries.u?.proxyJump).toBe("bastion.example");
+		expect(entries.v?.proxyJump).toBe("a@h1,h2:2200");
 	});
 });
 
@@ -302,12 +478,23 @@ describe("resolveIdentityAgent", () => {
 	it("takes wildcards, several patterns and negations", () => {
 		const config = "Host web-* !web-public db\n  IdentityAgent none\n";
 		expect(resolveIdentityAgent(config, "web-01")).toBe("none");
-		expect(resolveIdentityAgent(config, "DB")).toBe("none");
+		expect(resolveIdentityAgent(config, "db")).toBe("none");
+		// ssh matches Host patterns case-sensitively (#1038)
+		expect(resolveIdentityAgent(config, "DB")).toBeNull();
 		expect(resolveIdentityAgent(config, "web-public")).toBeNull();
 	});
 
 	it("reads Key=Value, a quoted value, and CRLF line ends", () => {
 		expect(resolveIdentityAgent('Host box\r\n  IdentityAgent="none"\r\n', "box")).toBe("none");
+	});
+
+	it("matches Host patterns case-sensitively, as ssh does", () => {
+		const config = "Host Web\n  IdentityAgent none\n";
+		expect(resolveIdentityAgent(config, "web")).toBeNull();
+		expect(resolveIdentityAgent(config, "Web")).toBe("none");
+		expect(resolveIdentityAgent('Host "box"\n  IdentityAgent = none # account\n', "box")).toBe(
+			"none",
+		);
 	});
 
 	it("does not evaluate a Match block, and counts it as not applying", () => {

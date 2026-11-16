@@ -2072,6 +2072,23 @@ describe("a new terminal's pane after a reload", () => {
 		expect(sentFor(hub, "ATTACH", "P1")).toEqual([]);
 	});
 
+	// A window the test closed with its spawn unanswered must leave nothing behind: that spawn's
+	// deadline would end it 15 s later, and its store would write its pending spawns into the
+	// storage of whichever window is open by then (#1052).
+	it("leaves nothing of a closed window's spawn to write into the next window's storage", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		await startingOnAlpha();
+
+		await unmountWindow();
+		localStorage.setItem(PENDING_KEY, "the next window's");
+		await vi.advanceTimersByTimeAsync(16_000);
+
+		expect(localStorage.getItem(PENDING_KEY)).toBe("the next window's");
+	});
+
 	it("keeps no recorded start once the terminal has started", async () => {
 		const first = await startingOnAlpha();
 

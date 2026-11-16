@@ -138,15 +138,16 @@ export async function mountWindow(setup: WindowSetup = {}): Promise<MountedWindo
  *
  * Every SPAWN the window sent is refused first, while its storage is still its own. Left waiting,
  * a SPAWN ends at its deadline, 15 s later: the store of a window long gone then writes its
- * pending spawns into the storage of whichever test runs by then (#1052). A SPAWN already
- * answered takes no notice of the refusal.
+ * pending spawns into the storage of whichever test runs by then (#1052). A spawn already
+ * answered takes no notice of the refusal; the window only shows it as a toast.
  */
 export async function unmountWindow(): Promise<void> {
 	const hub = windowHub;
 	windowHub = null;
-	if (hub !== null) {
-		for (const spawn of hub.frames("SPAWN")) {
-			hub.hear({
+	try {
+		const spawns = hub?.frames("SPAWN") ?? [];
+		for (const spawn of spawns) {
+			hub?.hear({
 				type: "ERROR",
 				code: "SPAWN_FAILED",
 				message: "The window is closing.",
@@ -154,16 +155,17 @@ export async function unmountWindow(): Promise<void> {
 				requestId: spawn.requestId,
 			});
 		}
-		await settle();
+		if (spawns.length > 0) await settle();
+	} finally {
+		useCommandPalette().close();
+		useShortcutsOverlay().close();
+		app?.unmount();
+		app = null;
+		root?.remove();
+		root = null;
+		document.body.replaceChildren();
+		(document.activeElement as HTMLElement | null)?.blur?.();
 	}
-	useCommandPalette().close();
-	useShortcutsOverlay().close();
-	app?.unmount();
-	app = null;
-	root?.remove();
-	root = null;
-	document.body.replaceChildren();
-	(document.activeElement as HTMLElement | null)?.blur?.();
 }
 
 /** Press a key where the keyboard is (or on `target`), as a keydown the page can stop. */

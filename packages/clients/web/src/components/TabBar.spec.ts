@@ -16,30 +16,37 @@ let app: App | null = null;
 let root: HTMLElement;
 const activeTabIndex = ref(0);
 const visibleTabIds = ref<ReadonlySet<string> | null>(null);
+/** The bar's tabs, by id: a test closes one as App.vue does, by dropping it from the list. */
+const tabList = ref<string[]>([]);
 
 function mountBar(tabIds: string[], active = 0, bar: Component = TabBar) {
 	activeTabIndex.value = active;
+	tabList.value = tabIds;
 	const selectTab = vi.fn((index: number) => {
 		activeTabIndex.value = index;
 	});
 	const closeTab = vi.fn();
+	const renameTab = vi.fn();
+	const reorderTab = vi.fn();
 	root = document.createElement("div");
 	document.body.appendChild(root);
 	app = createApp({
 		render: () =>
 			h(bar, {
-				tabs: tabIds.map((id) => ({ id })),
+				tabs: tabList.value.map((id) => ({ id })),
 				activeTabIndex: activeTabIndex.value,
 				getTabLabel: (id: string) => `Label ${id}`,
-				getActiveChannelId: () => null,
+				getActiveChannelId: (id: string) => `ch-${id}`,
 				visibleTabIds: visibleTabIds.value,
 				onSelectTab: selectTab,
 				onCloseTab: closeTab,
+				onRenameTab: renameTab,
+				onReorderTab: reorderTab,
 			}),
 	});
 	app.use(createPinia());
 	app.mount(root);
-	return { selectTab, closeTab };
+	return { selectTab, closeTab, renameTab, reorderTab };
 }
 
 beforeEach(() => {
@@ -283,5 +290,133 @@ describe("TabBar rename", () => {
 		expect(input?.value).toBe("Label t1");
 		expect(input?.selectionStart).toBe(0);
 		expect(input?.selectionEnd).toBe("Label t1".length);
+	});
+
+	// Middle-clicking a tab closes it and leaves the field focused, so no blur ends the rename (#990).
+	it("stays on the tab being renamed when a tab before it closes", async () => {
+		const { closeTab, renameTab } = mountBar(["t0", "t1", "t2"], 0);
+		const input = await rename("t1", "Build");
+		tab("t0").dispatchEvent(
+			new MouseEvent("mousedown", { button: 1, bubbles: true, cancelable: true }),
+		);
+		expect(closeTab).toHaveBeenCalledWith(0);
+		await closeTabs("t0");
+		expect(renameField("t2")).toBeNull();
+		expect(renameField("t1")).toBe(input);
+		expect(input.value).toBe("Build");
+		expect(document.activeElement).toBe(input);
+		await press("Enter");
+		expect(renameTab).toHaveBeenCalledExactlyOnceWith("ch-t1", "Build");
+	});
+
+	it("ends the rename, renaming nothing, when the tab being renamed closes", async () => {
+		const { closeTab, renameTab } = mountBar(["t0", "t1", "t2"], 0);
+		await rename("t1", "Build");
+		tab("t1").dispatchEvent(
+			new MouseEvent("mousedown", { button: 1, bubbles: true, cancelable: true }),
+		);
+		expect(closeTab).toHaveBeenCalledWith(1);
+		await closeTabs("t1");
+		expect(root.querySelector("input.tab-rename-input")).toBeNull();
+		// The next rename starts from the tab's own name, not the text typed for the closed tab.
+		const next = await rename("t2");
+		expect(next.value).toBe("Label t2");
+		await press("Enter");
+		expect(renameTab).not.toHaveBeenCalled();
+	});
+});
+
+/** The rename field in a tab, or null. */
+function renameField(id: string): HTMLInputElement | null {
+	return tab(id).querySelector("input.tab-rename-input");
+}
+
+/** Double-click a tab's name, and type `text` into the field when given. */
+async function rename(id: string, text?: string): Promise<HTMLInputElement> {
+	tab(id)
+		.querySelector(".tab__label")
+		?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+	await nextTick();
+	await nextTick();
+	const input = renameField(id);
+	if (!input) throw new Error(`no rename field on ${id}`);
+	if (text !== undefined) {
+		input.value = text;
+		input.dispatchEvent(new Event("input", { bubbles: true }));
+	}
+	return input;
+}
+
+/** The parent drops tabs from the list, as App.vue does on close-tab or when a terminal ends. */
+async function closeTabs(...ids: string[]): Promise<void> {
+	tabList.value = tabList.value.filter((id) => !ids.includes(id));
+	await nextTick();
+	await nextTick();
+}
+
+// A tab can close under the menu or a drag without a click: its terminal ended (App.vue closes it).
+describe("TabBar, when a tab closes under the menu or a drag", () => {
+	function menuItem(label: string): HTMLButtonElement {
+		const item = [...document.querySelectorAll<HTMLButtonElement>(".ctx-menu .ctx-item")].find(
+			(el) => el.textContent?.trim() === label,
+		);
+		if (!item) throw new Error(`no menu item ${label}`);
+		return item;
+	}
+
+	async function openMenu(id: string): Promise<void> {
+		tab(id).dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+		await nextTick();
+	}
+
+	it("keeps the menu on the tab it was opened on", async () => {
+		const { closeTab } = mountBar(["t0", "t1", "t2"], 0);
+		await openMenu("t1");
+		await closeTabs("t0");
+		menuItem("Close").click();
+		expect(closeTab).toHaveBeenCalledExactlyOnceWith(0);
+	});
+
+	it("closes the menu when its tab closes", async () => {
+		mountBar(["t0", "t1", "t2"], 0);
+		await openMenu("t1");
+		await closeTabs("t1");
+		expect(document.querySelector(".ctx-menu")).toBeNull();
+	});
+
+	function dragEvent(type: string, data: Map<string, string>, clientX = 0): DragEvent {
+		const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX }) as DragEvent;
+		const dataTransfer = {
+			effectAllowed: "none",
+			dropEffect: "none",
+			get types() {
+				return [...data.keys()];
+			},
+			setData: (format: string, value: string) => data.set(format, value),
+			getData: (format: string) => data.get(format) ?? "",
+		};
+		Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+		return event;
+	}
+
+	it("moves the tab that was dragged", async () => {
+		const { reorderTab } = mountBar(["t0", "t1", "t2"], 0);
+		const data = new Map<string, string>();
+		tab("t2").dispatchEvent(dragEvent("dragstart", data));
+		await nextTick();
+		await closeTabs("t0");
+		// Left of every tab's middle (happy-dom lays them all out at 0): before the first.
+		tab("t1").dispatchEvent(dragEvent("drop", data, -1));
+		expect(reorderTab).toHaveBeenCalledExactlyOnceWith(1, 0);
+	});
+
+	it("moves nothing when the tab dragged has closed", async () => {
+		const { reorderTab } = mountBar(["t0", "t1", "t2"], 0);
+		const data = new Map<string, string>();
+		tab("t2").dispatchEvent(dragEvent("dragstart", data));
+		await nextTick();
+		await closeTabs("t2");
+		tab("t1").dispatchEvent(dragEvent("drop", data, -1));
+		expect(reorderTab).not.toHaveBeenCalled();
 	});
 });

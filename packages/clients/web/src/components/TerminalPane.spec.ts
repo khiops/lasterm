@@ -4439,8 +4439,11 @@ describe("TerminalPane streaming a paste (#1014)", () => {
 		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
 		attachOk(U, "U", { adaptsInput: true, streamsPaste: true });
 		await settle();
+		// The paste left behind holds nothing more: what is typed now goes, alone, to U.
+		type("b");
 
-		expect(inputs()).toEqual([]);
+		expect(inputs()).toEqual(["b"]);
+		expect(inputsTo()).toEqual([U]);
 	});
 
 	it("WB3: refuses a second paste while chunks are unsent, and in its tail before the last acknowledgement", async () => {

@@ -1518,6 +1518,28 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		expect(banner()).toBeNull();
 	});
 
+	// Only a live answer ends the missed output: a Reconnect answered from
+	// memory again leaves the copy to be replaced (#930, #1010).
+	it("draws the live answer after a Reconnect answered from memory again (#1010)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "AGAIN", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
 	// The socket back over a live screen, answered from memory: the live
 	// answer after it replaces that copy as well (#1010).
 	it("draws the live answer over a copy from memory its socket's return brought (#1010)", async () => {

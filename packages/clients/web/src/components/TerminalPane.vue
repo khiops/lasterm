@@ -916,10 +916,6 @@ watch(
 	},
 	{ immediate: true },
 );
-// Another terminal: its first answer replaces the screen anyway.
-watch(effectiveChannelId, () => {
-	missedOutput = isDetached.value || hostDisconnectedByUser.value;
-});
 
 /** What the pane lays over its terminal, if anything. */
 const cover = computed(() =>

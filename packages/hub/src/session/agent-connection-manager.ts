@@ -747,24 +747,15 @@ export class AgentConnectionManager {
 			return;
 		}
 
-		let agent: LastermAgent;
+		// Attaching is the whole restart: it reconciles with what the daemon
+		// holds, which keeps those terminals and forgets the rest. A SPAWN
+		// after it could only name a terminal the daemon holds, or one whose
+		// own start is under way; the agent refuses the id, and the refusal
+		// reported a running terminal dead (#981).
 		try {
-			agent = await this.attachDaemon(hostId, sessionId);
+			await this.attachDaemon(hostId, sessionId);
 		} catch {
 			this.lifecycle.closeSession(hostId, sessionId);
-			return;
 		}
-
-		await this.lifecycle.spawnChannelsForHost(
-			hostId,
-			agent,
-			(channelId) => {
-				this.ctx.scheduler.trackChannel(channelId);
-				this.ctx.chunker.trackChannel(channelId);
-			},
-			(channelId, ch) => {
-				this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead");
-			},
-		);
 	}
 }

@@ -16,6 +16,7 @@ use crate::framing::{encode_frame, FrameReader};
 use crate::headless::{HeadlessMirror, SnapshotInfo};
 use crate::input::{Offer, PasteEvent, PasteOffer, PasteReport};
 use crate::input_modes::{self, InputModeCell};
+use crate::output_cut::OutputCut;
 use crate::owner::OwnerId;
 use crate::protocol::{error_codes, AgentToHub, SnapshotData};
 use crate::pty::{
@@ -39,11 +40,13 @@ pub(crate) enum ChannelCommand {
 
 /// An ATTACH or a SNAPSHOT_REQ, for the channel's reader to answer (#931).
 ///
-/// The reader renders the screen from what it has read so far and puts the
-/// reply into the channel's pipeline, behind that output. So the reply reaches
-/// the connection that asked after every OUTPUT its screen holds and before
-/// every OUTPUT read after it, and its `last_seq` is the seq of the last read
-/// it holds. A screen too large for one frame gets no reply.
+/// The reader renders the screen from the output it has sent so far and puts
+/// the reply into the channel's pipeline, behind that output. So the reply
+/// reaches the connection that asked after every OUTPUT its screen holds and
+/// before every OUTPUT sent after it, and its `last_seq` is the seq of the
+/// last read before it. A read's bytes that end inside an escape sequence go
+/// out with a later read, under its seq (#954). A screen too large for one
+/// frame gets no reply.
 pub(crate) struct SnapshotRequest {
     pub(crate) reply: SnapshotReply,
     /// The connection that asked.
@@ -1199,6 +1202,7 @@ fn spawn_reader_task(
     tokio::spawn(async move {
         let mut rbuf = vec![0u8; 4096];
         let mut seq: u64 = 0;
+        let mut output = OutputCut::default();
         let mut mirror = mirror;
         let mut cwd = cwd;
         // What this terminal's output counts against: its hub's connection.
@@ -1232,6 +1236,16 @@ fn spawn_reader_task(
                                 _ => "unexpected".to_string(),
                             };
                             tracing::debug!(channel_id = %channel_id, reason = %reason, "PTY reader EOF");
+                            // What waited for the end of a sequence goes now,
+                            // as one more read (#954).
+                            let rest = output.finish();
+                            if !rest.is_empty() {
+                                seq += 1;
+                                emit_output(
+                                    rest, seq, &mut mirror, &input_modes, &mut cwd,
+                                    &channel_events, &flow, &owner, &channel_id,
+                                );
+                            }
                             // Emit a LOG diagnostic before breaking
                             let log_msg = AgentToHub::Log {
                                 channel_id: channel_id.clone(),
@@ -1245,73 +1259,18 @@ fn spawn_reader_task(
                         }
                         Ok(n) => {
                             seq += 1;
-                            // Strip DSR queries (\x1b[6n) from output before
-                            // forwarding to the hub.  With PSEUDOCONSOLE_INHERIT_CURSOR,
-                            // ConPTY sends DSR but does not need a response.  If xterm.js
-                            // sees the DSR, it responds with \x1b[row;colR which travels
-                            // back as INPUT → ConPTY stdin → child console input buffer,
-                            // killing the shell with garbage keyboard events.
-                            let raw = &rbuf[..n];
-                            let data = strip_dsr(raw);
-
-                            // Skip empty chunks (e.g. all-DSR data after stripping)
+                            // DSR queries stripped, and the output only up to
+                            // where a pane's terminal is between sequences: a
+                            // snapshot taken before the next read then needs
+                            // no parser state (#954).
+                            let data = output.take(&rbuf[..n]);
                             if data.is_empty() {
                                 continue;
                             }
-
-                            // Feed output to the headless mirror BEFORE sending to batch
-                            mirror.process(&data);
-                            input_modes.store(mirror.input_modes());
-
-                            // Send to batch loop for OUTPUT frames
-                            channel_events.send(ChannelEvent::Output(OutputEvent {
-                                owner: owner.clone(),
-                                channel_id: channel_id.clone(),
-                                seq,
-                                charge: flow.read(data.len()),
-                                data,
-                            }));
-
-                            // Emit title change if detected
-                            if let Some(title) = mirror.take_title_change() {
-                                let msg = AgentToHub::TitleChange {
-                                    channel_id: channel_id.clone(),
-                                    title,
-                                    display_title: None,
-                                };
-                                send_channel_event(
-                                    &channel_events, &flow, &owner, &channel_id, &msg,
-                                );
-                            }
-
-                            // Emit bell if detected
-                            if mirror.take_bell() {
-                                let msg = AgentToHub::Bell {
-                                    channel_id: channel_id.clone(),
-                                };
-                                send_channel_event(
-                                    &channel_events, &flow, &owner, &channel_id, &msg,
-                                );
-                            }
-
-                            // Emit notification if detected
-                            if let Some(message) = mirror.take_notification() {
-                                let msg = AgentToHub::Notification {
-                                    channel_id: channel_id.clone(),
-                                    message,
-                                };
-                                send_channel_event(
-                                    &channel_events, &flow, &owner, &channel_id, &msg,
-                                );
-                            }
-
-                            // The shell said where it is: sent at once (#834).
-                            if let Some(report) = mirror.take_shell_cwd() {
-                                cwd.shell_reported(report);
-                                send_cwd(
-                                    &mut cwd, false, &channel_events, &flow, &owner, &channel_id,
-                                );
-                            }
+                            emit_output(
+                                data, seq, &mut mirror, &input_modes, &mut cwd,
+                                &channel_events, &flow, &owner, &channel_id,
+                            );
 
                             if flow.full() {
                                 held_back = true;
@@ -1415,6 +1374,65 @@ fn spawn_reader_task(
         };
         send_channel_event(&channel_events, &flow, &owner, &channel_id, &msg);
     });
+}
+
+/// Hand `data`, output that ends between sequences, to the mirror and the
+/// hub as the OUTPUT of read `seq`, then send what the mirror saw in it: a
+/// title, a bell, a notification, the shell's directory.
+#[allow(clippy::too_many_arguments)]
+fn emit_output(
+    data: Vec<u8>,
+    seq: u64,
+    mirror: &mut HeadlessMirror,
+    input_modes: &InputModeCell,
+    cwd: &mut CwdTracker,
+    channel_events: &ChannelEventSender,
+    flow: &Arc<Flow>,
+    owner: &OwnerId,
+    channel_id: &str,
+) {
+    // The mirror reads it before it goes, so that a snapshot taken after it
+    // holds it.
+    mirror.process(&data);
+    input_modes.store(mirror.input_modes());
+
+    channel_events.send(ChannelEvent::Output(OutputEvent {
+        owner: owner.clone(),
+        channel_id: channel_id.to_owned(),
+        seq,
+        charge: flow.read(data.len()),
+        data,
+    }));
+
+    if let Some(title) = mirror.take_title_change() {
+        let msg = AgentToHub::TitleChange {
+            channel_id: channel_id.to_owned(),
+            title,
+            display_title: None,
+        };
+        send_channel_event(channel_events, flow, owner, channel_id, &msg);
+    }
+
+    if mirror.take_bell() {
+        let msg = AgentToHub::Bell {
+            channel_id: channel_id.to_owned(),
+        };
+        send_channel_event(channel_events, flow, owner, channel_id, &msg);
+    }
+
+    if let Some(message) = mirror.take_notification() {
+        let msg = AgentToHub::Notification {
+            channel_id: channel_id.to_owned(),
+            message,
+        };
+        send_channel_event(channel_events, flow, owner, channel_id, &msg);
+    }
+
+    // The shell said where it is: sent at once (#834).
+    if let Some(report) = mirror.take_shell_cwd() {
+        cwd.shell_reported(report);
+        send_cwd(cwd, false, channel_events, flow, owner, channel_id);
+    }
 }
 
 /// One read of a terminal's process by its polling task.
@@ -1541,9 +1559,9 @@ async fn ask_reader(
     }
 }
 
-/// Answer `request` with the screen as the reads `1..=last_seq` left it, put
-/// in the channel's pipeline behind the output of those reads (#931), or with
-/// nothing when the screen is too large for one frame.
+/// Answer `request` with the screen as the output sent with seqs
+/// `1..=last_seq` left it, put in the channel's pipeline behind that output
+/// (#931), or with nothing when the screen is too large for one frame.
 fn answer_snapshot(
     request: SnapshotRequest,
     mirror: &HeadlessMirror,
@@ -1603,33 +1621,6 @@ fn map_spawn_error(e: &std::io::Error) -> &'static str {
         std::io::ErrorKind::AlreadyExists => error_codes::CHANNEL_EXISTS,
         _ => error_codes::PTY_SPAWN_FAILED,
     }
-}
-
-/// Encode and write a frame to the shared stdout.
-/// Encode a message and send it via the frame channel.
-/// Synchronous — no await needed. Errors are ignored if receiver is gone.
-/// Strip DSR query sequences (`\x1b[6n`) from ConPTY output.
-///
-/// ConPTY with `PSEUDOCONSOLE_INHERIT_CURSOR` sends DSR but doesn't need
-/// a response.  If we forward DSR to xterm.js, it responds with
-/// `\x1b[row;colR` which the hub sends back as INPUT.  ConPTY passes this
-/// to the child's console input buffer as keyboard events, killing the shell.
-fn strip_dsr(data: &[u8]) -> Vec<u8> {
-    const DSR: &[u8] = b"\x1b[6n";
-    if !data.windows(DSR.len()).any(|w| w == DSR) {
-        return data.to_vec(); // fast path: no DSR
-    }
-    let mut out = Vec::with_capacity(data.len());
-    let mut i = 0;
-    while i < data.len() {
-        if i + DSR.len() <= data.len() && &data[i..i + DSR.len()] == DSR {
-            i += DSR.len(); // skip the DSR sequence
-        } else {
-            out.push(data[i]);
-            i += 1;
-        }
-    }
-    out
 }
 
 /// Where a paste's events go: `channel_id`'s PASTE_ACK and PASTE_CLOSED, on
@@ -2432,6 +2423,183 @@ mod stdio_tests {
             .as_str()
             .expect("input_modes");
         assert!(modes.contains("\x1b[?2004h"), "{modes:?}");
+    }
+
+    /// The events of one terminal until its LOG `PTY closed`: each OUTPUT's
+    /// seq and bytes, and the type and text of each other frame, in order.
+    #[cfg(unix)]
+    async fn events_until_closed(
+        events: &mut mpsc::UnboundedReceiver<ChannelEvent>,
+    ) -> Vec<(String, u64, Vec<u8>)> {
+        let mut seen = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while let Some(event) = events.recv().await {
+                match event {
+                    ChannelEvent::Output(output) => {
+                        seen.push(("OUTPUT".to_owned(), output.seq, output.data));
+                    }
+                    ChannelEvent::Frame(event) => {
+                        let frame: serde_json::Value =
+                            rmp_serde::from_slice(&event.frame[4..]).unwrap();
+                        let kind = frame["type"].as_str().unwrap_or_default().to_owned();
+                        let text = frame["title"]
+                            .as_str()
+                            .or(frame["msg"].as_str())
+                            .unwrap_or_default();
+                        let closed = kind == "LOG" && text == "PTY closed";
+                        seen.push((kind, 0, text.as_bytes().to_vec()));
+                        if closed {
+                            return;
+                        }
+                    }
+                    ChannelEvent::Reply(_) => {}
+                }
+            }
+        })
+        .await
+        .expect("the PTY closes");
+        seen
+    }
+
+    /// At the PTY's end, what waited for the end of a sequence goes out as
+    /// one more read, with what the mirror saw in it, before the LOG (#954).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_output_held_at_the_end_is_sent_with_its_events() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let mut events = start_shell_in(
+            "ending",
+            "/bin/sh",
+            vec!["-c".into(), "printf 'A\\033]2;final-title\\033'".into()],
+            None,
+            false,
+            &manager,
+            &senders,
+        )
+        .await;
+        let seen = events_until_closed(&mut events).await;
+
+        let outputs: Vec<&(String, u64, Vec<u8>)> =
+            seen.iter().filter(|(kind, ..)| kind == "OUTPUT").collect();
+        let bytes: Vec<u8> = outputs
+            .iter()
+            .flat_map(|(_, _, data)| data.clone())
+            .collect();
+        assert_eq!(bytes, b"A\x1b]2;final-title\x1b", "{seen:?}");
+        // The held bytes end the output, under a seq of their own.
+        let (_, last_seq, last) = outputs.last().expect("output");
+        assert!(last.ends_with(b"\x1b]2;final-title\x1b"), "{seen:?}");
+        assert!(
+            outputs[..outputs.len() - 1]
+                .iter()
+                .all(|(_, seq, _)| seq < last_seq),
+            "{seen:?}"
+        );
+        // Then the title the mirror read in them, then the LOG.
+        let last_output = seen.iter().rposition(|(k, ..)| k == "OUTPUT").unwrap();
+        let title = seen
+            .iter()
+            .position(|(k, ..)| k == "TITLE_CHANGE")
+            .expect("the title");
+        let log = seen.iter().position(|(k, ..)| k == "LOG").unwrap();
+        assert_eq!(seen[title].2, b"final-title");
+        assert!(last_output < title && title < log, "{seen:?}");
+    }
+
+    /// An ATTACH answered while a sequence is half read draws it whole: the
+    /// reader sent its output only up to the sequence's start (#954). This
+    /// proves the reader's wiring; the cut itself is proved in `output_cut`.
+    /// Under a reader that sends raw reads it is red only when the program's
+    /// one write reaches the reader in one read before the ATTACH.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_attach_inside_a_sequence_draws_it_whole() {
+        use crate::protocol::HubToAgent;
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let release = std::env::temp_dir().join(format!("lasterm-954-{}", std::process::id()));
+        let _ = std::fs::remove_file(&release);
+        let script = format!(
+            "printf '$ \\033[?200'; while [ ! -e '{}' ]; do sleep 0.05; done; printf '4hX'; sleep 20",
+            release.display()
+        );
+        let mut events = start_shell_in(
+            "cut",
+            "/bin/sh",
+            vec!["-c".into(), script],
+            None,
+            false,
+            &manager,
+            &senders,
+        )
+        .await;
+
+        let mut before = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !before.windows(2).any(|w| w == b"$ ") {
+                if let Some(ChannelEvent::Output(output)) = events.recv().await {
+                    before.extend_from_slice(&output.data);
+                }
+            }
+        })
+        .await
+        .expect("the program writes its prompt");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        answers(
+            HubToAgent::Attach {
+                channel_id: "cut".into(),
+                request_id: Some("attach-cut".into()),
+            },
+            &manager,
+            &senders,
+        )
+        .await;
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match events.recv().await {
+                    Some(ChannelEvent::Reply(reply)) => break reply,
+                    Some(ChannelEvent::Output(output)) => before.extend_from_slice(&output.data),
+                    Some(_) => continue,
+                    None => panic!("the terminal's pipeline closed without a reply"),
+                }
+            }
+        })
+        .await
+        .expect("the reader replies");
+
+        std::fs::write(&release, b"").unwrap();
+        let mut after = Vec::new();
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !after.contains(&b'X') {
+                if let Some(ChannelEvent::Output(output)) = events.recv().await {
+                    after.extend_from_slice(&output.data);
+                }
+            }
+        })
+        .await;
+        if let Some(process) = manager.lock().await.remove("cut") {
+            let _ = process.kill_tree();
+        }
+        let _ = std::fs::remove_file(&release);
+        finished.expect("the program writes the rest");
+
+        assert!(!before.contains(&0x1b), "sent before the reply: {before:?}");
+        let attached: serde_json::Value = rmp_serde::from_slice(&reply.frame[4..]).unwrap();
+        let snapshot = &attached["snapshot"];
+        let size = |key: &str| {
+            let value = u16::try_from(snapshot[key].as_u64().unwrap()).unwrap();
+            std::num::NonZeroU16::new(value).unwrap()
+        };
+        let mut pane = vt100::Parser::new(size("rows"), size("cols"), 0);
+        pane.process(b"\x1bc");
+        pane.process(snapshot["serialized"].as_str().unwrap().as_bytes());
+        pane.process(snapshot["input_modes"].as_str().unwrap().as_bytes());
+        pane.process(&after);
+        let row = pane.screen().contents().lines().next().map(str::to_owned);
+        assert_eq!(row.as_deref(), Some("$ X"), "after the reply: {after:?}");
+        assert!(pane.screen().bracketed_paste());
     }
 
     /// The agent says it writes input in the program's form (#1012).

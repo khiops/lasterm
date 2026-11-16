@@ -369,8 +369,10 @@ The agent answers every ATTACH it receives, and at once. The snapshot comes from
 reader, which serves it while it reads the PTY, and sends the ATTACH_OK into the channel's output
 stream (§ 3.5): it reaches the connection that asked after every OUTPUT of the channel whose bytes
 the snapshot shows, and before every OUTPUT it does not show (#931). `last_seq` is the `seq` of the
-last read the snapshot holds, so on that connection the OUTPUT before it has `seq <= last_seq` and
-the OUTPUT after it `seq > last_seq`; it is 0 before the terminal's first read. An agent before #931
+last read before the snapshot, so on that connection the OUTPUT before it has `seq <= last_seq` and
+the OUTPUT after it `seq > last_seq`; it is 0 before the terminal's first read. The output the agent
+sends always ends between escape sequences and characters, so a pane that draws the snapshot and
+then that OUTPUT parses it from the start of a sequence (#954). An agent before #931
 sent 0 whatever it held, and its ATTACH_OK could overtake output its snapshot already showed. The hub
 numbers its spool itself and does not read `last_seq`. Once the PTY has closed, the channel is ending: an
 ATTACH whose request finds that reader gone, or reaches it as it stops and is dropped, gets the
@@ -431,6 +433,10 @@ waiting to be dispatched, is dropped: it would land inside a paste the new conne
 `seq` counts the reads of the channel's current workload, from 1; a restart, which reuses the
 channel id, starts again from 1. A frame merges several reads and carries the last one's, so seqs
 can go unseen between two frames, and a read that held only stripped DSR queries carries none.
+Output is sent only up to where xterm is between escape sequences and characters: the bytes of a
+read after that wait, and go out with the read that ends their sequence, under its `seq`, so a read
+whose bytes all wait carries none either. They wait for at most 64 KiB, then go out as they are.
+When the PTY closes, what still waits goes out as one more read, with the next `seq` (#954).
 
 **Batching:** Buffer 16ms or 4KB, whichever comes first, then flush. Any other frame about a
 channel (CHANNEL_EXIT, TITLE_CHANGE, PROCESS_TITLE, CWD_CHANGE, BELL, NOTIFICATION, LOG) first
@@ -465,7 +471,8 @@ Agent MUST resize both the PTY and the channel's `vt100` screen, so the next sna
 ```
 
 It comes in the channel's output stream as ATTACH_OK does (§ 3.3): after every OUTPUT its screen
-holds, before every OUTPUT it does not, with `last_seq` the `seq` of the last read it holds (#931).
+holds, before every OUTPUT it does not, with `last_seq` the `seq` of the last read before it (#931,
+#954).
 
 ### 3.8 CHANNEL_EXIT (Agent → Hub)
 

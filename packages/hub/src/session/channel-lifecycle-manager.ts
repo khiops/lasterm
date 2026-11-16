@@ -28,7 +28,7 @@ import type { AgentConnection } from "./agent-connection.js";
 import { daemonAuthFrame } from "./daemon-auth.js";
 import { hostDefaultProfile } from "./host-profile-menu.js";
 import { HostUnreachableError, hostAwayDuringSpawn } from "./host-reachability.js";
-import { agentAdaptsInput } from "./input-modes.js";
+import { agentAdaptsInput, agentStreamsPaste } from "./input-modes.js";
 import {
 	clearContext,
 	clearElevationContextsForChannel,
@@ -400,6 +400,7 @@ export class ChannelLifecycleManager {
 						hostId,
 						sessionId: session.id,
 						adaptsInput: agentAdaptsInput(this.ctx.agents, hostId),
+						streamsPaste: agentStreamsPaste(this.ctx.agents, hostId),
 					};
 					client.send(response);
 					resolve({ channelId, errCode: null });

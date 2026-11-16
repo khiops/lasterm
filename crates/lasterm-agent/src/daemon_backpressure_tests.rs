@@ -296,6 +296,12 @@ impl TestHub {
         self.send_within(msg, DEADLINE).await;
     }
 
+    /// End this connection's handler where it is, without the cleanup its
+    /// end runs: a connection that never reaches its end (#1014).
+    pub(super) fn abort(&self) {
+        self._handler.abort();
+    }
+
     /// Send, and fail unless the daemon has read it within `limit`.
     pub(super) async fn send_within(&mut self, msg: &HubToAgent, limit: Duration) {
         let frame = encode_frame(msg).expect("encode a hub frame");

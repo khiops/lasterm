@@ -667,3 +667,528 @@ async fn each_terminal_adapts_its_input_to_its_own_program() {
 
     tear_down(&daemon, &dir).await;
 }
+
+// ─── Pastes (#1014) ─────────────────────────────────────────────────────────
+//
+// A paste goes to a real terminal running `paste_reader` below, this test
+// binary itself started through the PTY, which copies every byte it reads
+// to a file: what the program got, markers included, byte for byte.
+
+/// The reader's output file, and what it prints once it reads.
+const PASTE_READER_OUT: &str = "LASTERM_TEST_PASTE_READER_OUT";
+/// Set: the reader turns bracketed paste on (and application cursor keys)
+/// before it reads.
+const PASTE_READER_BRACKETED: &str = "LASTERM_TEST_PASTE_READER_BRACKETED";
+/// Set to a count: the reader turns bracketed paste off once it has read that
+/// many bytes, and prints `OFF`.
+const PASTE_READER_OFF_AFTER: &str = "LASTERM_TEST_PASTE_READER_OFF_AFTER";
+/// The chunk size and window the hub's panes use (`@lasterm/shared`).
+const PASTE_CHUNK: usize = 32 * 1024;
+const PASTE_WINDOW: usize = 8;
+
+/// Not a test of its own: the program the paste tests start in a terminal.
+/// Run without its variable, as in a plain test run, it does nothing.
+#[test]
+fn paste_reader() {
+    let Some(out) = std::env::var_os(PASTE_READER_OUT) else {
+        return;
+    };
+    use std::io::Write;
+    let bracketed = std::env::var_os(PASTE_READER_BRACKETED).is_some();
+    let off_after: Option<usize> = std::env::var(PASTE_READER_OFF_AFTER)
+        .ok()
+        .and_then(|n| n.parse().ok());
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(out)
+        .expect("open the reader's output");
+    raw_input();
+    let mut stdout = std::io::stdout();
+    if bracketed {
+        write!(stdout, "\x1b[?2004h\x1b[?1h").unwrap();
+    }
+    write!(stdout, "READY\r\n").unwrap();
+    stdout.flush().unwrap();
+    let mut total = 0usize;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = read_input(&mut buf);
+        if n == 0 {
+            return;
+        }
+        file.write_all(&buf[..n]).unwrap();
+        file.flush().unwrap();
+        let before = total;
+        total += n;
+        if let Some(limit) = off_after {
+            if before < limit && total >= limit {
+                write!(stdout, "\x1b[?2004lOFF\r\n").unwrap();
+                stdout.flush().unwrap();
+            }
+        }
+    }
+}
+
+/// The terminal's input, byte for byte: no echo, no line editing, nothing
+/// translated.
+#[cfg(unix)]
+fn raw_input() {
+    // SAFETY: a termios read and written back for this process's stdin.
+    unsafe {
+        let mut termios: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(0, &mut termios) == 0 {
+            libc::cfmakeraw(&mut termios);
+            libc::tcsetattr(0, libc::TCSANOW, &termios);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_input(buf: &mut [u8]) -> usize {
+    use std::io::Read;
+    std::io::stdin().read(buf).unwrap_or(0)
+}
+
+#[cfg(windows)]
+fn raw_input() {
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_INPUT, STD_INPUT_HANDLE,
+    };
+    // SAFETY: the console mode of this process's own input handle.
+    unsafe {
+        SetConsoleMode(
+            GetStdHandle(STD_INPUT_HANDLE),
+            ENABLE_VIRTUAL_TERMINAL_INPUT,
+        );
+    }
+}
+
+#[cfg(windows)]
+fn read_input(buf: &mut [u8]) -> usize {
+    use windows_sys::Win32::Storage::FileSystem::ReadFile;
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE};
+    let mut n: u32 = 0;
+    // SAFETY: a read into `buf`, of at most its length, from our own stdin.
+    let ok = unsafe {
+        ReadFile(
+            GetStdHandle(STD_INPUT_HANDLE),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &mut n,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        0
+    } else {
+        n as usize
+    }
+}
+
+/// A terminal running `paste_reader`, and the file it copies its input to.
+struct PasteTerminal {
+    channel_id: String,
+    out: PathBuf,
+}
+
+impl PasteTerminal {
+    async fn start(
+        hub: &mut TestHub,
+        dir: &Path,
+        channel_id: &str,
+        bracketed: bool,
+        off_after: Option<usize>,
+    ) -> Self {
+        let out = dir.join(format!("{channel_id}.in"));
+        let mut env = std::collections::HashMap::new();
+        env.insert(PASTE_READER_OUT.to_string(), out.display().to_string());
+        if bracketed {
+            env.insert(PASTE_READER_BRACKETED.to_string(), "1".to_string());
+        }
+        if let Some(n) = off_after {
+            env.insert(PASTE_READER_OFF_AFTER.to_string(), n.to_string());
+        }
+        let exe = std::env::current_exe().expect("this test binary");
+        hub.spawn(HubToAgent::Spawn {
+            request_id: format!("request-{channel_id}"),
+            channel_id: Some(channel_id.to_string()),
+            shell: Some(exe.display().to_string()),
+            args: Some(vec![
+                "--exact".into(),
+                "daemon::input_tests::paste_reader".into(),
+                "--nocapture".into(),
+                "--test-threads=1".into(),
+            ]),
+            cwd: None,
+            env: Some(env),
+            cols: 120,
+            rows: 30,
+            direct_process: None,
+            elevated: None,
+            elevation_secret: None,
+            elevation_method: None,
+            custom_command: None,
+            env_mode: "inherit".to_string(),
+            env_unset: None,
+            login_shell: None,
+            report_directory: None,
+        })
+        .await;
+        read_output_until(hub, channel_id, "READY").await;
+        Self {
+            channel_id: channel_id.to_string(),
+            out,
+        }
+    }
+
+    /// What the program has read, once it holds at least `len` bytes, and
+    /// after a moment for anything that should not come.
+    async fn read(&self, len: usize) -> Vec<u8> {
+        let deadline = tokio::time::Instant::now() + DEADLINE;
+        loop {
+            let got = std::fs::read(&self.out).unwrap_or_default();
+            if got.len() >= len {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                return std::fs::read(&self.out).unwrap_or_default();
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the program read {} of {len} bytes within {DEADLINE:?}",
+                got.len()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+/// Read until `channel_id` has printed `text`.
+async fn read_output_until(hub: &mut TestHub, channel_id: &str, text: &str) {
+    let mut printed = Vec::new();
+    while !String::from_utf8_lossy(&printed).contains(text) {
+        let frame = tokio::time::timeout(DEADLINE, hub.next_frame())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{channel_id} did not print {text:?}; it printed {:?}",
+                    String::from_utf8_lossy(&printed)
+                )
+            });
+        if is_about(&frame, "OUTPUT", channel_id) {
+            printed.extend_from_slice(output_data(&frame));
+        }
+    }
+}
+
+fn paste_chunk(channel_id: &str, paste_id: u32, seq: u32, data: &[u8], last: bool) -> HubToAgent {
+    HubToAgent::Paste {
+        channel_id: channel_id.to_string(),
+        paste_id,
+        seq,
+        data: data.to_vec(),
+        last,
+    }
+}
+
+/// Send `data` as paste `paste_id` the way a pane does: chunks of
+/// `PASTE_CHUNK`, never more than `PASTE_WINDOW` unacknowledged; then wait for
+/// the last chunk's PASTE_ACK. Returns the frames read.
+async fn paste_paced(
+    hub: &mut TestHub,
+    channel_id: &str,
+    paste_id: u32,
+    data: &[u8],
+) -> Vec<rmpv::Value> {
+    let chunks: Vec<&[u8]> = data.chunks(PASTE_CHUNK).collect();
+    let mut frames = Vec::new();
+    let mut acked = 0usize;
+    let mut sent = 0usize;
+    while acked < chunks.len() {
+        while sent < chunks.len() && sent - acked < PASTE_WINDOW {
+            let last = sent + 1 == chunks.len();
+            hub.send(&paste_chunk(
+                channel_id,
+                paste_id,
+                sent as u32,
+                chunks[sent],
+                last,
+            ))
+            .await;
+            sent += 1;
+        }
+        let frame = tokio::time::timeout(DEADLINE, hub.next_frame())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "no PASTE_ACK within {DEADLINE:?}: {acked} of {} acknowledged",
+                    chunks.len()
+                )
+            });
+        if is_about(&frame, "PASTE_ACK", channel_id) {
+            assert_eq!(
+                frame["seq"].as_u64(),
+                Some(acked as u64),
+                "acknowledged in order"
+            );
+            acked += 1;
+        }
+        assert!(
+            !is_about(&frame, "PASTE_CLOSED", channel_id),
+            "the paste was closed: {frame:?}"
+        );
+        frames.push(frame);
+    }
+    frames
+}
+
+/// 2 MiB: cursor keys in both forms, then a counting pattern, every 8-byte
+/// group the offset it starts at.
+fn paste_text() -> Vec<u8> {
+    let mut data = b"\x1b[A\x1bOA".to_vec();
+    while data.len() < 2 * 1024 * 1024 {
+        let offset = data.len();
+        data.extend_from_slice(format!("{:07}\n", offset % 10_000_000).as_bytes());
+    }
+    data.truncate(2 * 1024 * 1024);
+    data
+}
+
+/// PS1: a paste larger than the queue's bound reaches the program whole and
+/// unchanged, between one start and one end marker, sent as a pane sends it.
+/// Its cursor keys are not rewritten: #1012's `adapt` is not applied to it.
+#[tokio::test]
+async fn a_paste_larger_than_the_queue_reaches_the_pty_whole() {
+    let dir = scratch("paste-whole");
+    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+    let mut hub = TestHub::connect(&daemon, KEY_A, 1).await;
+    let terminal = PasteTerminal::start(&mut hub, &dir, "paste-whole", true, None).await;
+    let data = paste_text();
+    assert!(data.len() > crate::input::INPUT_QUEUE_BYTES);
+    paste_paced(&mut hub, &terminal.channel_id, 1, &data).await;
+    let expected = [crate::input::PASTE_START, &data, crate::input::PASTE_END].concat();
+    let got = terminal.read(expected.len()).await;
+    assert!(
+        got == expected,
+        "{} bytes read, {} expected; first difference at {:?}",
+        got.len(),
+        expected.len(),
+        got.iter().zip(&expected).position(|(a, b)| a != b)
+    );
+    tear_down(&daemon, &dir).await;
+}
+
+/// PS2: the same to a program without bracketed paste: no marker.
+#[tokio::test]
+async fn a_paste_to_a_program_without_bracketed_paste_has_no_markers() {
+    let dir = scratch("paste-plain");
+    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+    let mut hub = TestHub::connect(&daemon, KEY_A, 1).await;
+    let terminal = PasteTerminal::start(&mut hub, &dir, "paste-plain", false, None).await;
+    let data = paste_text();
+    paste_paced(&mut hub, &terminal.channel_id, 1, &data).await;
+    let got = terminal.read(data.len()).await;
+    assert!(
+        got == data,
+        "{} bytes read, {} expected",
+        got.len(),
+        data.len()
+    );
+    tear_down(&daemon, &dir).await;
+}
+
+/// PS3: the program turning bracketed paste off before the last chunk does
+/// not change the paste: it still ends with its end marker.
+#[tokio::test]
+async fn bracketing_is_decided_at_a_pastes_first_chunk() {
+    let dir = scratch("paste-decided");
+    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+    let mut hub = TestHub::connect(&daemon, KEY_A, 1).await;
+    let terminal =
+        PasteTerminal::start(&mut hub, &dir, "paste-decided", true, Some(PASTE_CHUNK)).await;
+    let first = vec![b'a'; PASTE_CHUNK];
+    hub.send(&paste_chunk(&terminal.channel_id, 1, 0, &first, false))
+        .await;
+    // The program read the first chunk and turned bracketed paste off.
+    read_output_until(&mut hub, &terminal.channel_id, "OFF").await;
+    hub.send(&paste_chunk(&terminal.channel_id, 1, 1, b"bb", true))
+        .await;
+    let expected = [
+        crate::input::PASTE_START,
+        &first,
+        b"bb",
+        crate::input::PASTE_END,
+    ]
+    .concat();
+    assert_eq!(terminal.read(expected.len()).await, expected);
+    tear_down(&daemon, &dir).await;
+}
+
+/// A bracketed paste opened by `hub`, its first chunk taken by the program.
+async fn open_paste(hub: &mut TestHub, terminal: &PasteTerminal, paste_id: u32) {
+    hub.send(&paste_chunk(
+        &terminal.channel_id,
+        paste_id,
+        0,
+        b"first",
+        false,
+    ))
+    .await;
+    hub.read_through(|frame| is_about(frame, "PASTE_ACK", &terminal.channel_id))
+        .await;
+}
+
+/// PS10 connection ends, next connection: a daemon connection ending closes
+/// its paste; the hub's next connection cannot carry it on.
+#[tokio::test]
+async fn a_connection_that_ends_closes_its_paste() {
+    let dir = scratch("paste-conn-end");
+    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+    let mut hub = TestHub::connect(&daemon, KEY_A, 1).await;
+    let terminal = PasteTerminal::start(&mut hub, &dir, "paste-conn-end", true, None).await;
+    open_paste(&mut hub, &terminal, 1).await;
+    drop(hub); // EOF: its handler ends
+    let expected = [crate::input::PASTE_START, b"first", crate::input::PASTE_END].concat();
+    assert_eq!(terminal.read(expected.len()).await, expected);
+
+    let mut next = TestHub::connect(&daemon, KEY_A, 2).await;
+    next.send(&paste_chunk(&terminal.channel_id, 1, 1, b"more", true))
+        .await;
+    let frames = next
+        .read_through(|frame| is_about(frame, "PASTE_CLOSED", &terminal.channel_id))
+        .await;
+    assert_eq!(frames.last().unwrap()["reason"].as_str(), Some("unknown"));
+    assert_eq!(
+        terminal.read(expected.len()).await,
+        expected,
+        "nothing more reached it"
+    );
+    tear_down(&daemon, &dir).await;
+}
+
+/// PS10 displaced, input of the new connection: a connection displaced by a
+/// newer one of its hub has its paste closed when it is displaced, even if
+/// its own handler never reaches its end; what the new one types follows the
+/// end marker.
+#[tokio::test]
+async fn a_displaced_connections_paste_closes_before_the_new_connection_types() {
+    let dir = scratch("paste-displaced");
+    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+    let mut old = TestHub::connect(&daemon, KEY_A, 1).await;
+    let terminal = PasteTerminal::start(&mut old, &dir, "paste-displaced", true, None).await;
+    open_paste(&mut old, &terminal, 1).await;
+    // Its handler never runs its end: only the displacement can close it.
+    old.abort();
+    let mut new = TestHub::connect(&daemon, KEY_A, 2).await;
+    // A second byte, a moment later: conhost on Windows 26100 can hold what is
+    // typed after an end marker written alone until later input arrives; a
+    // byte sent at once is held with it. That is an open product regression
+    // (#1030); this only keeps the test about order and closing.
+    new.send(&input(&terminal.channel_id, b"x".to_vec())).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    new.send(&input(&terminal.channel_id, b"y".to_vec())).await;
+    let expected = [
+        crate::input::PASTE_START,
+        b"first",
+        crate::input::PASTE_END,
+        b"xy",
+    ]
+    .concat();
+    assert_eq!(terminal.read(expected.len()).await, expected);
+    tear_down(&daemon, &dir).await;
+}
+
+/// PS10 stale frames and stale INPUT: what a displaced connection still had
+/// to dispatch reaches no terminal and leaves the new connection's paste
+/// unbroken.
+#[tokio::test]
+async fn a_displaced_connections_frames_are_dropped() {
+    let dir = scratch("paste-stale");
+    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+    let mut hub = TestHub::connect(&daemon, KEY_A, 2).await;
+    let terminal = PasteTerminal::start(&mut hub, &dir, "paste-stale", true, None).await;
+    open_paste(&mut hub, &terminal, 7).await;
+
+    // A connection of the same hub, displaced, dispatching what it had read.
+    let (displace, displaced) = tokio::sync::watch::channel(true);
+    let stale = crate::handler::ConnectionRef::daemon(1, displaced);
+    let (frame_tx, _frames) = tokio::sync::mpsc::unbounded_channel();
+    for msg in [
+        paste_chunk(&terminal.channel_id, 7, 1, b"STALE", false),
+        paste_chunk(&terminal.channel_id, 3, 0, b"STALE", true),
+        input(&terminal.channel_id, b"STALE".to_vec()),
+        HubToAgent::PasteCancel {
+            channel_id: terminal.channel_id.clone(),
+            paste_id: 7,
+        },
+    ] {
+        handle_message(
+            msg,
+            &OwnerId::from_hub_key(KEY_A),
+            &stale,
+            Arc::clone(&daemon.pty_manager),
+            frame_tx.clone(),
+            daemon.channel_events.clone(),
+            Arc::clone(&daemon.cmd_senders),
+        )
+        .await
+        .expect("a displaced connection's frame is handled");
+    }
+    drop(displace);
+
+    hub.send(&paste_chunk(&terminal.channel_id, 7, 1, b"second", true))
+        .await;
+    hub.read_through(|frame| is_about(frame, "PASTE_ACK", &terminal.channel_id))
+        .await;
+    let expected = [
+        crate::input::PASTE_START,
+        b"first",
+        b"second",
+        crate::input::PASTE_END,
+    ]
+    .concat();
+    assert_eq!(terminal.read(expected.len()).await, expected);
+    tear_down(&daemon, &dir).await;
+}
+
+/// PS5 through the agent's frames: a PASTE_CANCEL from the connection that
+/// owns the paste closes it for the program, end marker included, and answers
+/// PASTE_CLOSED `cancelled` with how much of it went; what is typed after
+/// follows the end marker.
+#[tokio::test]
+async fn a_paste_cancelled_by_its_connection_is_closed_for_the_program() {
+    let dir = scratch("paste-cancel");
+    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+    let mut hub = TestHub::connect(&daemon, KEY_A, 1).await;
+    let terminal = PasteTerminal::start(&mut hub, &dir, "paste-cancel", true, None).await;
+    open_paste(&mut hub, &terminal, 4).await;
+
+    hub.send(&HubToAgent::PasteCancel {
+        channel_id: terminal.channel_id.clone(),
+        paste_id: 4,
+    })
+    .await;
+    let frames = hub
+        .read_through(|frame| is_about(frame, "PASTE_CLOSED", &terminal.channel_id))
+        .await;
+    let closed = frames.last().unwrap();
+    assert_eq!(closed["paste_id"].as_u64(), Some(4));
+    assert_eq!(closed["reason"].as_str(), Some("cancelled"));
+    assert_eq!(closed["written"].as_u64(), Some(5));
+    // A second byte, a moment later: conhost on Windows 26100 can hold what is
+    // typed after an end marker written alone until later input arrives; a
+    // byte sent at once is held with it. That is an open product regression
+    // (#1030); this only keeps the test about order and closing.
+    hub.send(&input(&terminal.channel_id, b"x".to_vec())).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    hub.send(&input(&terminal.channel_id, b"y".to_vec())).await;
+
+    let expected = [
+        crate::input::PASTE_START,
+        b"first",
+        crate::input::PASTE_END,
+        b"xy",
+    ]
+    .concat();
+    assert_eq!(terminal.read(expected.len()).await, expected);
+    tear_down(&daemon, &dir).await;
+}

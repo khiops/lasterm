@@ -4545,9 +4545,11 @@ async fn relay_hub_ws_connect(
 
 /// Receives one raw MessagePack frame from the webview. Tauri has already
 /// materialised that body before this command runs; an oversized body is
-/// rejected without another copy or relay retention. This command also refuses
-/// a full native queue so the fire-and-forget JavaScript API cannot retain an
-/// unbounded chain of pending sends.
+/// rejected without another copy or relay retention. When the native queue is
+/// full, the command waits for room instead of failing the relay (#1014): the
+/// webview keeps one send in flight (`DesktopWsClient._drainSends`), so at most
+/// one waits here, and a paste streamed faster than the socket writes is held
+/// back rather than closing the connection.
 #[tauri::command]
 async fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), String> {
     let relay_id = request
@@ -4577,16 +4579,9 @@ async fn relay_hub_ws_send(request: tauri::ipc::Request<'_>) -> Result<(), Strin
             return Err(format!("WebSocket input {RAW_IPC_REFUSAL}"));
         }
     };
-    input.try_send(bytes.clone()).map_err(|error| {
+    input.send(bytes.clone()).await.map_err(|_| {
         close_hub_ws_relay(relay_id);
-        match error {
-            tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                "WebSocket relay input queue is full".to_string()
-            }
-            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                "WebSocket relay is no longer active".to_string()
-            }
-        }
+        "WebSocket relay is no longer active".to_string()
     })
 }
 
@@ -6750,6 +6745,44 @@ mod tests {
             send(Raw(vec![9; HUB_WS_MAX_MESSAGE_BYTES + 1])),
             (Err(too_big), None, true)
         );
+    }
+
+    /// DK1: a full native queue holds the next send back until the writer
+    /// takes one, and the relay stays open (#1014).
+    #[test]
+    fn websocket_input_waits_for_room_in_a_full_queue_instead_of_closing_its_relay() {
+        use tauri::ipc::InvokeBody::Raw;
+        let ipc = RelayIpc::new();
+        let id = NEXT_RELAY_ID.fetch_add(1, Ordering::Relaxed);
+        let (input, mut input_receiver) = tokio::sync::mpsc::channel(1);
+        input
+            .try_send(vec![1])
+            .expect("the queue takes its first message");
+        let (acknowledgement, _acknowledgement_receiver) = tokio::sync::mpsc::channel(1);
+        let (close, mut close_receiver) = tokio::sync::mpsc::unbounded_channel();
+        hub_ws_relays().lock().unwrap().insert(
+            id,
+            HubWsRelay {
+                input,
+                acknowledgement,
+                outstanding: Arc::new(Mutex::new(None)),
+                close,
+            },
+        );
+        // The writer takes the first message a moment after the send began.
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let first = input_receiver.blocking_recv();
+            let second = input_receiver.blocking_recv();
+            (first, second)
+        });
+
+        let answer = ipc.invoke("relay_hub_ws_send", ("x-lasterm-ws-id", id), Raw(vec![2]));
+
+        assert_eq!(answer, Ok(()), "the send waited for room");
+        assert_eq!(writer.join().unwrap(), (Some(vec![1]), Some(vec![2])));
+        assert!(close_receiver.try_recv().is_err(), "the relay stayed open");
+        hub_ws_relays().lock().unwrap().remove(&id);
     }
 
     /// A process that has exited must read as gone.

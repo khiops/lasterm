@@ -161,7 +161,7 @@ agent's default. A default profile the user set (`PUT /api/hosts/:id/profiles/:p
 replaced, and a profile the user hid is never marked (#800). The host's default profile is what a
 new terminal starts there, the local host's as an SSH host's (§ 4.4, #802).
 
-**Capabilities.** The hub logs the list, and gates nothing on it but `adapts_input`, which follows `"input-modes"` (§ 4.2): every agent it can meet has the others but `"hub-identity"`, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"input-modes"` means an agent that sends the terminal's input modes and alternate screen with each snapshot (§ 3.3) and writes paste markers and cursor keys in its program's form (§ 3.4); the hub tells the UI so with `adapts_input` (§ 4.2, § 4.4). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
+**Capabilities.** The hub logs the list, and gates nothing on it but `adapts_input`, which follows `"input-modes"` (§ 4.2), and `streams_paste` and its PASTE relay, which follow `"paste-stream"` (§ 3.21, § 4.21): every agent it can meet has the others but `"hub-identity"`, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"input-modes"` means an agent that sends the terminal's input modes and alternate screen with each snapshot (§ 3.3) and writes paste markers and cursor keys in its program's form (§ 3.4); the hub tells the UI so with `adapts_input` (§ 4.2, § 4.4). `"paste-stream"` means an agent that takes a paste as PASTE chunks, acknowledges each once its terminal took it, and writes and closes its markers itself (§ 3.21); the hub tells the UI so with `streams_paste`. `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
 
 ### 3.1b AUTH (Hub → Agent, daemon mode)
 
@@ -411,6 +411,10 @@ screen model, whatever the client's terminal believes (#1012):
   CSI or its SS3 form, is written in SS3 form when the program set application cursor keys (`?1`) and
   in CSI form otherwise. A sequence with parameters, such as `ESC[1;5A`, is written as it is.
 - Only whole sequences within one INPUT match: one split across two is written unchanged.
+
+A paste larger than one INPUT goes as PASTE chunks to an agent that says `"paste-stream"` (§ 3.21).
+An INPUT from a daemon connection that a newer connection of the same hub has displaced, still
+waiting to be dispatched, is dropped: it would land inside a paste the new connection sends.
 
 ### 3.5 OUTPUT (Agent → Hub)
 
@@ -776,6 +780,43 @@ use it yet: the first CWD_CHANGE for that channel after the question is its answ
 `not-found` on that channel's `CHANNEL_NOT_FOUND`, and after 2 s, or when the host has no agent
 connected, what was said last.
 
+### 3.21 PASTE / PASTE_CANCEL / PASTE_ACK / PASTE_CLOSED (`paste-stream`)
+
+```typescript
+// Hub → Agent
+{ type: "PASTE", channel_id: string, paste_id: number, seq: number, data: Uint8Array, last: boolean }
+{ type: "PASTE_CANCEL", channel_id: string, paste_id: number }
+// Agent → Hub
+{ type: "PASTE_ACK", channel_id: string, paste_id: number, seq: number }
+{ type: "PASTE_CLOSED", channel_id: string, paste_id: number,
+  reason: "cancelled" | "superseded" | "out_of_order" | "overflow" | "unknown",
+  written: number }  // the paste's data bytes written to the terminal
+```
+
+A paste (#1014) is its text, without markers, in chunks `seq` 0, 1, …, the last one `last: true`.
+`paste_id` is the hub's, unique while it runs (§ 4.21). The agent:
+
+- **opens** it at `seq` 0, closing any other paste the same connection has open on the channel
+  (`superseded`); it decides
+  then, from its screen model, whether the paste is bracketed (`?2004`), for both markers;
+- **takes** a later chunk only as the next one of that connection's open paste: one out of order closes
+  the paste (`out_of_order`); one for no open paste of the connection changes nothing and is answered
+  `unknown`, unless that paste is closed and not yet finished, whose PASTE_CLOSED is then the answer; one that would take the channel's input queue (§ 3.4) past its bound closes it
+  (`overflow`). A chunk is judged by the bound alone, never by INPUT's dropping;
+- **writes** `ESC[200~` before the first chunk and `ESC[201~` after the last when bracketed, and the
+  data unchanged; INPUT's adaptation is not applied to it;
+- **acknowledges** each chunk once its PTY writer has accepted its last byte, the last chunk of a
+  bracketed paste once the end marker has been accepted too: that PASTE_ACK is the final answer. On
+  Windows "accepted" is the PTY crate's own queue, up to 65 writes of 4 KiB ahead of ConPTY;
+- **closes** it on PASTE_CANCEL (`cancelled`), even after its last chunk until that is written, and
+  when the connection that sent it ends or is displaced, with no frame then. Closing skips what is
+  still queued of it, finishes a write already started, and, when its start marker went out, writes
+  `ESC[201~` right after the last of it that did, before anything queued later. PASTE_CLOSED follows
+  on the connection that sent it, while it is current.
+
+PASTE and PASTE_CANCEL from a displaced connection are dropped and change no paste. The hub keeps at
+most `PASTE_WINDOW_BYTES` (256 KiB) of a paste unacknowledged, through the pane (§ 4.21).
+
 ## 4. Message Types — Hub ↔ UI (WS)
 
 ### 4.1 AUTH
@@ -849,7 +890,10 @@ sends a frame or disconnects.
   files_panel: { open: boolean }, // whether the writer's files panel is open on it (§ 4.20, #838)
   // Whether the agent that takes this terminal's input now says "input-modes" (§ 3.1), read when the
   // answer is sent, from the connected agent INPUT goes to, never from a stored snapshot (#1012).
-  adapts_input: boolean
+  adapts_input: boolean,
+  // Whether that agent says "paste-stream" (§ 3.1), read the same way: the pane streams its
+  // pastes as PASTE chunks (§ 4.21, #1014).
+  streams_paste: boolean
 }
 
 // UI → Hub
@@ -917,6 +961,7 @@ and `CHANNEL_DEAD` shows it has ended, whatever the pane showed before.
     left), line breaks as `\r`, between `ESC[200~` and `ESC[201~`, in one INPUT;
   - a paste whose bracketed form is over 65,536 bytes is refused with a notice;
   - xterm pastes nothing of its own.
+- **While `streams_paste` is true,** the pane streams every paste instead (§ 4.21).
 - **Otherwise,** xterm pastes as it always did.
 
 ### 4.3 INPUT / OUTPUT / RESIZE / CHANNEL_SIZE
@@ -972,7 +1017,7 @@ smaller than that scroll rather than scaling the text.
 
 // Hub → UI
 { type: "SPAWN_OK", channel_id: string, host_id: string, session_id: string, request_id?: string,
-  adapts_input: boolean }  // as on ATTACH_OK (§ 4.2)
+  adapts_input: boolean, streams_paste: boolean }  // as on ATTACH_OK (§ 4.2)
 ```
 
 A SPAWN that names neither `shell` nor a launch profile, as the `+` button, the host picker and an
@@ -1934,6 +1979,45 @@ closed until a writer says otherwise.
 A hub older than this neither sends nor reads any of it, and answers a FILES_PANEL with nothing;
 the web then reads every writer's panel as closed. The hub logs a FILES_PANEL it applies at DEBUG,
 with its channel and state.
+
+### 4.21 PASTE / PASTE_CANCEL / PASTE_ACK / PASTE_CLOSED (#1014)
+
+```typescript
+// UI → Hub
+{ type: "PASTE", channel_id: string, paste_id: number, seq: number, data: Uint8Array, last: boolean }
+{ type: "PASTE_CANCEL", channel_id: string, paste_id: number }
+// Hub → UI, to the window that sent the paste only
+{ type: "PASTE_ACK", channel_id: string, paste_id: number, seq: number }
+{ type: "PASTE_CLOSED", channel_id: string, paste_id: number,
+  reason: "cancelled" | "superseded" | "out_of_order" | "overflow" | "unknown"
+        | "unsupported" | "agent_lost",
+  written?: number }  // from the agent; absent when the hub closed it
+```
+
+**The hub** relays a PASTE only from the terminal's write-lock holder (`isHolder`, stricter than
+INPUT's check, which lets anyone through while nobody holds the lock), with a valid channel id,
+`data` of at most 65,536 bytes, `paste_id` and `seq` whole numbers that fit a u32, and a boolean
+`last`; otherwise `ERROR INVALID_INPUT` or `WRITE_LOCK_DENIED`. To an agent that does not say
+`"paste-stream"` it answers `unsupported` and relays nothing. It gives each paste its own id toward the
+agent and maps the answers back, so an answer never reaches another window's paste. A window's `seq` 0
+while its own paste is still registered is refused (`INVALID_INPUT`); a later chunk of no registered
+paste is dropped silently. It cancels a paste at the agent when its window leaves or the lock moves
+to another window, also after its last chunk until its final answer, and tells the window
+`agent_lost` when the agent that took it closes or is replaced. It relays PASTE_ACK and PASTE_CLOSED
+to the owning window only, and forgets a paste at its final answer or a cancel.
+
+**The pane**, while `streams_paste` is true for the terminal it shows:
+
+- takes the clipboard text, removes the paste markers in it (as § 4.2), turns line breaks into `\r`,
+  and refuses with a notice a text over `PASTE_MAX_BYTES` (16 MiB) in UTF-8;
+- sends it in chunks of `PASTE_CHUNK_BYTES` (32 KiB), never more than `PASTE_WINDOW_BYTES` (256 KiB)
+  unacknowledged, and takes an answer only for its current paste and a `seq` it sent;
+- holds every `onData` (typed keys and xterm's own reports) while chunks are unsent, and sends it after
+  the last one; a Ctrl+C cancels the paste while it is in progress, then goes;
+- shows the progress with a Cancel button after a second, and says how much reached the terminal when
+  a paste ends early: exactly with the agent's `written`, otherwise at least what was acknowledged;
+- stops a paste when its socket drops, it loses the write lock or leaves the terminal, dropping what
+  it held; refuses a second paste until the first's final answer.
 
 ## 5. Protocol Sequences
 

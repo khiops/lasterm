@@ -1094,6 +1094,7 @@ mod tests {
                     channel_id: channel_id.clone(),
                 },
                 &OwnerId::stdio(),
+                &crate::handler::ConnectionRef::stdio(),
                 Arc::clone(&manager),
                 frame_tx,
                 channel_events,

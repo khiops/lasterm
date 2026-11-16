@@ -203,6 +203,44 @@ describe("encodeMessage / decodeMessage round-trip", () => {
 		expect(decodeMessage(encodeMessage(msg as unknown as ProtocolMessage))).toEqual(msg);
 	});
 
+	// SH1: the paste messages' fields and the UI's streamsPaste flag (#1014).
+	it("converts the paste fields and streamsPaste to snake_case on the wire, and back", () => {
+		const chunk: ProtocolMessage = {
+			type: "PASTE",
+			channelId: "chan-1",
+			pasteId: 3,
+			seq: 7,
+			data: new Uint8Array([0x61]),
+			last: true,
+		};
+		expect(toSnakeCase({ ...chunk, data: "d" })).toEqual({
+			type: "PASTE",
+			channel_id: "chan-1",
+			paste_id: 3,
+			seq: 7,
+			data: "d",
+			last: true,
+		});
+		expect(decodeMessage(encodeMessage(chunk))).toEqual(chunk);
+		const closed: ProtocolMessage = {
+			type: "PASTE_CLOSED",
+			channelId: "chan-1",
+			pasteId: 3,
+			reason: "overflow",
+			written: 98_304,
+		};
+		expect(decodeMessage(encodeMessage(closed))).toEqual(closed);
+		const spawnOk = {
+			type: "SPAWN_OK",
+			channelId: "c",
+			hostId: "h",
+			sessionId: "s",
+			streamsPaste: true,
+		};
+		expect(toSnakeCase(spawnOk)).toMatchObject({ streams_paste: true });
+		expect(decodeMessage(encodeMessage(spawnOk as ProtocolMessage))).toEqual(spawnOk);
+	});
+
 	it("round-trips a WRITE_LOCK message with null holder", () => {
 		const msg: ProtocolMessage = {
 			type: "WRITE_LOCK",

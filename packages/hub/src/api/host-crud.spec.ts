@@ -59,24 +59,17 @@ function nested(levels: number, inner = '"x"'): string {
 	return `${'{"a":'.repeat(levels)}${inner}${"}".repeat(levels)}`;
 }
 
-describe("POST /api/hosts links a picked SSH config ProxyJump (#1022)", () => {
-	it.each([
-		{
-			name: "the bastion's SSH config alias",
-			bastion: { ssh_host: "10.0.0.1", ssh_config_host: "jump" },
-			proxy: "jump",
-		},
-		{
-			name: "the bastion's address",
-			bastion: { ssh_host: "bastion.example.org" },
-			proxy: "bastion.example.org",
-		},
-	])("links through $name and returns the linked host", async ({ bastion, proxy }) => {
-		const bastionId = await createHost({
+// The New Host dialog decides a picked entry's jump when it is picked, and
+// tests that jump: the create stores it as sent rather than deciding again
+// after the test (#1042).
+describe("POST /api/hosts stores the jump it is sent (#1042)", () => {
+	it("stores a picked ProxyJump as sent", async () => {
+		await createHost({
 			type: "ssh",
 			label: "bastion",
 			ssh_auth: "agent",
-			...bastion,
+			ssh_host: "10.0.0.1",
+			ssh_config_host: "jump",
 		});
 
 		const res = await send("POST", "/api/hosts", {
@@ -86,17 +79,17 @@ describe("POST /api/hosts links a picked SSH config ProxyJump (#1022)", () => {
 				ssh_host: "target.example.org",
 				ssh_auth: "agent",
 				ssh_config_host: "target",
-				ssh_proxy_spec: proxy,
+				ssh_proxy_spec: "jump",
 			},
 		});
 
 		expect(res.statusCode, res.body).toBe(201);
 		const id = res.json<{ id: string }>().id;
-		expect(res.json()).toMatchObject({ ssh_proxy_host_id: bastionId });
-		expect(res.json().ssh_proxy_spec).toBeUndefined();
+		expect(res.json()).toMatchObject({ ssh_proxy_spec: "jump" });
+		expect(res.json().ssh_proxy_host_id).toBeUndefined();
 		const stored = meta.getHost(id);
-		expect(stored?.sshProxyHostId).toBe(bastionId);
-		expect(stored?.sshProxySpec).toBeUndefined();
+		expect(stored?.sshProxySpec).toBe("jump");
+		expect(stored?.sshProxyHostId).toBeUndefined();
 	});
 
 	it("leaves a manual POST's literal ProxyJump unlinked", async () => {

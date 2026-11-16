@@ -1,4 +1,5 @@
-import type { Host } from "@lasterm/shared";
+import type { Host, ParsedJumpSpec } from "@lasterm/shared";
+import { parseJumpSpec } from "@lasterm/shared";
 
 export function parseSshHost(sshHost: string): { username: string; hostname: string } {
 	const atIdx = sshHost.indexOf("@");
@@ -14,65 +15,8 @@ export function parseSshHost(sshHost: string): { username: string; hostname: str
 	};
 }
 
-/** A jump named as a spec, once read. */
-export interface ParsedJumpSpec {
-	user: string | null;
-	host: string;
-	port: number;
-}
-
-export type JumpSpecResult =
-	| { kind: "spec"; spec: ParsedJumpSpec }
-	| { kind: "chain"; hops: number }
-	| { kind: "invalid"; reason: string };
-
-/**
- * Read a `ProxyJump` value the way `ssh_config(5)` writes it.
- *
- * `[host]:port` is accepted as well as `host:port`: both appear in the wild,
- * and the bracketed form is the one a copied `known_hosts` line offers.
- */
-export function parseJumpSpec(raw: string): JumpSpecResult {
-	const trimmed = raw.trim();
-	if (trimmed === "") return { kind: "invalid", reason: "it is empty" };
-	if (trimmed.toLowerCase() === "none") {
-		return { kind: "invalid", reason: "`none` means no jump at all" };
-	}
-
-	const hops = trimmed.split(",").filter((hop) => hop.trim() !== "");
-	if (hops.length > 1) return { kind: "chain", hops: hops.length };
-
-	const single = hops[0] ?? trimmed;
-	const at = single.lastIndexOf("@");
-	const user = at === -1 ? null : single.slice(0, at);
-	const hostAndPort = at === -1 ? single : single.slice(at + 1);
-	if (at !== -1 && user === "") return { kind: "invalid", reason: "it names an empty user" };
-
-	// [host]:port, the bracketed form
-	const bracketed = hostAndPort.match(/^\[([^\]]+)\](?::(\d+))?$/);
-	if (bracketed) {
-		const host = bracketed[1] ?? "";
-		const port = bracketed[2] === undefined ? 22 : Number.parseInt(bracketed[2], 10);
-		if (host === "") return { kind: "invalid", reason: "it names no host" };
-		if (!Number.isInteger(port) || port < 1 || port > 65535) {
-			return { kind: "invalid", reason: `port ${bracketed[2]} is not a port` };
-		}
-		return { kind: "spec", spec: { user, host, port } };
-	}
-
-	const colon = hostAndPort.lastIndexOf(":");
-	// An IPv6 address without brackets has several colons and no port.
-	const looksLikeIpv6 = hostAndPort.indexOf(":") !== colon;
-	const host = colon === -1 || looksLikeIpv6 ? hostAndPort : hostAndPort.slice(0, colon);
-	const portText = colon === -1 || looksLikeIpv6 ? null : hostAndPort.slice(colon + 1);
-	if (host === "") return { kind: "invalid", reason: "it names no host" };
-
-	const port = portText === null ? 22 : Number.parseInt(portText, 10);
-	if (!Number.isInteger(port) || port < 1 || port > 65535) {
-		return { kind: "invalid", reason: `port ${portText} is not a port` };
-	}
-	return { kind: "spec", spec: { user, host, port } };
-}
+export type { JumpSpecResult, ParsedJumpSpec } from "@lasterm/shared";
+export { parseJumpSpec } from "@lasterm/shared";
 
 /** What a host says about the jump it is reached through. */
 export interface JumpDeclaration {

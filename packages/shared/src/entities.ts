@@ -163,8 +163,9 @@ export interface Host {
 	sshProxyHostId?: string | null;
 	/**
 	 * The bastion this one is reached through, written as `~/.ssh/config` writes
-	 * it: `user@host:port`. For a jump that is not a host here — imported, or
-	 * one nobody wants in the list.
+	 * it: `user@host:port`. For a jump not linked to a host here — a bastion
+	 * that is none, one nobody wants in the list, or one the spec reaches with
+	 * another user or port than its saved host's (#1040).
 	 */
 	sshProxySpec?: string | null;
 	/**

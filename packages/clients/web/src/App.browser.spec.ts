@@ -60,8 +60,8 @@ beforeEach(async () => {
 	await page.viewport(1400, 900);
 });
 
-afterEach(() => {
-	unmountWindow();
+afterEach(async () => {
+	await unmountWindow();
 	vi.restoreAllMocks();
 });
 

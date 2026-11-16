@@ -89,12 +89,12 @@ pub struct HeadlessMirror {
     pending_bell: bool,
     pending_notification: Option<String>,
     pending_shell_cwd: Option<ShellReport>,
-    /// The last byte seen that is not a C0 control, across reads: a DECSTR's
-    /// `!` comes right before its `p`, with only C0 controls between, which a
-    /// parser executes without leaving the sequence (#1012).
+    /// The last byte seen that is not a C0 control or DEL, across reads: a
+    /// DECSTR's `!` comes right before its `p`, with only those between, which
+    /// a parser executes or ignores without leaving the sequence (#1012).
     last_significant: Option<u8>,
-    /// An `ESC` was seen with only C0 controls since, across reads: a `c` now
-    /// ends a RIS. CAN and SUB cancel it, as they cancel any sequence.
+    /// An `ESC` was seen with only C0 controls or DEL since, across reads: a
+    /// `c` now ends a RIS. CAN and SUB cancel it, as they cancel any sequence.
     escape: bool,
 }
 
@@ -149,12 +149,12 @@ impl HeadlessMirror {
     /// After calling, check pending_* fields for events.
     pub fn process(&mut self, data: &[u8]) {
         // Each byte that may end a DECSTR (`p` after `!`) or a RIS (`c` after
-        // `ESC`), C0 controls between them aside, ends a slice, so that what
+        // `ESC`), C0 controls and DEL between them aside, ends a slice, so that what
         // they reset is reset at their place in the stream, before the bytes
         // after them (#1012).
         let mut start = 0;
         for (idx, &byte) in data.iter().enumerate() {
-            let c0 = byte < 0x20 && byte != 0x1b;
+            let c0 = (byte < 0x20 && byte != 0x1b) || byte == 0x7f;
             let decstr_end = byte == b'p' && self.last_significant == Some(b'!');
             let ris = byte == b'c' && self.escape;
             if byte == 0x1b {
@@ -580,13 +580,16 @@ mod tests {
         let mut mirror = HeadlessMirror::new(20, 5, 100);
         mirror.process(b"\x1b[!p\x1b[?1h");
         assert!(mirror.snapshot().input_modes.contains("\x1b[?1h"));
-        // C0 controls inside a DECSTR or a RIS, which parsers execute in place.
-        let mut mirror = HeadlessMirror::new(20, 5, 100);
-        mirror.process(b"\x1b[?1h\x1b[?2004h\x1b[!\x00p");
-        assert_eq!(mirror.snapshot().input_modes, reset_modes);
-        let mut mirror = HeadlessMirror::new(20, 5, 100);
-        mirror.process(b"\x1b[?1004h\x1b\x00c");
-        assert!(mirror.snapshot().input_modes.ends_with("\x1b[?1004l"));
+        // C0 controls inside a DECSTR or a RIS, which parsers execute in place,
+        // and DEL, which they ignore there.
+        for inside in [b"\x00", b"\x7f"] {
+            let mut mirror = HeadlessMirror::new(20, 5, 100);
+            mirror.process(&[b"\x1b[?1h\x1b[?2004h\x1b[!".as_slice(), inside, b"p"].concat());
+            assert_eq!(mirror.snapshot().input_modes, reset_modes);
+            let mut mirror = HeadlessMirror::new(20, 5, 100);
+            mirror.process(&[b"\x1b[?1004h\x1b".as_slice(), inside, b"c"].concat());
+            assert!(mirror.snapshot().input_modes.ends_with("\x1b[?1004l"));
+        }
         // Another intermediate is no DECSTR, and no flag waits for a `!p` in text.
         let mut mirror = HeadlessMirror::new(20, 5, 100);
         mirror.process(b"\x1b[?1h\x1b[!\"p");

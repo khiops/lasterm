@@ -460,15 +460,21 @@ export function useTerminal(
 				const text = event.clipboardData.getData("text/plain");
 				// Each UTF-16 unit left is at least one UTF-8 byte: a text that long
 				// is refused before any of it is copied.
-				const fewestBytes =
-					text.length - (text.match(/\r\n/g)?.length ?? 0) + PASTE_START.length + PASTE_END.length;
-				const stripped = text.includes("\u001b") ? withoutPasteMarkers(text) : text;
-				const form = `${PASTE_START}${stripped.replace(/\r?\n/g, "\r")}${PASTE_END}`;
-				if (
-					(!text.includes("\u001b") && fewestBytes > MAX_INPUT_SIZE) ||
-					new TextEncoder().encode(form).byteLength > MAX_INPUT_SIZE
-				) {
+				const hasEscape = text.includes("\u001b");
+				const tooLarge = () =>
 					useToastStore().show("warning", "This paste is too large to send (64 KiB at most).");
+				if (
+					!hasEscape &&
+					text.length - (text.match(/\r\n/g)?.length ?? 0) + PASTE_START.length + PASTE_END.length >
+						MAX_INPUT_SIZE
+				) {
+					tooLarge();
+					return;
+				}
+				const stripped = hasEscape ? withoutPasteMarkers(text) : text;
+				const form = `${PASTE_START}${stripped.replace(/\r?\n/g, "\r")}${PASTE_END}`;
+				if (new TextEncoder().encode(form).byteLength > MAX_INPUT_SIZE) {
+					tooLarge();
 					return;
 				}
 				// xterm's own user-input path: the view goes to the bottom and the

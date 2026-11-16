@@ -62,12 +62,20 @@ pub(crate) fn adapt(data: Vec<u8>, modes: InputModes) -> Vec<u8> {
     if !data.contains(&0x1b) {
         return data;
     }
+    // A start marker opens a paste when an end marker starts after it: one
+    // search for the last end marker keeps the pass linear.
+    let last_close = data
+        .windows(CLOSE.len())
+        .rposition(|window| window == CLOSE);
     let mut out = Vec::with_capacity(data.len());
     let mut in_paste = false;
     let mut i = 0;
     while i < data.len() {
         let rest = &data[i..];
-        if !in_paste && rest.starts_with(OPEN) && contains(&rest[OPEN.len()..], CLOSE) {
+        if !in_paste
+            && rest.starts_with(OPEN)
+            && last_close.is_some_and(|close| close >= i + OPEN.len())
+        {
             in_paste = true;
             if modes.bracketed_paste {
                 out.extend_from_slice(OPEN);
@@ -101,15 +109,20 @@ pub(crate) fn adapt(data: Vec<u8>, modes: InputModes) -> Vec<u8> {
     out
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_of_start_markers_without_an_end_is_adapted_in_one_pass() {
+        let data = OPEN.repeat(128 * 1024 / OPEN.len());
+        let started = std::time::Instant::now();
+
+        let out = adapt(data.clone(), PASTE_OFF);
+
+        assert_eq!(out, data);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
 
     const PASTE_ON: InputModes = InputModes {
         bracketed_paste: true,

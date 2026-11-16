@@ -1213,6 +1213,86 @@ describe("the hub's SSH config, read or refused (#734, #757)", () => {
 	});
 });
 
+describe("the host a chosen SSH config entry saves (#1022)", () => {
+	beforeEach(() => {
+		createHostSpy.mockClear();
+		knownHosts.length = 0;
+	});
+
+	it("stores the entry's alias and jump host as the import does", async () => {
+		knownHosts.push({ id: "bastion", label: "an unrelated host" } as Host);
+		const { sshConfigEntries, applySshConfigEntry, save } = useHostForm();
+		sshConfigEntries.value = [
+			{
+				name: "keyed",
+				hostname: "keyed.test",
+				port: 22,
+				user: "olivier",
+				identityFile: "~/.ssh/id_keyed",
+				proxyJump: "bastion",
+				isGitHost: false,
+			},
+		];
+
+		applySshConfigEntry("keyed");
+		await save();
+
+		expect(createHostSpy).toHaveBeenCalledOnce();
+		expect(createHostSpy.mock.calls[0]?.[0]).toMatchObject({
+			label: "keyed",
+			ssh_host: "keyed.test",
+			ssh_user: "olivier",
+			ssh_auth: "key",
+			ssh_key_path: "~/.ssh/id_keyed",
+			ssh_config_host: "keyed",
+			ssh_proxy_host_id: null,
+			ssh_proxy_spec: "bastion",
+		});
+	});
+
+	it("replaces every field the next entry leaves out", async () => {
+		const { form, sshConfigEntries, applySshConfigEntry, save } = useHostForm();
+		sshConfigEntries.value = [
+			{
+				name: "first",
+				hostname: "first.test",
+				port: 22,
+				user: "first-user",
+				identityFile: null,
+				proxyJump: "first-jump",
+				isGitHost: false,
+			},
+			{
+				name: "second",
+				hostname: null,
+				port: 22,
+				user: null,
+				identityFile: null,
+				proxyJump: null,
+				isGitHost: false,
+			},
+		];
+
+		applySshConfigEntry("first");
+		applySshConfigEntry("second");
+
+		expect(form.value).toMatchObject({
+			sshHost: "second",
+			sshUser: "",
+			sshProxy: "",
+		});
+		await save();
+		const body = createHostSpy.mock.calls[0]?.[0];
+		expect(body).toMatchObject({
+			ssh_host: "second",
+			ssh_config_host: "second",
+			ssh_proxy_host_id: null,
+			ssh_proxy_spec: null,
+		});
+		expect(body).not.toHaveProperty("ssh_user");
+	});
+});
+
 // ─── The Port field (#901) ───────────────────────────────────────────────────
 //
 // A port that is not a whole number from 1 to 65535 was taken as an emptied

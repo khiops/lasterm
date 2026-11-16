@@ -387,9 +387,10 @@ export function useHostForm(editHost?: Host) {
 		const entry = sshConfigEntries.value.find((e) => e.name === name);
 		if (!entry) return;
 		selectedSshConfigHost.value = name;
-		if (entry.hostname) form.value.sshHost = entry.hostname;
+		form.value.sshHost = entry.hostname ?? name;
 		setPortText(portTextOf(entry.port));
-		if (entry.user) form.value.sshUser = entry.user;
+		form.value.sshUser = entry.user ?? "";
+		form.value.sshProxy = entry.proxyJump ?? "";
 		// The entry's own method, whatever the form held, by the rule the import
 		// stores it with: its IdentityFile, else the agent (#1009, #917).
 		form.value.sshAuth = sshAuthFor(entry.identityFile);
@@ -398,6 +399,12 @@ export function useHostForm(editHost?: Host) {
 	}
 
 	function formProxyFields(chosen = form.value.sshProxy) {
+		const selectedEntry = sshConfigEntries.value.find(
+			(entry) => entry.name === selectedSshConfigHost.value,
+		);
+		if (selectedEntry?.proxyJump != null && chosen === selectedEntry.proxyJump) {
+			return { ssh_proxy_host_id: null, ssh_proxy_spec: selectedEntry.proxyJump };
+		}
 		return proxyFields(
 			chosen,
 			hostsStore.hosts.map((candidate) => candidate.id),
@@ -506,6 +513,9 @@ export function useHostForm(editHost?: Host) {
 			type: f.type,
 			...(f.type === "ssh" && {
 				ssh_host: f.sshHost,
+				...(selectedSshConfigHost.value && {
+					ssh_config_host: selectedSshConfigHost.value,
+				}),
 				// Only a valid port reaches here: canSave refuses an invalid one (#901).
 				...(f.sshPort !== undefined && { ssh_port: f.sshPort }),
 				...(f.sshUser && { ssh_user: f.sshUser }),

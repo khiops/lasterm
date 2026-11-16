@@ -3,7 +3,7 @@ import { MAX_INPUT_SIZE, PASTE_MAX_BYTES, sanitizeTitle } from "@lasterm/shared"
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { Terminal } from "@xterm/xterm";
-import { type Ref, ref, shallowRef, watch } from "vue";
+import { type MaybeRefOrGetter, type Ref, ref, shallowRef, toValue, watch } from "vue";
 import type { IWsClient } from "../services/ws-client.js";
 import { useChannelsStore } from "../stores/channels.js";
 import { useThemeStore } from "../stores/theme.js";
@@ -107,8 +107,11 @@ export function useTerminal(
 	containerRef: Ref<HTMLElement | null>,
 	wsClient: IWsClient,
 	profile?: TerminalProfile,
-	/** Explicit per-host theme name from host.profileJson (SC-03 override). */
-	hostThemeName?: string,
+	/**
+	 * The theme the pane's host names in its own profile (SC-03), read again
+	 * whenever it changes: the pane's host, or that host's profile (#997).
+	 */
+	hostThemeName?: MaybeRefOrGetter<string | undefined>,
 ) {
 	/**
 	 * The pane's xterm. Each one holds one terminal's output for its whole life:
@@ -147,8 +150,8 @@ export function useTerminal(
 	let streamsPaste = false;
 	/** The profile applied last, which a new xterm is made with. */
 	let currentProfile = profile;
-	/** The host's own theme, when the pane has one (SC-03). */
-	let hostTheme: ReturnType<typeof useThemeStore>["availableThemes"][number] | undefined;
+	/** Stops following the host's theme, once the pane is closed. */
+	let stopHostTheme: (() => void) | null = null;
 	/** The terminal colours the theme subscription gave last: a new xterm takes them. */
 	let lastTheme: Record<string, string> | null = null;
 	/** What `TerminalPane` wants told of every xterm's bells and scrolls. */
@@ -447,6 +450,40 @@ export function useTerminal(
 	}
 
 	/**
+	 * The xterm options a profile sets, alike for an xterm made with it and one
+	 * it is applied to later: an option set only at making stays as it was
+	 * when the profile changes (#998).
+	 */
+	function profileOptions(p: TerminalProfile | undefined) {
+		return {
+			cursorBlink: p?.cursorStyle !== "underline", // blink except underline (xterm default)
+			fontSize: p?.fontSize ?? DEFAULT_FONT_SIZE,
+			fontFamily: p?.fontFamily ?? DEFAULT_FONT_FAMILY,
+			cursorStyle: p?.cursorStyle ?? "block",
+			scrollback: p?.scrollback ?? 5000,
+		};
+	}
+
+	/** The theme the pane's host names, when the themes include it (SC-03). */
+	function hostTheme(): ReturnType<typeof useThemeStore>["availableThemes"][number] | undefined {
+		const name = toValue(hostThemeName);
+		return name ? useThemeStore().availableThemes.find((t) => t.name === name) : undefined;
+	}
+
+	/**
+	 * The terminal colours to draw with: the host's own theme if it has one,
+	 * else those the theme subscription gave last, else the active theme's.
+	 */
+	function themeInForce(): Record<string, string> {
+		const themeStore = useThemeStore();
+		const own = hostTheme();
+		if (own) return themeStore.toXtermTheme(own.colors);
+		if (lastTheme !== null) return lastTheme;
+		const colors = themeStore.activeTheme?.colors;
+		return colors ? themeStore.toXtermTheme(colors) : {};
+	}
+
+	/**
 	 * Make an xterm in the pane and make it the pane's: the first one at mount,
 	 * and each one that replaces it (#966). Every one is set up alike, from the
 	 * profile applied last and the theme in force. One that replaces another
@@ -456,29 +493,16 @@ export function useTerminal(
 	function makeXterm(container: HTMLElement, size?: { cols: number; rows: number }): Terminal {
 		const p = currentProfile;
 		const themeStore = useThemeStore();
-		// The theme the pane's subscription set last, unless the host has its own;
-		// the active one before any came.
-		const colors = (hostTheme ?? themeStore.activeTheme)?.colors;
-		const theme =
-			hostTheme === undefined && lastTheme !== null
-				? lastTheme
-				: colors
-					? themeStore.toXtermTheme(colors)
-					: {};
 
 		scrollbarMarkers = p?.scrollbarMarkers !== false; // default true
 		const term = new Terminal({
 			allowProposedApi: true,
 			allowTransparency: true,
-			cursorBlink: p?.cursorStyle !== "underline", // blink except underline (xterm default)
-			fontSize: p?.fontSize ?? DEFAULT_FONT_SIZE,
-			fontFamily: p?.fontFamily ?? DEFAULT_FONT_FAMILY,
-			cursorStyle: p?.cursorStyle ?? "block",
-			scrollback: p?.scrollback ?? 5000,
+			...profileOptions(p),
 			overviewRuler: {
 				width: terminalScrollbarWidth(themeStore.appearance.scrollbar, scrollbarMarkers),
 			},
-			theme,
+			theme: themeInForce(),
 			...size,
 		});
 
@@ -661,13 +685,6 @@ export function useTerminal(
 		}
 
 		const themeStore = useThemeStore();
-
-		// Per-host theme override (SC-03): use hostThemeName from host.profileJson
-		// if explicitly set. Otherwise use the runtime active theme.
-		hostTheme = hostThemeName
-			? themeStore.availableThemes.find((t) => t.name === hostThemeName)
-			: undefined;
-
 		const term = makeXterm(containerRef.value);
 
 		// The PTY's size changed: the pane draws at it unless it decides it (#831).
@@ -720,13 +737,12 @@ export function useTerminal(
 		// Per-host override (SC-03): if a host-specific theme is set, keep it.
 		themeUnsubscribe = themeStore.onTerminalThemeChange((xtermTheme) => {
 			lastTheme = xtermTheme;
-			if (terminal.value) {
-				if (hostTheme) {
-					terminal.value.options.theme = themeStore.toXtermTheme(hostTheme.colors);
-				} else {
-					terminal.value.options.theme = xtermTheme;
-				}
-			}
+			if (terminal.value) terminal.value.options.theme = themeInForce();
+		});
+		// The host's own theme follows the pane's host, that host's profile, and
+		// the themes fetched from the hub, which may come after the pane (#997).
+		stopHostTheme = watch(hostTheme, () => {
+			if (terminal.value) terminal.value.options.theme = themeInForce();
 		});
 
 		return { cols: term.cols, rows: term.rows };
@@ -1221,10 +1237,7 @@ export function useTerminal(
 		currentProfile = p;
 		const term = terminal.value;
 		if (!term) return;
-		term.options.fontFamily = p.fontFamily ?? DEFAULT_FONT_FAMILY;
-		term.options.fontSize = p.fontSize ?? DEFAULT_FONT_SIZE;
-		term.options.cursorStyle = p.cursorStyle ?? "block";
-		term.options.scrollback = p.scrollback ?? 5000;
+		Object.assign(term.options, profileOptions(p));
 		scrollbarMarkers = p.scrollbarMarkers !== false;
 		applyScrollbarWidth(term);
 		search.setScrollbarMarkers(scrollbarMarkers);
@@ -1290,6 +1303,8 @@ export function useTerminal(
 		resizeTimer = null;
 		themeUnsubscribe?.();
 		themeUnsubscribe = null;
+		stopHostTheme?.();
+		stopHostTheme = null;
 		stopListening();
 		inputDroppedUnsubscribe?.();
 		inputDroppedUnsubscribe = null;

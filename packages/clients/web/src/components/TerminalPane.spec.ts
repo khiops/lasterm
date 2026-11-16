@@ -982,6 +982,93 @@ describe("TerminalPane host", () => {
 
 // ─── Restart ─────────────────────────────────────────────────────────────────
 
+// ─── Options changed while shown (#997, #998) ────────────────────────────────
+
+// Some of what the pane draws with was read once, when its xterm was made, and
+// never again: a profile or host changed later left it as it was.
+describe("TerminalPane takes what it draws with when it changes", () => {
+	it("stops the cursor blinking when its style turns to underline, and back", async () => {
+		await openLive();
+		expect(terminal().options).toMatchObject({ cursorStyle: "block", cursorBlink: true });
+
+		paneProfile().profile.value = { ...paneProfile().profile.value, cursorStyle: "underline" };
+		await settle();
+		expect(terminal().options).toMatchObject({ cursorStyle: "underline", cursorBlink: false });
+
+		paneProfile().profile.value = { ...paneProfile().profile.value, cursorStyle: "bar" };
+		await settle();
+		expect(terminal().options).toMatchObject({ cursorStyle: "bar", cursorBlink: true });
+	});
+
+	it("takes its host's theme when the host is given one while it is shown", async () => {
+		await openLive({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [host(HOST, "pi")];
+			},
+		});
+
+		useHostsStore().hosts = [host(HOST, "pi", JSON.stringify({ theme: "nord" }))];
+		await settle();
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES.nord!.colors),
+		);
+	});
+
+	it("keeps its host's theme when the active theme changes", async () => {
+		await openLive({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [host(HOST, "pi", JSON.stringify({ theme: "nord" }))];
+			},
+		});
+
+		useThemeStore().applyTheme(BUNDLED_THEMES.dracula!);
+		await settle();
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES.nord!.colors),
+		);
+	});
+
+	it("goes back to the active theme when its host's own is taken away", async () => {
+		await openLive({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [host(HOST, "pi", JSON.stringify({ theme: "nord" }))];
+			},
+		});
+		useThemeStore().applyTheme(BUNDLED_THEMES.dracula!);
+		await settle();
+
+		useHostsStore().hosts = [host(HOST, "pi")];
+		await settle();
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES.dracula!.colors),
+		);
+	});
+
+	// The themes are fetched from the hub: a pane mounted before they came
+	// never found its host's.
+	it("takes its host's theme once the themes it names arrive", async () => {
+		await openLive({
+			setUp: () => {
+				useThemeStore().availableThemes = [];
+				useHostsStore().hosts = [host(HOST, "pi", JSON.stringify({ theme: "nord" }))];
+			},
+		});
+
+		useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+		await settle();
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES.nord!.colors),
+		);
+	});
+});
+
 describe("TerminalPane restart", () => {
 	// A Pi terminal came back — prompt on screen, write lock held — under an
 	// overlay still saying "Shell exited": the attach at page load had found it
@@ -2668,6 +2755,48 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 		await switched(channel);
 
 		expect(terminal().options.theme).toEqual(useThemeStore().toXtermTheme(own.colors));
+	});
+
+	// The pane read its host's theme once, at mount: a terminal on another host
+	// was drawn in the first host's theme (#997).
+	it("draws a terminal on another host in that host's theme", async () => {
+		const channel = await showingT({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [
+					host(HOST, "pi", JSON.stringify({ theme: "nord" })),
+					host(PI, "other", JSON.stringify({ theme: "gruvbox-dark" })),
+				];
+			},
+		});
+		useChannelsStore().registerChannelHost(U, PI);
+
+		await switched(channel);
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES["gruvbox-dark"]!.colors),
+		);
+	});
+
+	it("draws a terminal on a host with no theme of its own in the active theme", async () => {
+		const channel = await showingT({
+			setUp: () => {
+				useThemeStore().availableThemes = Object.values(BUNDLED_THEMES);
+				useHostsStore().hosts = [
+					host(HOST, "pi", JSON.stringify({ theme: "nord" })),
+					host(PI, "other"),
+				];
+			},
+		});
+		useThemeStore().applyTheme(BUNDLED_THEMES.dracula!);
+		await settle();
+		useChannelsStore().registerChannelHost(U, PI);
+
+		await switched(channel);
+
+		expect(terminal().options.theme).toEqual(
+			useThemeStore().toXtermTheme(BUNDLED_THEMES.dracula!.colors),
+		);
 	});
 
 	it("fits the terminal it switched to to its pane", async () => {

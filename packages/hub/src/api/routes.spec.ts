@@ -542,6 +542,68 @@ describe("PUT /api/hosts/:id", () => {
 		expect(row).toEqual({ ssh_port: null });
 	});
 
+	// The validator is unit-tested in hosts.spec.ts; these prove the routes
+	// store the value and consult the rule (#1034).
+	it("stores, keeps and clears a host's connection timeout (#1034)", async () => {
+		const created = await server.inject({
+			method: "POST",
+			url: "/api/hosts",
+			payload: {
+				type: "ssh",
+				label: "slow-link",
+				ssh_host: "10.0.0.15",
+				connect_timeout_seconds: 30,
+			},
+		});
+		expect(created.statusCode).toBe(201);
+		const id = created.json<{ id: string }>().id;
+		const read = async (): Promise<unknown> =>
+			(await server.inject({ method: "GET", url: `/api/hosts/${id}` })).json<
+				Record<string, unknown>
+			>().connect_timeout_seconds;
+		expect(await read()).toBe(30);
+
+		const put = (payload: Record<string, unknown>) =>
+			server.inject({ method: "PUT", url: `/api/hosts/${id}`, payload });
+		expect((await put({ connect_timeout_seconds: 60 })).statusCode).toBe(200);
+		expect(await read()).toBe(60);
+		expect((await put({ label: "slow-link-2" })).statusCode).toBe(200);
+		expect(await read()).toBe(60);
+		expect((await put({ connect_timeout_seconds: null })).statusCode).toBe(200);
+		expect(await read()).toBeNull();
+	});
+
+	it("refuses a connection timeout outside 20-120 whole seconds (#1034)", async () => {
+		const created = (
+			await server.inject({
+				method: "POST",
+				url: "/api/hosts",
+				payload: {
+					type: "ssh",
+					label: "slow-refused",
+					ssh_host: "10.0.0.16",
+					connect_timeout_seconds: 45,
+				},
+			})
+		).json<{ id: string }>();
+		const refused = await server.inject({
+			method: "PUT",
+			url: `/api/hosts/${created.id}`,
+			payload: { connect_timeout_seconds: 19 },
+		});
+		expect(refused.statusCode).toBe(400);
+		expect(refused.json()).toEqual({
+			error: {
+				code: "VALIDATION_ERROR",
+				message: "connect_timeout_seconds must be an integer between 20 and 120",
+			},
+		});
+		const row = dbs.meta
+			.prepare("SELECT connect_timeout_seconds FROM hosts WHERE id = ?")
+			.get(created.id);
+		expect(row).toEqual({ connect_timeout_seconds: 45 });
+	});
+
 	// An edit is checked on the host as it will be once saved, the stored
 	// values under the body's, with the rules a new host keeps (#795).
 	describe("the sign-in, as the edit leaves it (#795)", () => {

@@ -116,6 +116,17 @@ const SPAWN_DEADLINE_MS = 15_000;
 const SPAWN_PROMPTED_DEADLINE_MS = 300_000;
 
 /**
+ * How long it waits once the hub says it is connecting the host (#1034).
+ *
+ * Each wait of a connection has its own bound on the hub, up to 120 s when the
+ * host sets one, and a connection may dial more than once (a host key or a
+ * password asked again): the hub answers when it is done. This is only for a
+ * hub that stopped answering with its socket still open; a socket that closes
+ * ends the wait at once.
+ */
+const SPAWN_CONNECTING_DEADLINE_MS = 1_800_000;
+
+/**
  * A spawn's rejection, as a sentence for the pane. The hub's messages are
  * written for people; the code in front of them (`SSH_CONNECT_FAILED: …`) is
  * for logs.
@@ -1273,17 +1284,37 @@ export const useChannelsStore = defineStore("channels", () => {
 			let unsubOk: () => void;
 			let unsubErr: () => void;
 			let unsubPrompts: Array<() => void> = [];
+			let unsubConnecting: () => void = () => {};
+			let unsubDisconnect: () => void = () => {};
 
 			const stopWaiting = (): void => {
 				unsubOk();
 				unsubErr();
 				for (const unsub of unsubPrompts) unsub();
+				unsubConnecting();
+				unsubDisconnect();
 			};
 
+			let deadline = Date.now() + SPAWN_DEADLINE_MS;
 			let timer = setTimeout(() => {
 				stopWaiting();
 				reject(new Error(`SPAWN timeout — no SPAWN_OK after ${SPAWN_DEADLINE_MS / 1000}s`));
 			}, SPAWN_DEADLINE_MS);
+			// Waits longer, for `why`: never shorter than a hold already given, so
+			// that a prompt shown while the hub connects keeps the connection's
+			// wait, and a late one gets its own in full (#1034).
+			const holdFor = (ms: number, why: string): void => {
+				const until = Date.now() + ms;
+				if (until <= deadline) return;
+				deadline = until;
+				clearTimeout(timer);
+				timer = setTimeout(() => {
+					stopWaiting();
+					reject(new Error(why));
+				}, ms);
+			};
+			/** The hub said it is connecting the host for this SPAWN (#1034). */
+			let connecting = false;
 
 			// The password or passphrase its host last asked for, if any: a refusal
 			// because none was given says which (#875).
@@ -1296,15 +1327,16 @@ export const useChannelsStore = defineStore("channels", () => {
 			// SPAWN_OK, or the ERROR the hub sends when the answer was no.
 			type Prompt = { type: string; hostId?: string; promptType?: string };
 			const holdForAnAnswer = (msg: Prompt): void => {
-				if (msg.hostId !== undefined && msg.hostId !== hostId) return;
-				if (msg.promptType === "password" || msg.promptType === "passphrase") {
+				// While the hub connects the host, a prompt for the jump the
+				// connection goes through names the jump, not this host (#1034).
+				if (!connecting && msg.hostId !== undefined && msg.hostId !== hostId) return;
+				if (
+					(msg.hostId === undefined || msg.hostId === hostId) &&
+					(msg.promptType === "password" || msg.promptType === "passphrase")
+				) {
 					asked = msg.promptType;
 				}
-				clearTimeout(timer);
-				timer = setTimeout(() => {
-					stopWaiting();
-					reject(new Error("The hub stopped answering while a prompt was open."));
-				}, SPAWN_PROMPTED_DEADLINE_MS);
+				holdFor(SPAWN_PROMPTED_DEADLINE_MS, "The hub stopped answering while a prompt was open.");
 			};
 			unsubPrompts = (["HOST_VERIFY", "AUTH_PROMPT", "AGENT_BINARY_VERIFY"] as const).map((type) =>
 				sessionStore.wsClient.on(type, (msg) => {
@@ -1381,6 +1413,23 @@ export const useChannelsStore = defineStore("channels", () => {
 						}),
 					);
 				}
+			});
+
+			// The hub connects the host before it answers, each wait under its own
+			// bound: the pane waits for that answer rather than its 15 s, and gives
+			// up at once if the socket it would come on closes (#1034).
+			unsubConnecting = sessionStore.wsClient.on("HOST_CONNECTING", (msg) => {
+				if (msg.type !== "HOST_CONNECTING" || notOurs(msg) || connecting) return;
+				connecting = true;
+				holdFor(
+					SPAWN_CONNECTING_DEADLINE_MS,
+					"The hub stopped answering while it connected the host.",
+				);
+				unsubDisconnect = sessionStore.wsClient.onDisconnect(() => {
+					clearTimeout(timer);
+					stopWaiting();
+					reject(new Error("The connection to the hub was lost while it connected the host."));
+				});
 			});
 
 			// Auto-assign to first group when configured

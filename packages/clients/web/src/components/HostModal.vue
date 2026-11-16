@@ -275,6 +275,26 @@
 							</div>
 
 							<div class="field">
+								<label class="field-label" for="host-connect-timeout">Connection timeout (seconds)</label>
+								<!-- Text, as the port: digits only, 20 to 120 (#1034). -->
+								<input
+									id="host-connect-timeout"
+									v-model="form.connectTimeout"
+									type="text"
+									inputmode="numeric"
+									class="field-input"
+									placeholder="Default"
+									:aria-invalid="connectTimeoutError !== null"
+								/>
+								<span v-if="connectTimeoutError" class="field-error">{{ connectTimeoutError }}</span>
+								<p class="field-hint auth-note">
+									Each step of connecting to this host — reaching its SSH server, starting
+									the agent, its first answer — may take this long. Empty: ConnectTimeout
+									from ~/.ssh/config when it is 20 s or more, otherwise Lasterm's defaults.
+								</p>
+							</div>
+
+							<div class="field">
 								<label class="field-label">Keep an agent running there</label>
 								<p v-if="sshRemoteDaemonUnavailable" class="field-hint auth-note">
 									Not available on Windows hosts.
@@ -398,7 +418,7 @@
 							<div class="field field-test">
 								<button
 									class="btn btn-test"
-									:disabled="!form.sshHost || testing || portError !== null"
+									:disabled="!form.sshHost || testing || portError !== null || connectTimeoutError !== null"
 									@click="testConnectionInline"
 								>
 									{{ testing ? "Testing..." : "Test Connection" }}
@@ -780,6 +800,7 @@ const {
 	portText,
 	portError,
 	setPortText,
+	connectTimeoutError,
 	canSave,
 	previewInitials,
 	newGroupName,
@@ -891,6 +912,7 @@ const connectionTabHasError = computed(() => {
 		if (!form.value.sshHost) return true;
 		if (form.value.sshAuth === "key" && !form.value.sshKeyPath) return true;
 		if (portError.value) return true;
+		if (connectTimeoutError.value) return true;
 	}
 	return false;
 });

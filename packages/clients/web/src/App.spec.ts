@@ -2136,7 +2136,10 @@ describe("a new terminal's pane after a reload", () => {
 
 		expect(hub.frames("SPAWN")).toEqual([]);
 		expect(sentFor(hub, "ATTACH", first.pendingId)).toEqual([]);
-		expect(box().buttons).toEqual(["Retry", "Close"]);
+		expect(box()).toEqual({
+			lines: [UNCONFIRMED, "If it started, it is listed under alpha."],
+			buttons: ["Retry", "Close"],
+		});
 	});
 
 	it("waits for Retry when the connection comes back after a Retry failed", async () => {
@@ -2183,7 +2186,8 @@ describe("a new terminal's pane after a reload", () => {
 		await runPaletteRow("Split Right");
 		await settle();
 		expect(hub.frames("SPAWN")).toEqual([]);
-		expect(boxes().length).toBeGreaterThan(0);
+		// The pane mounted over the id shows the attempt's failure, not the restored lines.
+		expect(box()).toEqual({ lines: ["the hub cannot be reached"], buttons: ["Retry", "Close"] });
 		// The pane mounted over the id after the split waits for a click too.
 		await reconnectFully(hub);
 		expect(hub.frames("SPAWN")).toEqual([]);

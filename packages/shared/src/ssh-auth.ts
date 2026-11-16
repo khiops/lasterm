@@ -13,8 +13,8 @@ export function isBlankKeyPath(keyPath: string | null | undefined): boolean {
  * read. The hub stores it on POST, on the import, and on a PUT that turns a
  * local host with no method into an SSH one; migration 027 applied the same
  * rule to the SSH hosts stored without one before. The New Host dialog's
- * `~/.ssh/config` picker selects it too (#1009), so a picked entry signs in as
- * an imported one does.
+ * `~/.ssh/config` picker selects it too (#1009), so a picked entry gets the
+ * method an imported one is stored with.
  */
 export function sshAuthFor(keyPath: string | null | undefined): "agent" | "key" {
 	return isBlankKeyPath(keyPath) ? "agent" : "key";

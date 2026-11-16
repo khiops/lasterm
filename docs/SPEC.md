@@ -1024,11 +1024,11 @@ A host may declare a jump, in one of two ways and never both:
 | Field | Meaning |
 |---|---|
 | `ssh_proxy_host_id` | A host this hub knows. It brings its own `ssh_auth`, its own key path and its own pinned host key — nothing about it is described twice. |
-| `ssh_proxy_spec` | `user@host:port`, the form `~/.ssh/config` writes. For a bastion that is not a host here: it authenticates through the SSH agent, and its key is pinned in `ssh_proxy_fingerprint` on the host that jumps through it, since it has no row of its own. |
+| `ssh_proxy_spec` | `user@host:port`, the form `~/.ssh/config` writes. For a jump not linked to a host here: it authenticates through the SSH agent, and its key is pinned in `ssh_proxy_fingerprint` on the host that jumps through it, since it has no row of its own. |
 
 The target's connection runs inside a channel opened on the jump (`forwardOut`), so the jump's connection ends with it, whatever ended it: the hub, the host, the network, or an attempt that failed. Every connection to the host goes through the jump, read afresh from the host's settings each time: the first one, the retry after its key is confirmed, the reconnect a pane asks for, and the automatic reconnect after a dropped link, which asks nobody and uses only a passphrase already cached for the jump. Only a connection someone is making pins a jump's key; a reconnect goes through what is already trusted (#609). The jump's host key is verified against what is already trusted for it, and a jump nothing trusts yet is refused rather than accepted on sight (SECURITY.md §3.3b). A chain (`ProxyJump a,b`) is refused, naming the number of hops.
 
-Importing from `~/.ssh/config` keeps a `ProxyJump` as a spec, then links it to a host of the same import when one turns out to be that bastion.
+A `ProxyJump` from `~/.ssh/config` is linked to a saved SSH host only when it names that host's `~/.ssh/config` alias (exactly one saved host carrying it, not the one being added) and any user or port it writes is that host's: the saved host then stands for the alias's block, as `ssh` reaches it. Otherwise it is kept as written, a spec, even when it names a saved host with another user or port, or by its address, which may have a `Host` block of its own. The import decides this for each host it adds, against every saved host; the New Host dialog decides it when an entry is picked, and its connection test and `POST /api/hosts` then send and store that same jump: the create does not link (#1040, #1042).
 
 ### 4.6 Known Hosts Verification
 

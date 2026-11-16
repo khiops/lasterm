@@ -1,7 +1,6 @@
 import type { Host, SshConfigImport } from "@lasterm/shared";
-import { sshAuthFor, toSnakeCase } from "@lasterm/shared";
+import { jumpLinkFor, sshAuthFor, toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
-import { parseJumpSpec } from "../session/proxy-jump.js";
 import type { ParseResult } from "../ssh/ssh-config-parser.js";
 import { readSshConfig } from "../ssh/ssh-config-parser.js";
 import type { MetaDAL } from "../storage/meta.js";
@@ -56,22 +55,21 @@ export function validateSshConfigImportEntries(body: unknown): SshConfigImportVa
 	return { entries };
 }
 
-export function linkHostToProxyJump(metaDal: MetaDAL, host: Host): Host {
-	const spec = host.sshProxySpec;
-	if (!spec) return host;
-	const parsed = parseJumpSpec(spec);
-	if (parsed.kind !== "spec") return host;
-	const match = metaDal
-		.listHosts()
-		.find(
-			(candidate) =>
-				candidate.id !== host.id &&
-				candidate.type === "ssh" &&
-				(candidate.sshConfigHost === parsed.spec.host || candidate.sshHost === parsed.spec.host),
-		);
-	if (!match) return host;
+/**
+ * Link a host's `ProxyJump` to the saved bastion it names, when
+ * `jumpLinkFor` finds one; otherwise the host keeps it as written (#1040).
+ * `candidates` is the hub's hosts, read once by the caller for a whole import.
+ */
+export function linkHostToProxyJump(
+	metaDal: MetaDAL,
+	host: Host,
+	candidates: readonly Host[],
+): Host {
+	if (!host.sshProxySpec) return host;
+	const bastion = jumpLinkFor(host.sshProxySpec, candidates, host.id);
+	if (!bastion) return host;
 	return metaDal.updateHost(host.id, {
-		sshProxyHostId: match.id,
+		sshProxyHostId: bastion.id,
 		sshProxySpec: null,
 	});
 }
@@ -188,8 +186,8 @@ export function registerHostSshImportRoutes(
 						? { sshKeyPath: sshEntry.identityFile as string, sshAuth: "key" as const }
 						: { sshAuth: "agent" as const }),
 					sshConfigHost: sshEntry.name,
-					// Kept as written for now; the pass below links it to a host of
-					// this list when one turns out to be that bastion.
+					// Kept as written for now; the pass below links it to the saved
+					// bastion it names, when the link reaches what ssh would.
 					...(sshEntry.proxyJump != null ? { sshProxySpec: sshEntry.proxyJump } : {}),
 					...(entry.sshRemoteDaemon !== undefined && {
 						sshRemoteDaemon: entry.sshRemoteDaemon,
@@ -201,10 +199,12 @@ export function registerHostSshImportRoutes(
 			// Stored: said once for the whole list, the links below included.
 			announce("hosts");
 
-			// A bastion is usually a host of its own, imported in the same breath.
-			// Linking to it rather than keeping its address twice is what lets it
-			// carry its own authentication and its own pinned key.
-			const linked = hosts.map((host) => linkHostToProxyJump(metaDal, host));
+			// A bastion is usually a host of its own, imported earlier or in the
+			// same breath. Linking to it is what lets it carry its own
+			// authentication and its own pinned key; `jumpLinkFor` says when that
+			// is the jump ssh would make. The hosts are read once for the whole list.
+			const candidates = metaDal.listHosts();
+			const linked = hosts.map((host) => linkHostToProxyJump(metaDal, host, candidates));
 
 			return reply.code(201).send(toSnakeCase(linked));
 		},

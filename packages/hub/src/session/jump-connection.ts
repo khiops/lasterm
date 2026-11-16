@@ -217,7 +217,7 @@ export function openJumpRoute(options: JumpOptions): Promise<JumpRoute> {
 			throw new JumpRefusedError(
 				options.pinnedFingerprint
 					? `The jump host ${options.jump.host} presented ${presented}, which is not the key trusted for it. Nothing was connected.`
-					: `The jump host ${options.jump.host} presented ${presented}, and nothing here trusts it yet. Connect to it once as a host of its own, or let Lasterm trust what your known_hosts already does.`,
+					: `The jump host ${options.jump.host} presented ${presented}, and nothing here trusts it yet. Connect to it once as a saved host and choose that host as the jump, or let Lasterm trust what your known_hosts already does.`,
 			);
 		}
 		throw error;

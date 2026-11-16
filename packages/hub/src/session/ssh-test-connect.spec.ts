@@ -911,18 +911,25 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		await ended(f);
 	});
 
-	it("refuses an unknown bastion without a route or pin", async () => {
-		const f = await fixture({ unpinned: true });
-		await f.mgr.handleTestConnect("c1", f.msg);
-		expect(reply(f)).toMatchObject({
-			type: "TEST_CONNECT_FAIL",
-			message: expect.stringContaining("nothing here trusts it yet"),
-		});
-		expect(f.routes).toEqual([]);
-		expect(f.updateHostFingerprint).not.toHaveBeenCalled();
-		expect(f.updateHost).not.toHaveBeenCalled();
-		await ended(f);
-	});
+	// A spec jump reads only the jumping host's own pin, so the way out the
+	// message names is a saved host chosen as the jump (#1040).
+	it.each([false, true])(
+		"refuses an unknown bastion without a route or pin (spec=%s)",
+		async (spec) => {
+			const f = await fixture({ unpinned: true, spec });
+			await f.mgr.handleTestConnect("c1", f.msg);
+			expect(reply(f)).toMatchObject({
+				type: "TEST_CONNECT_FAIL",
+				message: expect.stringContaining(
+					"nothing here trusts it yet. Connect to it once as a saved host and choose that host as the jump, or let Lasterm trust what your known_hosts already does.",
+				),
+			});
+			expect(f.routes).toEqual([]);
+			expect(f.updateHostFingerprint).not.toHaveBeenCalled();
+			expect(f.updateHost).not.toHaveBeenCalled();
+			await ended(f);
+		},
+	);
 	it.each([false, true])("pins a known_hosts trusted bastion (spec=%s)", async (spec) => {
 		const f = await fixture({ unpinned: true, known: true, spec });
 		const done = f.mgr.handleTestConnect("c1", f.msg);

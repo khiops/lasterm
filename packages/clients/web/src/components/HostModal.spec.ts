@@ -1148,6 +1148,95 @@ describe("HostModal reading the hub's SSH config (#734, #757)", () => {
 			expect(keyPathInput()?.value).toBe("");
 		});
 	});
+
+	// The hint says the jump as Test Connection and Add Host send it: a saved
+	// host's id, or a spec the agent signs in to (#1040, #1042).
+	describe("the hint under a picked entry's jump (#1040, #1042)", () => {
+		const GW: Host = {
+			...SSH,
+			id: "01GWBASTION000000000000000",
+			label: "gw-label",
+			sshHost: "gateway.example",
+			sshConfigHost: "gw",
+			sshUser: "base",
+			sshPort: 22,
+		};
+
+		const proxyInput = (): HTMLInputElement => {
+			const input = el<HTMLInputElement>("input[list='host-proxy-options']");
+			if (!input) throw new Error("no Jump host field");
+			return input;
+		};
+		const hint = (): string | undefined =>
+			proxyInput().parentElement?.querySelector(".field-hint")?.textContent?.trim();
+
+		async function pickTarget(proxyJump: string, hosts: Host[] = [GW]): Promise<void> {
+			sshConfigAnswers(
+				json(200, {
+					entries: [{ name: "target", hostname: "target.example", proxy_jump: proxyJump }],
+					has_include: false,
+				}),
+			);
+			mountModal(null);
+			useHostsStore().hosts = [{ ...LOCAL }, { ...SSH }, ...hosts];
+			await chooseSshConfig();
+			const select = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select")).find(
+				(candidate) => Array.from(candidate.options).some((option) => option.value === "target"),
+			);
+			if (!select) throw new Error("no SSH host select");
+			select.value = "target";
+			select.dispatchEvent(new Event("change"));
+			await nextTick();
+		}
+
+		it("names the saved bastion a picked ProxyJump links to", async () => {
+			await pickTarget("gw");
+
+			expect(proxyInput().value).toBe(GW.id);
+			expect(hint()).toBe("Through gw-label, which brings its own key and sign-in.");
+		});
+
+		it.each([
+			{ variant: "one", hosts: [GW] },
+			{
+				variant: "ambiguous",
+				hosts: [GW, { ...GW, id: "01GWSECOND0000000000000000", label: "gw-second" }],
+			},
+		])(
+			"says a kept ProxyJump does not use the saved bastion's sign-in ($variant)",
+			async ({ hosts }) => {
+				await pickTarget("relay@gw", hosts);
+
+				expect(proxyInput().value).toBe("relay@gw");
+				expect(hint()).toBe("Through relay@gw, using your SSH agent, not a saved host's sign-in.");
+			},
+		);
+
+		it("says a chosen jump host is no longer saved", async () => {
+			await pickTarget("gw");
+
+			useHostsStore().hosts = [{ ...LOCAL }, { ...SSH }];
+			await nextTick();
+
+			expect(proxyInput().value).toBe(GW.id);
+			expect(hint()).toBe("The host chosen as the jump is no longer saved.");
+		});
+
+		it("describes a jump typed as a spec as a spec", async () => {
+			mountModal(null);
+			const input = proxyInput();
+			input.value = GW.id;
+			input.dispatchEvent(new Event("input"));
+			await nextTick();
+
+			useHostsStore().hosts = [{ ...LOCAL }, { ...SSH }, GW];
+			await nextTick();
+
+			expect(hint()).toBe(
+				`Through ${GW.id}, using your SSH agent. Add it as a host to give it a key of its own.`,
+			);
+		});
+	});
 });
 
 describe("live daemon edit guard", () => {

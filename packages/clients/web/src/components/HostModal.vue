@@ -628,7 +628,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch, type PropType } from "vue";
-import { type Host, isPlainObject, type VisualProfile } from "@lasterm/shared";
+import { type Host, isPlainObject, parseJumpSpec, type VisualProfile } from "@lasterm/shared";
 import { useHostForm } from "../composables/useHostForm.js";
 import { getHostColor } from "../composables/useHostIcon.js";
 import { useHostsStore } from "../stores/hosts.js";
@@ -735,12 +735,29 @@ const proxyCandidates = computed(() =>
 	hostsStore.hosts.filter((candidate) => candidate.type === 'ssh' && candidate.id !== props.editHost?.id),
 );
 
-/** What the field is understood to mean, said back in the person's words. */
+/**
+ * What the field is understood to mean, said back in the person's words: as
+ * Test Connection and Add Host send it, a host's id or a spec (#1042).
+ */
 const proxyHint = computed(() => {
 	const value = form.value.sshProxy.trim();
 	if (value === '') return 'Connected to directly.';
-	const known = proxyCandidates.value.find((candidate) => candidate.id === value);
-	if (known) return `Through ${known.label}, which brings its own key and sign-in.`;
+	if (proxyIsHostId.value) {
+		const known = hostsStore.hosts.find((candidate) => candidate.id === value);
+		if (known) return `Through ${known.label}, which brings its own key and sign-in.`;
+		return 'The host chosen as the jump is no longer saved.';
+	}
+	// A spec naming a saved host's alias was kept for its own user or port
+	// (#1040): the agent signs in, not that host.
+	const parsed = parseJumpSpec(value);
+	if (
+		parsed.kind === 'spec' &&
+		hostsStore.hosts.some(
+			(candidate) => candidate.type === 'ssh' && candidate.sshConfigHost === parsed.spec.host,
+		)
+	) {
+		return `Through ${value}, using your SSH agent, not a saved host's sign-in.`;
+	}
 	return `Through ${value}, using your SSH agent. Add it as a host to give it a key of its own.`;
 });
 const {
@@ -750,6 +767,7 @@ const {
 	sshConfigEntries,
 	sshConfigHasInclude,
 	selectedSshConfigHost,
+	proxyIsHostId,
 	loadingSshConfig,
 	sshConfigError,
 	testResult,

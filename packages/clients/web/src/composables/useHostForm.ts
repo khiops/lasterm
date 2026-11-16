@@ -1,5 +1,5 @@
 import type { Host, SshConfigEntry, TestConnectPlatform } from "@lasterm/shared";
-import { ErrorCode, generateId, sshAuthFor, sshPortFromText } from "@lasterm/shared";
+import { ErrorCode, generateId, jumpLinkFor, sshAuthFor, sshPortFromText } from "@lasterm/shared";
 import { computed, readonly, ref, shallowRef, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useHostsStore } from "../stores/hosts.js";
@@ -157,6 +157,24 @@ export function useHostForm(editHost?: Host) {
 	const isEdit = !!editHost;
 
 	const form = ref<HostFormData>(formOf(editHost));
+
+	/**
+	 * Whether the Jump host field's value names a saved host by its id, decided
+	 * when the value is set (a pick, a choice from the list, typing, the dialog
+	 * opening) against the hosts known then, and kept until the value changes.
+	 * Test Connection and Add Host both send it so: a host list that gains or
+	 * loses that host in between does not turn the one into the other (#1042).
+	 */
+	const proxyIsHostId = ref(false);
+	watch(
+		() => form.value.sshProxy,
+		(value) => {
+			const chosen = value.trim();
+			proxyIsHostId.value =
+				chosen !== "" && hostsStore.hosts.some((candidate) => candidate.id === chosen);
+		},
+		{ immediate: true, flush: "sync" },
+	);
 
 	/**
 	 * The Port field's text, as typed: the form reads the port from it (#901).
@@ -400,7 +418,12 @@ export function useHostForm(editHost?: Host) {
 		form.value.sshHost = entry.hostname ?? name;
 		setPortText(portTextOf(entry.port));
 		form.value.sshUser = entry.user ?? "";
-		form.value.sshProxy = entry.proxyJump ?? "";
+		// The jump an import would give the entry: its saved bastion when the
+		// link reaches what ssh would, else the ProxyJump as written (#1040, #1042).
+		form.value.sshProxy =
+			entry.proxyJump == null
+				? ""
+				: (jumpLinkFor(entry.proxyJump, hostsStore.hosts)?.id ?? entry.proxyJump);
 		// The entry's own method, whatever the form held, by the rule the import
 		// stores it with: its IdentityFile, else the agent (#1009, #917).
 		form.value.sshAuth = sshAuthFor(entry.identityFile);
@@ -419,10 +442,7 @@ export function useHostForm(editHost?: Host) {
 		) {
 			return { ssh_proxy_host_id: null, ssh_proxy_spec: selectedEntry.proxyJump };
 		}
-		return proxyFields(
-			chosen,
-			hostsStore.hosts.map((candidate) => candidate.id),
-		);
+		return proxyFields(chosen, proxyIsHostId.value ? [chosen.trim()] : []);
 	}
 
 	async function testConnectionInline(): Promise<void> {
@@ -697,6 +717,7 @@ export function useHostForm(editHost?: Host) {
 		sshConfigEntries,
 		sshConfigHasInclude,
 		selectedSshConfigHost,
+		proxyIsHostId: readonly(proxyIsHostId),
 		loadingSshConfig,
 		sshConfigError,
 		testResult,

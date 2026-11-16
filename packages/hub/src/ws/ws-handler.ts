@@ -126,6 +126,20 @@ export interface WsRouteOptions {
 /** What `writerCheck` found: the holder, or why the request may not write. */
 export type WriterCheck = "holder" | "unknown-client" | "not-holder";
 
+/**
+ * What a terminal's write lock changing hands means beyond the lock: queued
+ * uploads may go or wait (#835), and a paste its owner no longer holds stops
+ * (#1014).
+ */
+export function onWriteLockChange(
+	channelId: string,
+	transfers: { lockChanged(channelId: string): void } | undefined,
+	sessionManager: { pasteLockChanged(channelId: string): void },
+): void {
+	transfers?.lockChanged(channelId);
+	sessionManager.pasteLockChanged(channelId);
+}
+
 export async function registerWsRoutes(
 	server: FastifyInstance,
 	sessionManager: SessionManager,
@@ -151,10 +165,7 @@ export async function registerWsRoutes(
 			}
 		},
 		onForce: (force) => server.security.writeLockForced(force),
-		onChange: (channelId) => {
-			transfers?.lockChanged(channelId);
-			sessionManager.pasteLockChanged(channelId);
-		},
+		onChange: (channelId) => onWriteLockChange(channelId, transfers, sessionManager),
 	});
 	// A hub stopping keeps no lock for a holder that left: the grace ends with it.
 	server.addHook("onClose", async () => {

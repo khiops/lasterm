@@ -4471,6 +4471,38 @@ describe("TerminalPane streaming a paste (#1014)", () => {
 		expect(order().slice(-2)).toEqual(["CANCEL", "INPUT \u0003"]);
 	});
 
+	it("WB3: holds what another pane showing the terminal types, and takes its Ctrl+C", async () => {
+		freshWindow();
+		writer();
+		mountRoot(
+			defineComponent({
+				setup: () => () =>
+					h("div", [
+						h(TerminalPane, { channelId: T, hostId: HOST }),
+						h(TerminalPane, { channelId: T, hostId: HOST }),
+					]),
+			}),
+		);
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE", { adaptsInput: true, streamsPaste: true });
+		await settle();
+		const [first, second] = (xterm.terminals as StandInTerminal[]).filter((x) => !x.disposed);
+		const event = new Event("paste", { bubbles: true, cancelable: true });
+		Object.defineProperty(event, "clipboardData", {
+			value: { getData: () => "a".repeat(9 * CHUNK) },
+		});
+		first?.textarea.dispatchEvent(event);
+		const typeIn = (term: typeof first, data: string) => {
+			for (const listener of [...(term?.dataListeners ?? [])]) listener(data);
+		};
+
+		typeIn(second, "x");
+		expect(inputs()).toEqual([]);
+		typeIn(second, "");
+
+		expect(order().slice(-3)).toEqual(["CANCEL", "INPUT x", "INPUT "]);
+	});
+
 	it("WB3: holds xterm's own reports behind unsent chunks, as typed keys", async () => {
 		await streaming();
 		paste("a".repeat(9 * CHUNK));
@@ -4513,7 +4545,9 @@ describe("TerminalPane streaming a paste (#1014)", () => {
 
 		expect(order().slice(-2)).toEqual(["CANCEL", "INPUT a"]);
 		expect(chunks()).toHaveLength(10);
-		expect(toasts()).toEqual(["Paste cancelled: at least 64 KB of 1 MB reached the terminal."]);
+		expect(toasts()).toEqual([
+			"Paste cancelled: at least 65,536 bytes of 1,048,576 bytes reached the terminal.",
+		]);
 	});
 
 	it("WB4: says what went after a Ctrl+C too", async () => {
@@ -4523,7 +4557,9 @@ describe("TerminalPane streaming a paste (#1014)", () => {
 
 		type("\u0003");
 
-		expect(toasts()).toEqual(["Paste cancelled: at least 32 KB of 1 MB reached the terminal."]);
+		expect(toasts()).toEqual([
+			"Paste cancelled: at least 32,768 bytes of 1,048,576 bytes reached the terminal.",
+		]);
 	});
 
 	it("WB4: dismissing the progress only hides it: the paste goes on", async () => {
@@ -4547,7 +4583,9 @@ describe("TerminalPane streaming a paste (#1014)", () => {
 		ack(0);
 
 		expect(chunks()).toHaveLength(8);
-		expect(toasts()).toEqual(["Paste interrupted: 96 KB of 1 MB reached the terminal."]);
+		expect(toasts()).toEqual([
+			"Paste interrupted: 98,304 bytes of 1,048,576 bytes reached the terminal.",
+		]);
 	});
 
 	it("WB5: says at least what was acknowledged when the agent is lost, or the socket drops", async () => {
@@ -4561,8 +4599,8 @@ describe("TerminalPane streaming a paste (#1014)", () => {
 		dropConnection();
 
 		expect(toasts()).toEqual([
-			"Paste interrupted: at least 96 KB of 1 MB reached the terminal.",
-			"Paste interrupted: at least 96 KB of 1 MB reached the terminal.",
+			"Paste interrupted: at least 98,304 bytes of 1,048,576 bytes reached the terminal.",
+			"Paste interrupted: at least 98,304 bytes of 1,048,576 bytes reached the terminal.",
 		]);
 		expect(cancels()).toEqual([]);
 	});
@@ -4589,7 +4627,9 @@ describe("TerminalPane streaming a paste (#1014)", () => {
 
 		expect(cancels()).toEqual([{ type: "PASTE_CANCEL", channelId: T, pasteId: id }]);
 		expect(chunks()).toHaveLength(8);
-		expect(toasts()).toEqual(["Paste interrupted: at least 0 B of 1 MB reached the terminal."]);
+		expect(toasts()).toEqual([
+			"Paste interrupted: at least 0 bytes of 1,048,576 bytes reached the terminal.",
+		]);
 	});
 
 	it("WB6: a pane remounted for the same terminal gives its next paste a greater id", async () => {

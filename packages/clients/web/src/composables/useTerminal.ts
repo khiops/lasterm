@@ -9,7 +9,7 @@ import { useChannelsStore } from "../stores/channels.js";
 import { useThemeStore } from "../stores/theme.js";
 import { useToastStore } from "../stores/toast.js";
 import { terminalScrollbarWidth } from "../utils/terminal-scrollbar.js";
-import { PasteStream } from "./paste-stream.js";
+import { PasteStream, pasteInProgress } from "./paste-stream.js";
 import { awaitTerminalFont } from "./terminal-font.js";
 import { useTerminalSearch } from "./useTerminalSearch.js";
 
@@ -227,7 +227,7 @@ export function useTerminal(
 	function streamPaste(term: Terminal, clipboard: DataTransfer | null): void {
 		if (clipboard === null) return;
 		const toast = useToastStore();
-		if (pasteStream.active) {
+		if (pasteInProgress(channelId) !== null) {
 			toast.show("warning", "A paste is still being sent to this terminal.");
 			return;
 		}
@@ -574,8 +574,9 @@ export function useTerminal(
 				}
 				replayFocusReports = 0;
 			}
-			// Behind a paste still being sent, or its Ctrl+C (#1014).
-			if (pasteStream.takeInput(data)) return;
+			// Behind a paste still being sent to this terminal, from this pane or
+			// another showing it, or its Ctrl+C (#1014).
+			if (pasteInProgress(channelId)?.takeInput(data)) return;
 			sendInput(data);
 		});
 

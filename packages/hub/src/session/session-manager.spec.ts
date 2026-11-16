@@ -19,6 +19,7 @@ import { openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
+import { onWriteLockChange } from "../ws/ws-handler.js";
 import type { AgentConnection } from "./agent-connection.js";
 import { connectOrLaunch as _connectOrLaunchForMock } from "./agent-launcher.js";
 import { AuthCancelledError } from "./auth-cancelled.js";
@@ -32,6 +33,7 @@ import {
 import type { CommitProtectedMap } from "./session-context.js";
 import { SessionManager, type WsClient } from "./session-manager.js";
 import { seedShellProfiles } from "./shell-profile-seed.js";
+import { WriteLockManager } from "./write-lock.js";
 
 // ─── Mock channel ID helpers ──────────────────────────────────────────────────
 // Per-test counters reset in beforeEach; each SPAWN emits a unique channelId.
@@ -2897,10 +2899,18 @@ describe("SessionManager", () => {
 		});
 
 		it("HB3: cancels the paste when the write lock moves to another window", async () => {
-			const { toAgent, setHolder } = await terminal();
+			const { toAgent } = await terminal();
+			// The lock manager the WS routes make, wired as they wire it.
+			const locks = new WriteLockManager({
+				sendToClient: () => undefined,
+				broadcastToChannel: () => undefined,
+				onChange: (channelId) => onWriteLockChange(channelId, undefined, sm),
+			});
+			sm.setGetWriteLockHolder((channelId) => locks.getHolder(channelId));
+			locks.attach(CH, "c1");
+			locks.attach(CH, "c2");
 			sm.handlePaste("c1", chunk(1, 0));
-			setHolder("c2");
-			sm.pasteLockChanged(CH);
+			locks.force(CH, "c2");
 			expect(toAgent().at(-1)?.type).toBe("PASTE_CANCEL");
 		});
 
@@ -2918,6 +2928,24 @@ describe("SessionManager", () => {
 			agent.emit("message", { type: "PASTE_ACK", channelId: CH, pasteId: agentId, seq: 0 });
 			sm.removeClient("c1");
 			expect(toAgent().map((m) => m.type)).toEqual(["PASTE"]);
+		});
+
+		it("HB3: sends nothing once the agent closed the paste, and takes the window's next one", async () => {
+			const { agent, toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0));
+			const agentId = toAgent()[0]?.pasteId;
+			agent.emit("message", {
+				type: "PASTE_CLOSED",
+				channelId: CH,
+				pasteId: agentId,
+				reason: "overflow",
+				written: 1,
+			});
+			sm.handlePaste("c1", chunk(2, 0));
+			expect(toAgent().map((m) => m.type)).toEqual(["PASTE", "PASTE"]);
+			sm.removeClient("c1");
+			expect(toAgent().at(-1)?.type).toBe("PASTE_CANCEL");
+			expect(toAgent().filter((m) => m.type === "PASTE_CANCEL")).toHaveLength(1);
 		});
 
 		it("HB4: routes acknowledgements and closes to the owning window only", async () => {
@@ -2963,6 +2991,8 @@ describe("SessionManager", () => {
 
 		it("HB5: tells it once when the agent is replaced, and the old agent's late close spares a new paste", async () => {
 			const { c1, agent, toAgent } = await terminal();
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+			const CH2 = "local-ch-2";
 			sm.handlePaste("c1", chunk(3, 0));
 			const agents = (sm as unknown as { ctx: { agents: Map<string, unknown> } }).ctx.agents;
 			const [hostId] = [...agents.keys()];
@@ -2978,18 +3008,19 @@ describe("SessionManager", () => {
 				},
 			});
 			agents.set(hostId as string, replacement);
-			// The replaced agent closes, its close no longer the current one's:
-			// the paste it took is lost all the same, once.
+			// A new paste on the other terminal goes to the replacement.
+			sm.handlePaste("c1", { ...chunk(4, 0), channelId: CH2 });
+			expect(
+				(replacement.send as ReturnType<typeof vi.fn>).mock.calls.map(([m]) => [
+					m.type,
+					m.channelId,
+				]),
+			).toEqual([["PASTE", CH2]]);
+			// Then the replaced agent's late close: only the paste it took is lost, once.
 			agent.simulateDisconnect();
 			expect(pastes(c1)).toEqual([
 				{ type: "PASTE_CLOSED", channelId: CH, pasteId: 3, reason: "agent_lost" },
 			]);
-			// A new paste goes to the replacement, untouched by the old close.
-			sm.handlePaste("c1", chunk(4, 0));
-			expect(
-				(replacement.send as ReturnType<typeof vi.fn>).mock.calls.map(([m]) => m.type),
-			).toEqual(["PASTE"]);
-			expect(pastes(c1)).toHaveLength(1);
 			expect(toAgent().filter((m) => m.type === "PASTE")).toHaveLength(1);
 		});
 
@@ -3073,6 +3104,7 @@ describe("SessionManager", () => {
 		type Answer = {
 			type: string;
 			adaptsInput?: boolean;
+			streamsPaste?: boolean;
 			cached?: boolean;
 			snapshot?: Record<string, unknown> | null;
 		};
@@ -3093,7 +3125,7 @@ describe("SessionManager", () => {
 		});
 
 		for (const [capabilities, adapts] of [
-			[["input-modes"], true],
+			[["input-modes", "paste-stream"], true],
 			[[], false],
 		] as const) {
 			it(`says ${adapts} on an ATTACH_OK answered from memory while the host's agent says ${capabilities.length > 0 ? "input-modes" : "nothing of it"}, whatever agent stored the snapshot`, async () => {
@@ -3161,6 +3193,8 @@ describe("SessionManager", () => {
 				expect(cached?.cached).toBe(true);
 				expect(cached?.snapshot?.inputModes).toBe("\u001b[?2004h");
 				expect(cached?.adaptsInput).toBe(adapts);
+				// As the agent says paste-stream (#1014).
+				expect(cached?.streamsPaste).toBe(adapts);
 			});
 		}
 
@@ -3239,7 +3273,7 @@ describe("SessionManager", () => {
 				type: "HELLO",
 				version: 1,
 				agentVersion: "0.0.0",
-				capabilities: ["input-modes"],
+				capabilities: ["input-modes", "paste-stream"],
 			};
 			agent.simulateClose();
 			await new Promise((r) => setImmediate(r));
@@ -3253,6 +3287,8 @@ describe("SessionManager", () => {
 			expect(cached?.snapshot?.alternateScreen).toBe(true);
 			expect(cached?.snapshot?.inputModes).toBe("\u001b[?2004h");
 			expect(cached?.adaptsInput).toBe(false);
+			// No agent: no streaming (#1014).
+			expect(cached?.streamsPaste).toBe(false);
 		});
 	});
 

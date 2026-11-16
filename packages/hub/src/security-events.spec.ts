@@ -523,6 +523,14 @@ describe("keystrokes leave no trace in the logs", () => {
 	it("logs nothing at INFO or above for PASTE frames, and never their bytes at any level", async () => {
 		const pasted = "paste-secret-4242";
 		const channelId = "01HZZZZZZZZZZZZZZZZZZZZZZZ";
+		// The hub's own log at its most verbose, into the file the spec reads.
+		const hubLogger = new HubLogger(log.dir, {
+			level: "trace",
+			format: "jsonl",
+			output: "file",
+			maxAgeDays: 30,
+			maxSizeMb: 50,
+		});
 		const hub = await createServer({
 			tls: getTestTls(),
 			logger: false,
@@ -531,6 +539,7 @@ describe("keystrokes leave no trace in the logs", () => {
 			authToken: PRIMARY_TOKEN,
 			authConfig: { tokenTtlDays: 90 },
 			securityLog: log.securityLog,
+			hubLogger,
 		});
 		try {
 			const bytesAsText = (_key: string, value: unknown): unknown => {
@@ -564,6 +573,9 @@ describe("keystrokes leave no trace in the logs", () => {
 			const beforePasting = loud.length;
 			const beforeAny = every.length;
 
+			// The window holds the terminal's write lock: its PASTE is accepted, and
+			// the relay answers agent_lost, there being no agent: proof it ran.
+			ws.send(encodeMessage({ type: "WRITE_CLAIM", channelId }));
 			const data = new TextEncoder().encode(pasted);
 			for (let seq = 0; seq < 8; seq++) {
 				ws.send(
@@ -573,11 +585,41 @@ describe("keystrokes leave no trace in the logs", () => {
 			ws.send(encodeMessage({ type: "PASTE_CANCEL", channelId, pasteId: 1 }));
 			ws.send(encodeMessage({ type: "PING" }));
 			await vi.waitFor(() => expect(received.some((m) => m.type === "PONG")).toBe(true));
+			expect(received.find((m) => m.type === "PASTE_CLOSED")).toMatchObject({
+				reason: "agent_lost",
+			});
+			expect(received.some((m) => m.type === "ERROR")).toBe(false);
 			ws.terminate();
 
 			expect(loud.slice(beforePasting)).toEqual([]);
 			expect(every.slice(beforeAny).join("\n")).not.toContain(pasted);
 			expect(log.text()).not.toContain(pasted);
+			// A byte array written to hub.jsonl is an object of numbered keys, or an
+			// array of numbers: read each back as text.
+			const asText = (value: unknown): string[] => {
+				if (Array.isArray(value)) {
+					return value.every((v) => typeof v === "number")
+						? [String.fromCharCode(...(value as number[]))]
+						: value.flatMap(asText);
+				}
+				if (typeof value === "object" && value !== null) {
+					const entries = Object.entries(value);
+					if (
+						entries.length > 0 &&
+						entries.every(([k, v]) => /^\d+$/.test(k) && typeof v === "number")
+					) {
+						return [String.fromCharCode(...entries.map(([, v]) => v as number))];
+					}
+					return entries.flatMap(([, v]) => asText(v));
+				}
+				return typeof value === "string" ? [value] : [];
+			};
+			const logged = log
+				.text()
+				.split("\n")
+				.filter(Boolean)
+				.flatMap((line) => asText(JSON.parse(line)));
+			expect(logged.join("\n")).not.toContain(pasted);
 		} finally {
 			await hub.close();
 		}

@@ -15,6 +15,23 @@ import { formatSize } from "../utils/files-panel.js";
  */
 let nextPasteId = 1;
 
+/**
+ * The paste in progress on each terminal of the page, whichever pane sends it:
+ * two panes can show one terminal, and what is typed in either must wait
+ * behind it, or cancel it with Ctrl+C (#1014).
+ */
+const inProgress = new Map<string, PasteStream>();
+
+/** The pane's stream sending a paste to `channelId` now, if any. */
+export function pasteInProgress(channelId: string | null): PasteStream | null {
+	return channelId === null ? null : (inProgress.get(channelId) ?? null);
+}
+
+/** A byte count in full, for a paste's outcome: exact, or a lower bound said as one. */
+function bytes(count: number): string {
+	return `${count.toLocaleString("en-US")} bytes`;
+}
+
 /** How long a paste goes before its progress shows. */
 export const PASTE_PROGRESS_DELAY_MS = 1000;
 
@@ -93,6 +110,7 @@ export class PasteStream {
 			progressTimer: null,
 		};
 		this.paste = paste;
+		inProgress.set(channelId, this);
 		paste.progressTimer = setTimeout(() => {
 			paste.progressTimer = null;
 			if (this.paste !== paste) return;
@@ -149,12 +167,10 @@ export class PasteStream {
 		// Typed for this terminal, still shown: it goes, unless its agent is gone.
 		if (msg.reason !== "agent_lost") this.release(paste.held);
 		const reached =
-			msg.written === undefined
-				? `at least ${formatSize(paste.ackedBytes)}`
-				: formatSize(msg.written);
+			msg.written === undefined ? `at least ${bytes(paste.ackedBytes)}` : bytes(msg.written);
 		this.deps.toast.show(
 			"error",
-			`Paste interrupted: ${reached} of ${formatSize(paste.total)} reached the terminal.`,
+			`Paste interrupted: ${reached} of ${bytes(paste.total)} reached the terminal.`,
 		);
 	}
 
@@ -167,7 +183,7 @@ export class PasteStream {
 		this.release([...paste.held, ...after]);
 		this.deps.toast.show(
 			"info",
-			`Paste cancelled: at least ${formatSize(paste.ackedBytes)} of ${formatSize(paste.total)} reached the terminal.`,
+			`Paste cancelled: at least ${bytes(paste.ackedBytes)} of ${bytes(paste.total)} reached the terminal.`,
 		);
 	}
 
@@ -183,7 +199,7 @@ export class PasteStream {
 		if (this.deps.connected()) this.sendCancel(paste);
 		this.deps.toast.show(
 			"error",
-			`Paste interrupted: at least ${formatSize(paste.ackedBytes)} of ${formatSize(paste.total)} reached the terminal.`,
+			`Paste interrupted: at least ${bytes(paste.ackedBytes)} of ${bytes(paste.total)} reached the terminal.`,
 		);
 	}
 
@@ -228,6 +244,7 @@ export class PasteStream {
 	/** Forget `paste`: its progress goes. */
 	private finish(paste: Paste): void {
 		if (this.paste === paste) this.paste = null;
+		if (inProgress.get(paste.channelId) === this) inProgress.delete(paste.channelId);
 		if (paste.progressTimer !== null) clearTimeout(paste.progressTimer);
 		paste.progressTimer = null;
 		if (paste.progressToast !== null) this.deps.toast.dismiss(paste.progressToast);

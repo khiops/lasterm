@@ -796,11 +796,12 @@ connected, what was said last.
 A paste (#1014) is its text, without markers, in chunks `seq` 0, 1, …, the last one `last: true`.
 `paste_id` is the hub's, unique while it runs (§ 4.21). The agent:
 
-- **opens** it at `seq` 0, closing any other paste open on the channel (`superseded`); it decides
+- **opens** it at `seq` 0, closing any other paste the same connection has open on the channel
+  (`superseded`); it decides
   then, from its screen model, whether the paste is bracketed (`?2004`), for both markers;
 - **takes** a later chunk only as the next one of that connection's open paste: one out of order closes
   the paste (`out_of_order`); one for no open paste of the connection changes nothing and is answered
-  `unknown`; one that would take the channel's input queue (§ 3.4) past its bound closes it
+  `unknown`, unless that paste is closed and not yet finished, whose PASTE_CLOSED is then the answer; one that would take the channel's input queue (§ 3.4) past its bound closes it
   (`overflow`). A chunk is judged by the bound alone, never by INPUT's dropping;
 - **writes** `ESC[200~` before the first chunk and `ESC[201~` after the last when bracketed, and the
   data unchanged; INPUT's adaptation is not applied to it;

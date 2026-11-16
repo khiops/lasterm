@@ -315,8 +315,10 @@ impl InputQueue {
         };
         let len = data.len();
         if seq == 0 {
+            // Only this connection's: a paste is changed by its own connection
+            // alone (a displaced one's were closed when it was displaced).
             for paste in state.pastes.iter_mut() {
-                if paste.closed.is_none() {
+                if paste.closed.is_none() && paste.key.connection == connection {
                     paste.closed = Some(CloseReason::Superseded);
                 }
             }
@@ -348,6 +350,11 @@ impl InputQueue {
             .iter()
             .position(|paste| paste.closed.is_none() && paste.key.connection == connection)
         else {
+            // A chunk still in flight for a paste closed and not yet finished:
+            // its PASTE_CLOSED, with its reason and count, is the answer.
+            if state.paste(key).is_some() {
+                return PasteOffer::Closed;
+            }
             return PasteOffer::Unknown;
         };
         let paste = &mut state.pastes[open];
@@ -1147,7 +1154,11 @@ mod tests {
         );
         assert_eq!(third, PasteOffer::Closed);
         let fourth = queue.offer_paste(CONN, 4, 3, chunk(b'd', 8192), true, || true, report);
-        assert_eq!(fourth, PasteOffer::Unknown, "the paste is closed");
+        assert_eq!(
+            fourth,
+            PasteOffer::Closed,
+            "closed and not yet finished: its own PASTE_CLOSED is the answer, not `unknown`"
+        );
         pty.open_all();
         event_count(&events, 1).await;
         let taken = pty.taken();

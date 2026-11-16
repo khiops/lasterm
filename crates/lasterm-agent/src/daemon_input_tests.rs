@@ -1143,3 +1143,40 @@ async fn a_displaced_connections_frames_are_dropped() {
     assert_eq!(terminal.read(expected.len()).await, expected);
     tear_down(&daemon, &dir).await;
 }
+
+/// PS5 through the agent's frames: a PASTE_CANCEL from the connection that
+/// owns the paste closes it for the program, end marker included, and answers
+/// PASTE_CLOSED `cancelled` with how much of it went; what is typed after
+/// follows the end marker.
+#[tokio::test]
+async fn a_paste_cancelled_by_its_connection_is_closed_for_the_program() {
+    let dir = scratch("paste-cancel");
+    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+    let mut hub = TestHub::connect(&daemon, KEY_A, 1).await;
+    let terminal = PasteTerminal::start(&mut hub, &dir, "paste-cancel", true, None).await;
+    open_paste(&mut hub, &terminal, 4).await;
+
+    hub.send(&HubToAgent::PasteCancel {
+        channel_id: terminal.channel_id.clone(),
+        paste_id: 4,
+    })
+    .await;
+    let frames = hub
+        .read_through(|frame| is_about(frame, "PASTE_CLOSED", &terminal.channel_id))
+        .await;
+    let closed = frames.last().unwrap();
+    assert_eq!(closed["paste_id"].as_u64(), Some(4));
+    assert_eq!(closed["reason"].as_str(), Some("cancelled"));
+    assert_eq!(closed["written"].as_u64(), Some(5));
+    hub.send(&input(&terminal.channel_id, b"x".to_vec())).await;
+
+    let expected = [
+        crate::input::PASTE_START,
+        b"first",
+        crate::input::PASTE_END,
+        b"x",
+    ]
+    .concat();
+    assert_eq!(terminal.read(expected.len()).await, expected);
+    tear_down(&daemon, &dir).await;
+}

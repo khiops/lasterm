@@ -867,6 +867,165 @@ describe("useChannelsStore — spawnChannel waiting on a person", () => {
 		}
 	});
 
+	// The hub says it is connecting the host: each wait of that connection has
+	// its own bound, up to 120 s on a slow host, so the pane waits for the
+	// hub's answer, and gives up at once if the socket it would come on closes
+	// (#1034).
+	describe("while the hub connects the host (#1034)", () => {
+		const MINUTE = 60_000;
+
+		function spawning() {
+			const sessionStore = useSessionStore();
+			const ws = silentWsClient();
+			const disconnectListeners: Array<() => void> = [];
+			const onDisconnect = vi.fn((cb: () => void) => {
+				disconnectListeners.push(cb);
+				return () => {
+					const idx = disconnectListeners.indexOf(cb);
+					if (idx !== -1) disconnectListeners.splice(idx, 1);
+				};
+			});
+			// @ts-expect-error — overwrite reactive wsClient for test
+			sessionStore.wsClient = { on: ws.on, send: ws.send, onDisconnect };
+			const store = useChannelsStore();
+			const spawn = store.spawnChannel("host-1", { select: false });
+			const sent = ws.send.mock.calls[0] as [{ requestId: string }];
+			const requestId = sent[0].requestId;
+			const outcome = { settled: false, error: undefined as Error | undefined };
+			void spawn.then(
+				() => {
+					outcome.settled = true;
+				},
+				(err: Error) => {
+					outcome.settled = true;
+					outcome.error = err;
+				},
+			);
+			const disconnect = (): void => {
+				for (const cb of [...disconnectListeners]) cb();
+			};
+			return { ws, spawn, requestId, outcome, disconnect };
+		}
+
+		it("waits for the hub while it connects the host (#1034)", async () => {
+			vi.useFakeTimers();
+			try {
+				const held = spawning();
+				held.ws.emit({ type: "HOST_CONNECTING", hostId: "host-1", requestId: held.requestId });
+				await vi.advanceTimersByTimeAsync(29 * MINUTE);
+				expect(held.outcome.settled).toBe(false);
+				held.ws.emit({ type: "SPAWN_OK", channelId: "ch-slow", requestId: held.requestId });
+				await expect(held.spawn).resolves.toBe("ch-slow");
+
+				const unanswered = spawning();
+				unanswered.ws.emit({
+					type: "HOST_CONNECTING",
+					hostId: "host-1",
+					requestId: unanswered.requestId,
+				});
+				await vi.advanceTimersByTimeAsync(29 * MINUTE);
+				expect(unanswered.outcome.settled).toBe(false);
+				await vi.advanceTimersByTimeAsync(MINUTE + 1);
+				expect(unanswered.outcome.error?.message).toBe(
+					"The hub stopped answering while it connected the host.",
+				);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("does not wait for another spawn's connection (#1034)", async () => {
+			vi.useFakeTimers();
+			try {
+				const otherHost = spawning();
+				otherHost.ws.emit({
+					type: "HOST_CONNECTING",
+					hostId: "host-2",
+					requestId: otherHost.requestId,
+				});
+				const otherSpawn = spawning();
+				otherSpawn.ws.emit({ type: "HOST_CONNECTING", hostId: "host-1", requestId: "not-mine" });
+				await vi.advanceTimersByTimeAsync(15_001);
+				expect(otherHost.outcome.error?.message).toBe("SPAWN timeout — no SPAWN_OK after 15s");
+				expect(otherSpawn.outcome.error?.message).toBe("SPAWN timeout — no SPAWN_OK after 15s");
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("lets a late prompt extend the connecting hold (#1034)", async () => {
+			vi.useFakeTimers();
+			try {
+				const held = spawning();
+				held.ws.emit({ type: "HOST_CONNECTING", hostId: "host-1", requestId: held.requestId });
+				await vi.advanceTimersByTimeAsync(28 * MINUTE);
+				held.ws.emit({ type: "AUTH_PROMPT", hostId: "host-1", promptType: "password" });
+				await vi.advanceTimersByTimeAsync(4 * MINUTE);
+				expect(held.outcome.settled).toBe(false);
+				await vi.advanceTimersByTimeAsync(MINUTE + 1);
+				expect(held.outcome.error?.message).toBe(
+					"The hub stopped answering while a prompt was open.",
+				);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("lets a jump's prompt extend its target's connecting hold (#1034)", async () => {
+			vi.useFakeTimers();
+			try {
+				const held = spawning();
+				held.ws.emit({ type: "HOST_CONNECTING", hostId: "host-1", requestId: held.requestId });
+				await vi.advanceTimersByTimeAsync(28 * MINUTE);
+				held.ws.emit({ type: "AUTH_PROMPT", hostId: "host-2", promptType: "password" });
+				await vi.advanceTimersByTimeAsync(4 * MINUTE);
+				expect(held.outcome.settled).toBe(false);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("keeps the later deadline of two holds (#1034)", async () => {
+			vi.useFakeTimers();
+			try {
+				const held = spawning();
+				held.ws.emit({ type: "HOST_CONNECTING", hostId: "host-1", requestId: held.requestId });
+				await vi.advanceTimersByTimeAsync(MINUTE);
+				held.ws.emit({ type: "HOST_VERIFY", hostId: "host-1", promptId: "p1" });
+				await vi.advanceTimersByTimeAsync(28 * MINUTE);
+				expect(held.outcome.settled).toBe(false);
+				await vi.advanceTimersByTimeAsync(MINUTE + 1);
+				expect(held.outcome.error?.message).toBe(
+					"The hub stopped answering while it connected the host.",
+				);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("gives up a held spawn when the socket to the hub closes (#1034)", async () => {
+			vi.useFakeTimers();
+			try {
+				const held = spawning();
+				held.ws.emit({ type: "HOST_CONNECTING", hostId: "host-1", requestId: held.requestId });
+				held.disconnect();
+				await vi.advanceTimersByTimeAsync(0);
+				expect(held.outcome.error?.message).toBe(
+					"The connection to the hub was lost while it connected the host.",
+				);
+
+				const notHeld = spawning();
+				notHeld.disconnect();
+				await vi.advanceTimersByTimeAsync(14_000);
+				expect(notHeld.outcome.settled).toBe(false);
+				await vi.advanceTimersByTimeAsync(1_001);
+				expect(notHeld.outcome.error?.message).toBe("SPAWN timeout — no SPAWN_OK after 15s");
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+	});
+
 	// The hub gives its agent ten seconds, then says why it heard nothing: that
 	// the host went away meanwhile, which a pane waits out (#605). A client
 	// that gave up at ten seconds too never heard it.

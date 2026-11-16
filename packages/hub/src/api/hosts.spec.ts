@@ -429,3 +429,39 @@ describe("sameJson", () => {
 		expect(sameJson({ a: { a: "x" } }, deep)).toBe(false);
 	});
 });
+
+// A host's connection timeout is 20 to 120 whole seconds, or none (#1034).
+describe("connect_timeout_seconds", () => {
+	const MESSAGE = "connect_timeout_seconds must be an integer between 20 and 120";
+	const stored: Host = {
+		id: "01HOST",
+		type: "ssh",
+		label: "pi",
+		sshHost: "10.0.0.1",
+		sshAuth: "agent",
+		iconType: "auto",
+		trustRemoteHints: "apply",
+		sortOrder: 0,
+		os: null,
+		arch: null,
+		createdAt: "2026-11-16T00:00:00.000Z",
+		updatedAt: "2026-11-16T00:00:00.000Z",
+	};
+	const create = (value: unknown): string | null =>
+		validateCreateHost(
+			body({ type: "ssh", label: "slow", ssh_host: "10.0.0.1", connect_timeout_seconds: value }),
+		);
+	const update = (value: unknown): string | null =>
+		validateUpdateHost(stored, { connect_timeout_seconds: value } as unknown as UpdateHostBody);
+
+	it("refuses a connection timeout outside 20-120 whole seconds (#1034)", () => {
+		for (const value of [19, 121, 30.5, "60", true]) {
+			expect([value, create(value)]).toEqual([value, MESSAGE]);
+			expect([value, update(value)]).toEqual([value, MESSAGE]);
+		}
+		for (const value of [20, 120, null, undefined]) {
+			expect([value, create(value)]).toEqual([value, null]);
+			expect([value, update(value)]).toEqual([value, null]);
+		}
+	});
+});

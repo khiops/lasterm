@@ -4,7 +4,7 @@ import net from "node:net";
 import { join } from "node:path";
 import { generateId, type TestConnectMessage } from "@lasterm/shared";
 import { Server, type Server as SshServer, utils } from "ssh2";
-import { afterAll, afterEach, describe, expect, it, type Mock, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, type Mock, vi } from "vitest";
 import { sshAddress, targetRoute } from "../ssh-route.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
@@ -1196,5 +1196,303 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		expect(f.routes).toEqual(["target:2222", "target:2222"]);
 		expect(f.targetAuth.usernames).toContain("user");
 		await ended(f);
+	});
+});
+
+// ─── The connection timeout, in the form or ~/.ssh/config (#1034) ───────────
+//
+// These wait in real time, as the hub's timers do: the form's value is never
+// under 20 s, and the test's own default is 10 s.
+
+/** A TCP front for `targetPort` that connects to it only `delayMs` after each accept: a slow link. */
+async function slowLink(
+	targetPort: number,
+	delayMs: number,
+): Promise<{ close: () => void; port: number }> {
+	const sockets: net.Socket[] = [];
+	const server = net.createServer((socket) => {
+		sockets.push(socket);
+		socket.pause();
+		socket.on("error", () => {});
+		setTimeout(() => {
+			if (socket.destroyed) return;
+			const onward = net.connect(targetPort, "127.0.0.1");
+			sockets.push(onward);
+			onward.on("error", () => socket.destroy());
+			socket.on("error", () => onward.destroy());
+			socket.pipe(onward).pipe(socket);
+			socket.resume();
+		}, delayMs);
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	return {
+		port: (server.address() as net.AddressInfo).port,
+		close: () => {
+			for (const socket of sockets) socket.destroy();
+			server.close();
+		},
+	};
+}
+
+/** A bastion routing to `targetPort`, answering a channel open after `channelDelayMs`, never when null. */
+async function slowBastion(
+	targetPort: number,
+	channelDelayMs: number | null,
+): Promise<{ close: () => void; port: number }> {
+	const timers: ReturnType<typeof setTimeout>[] = [];
+	const server = new Server({ hostKeys: [HOST_KEY] }, (conn) => {
+		conn.on("error", () => {});
+		conn.on("authentication", (auth) => auth.accept());
+		conn.on("ready", () =>
+			conn.on("tcpip", (accept) => {
+				if (channelDelayMs === null) return;
+				timers.push(
+					setTimeout(() => {
+						const stream = accept();
+						const onward = net.connect(targetPort, "127.0.0.1");
+						onward.on("error", () => stream.destroy());
+						stream.on("error", () => onward.destroy());
+						stream.pipe(onward).pipe(stream);
+					}, channelDelayMs),
+				);
+			}),
+		);
+	});
+	server.on("error", () => {});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	return {
+		port: (server.address() as net.AddressInfo).port,
+		close: () => {
+			for (const timer of timers) clearTimeout(timer);
+			server.close();
+		},
+	};
+}
+
+describe("TEST_CONNECT takes the host's connection timeout (#1034)", () => {
+	const SLOW = 40_000;
+	const closers: Array<() => void> = [];
+	const emptyHome = makeTempDir("lasterm-1034-test-home-");
+	let fingerprint = "";
+
+	beforeAll(async () => {
+		vi.stubEnv("HOME", emptyHome);
+		vi.stubEnv("USERPROFILE", emptyHome);
+		vi.stubEnv(
+			"SSH_AUTH_SOCK",
+			process.platform === "win32"
+				? String.raw`\\.\pipe\lasterm-unused-agent-${generateId()}`
+				: join(emptyHome, "unused-agent.sock"),
+		);
+		const mock = await sshServer();
+		fingerprint = await serverFingerprint(mock.port);
+		mock.server.close();
+	});
+
+	afterAll(async () => {
+		for (const close of closers) close();
+		vi.unstubAllEnvs();
+		await removeTempDir(emptyHome);
+	});
+
+	/** A saved, pinned host behind a link that answers `delayMs` late. */
+	async function slowSavedHost(delayMs: number) {
+		const mock = await sshServer();
+		closers.push(() => mock.server.close());
+		const link = await slowLink(mock.port, delayMs);
+		closers.push(link.close);
+		const harness = setup({ type: "ssh", sshHost: "127.0.0.1", sshPort: link.port, fingerprint });
+		return { ...harness, port: link.port };
+	}
+
+	/** The reply a test sent, and how long it took. */
+	async function run(
+		harness: { mgr: SshConnectionManager; client: { send: Mock } },
+		msg: TestConnectMessage,
+	): Promise<{ ms: number; reply: unknown }> {
+		const started = Date.now();
+		await harness.mgr.handleTestConnect("c1", msg);
+		const reply = harness.client.send.mock.calls
+			.map(([m]) => m)
+			.find((m) => m.type === "TEST_CONNECT_OK" || m.type === "TEST_CONNECT_FAIL");
+		return { ms: Date.now() - started, reply };
+	}
+
+	/** A saved target behind a saved, pinned bastion, both slow as told. */
+	async function throughSlowJump(bannerDelayMs: number, channelDelayMs: number | null) {
+		const target = await sshServer();
+		closers.push(() => target.server.close());
+		const bastion = await slowBastion(target.port, channelDelayMs);
+		closers.push(bastion.close);
+		const link = await slowLink(bastion.port, bannerDelayMs);
+		closers.push(link.close);
+		const harness = setup();
+		const hosts = new Map<string, Record<string, unknown>>([
+			[
+				"jump",
+				{
+					id: "jump",
+					type: "ssh",
+					sshHost: "127.0.0.1",
+					sshPort: link.port,
+					sshUser: "tester",
+					sshAuth: "key",
+					sshKeyPath: CLIENT_KEY_PATH,
+				},
+			],
+			[
+				"saved-host",
+				{
+					id: "saved-host",
+					type: "ssh",
+					sshHost: "target",
+					sshPort: 2222,
+					sshProxyHostId: "jump",
+					sshProxySpec: null,
+				},
+			],
+		]);
+		Object.assign(harness.ctx.metaDal, {
+			getHost: (id: string) => hosts.get(id),
+			getHostFingerprint: (id: string, expectedRoute: string | null) =>
+				expectedRoute !== null && id === "jump" ? fingerprint : null,
+			updateHostProxyFingerprint: vi.fn().mockReturnValue(true),
+		});
+		Object.assign(harness.ctx, { configResolver: { sshConfig: { trustKnownHosts: false } } });
+		const msg: TestConnectMessage = {
+			...testMessage("saved-host", 2222),
+			hostname: "target",
+			sshProxyHostId: "jump",
+		};
+		harness.ctx.trustedOnceFingerprints.set(testedRoute(msg, harness.ctx), fingerprint);
+		return { harness, msg };
+	}
+
+	describe.concurrent("without ~/.ssh/config", () => {
+		it(
+			"tests a host with its connection timeout (#1034)",
+			async () => {
+				const host = await slowSavedHost(21_000);
+				const { reply } = await run(host, {
+					...testMessage("saved-host", host.port),
+					connectTimeoutSeconds: 25,
+				});
+				expect(reply).toEqual({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
+			},
+			SLOW,
+		);
+
+		it(
+			"keeps 10 s without a connection timeout (#1034)",
+			async () => {
+				const host = await slowSavedHost(12_000);
+				const { ms, reply } = await run(host, testMessage("saved-host", host.port));
+				expect(reply).toEqual({
+					type: "TEST_CONNECT_FAIL",
+					hostId: "saved-host",
+					message: "Connection timed out",
+				});
+				expect(ms).toBeGreaterThanOrEqual(9_000);
+				expect(ms).toBeLessThan(12_000);
+			},
+			SLOW,
+		);
+
+		it(
+			"ignores a connection timeout outside 20-120 seconds (#1034)",
+			async () => {
+				const results = await Promise.all(
+					[0, 1_000_000_000, 30.5, "60"].map(async (value) => {
+						const host = await slowSavedHost(12_000);
+						const { ms, reply } = await run(host, {
+							...testMessage("saved-host", host.port),
+							connectTimeoutSeconds: value as number,
+						});
+						return [value, (reply as { type: string }).type, ms >= 9_000 && ms < 12_000];
+					}),
+				);
+				expect(results).toEqual([
+					[0, "TEST_CONNECT_FAIL", true],
+					[1_000_000_000, "TEST_CONNECT_FAIL", true],
+					[30.5, "TEST_CONNECT_FAIL", true],
+					["60", "TEST_CONNECT_FAIL", true],
+				]);
+			},
+			SLOW,
+		);
+
+		it(
+			"tests through a slow jump with the connection timeout (#1034)",
+			async () => {
+				const { harness, msg } = await throughSlowJump(21_000, 0);
+				const { reply } = await run(harness, { ...msg, connectTimeoutSeconds: 25 });
+				expect(reply).toEqual({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
+			},
+			SLOW,
+		);
+
+		it(
+			"tests a jump's connection and channel each with the connection timeout (#1034)",
+			async () => {
+				const { harness, msg } = await throughSlowJump(12_000, 12_000);
+				const { reply } = await run(harness, { ...msg, connectTimeoutSeconds: 20 });
+				expect(reply).toEqual({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
+			},
+			SLOW,
+		);
+
+		it(
+			"gives up on a test's jump that never opens the route (#1034)",
+			async () => {
+				const { harness, msg } = await throughSlowJump(0, null);
+				const { ms, reply } = await run(harness, { ...msg, connectTimeoutSeconds: 20 });
+				expect(reply).toMatchObject({ type: "TEST_CONNECT_FAIL", hostId: "saved-host" });
+				expect((reply as { message: string }).message).toContain(
+					"The jump host 127.0.0.1 did not open a route",
+				);
+				expect(ms).toBeGreaterThanOrEqual(19_000);
+				expect(ms).toBeLessThan(23_000);
+			},
+			SLOW,
+		);
+	});
+
+	describe("with ~/.ssh/config", () => {
+		it(
+			"takes ConnectTimeout for the saved host's alias (#1034)",
+			async () => {
+				const home = makeTempDir("lasterm-1034-test-config-");
+				try {
+					mkdirSync(join(home, ".ssh"));
+					writeFileSync(
+						join(home, ".ssh", "config"),
+						"Host slow\n  ConnectTimeout 25\nHost 127.0.0.1\n  ConnectTimeout 20\n",
+					);
+					vi.stubEnv("HOME", home);
+					vi.stubEnv("USERPROFILE", home);
+					const mock = await sshServer();
+					closers.push(() => mock.server.close());
+					const link = await slowLink(mock.port, 21_000);
+					closers.push(link.close);
+					// Saved on another port: the form changed it, and the alias stays.
+					const harness = setup({
+						type: "ssh",
+						sshHost: "127.0.0.1",
+						sshPort: 1,
+						sshConfigHost: "slow",
+						fingerprint,
+					});
+					const msg = testMessage("saved-host", link.port);
+					harness.ctx.trustedOnceFingerprints.set(testedRoute(msg, harness.ctx), fingerprint);
+					const { reply } = await run(harness, msg);
+					expect(reply).toEqual({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
+				} finally {
+					vi.stubEnv("HOME", emptyHome);
+					vi.stubEnv("USERPROFILE", emptyHome);
+					await removeTempDir(home);
+				}
+			},
+			SLOW,
+		);
 	});
 });

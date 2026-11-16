@@ -829,6 +829,7 @@ Host (permanent config)
  ├── sshProxySpec?: string | null      // or a jump given as user@host:port
  ├── sshProxyFingerprint?: string | null // the key pinned for a jump given as a spec
  ├── sshRemoteDaemon?: boolean | null  // keep an agent running there (#79); the Add Host dialog preselects Yes; null follows [ssh] remote_daemon
+ ├── connectTimeoutSeconds?: number | null  // 20-120 s for each wait of a connection (#1034); null: ~/.ssh/config ConnectTimeout >= 20 s, else the hub's own limits (PROTOCOL.md § 4.4)
  ├── agentSha256?: string | null       // SHA256 of the pinned remote agent binary
  ├── createdAt: string                 // ISO 8601
  └── updatedAt: string

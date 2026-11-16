@@ -30,6 +30,31 @@ export function sshPortFromText(text: string): number | null {
 	return port >= 1 && port <= 65535 ? port : null;
 }
 
+/**
+ * The shortest and longest connection timeout a host may set, in seconds
+ * (#1034). Never under the hub's own 20 s: the setting only gives a slow host
+ * more time, since ssh2's clock covers authentication, where a person may be.
+ */
+export const CONNECT_TIMEOUT_MIN_SECONDS = 20;
+export const CONNECT_TIMEOUT_MAX_SECONDS = 120;
+
+/** Whether `value` is a connection timeout a host may store: a whole number of seconds from 20 to 120. */
+export function isConnectTimeoutSeconds(value: unknown): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isInteger(value) &&
+		value >= CONNECT_TIMEOUT_MIN_SECONDS &&
+		value <= CONNECT_TIMEOUT_MAX_SECONDS
+	);
+}
+
+/** The connection timeout a text names, digits only as for the port, or null. */
+export function connectTimeoutFromText(text: string): number | null {
+	if (!/^[0-9]+$/.test(text)) return null;
+	const seconds = Number(text);
+	return isConnectTimeoutSeconds(seconds) ? seconds : null;
+}
+
 export const MAX_INPUT_SIZE = 65_536; // 64 KB
 
 export function isValidInputData(data: unknown): data is Uint8Array {

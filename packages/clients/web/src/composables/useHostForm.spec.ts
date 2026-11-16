@@ -1631,3 +1631,58 @@ describe("the Port field (#901)", () => {
 		expect(form.value.sshPort).toBe(2222);
 	});
 });
+
+// The connection timeout travels with the connection test, as the form holds
+// it, and an invalid one tests nothing (#1034).
+describe("the Connection timeout field (#1034)", () => {
+	const STORED: Host = {
+		id: "h-slow",
+		label: "slow",
+		type: "ssh",
+		sshHost: "slow.test",
+		sshAuth: "agent",
+		iconType: "auto",
+		trustRemoteHints: "apply",
+		sortOrder: 0,
+		os: "linux",
+		arch: null,
+		createdAt: "",
+		updatedAt: "",
+	};
+
+	beforeEach(() => {
+		knownHosts.length = 0;
+		daemonConnection.connected = false;
+		testWsClient.on.mockReset();
+		testWsClient.send.mockReset();
+		testWsClient.on.mockImplementation(() => () => {});
+	});
+
+	it("tests the connection with the timeout in the form (#1034)", async () => {
+		const { form, testConnectionInline } = useHostForm(STORED);
+		form.value.connectTimeout = "60";
+		void testConnectionInline();
+		await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledTimes(1));
+		expect(testWsClient.send.mock.calls[0]?.[0]).toMatchObject({
+			type: "TEST_CONNECT",
+			connectTimeoutSeconds: 60,
+		});
+
+		form.value.connectTimeout = "";
+		void testConnectionInline();
+		await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledTimes(2));
+		expect(testWsClient.send.mock.calls[1]?.[0]).not.toHaveProperty("connectTimeoutSeconds");
+	});
+
+	it("sends no test after the timeout became invalid (#1034)", async () => {
+		const { form, testConnectionInline, testing } = useHostForm(STORED);
+		form.value.connectTimeout = "60";
+
+		const pending = testConnectionInline();
+		form.value.connectTimeout = "19";
+		await pending;
+
+		expect(testWsClient.send).not.toHaveBeenCalled();
+		expect(testing.value).toBe(false);
+	});
+});

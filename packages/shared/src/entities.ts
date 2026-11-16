@@ -179,6 +179,13 @@ export interface Host {
 	 * because leaving a process behind is a decision about *this* machine.
 	 */
 	sshRemoteDaemon?: boolean | null;
+	/**
+	 * How long each wait of a connection to this host may last, in whole
+	 * seconds from 20 to 120 (#1034): the jump, the SSH server, reaching the
+	 * agent, its HELLO. Null takes `ConnectTimeout` from `~/.ssh/config` when it
+	 * is 20 s or more, otherwise the hub's own limits.
+	 */
+	connectTimeoutSeconds?: number | null;
 	/** SHA256 of the pinned remote agent binary (null = not yet verified). */
 	agentSha256?: string | null;
 	createdAt: string; // ISO 8601

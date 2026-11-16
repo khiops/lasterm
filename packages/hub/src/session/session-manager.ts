@@ -34,6 +34,7 @@ import type {
 	EnvMode,
 	ErrorMessage,
 	Host,
+	HostConnectingMessage,
 	InputMessage,
 	LiveCwd,
 	PasteCancelMessage,
@@ -177,7 +178,11 @@ export function answeringSpawn(client: WsClient, requestId: string | undefined):
 		id: client.id,
 		attachedChannels: client.attachedChannels,
 		send: (msg) =>
-			client.send(msg.type === "ERROR" || msg.type === "SPAWN_OK" ? { ...msg, requestId } : msg),
+			client.send(
+				msg.type === "ERROR" || msg.type === "SPAWN_OK" || msg.type === "HOST_CONNECTING"
+					? { ...msg, requestId }
+					: msg,
+			),
 	};
 }
 
@@ -1186,6 +1191,8 @@ export class SessionManager {
 							hostId,
 							acqId: acq.id,
 						});
+						// The pane stops its own clock until the hub answers (#1034).
+						client.send({ type: "HOST_CONNECTING", hostId } satisfies HostConnectingMessage);
 						try {
 							session = await acq.connectPromise;
 						} catch (err) {
@@ -1242,6 +1249,11 @@ export class SessionManager {
 					try {
 						// getOrCreateSession is async; the session object is created here.
 						const sessionState = await this.agentMgr.getOrCreateSession(hostId, true, spawnFence);
+						// The pane stops its own clock until the hub answers: each wait of
+						// the connection below has its own bound, and the host's may be
+						// longer than the pane's 15 s (#1034). Every way out of the
+						// connection below answers it.
+						client.send({ type: "HOST_CONNECTING", hostId } satisfies HostConnectingMessage);
 						// B4 fix: _connectSshAgent returns the wired agent WITHOUT setting
 						// ctx.agents — we set it here, atomically with commit(), so no
 						// concurrent SPAWN can observe "agent live + acq live" simultaneously.
@@ -1267,6 +1279,25 @@ export class SessionManager {
 								lease,
 								releaseConnectingLease,
 							);
+							// A cancelled connection is answered nowhere else
+							// (`_connectSshAgent` sends nothing once its signal is aborted),
+							// and this pane, told HOST_CONNECTING, waits for an answer (#1034).
+							if (connectingAcq.controller.signal.aborted) {
+								client.send(
+									this.ctx.userDisconnectedHosts.has(hostId)
+										? hostDisconnectedMessage(
+												hostId,
+												host.label,
+												this.ctx.sessions.get(hostId)?.status ?? "closed",
+												reuseChannelId,
+											)
+										: ({
+												type: "ERROR",
+												code: "SSH_CONNECT_FAILED",
+												message: `The connection to ${host.label} was cancelled.`,
+											} satisfies ErrorMessage),
+								);
+							}
 							return null;
 						}
 
@@ -3589,6 +3620,11 @@ export class SessionManager {
 					err.mismatch,
 					err.pinnedSha256,
 				);
+				// Cancelled, as a Disconnect does: the question was withdrawn, and
+				// whoever started this answers it (#1034).
+				if (action === "reject" && signal?.aborted) {
+					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
+				}
 				if (action === "reject") {
 					const message = `Remote agent binary at ${err.remotePath} (sha256: ${err.remoteSha256}) was refused.`;
 					client.send({
@@ -3693,6 +3729,11 @@ export class SessionManager {
 						? { verdict: verdict.kind, file: verdict.file, line: verdict.line }
 						: undefined,
 				);
+				// Cancelled, as a Disconnect does: the question was withdrawn, and
+				// whoever started this answers it (#1034).
+				if (action === "reject" && signal?.aborted) {
+					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
+				}
 				if (action === "reject") {
 					client.send({
 						type: "ERROR",

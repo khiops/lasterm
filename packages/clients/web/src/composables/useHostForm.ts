@@ -402,7 +402,11 @@ export function useHostForm(editHost?: Host) {
 		const selectedEntry = sshConfigEntries.value.find(
 			(entry) => entry.name === selectedSshConfigHost.value,
 		);
-		if (selectedEntry?.proxyJump != null && chosen === selectedEntry.proxyJump) {
+		if (
+			source.value === "ssh-config" &&
+			selectedEntry?.proxyJump != null &&
+			chosen === selectedEntry.proxyJump
+		) {
 			return { ssh_proxy_host_id: null, ssh_proxy_spec: selectedEntry.proxyJump };
 		}
 		return proxyFields(
@@ -513,9 +517,10 @@ export function useHostForm(editHost?: Host) {
 			type: f.type,
 			...(f.type === "ssh" && {
 				ssh_host: f.sshHost,
-				...(selectedSshConfigHost.value && {
-					ssh_config_host: selectedSshConfigHost.value,
-				}),
+				...(source.value === "ssh-config" &&
+					selectedSshConfigHost.value && {
+						ssh_config_host: selectedSshConfigHost.value,
+					}),
 				// Only a valid port reaches here: canSave refuses an invalid one (#901).
 				...(f.sshPort !== undefined && { ssh_port: f.sshPort }),
 				...(f.sshUser && { ssh_user: f.sshUser }),

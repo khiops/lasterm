@@ -1221,7 +1221,7 @@ describe("the host a chosen SSH config entry saves (#1022)", () => {
 
 	it("stores the entry's alias and jump host as the import does", async () => {
 		knownHosts.push({ id: "bastion", label: "an unrelated host" } as Host);
-		const { sshConfigEntries, applySshConfigEntry, save } = useHostForm();
+		const { source, sshConfigEntries, applySshConfigEntry, save } = useHostForm();
 		sshConfigEntries.value = [
 			{
 				name: "keyed",
@@ -1234,6 +1234,7 @@ describe("the host a chosen SSH config entry saves (#1022)", () => {
 			},
 		];
 
+		source.value = "ssh-config";
 		applySshConfigEntry("keyed");
 		await save();
 
@@ -1251,7 +1252,7 @@ describe("the host a chosen SSH config entry saves (#1022)", () => {
 	});
 
 	it("replaces every field the next entry leaves out", async () => {
-		const { form, sshConfigEntries, applySshConfigEntry, save } = useHostForm();
+		const { form, source, sshConfigEntries, applySshConfigEntry, save } = useHostForm();
 		sshConfigEntries.value = [
 			{
 				name: "first",
@@ -1273,6 +1274,7 @@ describe("the host a chosen SSH config entry saves (#1022)", () => {
 			},
 		];
 
+		source.value = "ssh-config";
 		applySshConfigEntry("first");
 		applySshConfigEntry("second");
 
@@ -1290,6 +1292,66 @@ describe("the host a chosen SSH config entry saves (#1022)", () => {
 			ssh_proxy_spec: null,
 		});
 		expect(body).not.toHaveProperty("ssh_user");
+	});
+
+	it("limits the alias and literal ProxyJump handling to the SSH config source", async () => {
+		knownHosts.push({ id: "bastion", label: "an unrelated host" } as Host);
+		const { form, source, sshConfigEntries, applySshConfigEntry, save } = useHostForm();
+		sshConfigEntries.value = [
+			{
+				name: "keyed",
+				hostname: "keyed.test",
+				port: 22,
+				user: "olivier",
+				identityFile: "~/.ssh/id_keyed",
+				proxyJump: "bastion",
+				isGitHost: false,
+			},
+		];
+
+		source.value = "ssh-config";
+		applySshConfigEntry("keyed");
+		source.value = "manual";
+		form.value.sshHost = "manual.test";
+		await save();
+
+		const body = createHostSpy.mock.calls[0]?.[0];
+		expect(body).toMatchObject({
+			ssh_host: "manual.test",
+			ssh_proxy_host_id: "bastion",
+			ssh_proxy_spec: null,
+		});
+		expect(body).not.toHaveProperty("ssh_config_host");
+	});
+
+	it("does not carry a picked alias into a Manual Quick Connect", async () => {
+		const { source, quickConnect, sshConfigEntries, applySshConfigEntry, save } = useHostForm();
+		sshConfigEntries.value = [
+			{
+				name: "prod",
+				hostname: "prod.test",
+				port: 22,
+				user: "prod-user",
+				identityFile: null,
+				proxyJump: null,
+				isGitHost: false,
+			},
+		];
+
+		source.value = "ssh-config";
+		applySshConfigEntry("prod");
+		source.value = "manual";
+		quickConnect.value = "alice@quick.test:2222";
+		await nextTick();
+		await save();
+
+		const body = createHostSpy.mock.calls[0]?.[0];
+		expect(body).toMatchObject({
+			ssh_host: "quick.test",
+			ssh_port: 2222,
+			ssh_user: "alice",
+		});
+		expect(body).not.toHaveProperty("ssh_config_host");
 	});
 });
 

@@ -2,6 +2,7 @@ import { isPlainObject, sshAuthFor, toSnakeCase, validateCustomCommand } from "@
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
+import { linkHostToProxyJump } from "./host-ssh-import.js";
 import type { CreateHostBody, UpdateHostBody } from "./hosts.js";
 import {
 	readHostProfileJson,
@@ -142,8 +143,9 @@ export function registerHostCrudRoutes(
 			...(body.arch !== undefined && { arch: body.arch }),
 		});
 
+		const linked = body.ssh_config_host ? linkHostToProxyJump(metaDal, host) : host;
 		announce("hosts");
-		return reply.code(201).send(toSnakeCase(host));
+		return reply.code(201).send(toSnakeCase(linked));
 	});
 
 	// PUT /api/hosts/order — reorder hosts within a group

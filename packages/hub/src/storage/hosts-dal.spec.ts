@@ -281,6 +281,16 @@ describe("HostsDAL — duplicateHost (#746)", () => {
 		dal = new HostsDAL(dbs.meta);
 	});
 	afterEach(() => dbs.close());
+
+	it("copies the connection timeout (#1034)", () => {
+		const slow = dal.createHost({
+			type: "ssh",
+			sshHost: "slow",
+			label: "slow",
+			connectTimeoutSeconds: 45,
+		});
+		expect(dal.duplicateHost(slow.id)?.connectTimeoutSeconds).toBe(45);
+	});
 	const create = (label: string, fields: Partial<CreateHostInput> = {}) =>
 		dal.createHost({ type: "ssh", sshHost: label, label, ...fields });
 	// A group's hosts as the rail shows them: in the hub's order, by sort_order.

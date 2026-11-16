@@ -1,4 +1,12 @@
-import { ELEVATION_METHODS_ALL, type Host, isBlankKeyPath, isPlainObject } from "@lasterm/shared";
+import {
+	CONNECT_TIMEOUT_MAX_SECONDS,
+	CONNECT_TIMEOUT_MIN_SECONDS,
+	ELEVATION_METHODS_ALL,
+	type Host,
+	isBlankKeyPath,
+	isConnectTimeoutSeconds,
+	isPlainObject,
+} from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
@@ -30,6 +38,8 @@ export interface CreateHostBody {
 	ssh_proxy_host_id?: string | null;
 	ssh_proxy_spec?: string | null;
 	ssh_remote_daemon?: boolean | null;
+	/** 20-120 whole seconds; null or absent for the default (#1034). */
+	connect_timeout_seconds?: number | null;
 	profile_json?: string;
 	elevation_method?: "sudo" | "doas" | "pkexec" | "gsudo" | "custom" | null;
 	custom_command?: string | null;
@@ -59,6 +69,8 @@ export interface UpdateHostBody {
 	ssh_proxy_host_id?: string | null;
 	ssh_proxy_spec?: string | null;
 	ssh_remote_daemon?: boolean | null;
+	/** null clears it, back to the default (#1034). */
+	connect_timeout_seconds?: number | null;
 	profile_json?: string;
 	elevation_method?: "sudo" | "doas" | "pkexec" | "gsudo" | "custom" | null;
 	custom_command?: string | null;
@@ -226,6 +238,10 @@ function validateHostFields(fields: Record<string, unknown>): string | null {
 	const daemon = fields.ssh_remote_daemon;
 	if (daemon !== undefined && daemon !== null && typeof daemon !== "boolean") {
 		return "ssh_remote_daemon must be boolean or null";
+	}
+	const timeout = fields.connect_timeout_seconds;
+	if (timeout !== undefined && timeout !== null && !isConnectTimeoutSeconds(timeout)) {
+		return `connect_timeout_seconds must be an integer between ${CONNECT_TIMEOUT_MIN_SECONDS} and ${CONNECT_TIMEOUT_MAX_SECONDS}`;
 	}
 	return validateSshPort(fields.ssh_port) ?? validateHostColor(fields.color);
 }

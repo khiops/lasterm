@@ -6880,6 +6880,7 @@ describe("SessionManager — elevation support", () => {
 //   - moving getOrCreateSession BEFORE the .set() call → two sessions in ctx.sessions
 
 // Re-import the mocked SshAgent so vi.mocked() can read call counts.
+import { AgentBinaryDecisionNeeded } from "./agent-deployer.js";
 import { SshAgent as _SshAgentForMock } from "./ssh-agent.js";
 
 describe("SessionManager — concurrent SSH connect coalescing", () => {
@@ -6920,6 +6921,189 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 	// SshAgent is constructed twice, and channels reference different sessionIds.
 	// Post-fix: exactly one session entry, one SshAgent construction, both
 	// channel states carry the same sessionId.
+	// ── #1034: the pane is told the hub is connecting its host ──────────────────
+	//
+	// Each wait of a connection has its own bound, and a host's may be longer
+	// than the pane's 15 s: the hub says it is connecting, once per SPAWN, and
+	// answers every SPAWN it said it to.
+
+	/** The next SshAgent: its start runs `start`, given the abort signal. */
+	function nextSshAgent(
+		start: (signal: AbortSignal | undefined) => Promise<void>,
+		tofu = false,
+	): void {
+		// biome-ignore lint/complexity/useArrowFunction: vitest 4 needs a constructable function for new-ed mocks
+		vi.mocked(_SshAgentForMock).mockImplementationOnce(function (
+			host: { id: string },
+			_promptAuth: unknown,
+			deployOptions?: MockSshAgentDeployOptions,
+		) {
+			const agent = new MockSshAgent(host, deployOptions);
+			if (tofu) {
+				agent.lastKeyVerification = {
+					capturedFingerprint: "SHA256:mockfp",
+					mismatch: false,
+					tofu: true,
+				} as typeof agent.lastKeyVerification;
+			}
+			agent.start = vi.fn((_fp: unknown, _trusted: unknown, signal?: AbortSignal) =>
+				start(signal),
+			) as unknown as typeof agent.start;
+			mockSshAgentInstance = agent;
+			return agent;
+		} as unknown as typeof _SshAgentForMock);
+	}
+
+	const connecting = (received: ProtocolMessage[]) =>
+		received.filter((m) => m.type === "HOST_CONNECTING");
+
+	it("tells each spawning client its host is being connected (#1034)", async () => {
+		const hostId = await createSshHost();
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		nextSshAgent(() => gate);
+		const r1: ProtocolMessage[] = [];
+		const r2: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1034-a", r1));
+		sm.addClient(makeClient("c-1034-b", r2));
+
+		const spawnA = sm.handleSpawn("c-1034-a", { type: "SPAWN", hostId, requestId: "r1" });
+		const spawnB = sm.handleSpawn("c-1034-b", { type: "SPAWN", hostId, requestId: "r2" });
+		await flushImmediate();
+		await flushImmediate();
+
+		// Still connecting: the start above has not returned.
+		expect(connecting(r1)).toEqual([{ type: "HOST_CONNECTING", hostId, requestId: "r1" }]);
+		expect(connecting(r2)).toEqual([{ type: "HOST_CONNECTING", hostId, requestId: "r2" }]);
+		expect(r1.some((m) => m.type === "SPAWN_OK")).toBe(false);
+
+		release();
+		expect(await spawnA).not.toBeNull();
+		expect(await spawnB).not.toBeNull();
+		expect(
+			r1.map((m) => m.type).filter((t) => t === "HOST_CONNECTING" || t === "SPAWN_OK"),
+		).toEqual(["HOST_CONNECTING", "SPAWN_OK"]);
+		expect(
+			r2.map((m) => m.type).filter((t) => t === "HOST_CONNECTING" || t === "SPAWN_OK"),
+		).toEqual(["HOST_CONNECTING", "SPAWN_OK"]);
+	});
+
+	it("sends one HOST_CONNECTING per spawn however many dials (#1034)", async () => {
+		const hostId = await createSshHost();
+		nextSshAgent(() => Promise.reject(new Error("SSH_TOFU")), true);
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1034-once", received));
+
+		const spawn = sm.handleSpawn("c-1034-once", { type: "SPAWN", hostId, requestId: "r-once" });
+		const prompt = await vi.waitFor(() => {
+			const asked = received.find((m) => m.type === "HOST_VERIFY") as
+				| { promptId: string }
+				| undefined;
+			if (asked === undefined) throw new Error("not asked yet");
+			return asked;
+		});
+		sm.handleHostVerifyResponse(prompt.promptId, "trust_once", "c-1034-once");
+
+		expect(await spawn).not.toBeNull();
+		// Two dials: the first refused for its unknown key, the second trusted.
+		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(2);
+		expect(connecting(received)).toEqual([
+			{ type: "HOST_CONNECTING", hostId, requestId: "r-once" },
+		]);
+	});
+
+	it("sends one HOST_CONNECTING when an approved agent binary dials again (#1034)", async () => {
+		const hostId = await createSshHost();
+		// The first dial finds a binary nobody approved; once trusted,
+		// _connectSshAgent is entered again and dials anew.
+		nextSshAgent(() =>
+			Promise.reject(
+				new AgentBinaryDecisionNeeded({
+					hostId,
+					hostname: "concurrent-test",
+					remotePath: "/home/user/.local/bin/lasterm-agent",
+					remoteSha256: "ab".repeat(32),
+					os: "linux",
+					arch: "x64",
+					mismatch: false,
+				}),
+			),
+		);
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1034-binary", received));
+
+		const spawn = sm.handleSpawn("c-1034-binary", { type: "SPAWN", hostId, requestId: "r-bin" });
+		const prompt = await vi.waitFor(() => {
+			const asked = received.find((m) => m.type === "AGENT_BINARY_VERIFY") as
+				| { promptId: string }
+				| undefined;
+			if (asked === undefined) throw new Error("not asked yet");
+			return asked;
+		});
+		sm.handleAgentVerifyResponse(prompt.promptId, "trust_once", "c-1034-binary");
+
+		expect(await spawn).not.toBeNull();
+		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(2);
+		expect(connecting(received)).toEqual([{ type: "HOST_CONNECTING", hostId, requestId: "r-bin" }]);
+	});
+
+	it("answers a spawn disconnected during its host-key question as disconnected (#1034)", async () => {
+		const hostId = await createSshHost();
+		nextSshAgent(() => Promise.reject(new Error("SSH_TOFU")), true);
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1034-ask", received));
+
+		const spawn = sm.handleSpawn("c-1034-ask", { type: "SPAWN", hostId, requestId: "r-ask" });
+		await vi.waitFor(() => {
+			if (!received.some((m) => m.type === "HOST_VERIFY")) throw new Error("not asked yet");
+		});
+		sm.disconnectHost(hostId);
+
+		expect(await spawn).toBeNull();
+		expect(received.filter((m) => m.type === "ERROR")).toEqual([
+			expect.objectContaining({
+				type: "ERROR",
+				hostId,
+				requestId: "r-ask",
+				message: "concurrent-ssh is disconnected. Connect it to start its terminals.",
+			}),
+		]);
+	});
+
+	it("answers a spawn whose connection its user cancelled (#1034)", async () => {
+		const hostId = await createSshHost();
+		nextSshAgent(
+			(signal) =>
+				new Promise<void>((_resolve, reject) => {
+					signal?.addEventListener("abort", () =>
+						reject(Object.assign(new Error("SSH connect aborted"), { name: "AbortError" })),
+					);
+				}),
+		);
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1034-cancel", received));
+
+		const spawn = sm.handleSpawn("c-1034-cancel", {
+			type: "SPAWN",
+			hostId,
+			requestId: "r-cancel",
+		});
+		await vi.waitFor(() => expect(connecting(received)).toHaveLength(1));
+		sm.disconnectHost(hostId);
+
+		expect(await spawn).toBeNull();
+		expect(received.filter((m) => m.type === "ERROR")).toEqual([
+			expect.objectContaining({
+				type: "ERROR",
+				hostId,
+				requestId: "r-cancel",
+				message: "concurrent-ssh is disconnected. Connect it to start its terminals.",
+			}),
+		]);
+	});
+
 	it("two concurrent SPAWNs share exactly one session and one SshAgent", async () => {
 		const hostId = await createSshHost();
 

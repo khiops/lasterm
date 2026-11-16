@@ -7,11 +7,20 @@ describe("parseJumpSpec", () => {
 	it("reads the plain form ssh_config uses", () => {
 		expect(parseJumpSpec("bastion")).toEqual({
 			kind: "spec",
-			spec: { user: null, host: "bastion", port: 22 },
+			spec: { user: null, host: "bastion", port: 22, portGiven: false },
 		});
 		expect(parseJumpSpec("jump@bastion.example.com:2222")).toEqual({
 			kind: "spec",
-			spec: { user: "jump", host: "bastion.example.com", port: 2222 },
+			spec: { user: "jump", host: "bastion.example.com", port: 2222, portGiven: true },
+		});
+		// Whether a port is written, which a link to a saved bastion compares (#1040).
+		expect(parseJumpSpec("gw")).toEqual({
+			kind: "spec",
+			spec: { user: null, host: "gw", port: 22, portGiven: false },
+		});
+		expect(parseJumpSpec("gw:2200")).toEqual({
+			kind: "spec",
+			spec: { user: null, host: "gw", port: 2200, portGiven: true },
 		});
 	});
 
@@ -19,11 +28,11 @@ describe("parseJumpSpec", () => {
 	it("reads the bracketed form", () => {
 		expect(parseJumpSpec("me@[bastion]:2222")).toEqual({
 			kind: "spec",
-			spec: { user: "me", host: "bastion", port: 2222 },
+			spec: { user: "me", host: "bastion", port: 2222, portGiven: true },
 		});
 		expect(parseJumpSpec("[bastion]")).toEqual({
 			kind: "spec",
-			spec: { user: null, host: "bastion", port: 22 },
+			spec: { user: null, host: "bastion", port: 22, portGiven: false },
 		});
 	});
 
@@ -31,11 +40,11 @@ describe("parseJumpSpec", () => {
 	it("does not mistake an IPv6 address for a host and a port", () => {
 		expect(parseJumpSpec("fe80::1")).toEqual({
 			kind: "spec",
-			spec: { user: null, host: "fe80::1", port: 22 },
+			spec: { user: null, host: "fe80::1", port: 22, portGiven: false },
 		});
 		expect(parseJumpSpec("[fe80::1]:2222")).toEqual({
 			kind: "spec",
-			spec: { user: null, host: "fe80::1", port: 2222 },
+			spec: { user: null, host: "fe80::1", port: 2222, portGiven: true },
 		});
 	});
 
@@ -78,7 +87,7 @@ describe("planJump", () => {
 	it("goes through a bastion named as a spec", () => {
 		expect(planJump({ sshProxySpec: "jump@bastion:2222" })).toEqual({
 			kind: "spec",
-			spec: { user: "jump", host: "bastion", port: 2222 },
+			spec: { user: "jump", host: "bastion", port: 2222, portGiven: true },
 		});
 	});
 

@@ -43,6 +43,7 @@ interface HostRow {
 	ssh_proxy_host_id: string | null;
 	ssh_proxy_spec: string | null;
 	ssh_remote_daemon: number | null;
+	connect_timeout_seconds: number | null;
 	ssh_proxy_fingerprint: string | null;
 	created_at: string;
 	updated_at: string;
@@ -103,6 +104,7 @@ function rowToHost(row: HostRow): Host {
 	if (row.ssh_proxy_spec != null) host.sshProxySpec = row.ssh_proxy_spec;
 	if (row.ssh_proxy_fingerprint != null) host.sshProxyFingerprint = row.ssh_proxy_fingerprint;
 	if (row.ssh_remote_daemon != null) host.sshRemoteDaemon = row.ssh_remote_daemon === 1;
+	host.connectTimeoutSeconds = row.connect_timeout_seconds;
 	return host;
 }
 
@@ -154,7 +156,7 @@ export class HostsDAL {
 				icon_type, icon_value, color, profile_json, trust_remote_hints,
 				default_cwd,
 				host_group_id, sort_order, ssh_config_host, ssh_user,
-				ssh_proxy_host_id, ssh_proxy_spec, ssh_remote_daemon,
+				ssh_proxy_host_id, ssh_proxy_spec, ssh_remote_daemon, connect_timeout_seconds,
 				elevation_method, custom_command,
 				os, arch,
 				created_at, updated_at
@@ -163,7 +165,7 @@ export class HostsDAL {
 				?, ?, ?, ?, ?,
 				?,
 				?, ?, ?, ?,
-				?, ?, ?,
+				?, ?, ?, ?,
 				?, ?,
 				?, ?,
 				?, ?
@@ -190,6 +192,7 @@ export class HostsDAL {
 				input.sshProxyHostId ?? null,
 				input.sshProxySpec ?? null,
 				input.sshRemoteDaemon == null ? null : input.sshRemoteDaemon ? 1 : 0,
+				input.connectTimeoutSeconds ?? null,
 				input.elevationMethod ?? null,
 				input.customCommand ?? null,
 				input.os ?? null,
@@ -287,6 +290,7 @@ export class HostsDAL {
 				sshProxySpec: "ssh_proxy_spec",
 				sshProxyFingerprint: "ssh_proxy_fingerprint",
 				sshRemoteDaemon: "ssh_remote_daemon",
+				connectTimeoutSeconds: "connect_timeout_seconds",
 				elevationMethod: "elevation_method",
 				customCommand: "custom_command",
 				os: "os",
@@ -504,6 +508,9 @@ export class HostsDAL {
 				...(original.sshUser != null && { sshUser: original.sshUser }),
 				...(original.sshRemoteDaemon !== undefined && {
 					sshRemoteDaemon: original.sshRemoteDaemon,
+				}),
+				...(original.connectTimeoutSeconds != null && {
+					connectTimeoutSeconds: original.connectTimeoutSeconds,
 				}),
 				// The jump is part of the route: without it the copy would dial the
 				// same address directly, which can be another machine.

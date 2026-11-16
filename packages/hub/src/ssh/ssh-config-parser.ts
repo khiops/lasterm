@@ -1,7 +1,12 @@
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { type SshConfigEntry, sshPortFromText } from "@lasterm/shared";
+import {
+	CONNECT_TIMEOUT_MAX_SECONDS,
+	CONNECT_TIMEOUT_MIN_SECONDS,
+	type SshConfigEntry,
+	sshPortFromText,
+} from "@lasterm/shared";
 
 const GIT_HOSTS = new Set([
 	"github.com",
@@ -416,4 +421,72 @@ export function identityAgentIsNone(alias: string, home: string = homedir()): bo
 		return false;
 	}
 	return resolveIdentityAgent(content, alias)?.toLowerCase() === "none";
+}
+
+/** Seconds per `convtime` unit (OpenSSH misc.c); no unit is seconds. */
+const CONVTIME_UNIT_SECONDS: Record<string, number> = {
+	s: 1,
+	m: 60,
+	h: 3_600,
+	d: 86_400,
+	w: 604_800,
+};
+
+/**
+ * The seconds a `ConnectTimeout` argument names, or null for none (#1034): a
+ * subset of OpenSSH's `convtime`, one or more `<digits>[smhdw]`, any case,
+ * summed. `none`, a fraction (`25.5`) or anything else is no value.
+ */
+function convtimeSeconds(word: string): number | null {
+	// Every run of digits but the last ends in a unit: one way to read the
+	// word, so matching stays linear however long it is.
+	if (!/^(?:[0-9]+[smhdw])*[0-9]+[smhdw]?$/i.test(word)) return null;
+	let seconds = 0;
+	for (const [, digits, unit] of word.matchAll(/([0-9]+)([smhdwSMHDW]?)/g)) {
+		seconds += Number(digits) * (CONVTIME_UNIT_SECONDS[(unit ?? "").toLowerCase()] ?? 1);
+	}
+	return seconds;
+}
+
+/**
+ * The connection timeout this configuration gives the host `name`, in seconds,
+ * as Lasterm takes it (#1034): the first `ConnectTimeout` among the lines that
+ * apply to `name`, as for `IdentityAgent`, its one argument read by
+ * `convtimeSeconds`; a line with more than one argument is no value. A value
+ * under `CONNECT_TIMEOUT_MIN_SECONDS` is none, since the setting only gives a
+ * host more time than the hub's own limits; one over
+ * `CONNECT_TIMEOUT_MAX_SECONDS` is that maximum.
+ */
+export function resolveConnectTimeout(content: string, name: string): number | null {
+	for (const directive of applyingTo(sectionsOf(directivesOf(content)), name)) {
+		if (directive.key !== "connecttimeout") continue;
+		const word = onlyArgument(directive);
+		const seconds = word === null ? null : convtimeSeconds(word);
+		if (seconds === null || seconds < CONNECT_TIMEOUT_MIN_SECONDS) return null;
+		return Math.min(seconds, CONNECT_TIMEOUT_MAX_SECONDS);
+	}
+	return null;
+}
+
+/**
+ * The connection timeout `~/.ssh/config` gives the first of `names` it gives
+ * one, in seconds, or null (#1034). The names are the host's alias, then its
+ * hostname, as ssh(1) matches the name it is given. A file that is missing or
+ * cannot be read gives none.
+ */
+export function sshConfigConnectTimeout(
+	names: readonly string[],
+	home: string = homedir(),
+): number | null {
+	let content: string;
+	try {
+		content = readFileSync(resolve(home, ".ssh", "config"), "utf-8");
+	} catch {
+		return null;
+	}
+	for (const name of names) {
+		const seconds = resolveConnectTimeout(content, name);
+		if (seconds !== null) return seconds;
+	}
+	return null;
 }

@@ -2,7 +2,6 @@ import { isPlainObject, sshAuthFor, toSnakeCase, validateCustomCommand } from "@
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
-import { linkHostToProxyJump } from "./host-ssh-import.js";
 import type { CreateHostBody, UpdateHostBody } from "./hosts.js";
 import {
 	readHostProfileJson,
@@ -136,6 +135,9 @@ export function registerHostCrudRoutes(
 			...(body.ssh_proxy_host_id !== undefined && { sshProxyHostId: body.ssh_proxy_host_id }),
 			...(body.ssh_proxy_spec !== undefined && { sshProxySpec: body.ssh_proxy_spec }),
 			...(body.ssh_remote_daemon !== undefined && { sshRemoteDaemon: body.ssh_remote_daemon }),
+			...(body.connect_timeout_seconds !== undefined && {
+				connectTimeoutSeconds: body.connect_timeout_seconds,
+			}),
 			...(profile.value != null && { profileJson: profile.value }),
 			...(body.elevation_method !== undefined && { elevationMethod: body.elevation_method }),
 			...(body.custom_command !== undefined && { customCommand: body.custom_command }),
@@ -143,9 +145,10 @@ export function registerHostCrudRoutes(
 			...(body.arch !== undefined && { arch: body.arch }),
 		});
 
-		const linked = body.ssh_config_host ? linkHostToProxyJump(metaDal, host) : host;
+		// The jump is stored as sent: the New Host dialog decided it when an
+		// entry was picked, and tested that same jump (#1042).
 		announce("hosts");
-		return reply.code(201).send(toSnakeCase(linked));
+		return reply.code(201).send(toSnakeCase(host));
 	});
 
 	// PUT /api/hosts/order — reorder hosts within a group
@@ -286,6 +289,9 @@ export function registerHostCrudRoutes(
 			if (body.ssh_proxy_spec !== undefined) updateInput.sshProxySpec = body.ssh_proxy_spec;
 			if (body.ssh_remote_daemon !== undefined) {
 				updateInput.sshRemoteDaemon = body.ssh_remote_daemon;
+			}
+			if (body.connect_timeout_seconds !== undefined) {
+				updateInput.connectTimeoutSeconds = body.connect_timeout_seconds;
 			}
 			if (profile.value !== undefined) updateInput.profileJson = profile.value;
 			if (body.elevation_method !== undefined) updateInput.elevationMethod = body.elevation_method;

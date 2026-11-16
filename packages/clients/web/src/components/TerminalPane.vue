@@ -43,6 +43,17 @@
 				</div>
 			</div>
 		</div>
+		<!-- A new terminal the page it was opened on never started (#992): nothing
+		     was asked of the hub, so nothing is gone. Start spawns it here. -->
+		<div v-else-if="notStarted" class="terminal-error terminal-error--not-connected">
+			<div class="terminal-error__box">
+				<span>This terminal was never started.</span>
+				<div class="terminal-error__actions">
+					<button class="exit-btn exit-btn--primary" @click="onStart">Start</button>
+					<button class="exit-btn" @click="onClosePaneFromOverlay">Close</button>
+				</div>
+			</div>
+		</div>
 		<div v-else-if="!ready" class="terminal-loading">
 			<span>Connecting…</span>
 		</div>
@@ -385,6 +396,23 @@ const spawnFor: string | null = spawnHostId !== null ? (props.channelId ?? null)
  * mounted over the id in the same render has taken hold of it.
  */
 const holdsSpawn = ref(spawnFor !== null);
+/**
+ * Whether the spawn this pane shows was owed by a page before this one (#992).
+ *
+ * The layout is saved with the ids of new terminals that never started, so a
+ * load restores leaves over ids no hub ever created a terminal for. Asking the
+ * hub to attach one is asking for a terminal that never was: it answered
+ * CHANNEL_NOT_FOUND, and the pane said the terminal no longer exists over what
+ * was only a terminal nobody had started yet. Nothing was started, so nothing
+ * is owed to the hub until someone asks for one here.
+ *
+ * Of the id the pane shows now, not of the one it mounted with: the layout
+ * keeps the pane and changes its id when the sidebar opens a terminal in it
+ * (#965), and the card belongs to the id (#992).
+ */
+const notStarted = computed(
+	() => props.channelId !== null && channelsStore.pendingSpawnIsRestored(props.channelId),
+);
 function releaseSpawn(): void {
 	if (!holdsSpawn.value || spawnFor === null) return;
 	holdsSpawn.value = false;
@@ -967,6 +995,17 @@ watch(isDead, (dead) => {
  */
 async function openChannel(cols: number, rows: number): Promise<void> {
 	try {
+		// A new terminal no page ever started (#992): nothing was asked of the
+		// hub under this id, so there is nothing to attach, and asking would be
+		// asking for a terminal that never was. The pane offers to start one
+		// here, and starts it when someone asks.
+		//
+		// Ready all the same: it is not opening anything, and given another
+		// terminal later, it attaches that one as any ready pane does (#965).
+		if (notStarted.value) {
+			ready.value = true;
+			return;
+		}
 		// The spawn it owes failed already, before a split or a move remounted
 		// it: shown as it is, with Retry or Connect, without the hub. A
 		// connection failing meanwhile would show its own error instead, which
@@ -1181,6 +1220,21 @@ async function onRetry(): Promise<void> {
 	// The spawn it owes failed: cleared as it is clicked, so the open below sends
 	// it again, or a pane remounted over the id while this one waits does (#980).
 	if (holdsSpawn.value && spawnFor !== null) channelsStore.clearFailedPendingSpawn(spawnFor);
+	const term = terminal.value;
+	await openChannel(term?.cols ?? 80, term?.rows ?? 24);
+}
+
+/**
+ * Start the new terminal this pane shows (#992).
+ *
+ * A page before this one owed the spawn and went away without sending it, so
+ * the record is this page's to take up: from here the id's spawn is run as any
+ * other, by the pane that shows it.
+ */
+async function onStart(): Promise<void> {
+	const tempId = props.channelId;
+	if (tempId === null) return;
+	channelsStore.adoptPendingSpawn(tempId);
 	const term = terminal.value;
 	await openChannel(term?.cols ?? 80, term?.rows ?? 24);
 }

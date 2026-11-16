@@ -19,6 +19,69 @@ import { useSessionStore } from "./session.js";
 
 const COLLAPSED_KEY = "lasterm:collapsed-groups";
 
+/**
+ * A pending id the layout still holds, as the page before this one left it.
+ *
+ * `sent` says a SPAWN went out under the id. The hub may have created the
+ * terminal, so it is not one nobody started: attaching is the right thing for
+ * the next page to do, and a second Start would leave a terminal nobody asked
+ * for (#992).
+ */
+interface PersistedSpawn {
+	hostId: string;
+	sent: boolean;
+}
+
+/**
+ * The pending ids the layout still holds, by id.
+ *
+ * The layout is saved with the ids of new terminals that never started, so a
+ * new page restores leaves over ids no terminal was ever created for. A hub
+ * answers an attach for one as a terminal it has no record of, which the pane
+ * showed as "This terminal no longer exists" (#992). Kept with the layout, the
+ * host is what says these are new terminals, not terminals that went missing.
+ */
+const PENDING_SPAWNS_KEY = "lasterm:pending-spawns";
+
+function loadPendingSpawns(): Record<string, PersistedSpawn> {
+	try {
+		const raw = localStorage.getItem(PENDING_SPAWNS_KEY);
+		if (raw === null) return {};
+		const held = JSON.parse(raw) as unknown;
+		if (typeof held !== "object" || held === null || Array.isArray(held)) return {};
+		const records: Record<string, PersistedSpawn> = {};
+		for (const [tempId, value] of Object.entries(held as Record<string, unknown>)) {
+			// A bare host was the whole record before `sent` was kept: nothing of
+			// that page's ever said a SPAWN went out, and a page that did send one
+			// wrote it under the next page's key only from there on. Read as sent,
+			// so the terminal a page may have started is attached rather than
+			// started again.
+			if (typeof value === "string") records[tempId] = { hostId: value, sent: true };
+			else if (
+				typeof value === "object" &&
+				value !== null &&
+				typeof (value as { hostId?: unknown }).hostId === "string"
+			) {
+				const record = value as { hostId: string; sent?: unknown };
+				records[tempId] = { hostId: record.hostId, sent: record.sent === true };
+			}
+		}
+		return records;
+	} catch {
+		return {};
+	}
+}
+
+function savePendingSpawns(records: Record<string, PersistedSpawn>): void {
+	try {
+		if (Object.keys(records).length === 0) localStorage.removeItem(PENDING_SPAWNS_KEY);
+		else localStorage.setItem(PENDING_SPAWNS_KEY, JSON.stringify(records));
+	} catch {
+		// Ignore storage errors, as the layout does: the record is a courtesy to
+		// the next page, and none of this page's panes depends on it.
+	}
+}
+
 function loadCollapsedMap(): Record<string, boolean> {
 	try {
 		const raw = localStorage.getItem(COLLAPSED_KEY);
@@ -147,6 +210,18 @@ interface PendingSpawn {
 	readonly hostId: string;
 	holders: number;
 	run: PendingSpawnRun | null;
+	/**
+	 * A SPAWN went out under the id (#992). The hub may have created the
+	 * terminal, so a page that loads such a record attaches rather than offering
+	 * to start one: a second SPAWN would leave a terminal nobody asked for.
+	 */
+	sent: boolean;
+	/**
+	 * A page before this one left the record, and no pane here has taken it up
+	 * (#992). Only those may be one whose spawn is owed but never sent; one this
+	 * page registered runs its spawn here.
+	 */
+	restored?: boolean;
 }
 
 /** Why the last attempt to bring a terminal back failed. */
@@ -965,20 +1040,96 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * one before it left it (#980). It goes once no pane holds it and no spawn of
 	 * it is in flight. The panes count themselves in and out, so it is no
 	 * reactive state.
+	 *
+	 * A load starts it from what the page before it left: those ids are in the
+	 * saved layout, and one the page never sent a SPAWN for is restored as owed
+	 * here (#992).
 	 */
-	const pendingSpawns = new Map<string, PendingSpawn>();
+	const pendingSpawns = new Map<string, PendingSpawn>(
+		Object.entries(loadPendingSpawns()).map(([tempId, held]) => [
+			tempId,
+			{ hostId: held.hostId, holders: 0, run: null, sent: held.sent, restored: true },
+		]),
+	);
 
+	/**
+	 * The ids whose spawn a page before this one owed and never sent, and no pane
+	 * has taken up since (#992).
+	 *
+	 * A pane shows the offer to start one while its id is in here, and takes it
+	 * out by adopting it. Reactive, unlike the records: the offer is part of
+	 * what the pane draws.
+	 *
+	 * Only the unsent ones. A page that sent a SPAWN may have left a terminal on
+	 * the hub, and attaching is what finds it; offering to start one again would
+	 * start a second.
+	 */
+	const restoredSpawns = ref<ReadonlySet<string>>(
+		new Set([...pendingSpawns].filter(([, record]) => !record.sent).map(([tempId]) => tempId)),
+	);
+
+	/**
+	 * Keep the ids whose spawn is still owed, so the next page can tell them from
+	 * terminals the hub has no record of.
+	 */
+	function persistPendingSpawns(): void {
+		const records: Record<string, PersistedSpawn> = {};
+		for (const [tempId, record] of pendingSpawns) {
+			records[tempId] = { hostId: record.hostId, sent: record.sent };
+		}
+		savePendingSpawns(records);
+	}
+
+	/**
+	 * A pane opened for a new terminal, on this page: the spawn is this page's to
+	 * send, so the id is no restorable one, whatever a page before it left under
+	 * the same id (#992).
+	 */
 	function registerPendingSpawn(tempId: string, hostId: string): void {
-		pendingSpawns.set(tempId, { hostId, holders: 0, run: null });
+		pendingSpawns.set(tempId, { hostId, holders: 0, run: null, sent: false });
+		if (restoredSpawns.value.has(tempId)) {
+			const next = new Set(restoredSpawns.value);
+			next.delete(tempId);
+			restoredSpawns.value = next;
+		}
+		persistPendingSpawns();
+	}
+
+	/**
+	 * Whether `tempId`'s spawn was owed by a page before this one, and no pane
+	 * here has taken it up: the terminal it was for never started, so there is
+	 * nothing for the hub to find (#992).
+	 */
+	function pendingSpawnIsRestored(tempId: string): boolean {
+		return restoredSpawns.value.has(tempId);
+	}
+
+	/**
+	 * A pane takes a restored spawn up: from now on it is this page's, and the
+	 * next pane to ask starts it rather than being told it never started.
+	 */
+	function adoptPendingSpawn(tempId: string): void {
+		if (!restoredSpawns.value.has(tempId)) return;
+		const next = new Set(restoredSpawns.value);
+		next.delete(tempId);
+		restoredSpawns.value = next;
+		const record = pendingSpawns.get(tempId);
+		if (record !== undefined) record.restored = false;
 	}
 
 	/**
 	 * A pane showing `tempId` counts itself in. Returns the host its spawn is
 	 * for, or null when no spawn is owed for that id.
+	 *
+	 * Null for one a page before this sent a SPAWN for and this page has not
+	 * taken up yet (#992): there is a terminal on the hub that an attach finds,
+	 * and owing a spawn would start a second one beside it. Read, not counted:
+	 * the pane holds nothing of an id it cannot spawn for.
 	 */
 	function holdPendingSpawn(tempId: string): string | null {
 		const record = pendingSpawns.get(tempId);
 		if (record === undefined) return null;
+		if (record.restored === true && record.sent) return null;
 		record.holders += 1;
 		return record.hostId;
 	}
@@ -993,7 +1144,14 @@ export const useChannelsStore = defineStore("channels", () => {
 
 	function forgetIfUnheld(tempId: string, record: PendingSpawn): void {
 		if (record.holders > 0 || record.run?.state === "running") return;
-		if (pendingSpawns.get(tempId) === record) pendingSpawns.delete(tempId);
+		if (pendingSpawns.get(tempId) !== record) return;
+		pendingSpawns.delete(tempId);
+		if (restoredSpawns.value.has(tempId)) {
+			const next = new Set(restoredSpawns.value);
+			next.delete(tempId);
+			restoredSpawns.value = next;
+		}
+		persistPendingSpawns();
 	}
 
 	/**
@@ -1008,6 +1166,12 @@ export const useChannelsStore = defineStore("channels", () => {
 		const record = pendingSpawns.get(tempId);
 		if (record === undefined) return null;
 		if (record.run !== null) return record.run;
+		// A SPAWN goes out below: a page that loads this id must attach rather
+		// than offer to start a second terminal for it (#992).
+		if (!record.sent) {
+			record.sent = true;
+			persistPendingSpawns();
+		}
 		// What its SPAWN_OK said of the agent's input (#1012).
 		let adaptsInput = false;
 		let streamsPaste = false;
@@ -1707,6 +1871,8 @@ export const useChannelsStore = defineStore("channels", () => {
 		registerPendingSpawn,
 		holdPendingSpawn,
 		releasePendingSpawn,
+		pendingSpawnIsRestored,
+		adoptPendingSpawn,
 		runPendingSpawn,
 		pendingSpawnRun,
 		clearFailedPendingSpawn,

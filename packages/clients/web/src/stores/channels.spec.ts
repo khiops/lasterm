@@ -2295,3 +2295,100 @@ describe("useChannelsStore — a new terminal's spawn, whichever pane shows it (
 		});
 	});
 });
+
+// ---------------------------------------------------------------------------
+// A pending id outlives the page it was made on (#992)
+// ---------------------------------------------------------------------------
+
+describe("useChannelsStore — a pending id outlives the page it was made on (#992)", () => {
+	/** The page after a reload: its own store, over the storage the last one left. */
+	function reload(): ReturnType<typeof useChannelsStore> {
+		setActivePinia(createPinia());
+		return useChannelsStore();
+	}
+
+	it("knows after a load which ids a spawn was owed for, and on which host", () => {
+		useChannelsStore().registerPendingSpawn("pending-1", "host-1");
+
+		const next = reload();
+
+		expect(next.holdPendingSpawn("pending-1")).toBe("host-1");
+	});
+
+	it("tells such an id apart from one whose spawn this page registered", () => {
+		useChannelsStore().registerPendingSpawn("pending-1", "host-1");
+
+		const next = reload();
+
+		expect(next.pendingSpawnIsRestored("pending-1")).toBe(true);
+		// Nothing was started: a page that went away took its spawn with it.
+		expect(next.pendingSpawnRun("pending-1")).toBeNull();
+	});
+
+	it("leaves a spawn this page registers to the pane that owes it", () => {
+		const store = useChannelsStore();
+		store.registerPendingSpawn("pending-1", "host-1");
+
+		expect(store.pendingSpawnIsRestored("pending-1")).toBe(false);
+		expect(store.holdPendingSpawn("pending-1")).toBe("host-1");
+	});
+
+	it("starts one the pane takes up, and asks no longer", () => {
+		useChannelsStore().registerPendingSpawn("pending-1", "host-1");
+		const next = reload();
+		next.holdPendingSpawn("pending-1");
+
+		next.adoptPendingSpawn("pending-1");
+
+		expect(next.pendingSpawnIsRestored("pending-1")).toBe(false);
+	});
+
+	it("forgets one no pane shows any more, so the next load does not see it", () => {
+		const store = useChannelsStore();
+		store.registerPendingSpawn("pending-1", "host-1");
+		store.holdPendingSpawn("pending-1");
+		store.releasePendingSpawn("pending-1");
+
+		expect(reload().holdPendingSpawn("pending-1")).toBeNull();
+	});
+
+	it("takes an id this page registers back from what a page before it left", () => {
+		useChannelsStore().registerPendingSpawn("pending-1", "host-1");
+		const next = reload();
+		expect(next.pendingSpawnIsRestored("pending-1")).toBe(true);
+
+		next.registerPendingSpawn("pending-1", "host-2");
+
+		expect(next.pendingSpawnIsRestored("pending-1")).toBe(false);
+		expect(next.holdPendingSpawn("pending-1")).toBe("host-2");
+	});
+
+	// The page went away with the SPAWN out and unanswered: the hub may have
+	// created the terminal, so the next page attaches, as it would for any other
+	// id. Offering to start one again would start a second (#992).
+	it("does not call a spawn that went out one nobody started", () => {
+		socket();
+		const store = useChannelsStore();
+		store.registerPendingSpawn("pending-1", "host-1");
+		store.holdPendingSpawn("pending-1");
+		expect(store.runPendingSpawn("pending-1", 80, 24)).not.toBeNull();
+
+		const next = reload();
+
+		expect(next.pendingSpawnIsRestored("pending-1")).toBe(false);
+		// Owing no spawn either: the pane attaches the terminal this may have
+		// started, rather than starting another beside it.
+		expect(next.holdPendingSpawn("pending-1")).toBeNull();
+	});
+
+	// Its own spawn, on this page: the pane that shows it runs it.
+	it("keeps a spawn this page sent with the pane that shows it", () => {
+		socket();
+		const store = useChannelsStore();
+		store.registerPendingSpawn("pending-1", "host-1");
+		store.holdPendingSpawn("pending-1");
+		store.runPendingSpawn("pending-1", 80, 24);
+
+		expect(store.holdPendingSpawn("pending-1")).toBe("host-1");
+	});
+});

@@ -3,7 +3,13 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
-import { identityAgentIsNone, parseSshConfig, resolveIdentityAgent } from "./ssh-config-parser.js";
+import {
+	identityAgentIsNone,
+	parseSshConfig,
+	resolveConnectTimeout,
+	resolveIdentityAgent,
+	sshConfigConnectTimeout,
+} from "./ssh-config-parser.js";
 
 describe("SSH Config Parser", () => {
 	it("parses a simple host block", () => {
@@ -341,5 +347,66 @@ describe("identityAgentIsNone", () => {
 
 	it("is false where there is no ~/.ssh/config to read", () => {
 		expect(identityAgentIsNone("box", empty)).toBe(false);
+	});
+});
+
+// A host without a connection timeout of its own takes ConnectTimeout from
+// ~/.ssh/config, never under the hub's own 20 s and never over 120 s (#1034).
+describe("resolveConnectTimeout", () => {
+	const of = (line: string): number | null => resolveConnectTimeout(`Host box\n  ${line}\n`, "box");
+
+	it("reads ConnectTimeout in the forms Lasterm takes, never under 20 s (#1034)", () => {
+		const expected: Array<[string, number | null]> = [
+			["ConnectTimeout 25", 25],
+			["ConnectTimeout=25", 25],
+			["ConnectTimeout = 25 # slow", 25],
+			['ConnectTimeout "25"', 25],
+			["ConnectTimeout '25'", 25],
+			["ConnectTimeout 25.5", null],
+			["ConnectTimeout 1m", 60],
+			["ConnectTimeout 1m30s", 90],
+			["ConnectTimeout 2M", 120],
+			["ConnectTimeout 1h", 120],
+			["ConnectTimeout 1H", 120],
+			["ConnectTimeout 1d", 120],
+			["ConnectTimeout 1D", 120],
+			["ConnectTimeout 1w", 120],
+			["ConnectTimeout 1W", 120],
+			["ConnectTimeout 1S", null],
+			["ConnectTimeout 20S", 20],
+			["ConnectTimeout 300", 120],
+			["ConnectTimeout 20", 20],
+			["ConnectTimeout 19", null],
+			["ConnectTimeout 5", null],
+			["ConnectTimeout 0", null],
+			["ConnectTimeout none", null],
+			["ConnectTimeout abc", null],
+			["ConnectTimeout 25 30", null],
+			["connecttimeout 25", 25],
+		];
+		expect(expected.map(([line]) => [line, of(line)])).toEqual(expected);
+	});
+
+	it("applies Host *, lines before any Host, and the first value only (#1034)", () => {
+		expect(resolveConnectTimeout("Host *\n  ConnectTimeout 40\n", "box")).toBe(40);
+		expect(resolveConnectTimeout("ConnectTimeout 40\nHost box\n  User me\n", "box")).toBe(40);
+		expect(
+			resolveConnectTimeout("Host box\n  ConnectTimeout 30\nHost *\n  ConnectTimeout 90\n", "box"),
+		).toBe(30);
+	});
+
+	it("ignores Match blocks, other hosts and negated patterns (#1034)", () => {
+		expect(resolveConnectTimeout("Match host box\n  ConnectTimeout 40\n", "box")).toBeNull();
+		expect(resolveConnectTimeout("Host other\n  ConnectTimeout 40\n", "box")).toBeNull();
+		expect(resolveConnectTimeout("Host box !box\n  ConnectTimeout 40\n", "box")).toBeNull();
+	});
+
+	it("gives none where there is no ~/.ssh/config to read (#1034)", async () => {
+		const empty = makeTempDir("lasterm-connect-timeout-empty-");
+		try {
+			expect(sshConfigConnectTimeout(["box"], empty)).toBeNull();
+		} finally {
+			await removeTempDir(empty);
+		}
 	});
 });

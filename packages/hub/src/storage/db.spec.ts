@@ -60,12 +60,12 @@ describe("openTestDatabases", () => {
 		expect(fk).toBe(1);
 	});
 
-	it("meta.db: schema_version is 27 after migration", () => {
+	it("meta.db: schema_version is 28 after migration", () => {
 		dbs = openTestDatabases();
 		const row = dbs.meta.prepare("SELECT MAX(version) as v FROM schema_version").get() as {
 			v: number;
 		};
-		expect(row.v).toBe(27);
+		expect(row.v).toBe(28);
 	});
 
 	it("spool.db: schema_version is 1 after migration", () => {
@@ -104,7 +104,7 @@ describe("openTestDatabases", () => {
 		expect(table?.name).toBe("chunks");
 	});
 
-	it("migration runner is idempotent (running twice produces same schema_version = 27)", () => {
+	it("migration runner is idempotent (running twice produces same schema_version = 28)", () => {
 		// First open
 		const dbs1 = openTestDatabases();
 		const v1 = (
@@ -119,8 +119,8 @@ describe("openTestDatabases", () => {
 		).v;
 		dbs2.close();
 
-		expect(v1).toBe(27);
-		expect(v2).toBe(27);
+		expect(v1).toBe(28);
+		expect(v2).toBe(28);
 	});
 
 	it("close() closes memory databases synchronously and returns a promise", async () => {
@@ -272,6 +272,7 @@ describe("meta.db and its baseline", () => {
 			{ version: 25 },
 			{ version: 26 },
 			{ version: 27 },
+			{ version: 28 },
 		]);
 		expect(tables(dbs.meta)).toEqual([
 			"auth_tokens",
@@ -323,6 +324,7 @@ describe("meta.db and its baseline", () => {
 			"ssh_proxy_fingerprint",
 			"ssh_remote_daemon",
 			"discovered_default_shell",
+			"connect_timeout_seconds",
 		]);
 		expect(columns(dbs.meta, "host_launch_profiles")).toEqual([
 			"host_id",
@@ -369,6 +371,7 @@ describe("meta.db and its baseline", () => {
 			{ version: 25 },
 			{ version: 26 },
 			{ version: 27 },
+			{ version: 28 },
 		]);
 		expect(tables(dbs.meta)).toEqual([
 			"host_launch_profiles",
@@ -392,6 +395,7 @@ describe("meta.db and its baseline", () => {
 			"ssh_fingerprint",
 			"ssh_proxy_fingerprint",
 			"discovered_default_shell",
+			"connect_timeout_seconds",
 		]);
 		expect(dbs.meta.prepare("SELECT * FROM hosts").all()).toEqual([
 			{
@@ -406,6 +410,7 @@ describe("meta.db and its baseline", () => {
 				ssh_fingerprint: null,
 				ssh_proxy_fingerprint: null,
 				discovered_default_shell: null,
+				connect_timeout_seconds: null,
 			},
 		]);
 	});
@@ -500,6 +505,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 25 },
 			{ version: 26 },
 			{ version: 27 },
+			{ version: 28 },
 		]);
 		// What a connection reads, and compares with fingerprintOf(key) as it is.
 		expect(dal.getHostFingerprint("T", routeOf("T"))).toBe(fingerprintOf(target));
@@ -535,6 +541,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 25 },
 			{ version: 26 },
 			{ version: 27 },
+			{ version: 28 },
 		]);
 		expect(pins(dbs.meta)).toEqual([]);
 	});
@@ -555,6 +562,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 25 },
 			{ version: 26 },
 			{ version: 27 },
+			{ version: 28 },
 		]);
 		expect(pins(dbs.meta)).toEqual(migrated);
 
@@ -640,6 +648,7 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 			{ version: 25 },
 			{ version: 26 },
 			{ version: 27 },
+			{ version: 28 },
 		]);
 		const row = (
 			id: string,
@@ -688,6 +697,7 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 			{ version: 25 },
 			{ version: 26 },
 			{ version: 27 },
+			{ version: 28 },
 		]);
 		expect(shells(dbs.meta)).toEqual(chosen);
 	});
@@ -766,6 +776,7 @@ describe("meta.db migration 024: a launch profile override says whether the user
 			{ version: 25 },
 			{ version: 26 },
 			{ version: 27 },
+			{ version: 28 },
 		]);
 		expect(overrides(dbs.meta)).toEqual([
 			{
@@ -853,6 +864,7 @@ describe("meta.db migration 025: a launch profile can have its PowerShell report
 			{ version: 25 },
 			{ version: 26 },
 			{ version: 27 },
+			{ version: 28 },
 		]);
 		expect(
 			dbs.meta.prepare("SELECT id, report_directory, updated_at FROM launch_profiles").all(),
@@ -1033,12 +1045,27 @@ describe("meta.db migration 026: the uploads' tables", () => {
 
 		dbs = openDatabases(dir);
 
-		expect(versions(dbs.meta)).toEqual([...upTo25, { version: 26 }, { version: 27 }]);
+		expect(versions(dbs.meta)).toEqual([
+			...upTo25,
+			{ version: 26 },
+			{ version: 27 },
+			{ version: 28 },
+		]);
 		const after = contents(dbs.meta);
 		expect(Object.keys(after).filter((table) => !(table in before))).toEqual([
 			"transfer_items",
 			"transfers",
 		]);
+		// Migration 028, which runs after it, adds one column to hosts, NULL in
+		// every row (#1034): what 026 left is the rest.
+		const hosts = after.hosts as { columns: string[]; rows: Array<Record<string, unknown>> };
+		expect(hosts.rows.map((row) => row.connect_timeout_seconds)).toEqual(
+			hosts.rows.map(() => null),
+		);
+		after.hosts = {
+			columns: hosts.columns.filter((column) => column !== "connect_timeout_seconds"),
+			rows: hosts.rows.map(({ connect_timeout_seconds: _added, ...row }) => row),
+		};
 		for (const [table, was] of Object.entries(before)) expect(after[table]).toEqual(was);
 		expect(columns(dbs.meta, "transfers")).toEqual([
 			"id",
@@ -1124,7 +1151,12 @@ describe("meta.db migration 026: the uploads' tables", () => {
 		said.mockRestore();
 
 		expect(ahead).toBe(true);
-		expect(versions(dbs.meta)).toEqual([...upTo25, { version: 26 }, { version: 27 }]);
+		expect(versions(dbs.meta)).toEqual([
+			...upTo25,
+			{ version: 26 },
+			{ version: 27 },
+			{ version: 28 },
+		]);
 		const meta = new MetaDAL(dbs.meta);
 		expect(meta.getHost("H")?.label).toBe("pi");
 		expect(meta.deleteHost("H2")).toBe(true);
@@ -1198,8 +1230,65 @@ describe("meta.db migration 027", () => {
 			{ version: 25 },
 			{ version: 26 },
 			{ version: 27 },
+			{ version: 28 },
 		]);
 		const methods = ["agent", "key", "agent", "agent", "password", "agent", null];
-		expect(hosts(dbs.meta)).toEqual(rowsBefore.map((row, i) => ({ ...row, ssh_auth: methods[i] })));
+		expect(hosts(dbs.meta)).toEqual(
+			rowsBefore.map((row, i) => ({
+				...row,
+				ssh_auth: methods[i],
+				// Migration 028 runs after it (#1034).
+				connect_timeout_seconds: null,
+			})),
+		);
+	});
+});
+
+// ─── Migration 028: a connection timeout per host (#1034) ───────────────────
+
+describe("meta.db migration 028", () => {
+	let dir: string;
+	let dbs: DatabaseManager | undefined;
+
+	beforeEach(() => {
+		dir = makeTempDir("lasterm-db-028-");
+	});
+
+	afterEach(async () => {
+		await dbs?.close();
+		dbs = undefined;
+		await removeTempDir(dir);
+	});
+
+	const migration = (name: string) =>
+		readFileSync(fileURLToPath(new URL(`./migrations/meta/${name}`, import.meta.url)), "utf-8");
+
+	it("adds a host's connection timeout, null for existing hosts (#1034)", () => {
+		const before = new Database(join(dir, "meta.db"));
+		for (const file of [
+			"021-baseline.sql",
+			"022-unpadded-ssh-pins.sql",
+			"023-discovered-default-shell.sql",
+			"024-launch-profile-set-by-user.sql",
+			"025-launch-profile-report-directory.sql",
+			"026-transfers.sql",
+			"027-ssh-auth-for-every-ssh-host.sql",
+		]) {
+			before.exec(migration(file));
+		}
+		before
+			.prepare(
+				`INSERT INTO hosts (id, type, label, ssh_host, ssh_auth, created_at, updated_at)
+				VALUES ('H1', 'ssh', 'slow', 'a.test', 'agent', '2026-11-16T00:00:00.000Z', '2026-11-16T00:00:00.000Z')`,
+			)
+			.run();
+		before.close();
+
+		dbs = openDatabases(dir);
+		const dal = new MetaDAL(dbs.meta);
+
+		expect(dal.getHost("H1")?.connectTimeoutSeconds).toBeNull();
+		dal.updateHost("H1", { connectTimeoutSeconds: 30 });
+		expect(dal.getHost("H1")?.connectTimeoutSeconds).toBe(30);
 	});
 });

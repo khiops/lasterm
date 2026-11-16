@@ -15,6 +15,7 @@ use crate::flow::{Flow, Flows, InTransit, Queued};
 use crate::framing::{encode_frame, FrameReader};
 use crate::headless::{HeadlessMirror, SnapshotInfo};
 use crate::input::Offer;
+use crate::input_modes::{self, InputModeCell};
 use crate::owner::OwnerId;
 use crate::protocol::{error_codes, AgentToHub, SnapshotData};
 use crate::pty::{
@@ -288,6 +289,9 @@ pub(crate) fn build_hello(daemon: bool) -> AgentToHub {
         "env-modes".into(),
         // Sends CWD_CHANGE and answers CWD_QUERY (#834).
         "cwd".into(),
+        // Writes paste markers and cursor keys in the program's form, and
+        // sends the input modes and the alternate screen with a snapshot (#1012).
+        "input-modes".into(),
     ];
     if daemon {
         capabilities.push("hub-identity".into());
@@ -484,8 +488,12 @@ pub(crate) async fn handle_message(
             // follow on this connection, other channels' included (#740).
             let offered = {
                 let mgr = pty_manager.lock().await;
-                mgr.owned_by(&channel_id, owner)
-                    .map(|channel| channel.input.offer(data))
+                mgr.owned_by(&channel_id, owner).map(|channel| {
+                    // In the form the program asked for, whatever the client's
+                    // terminal believes (#1012).
+                    let data = input_modes::adapt(data, channel.input_modes.load());
+                    channel.input.offer(data)
+                })
             };
             match offered {
                 None => send_frame(&frame_tx, &channel_not_found(channel_id, None))?,
@@ -947,12 +955,12 @@ async fn handle_spawn(
     match spawn_result {
         Ok((ch_id, pty_pid)) => {
             // Get a reader for the new channel before releasing the broader context
-            let pty_reader_opt = {
+            let (pty_reader_opt, input_modes) = {
                 let mut mgr = pty_manager.lock().await;
-                mgr.reader_for(&ch_id)
+                (mgr.reader_for(&ch_id), mgr.input_modes_for(&ch_id))
             };
 
-            if let Some(pty_reader) = pty_reader_opt {
+            if let (Some(pty_reader), Some(input_modes)) = (pty_reader_opt, input_modes) {
                 // Create a headless mirror for this channel (not Send — lives in the reader task)
                 let mirror = HeadlessMirror::new(cols, rows, 1000);
                 // Its directory, starting where the agent started it (#834).
@@ -999,6 +1007,7 @@ async fn handle_spawn(
                     pty_pid,
                     pty_reader,
                     mirror,
+                    input_modes,
                     cwd,
                     cmd_rx,
                     cmd_tx,
@@ -1060,6 +1069,7 @@ fn spawn_reader_task(
     pty_pid: u32,
     mut pty_reader: async_xpty::PtyReader,
     mirror: HeadlessMirror,
+    input_modes: Arc<InputModeCell>,
     cwd: CwdTracker,
     mut cmd_rx: mpsc::UnboundedReceiver<ChannelCommand>,
     own_cmd_tx: mpsc::UnboundedSender<ChannelCommand>,
@@ -1132,6 +1142,7 @@ fn spawn_reader_task(
 
                             // Feed output to the headless mirror BEFORE sending to batch
                             mirror.process(&data);
+                            input_modes.store(mirror.input_modes());
 
                             // Send to batch loop for OUTPUT frames
                             channel_events.send(ChannelEvent::Output(OutputEvent {
@@ -1428,6 +1439,8 @@ fn answer_snapshot(
         rows: info.rows,
         cursor_x: info.cursor_x,
         cursor_y: info.cursor_y,
+        alternate_screen: info.alternate_screen,
+        input_modes: info.input_modes,
     };
     let msg = match request.reply {
         SnapshotReply::Attach { request_id } => AgentToHub::AttachOk {
@@ -2190,6 +2203,95 @@ mod stdio_tests {
             "no reply goes down the pipeline"
         );
         assert!(replies.try_recv().is_err(), "nor to the connection");
+    }
+
+    /// The ATTACH_OK carries the program's input modes and whether it is in
+    /// the alternate screen (#1012).
+    #[tokio::test]
+    async fn attach_ok_carries_the_input_modes_and_the_alternate_screen() {
+        use crate::protocol::HubToAgent;
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let (shell, args): (&str, Vec<String>) = if cfg!(windows) {
+            (
+                "pwsh.exe",
+                vec![
+                    "-NoProfile".into(),
+                    "-NoLogo".into(),
+                    "-Command".into(),
+                    "[Console]::Write([char]27+'[?2004h'+[char]27+'[?1049hREADY'); Start-Sleep 20"
+                        .into(),
+                ],
+            )
+        } else {
+            (
+                "/bin/sh",
+                vec![
+                    "-c".into(),
+                    "printf '\\033[?2004h\\033[?1049hREADY'; sleep 20".into(),
+                ],
+            )
+        };
+        let mut events =
+            start_shell_in("modes", shell, args, None, false, &manager, &senders).await;
+        let mut seen = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !String::from_utf8_lossy(&seen).contains("READY") {
+                if let Some(ChannelEvent::Output(output)) = events.recv().await {
+                    seen.extend_from_slice(&output.data);
+                }
+            }
+        })
+        .await
+        .expect("the program writes its modes");
+
+        answers(
+            HubToAgent::Attach {
+                channel_id: "modes".into(),
+                request_id: Some("attach-m".into()),
+            },
+            &manager,
+            &senders,
+        )
+        .await;
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match events.recv().await {
+                    Some(ChannelEvent::Reply(reply)) => break reply,
+                    Some(_) => continue,
+                    None => panic!("the terminal's pipeline closed without a reply"),
+                }
+            }
+        })
+        .await
+        .expect("the reader replies");
+        if let Some(process) = manager.lock().await.remove("modes") {
+            let _ = process.kill_tree();
+        }
+
+        let attached: serde_json::Value = rmp_serde::from_slice(&reply.frame[4..]).unwrap();
+        assert_eq!(attached["type"], "ATTACH_OK");
+        assert_eq!(attached["snapshot"]["alternate_screen"], true);
+        let modes = attached["snapshot"]["input_modes"]
+            .as_str()
+            .expect("input_modes");
+        assert!(modes.contains("\x1b[?2004h"), "{modes:?}");
+    }
+
+    /// The agent says it writes input in the program's form (#1012).
+    #[test]
+    fn every_agent_says_input_modes() {
+        for daemon in [false, true] {
+            match build_hello(daemon) {
+                AgentToHub::Hello { capabilities, .. } => {
+                    assert!(
+                        capabilities.contains(&"input-modes".to_string()),
+                        "{capabilities:?}"
+                    );
+                }
+                _ => unreachable!("build_hello builds HELLO"),
+            }
+        }
     }
 
     /// Only a daemon says it tells hubs apart.

@@ -43,6 +43,8 @@ let nextLocalSpawnError: { code: string; message: string } | null = null;
 let nextLocalAttachNotFoundChannelId: string | null = null;
 let localChannelStateWaitCount = 0;
 let nextLocalChannelStateFailure: Error | null = null;
+/** The capabilities the next local agent says in its HELLO; none said when null. */
+let nextLocalAgentCapabilities: string[] | null = null;
 const mockLocalAgents: Array<{
 	send: ReturnType<typeof vi.fn>;
 	close: ReturnType<typeof vi.fn>;
@@ -66,9 +68,19 @@ vi.mock("./agent-launcher.js", () => {
 
 	class MockLocalAgent extends EventEmitter {
 		private _connected = true;
+		helloMessage: unknown;
 		constructor() {
 			super();
 			mockLocalAgents.push(this);
+			this.helloMessage =
+				nextLocalAgentCapabilities === null
+					? undefined
+					: {
+							type: "HELLO",
+							version: 1,
+							agentVersion: "0.0.0",
+							capabilities: nextLocalAgentCapabilities,
+						};
 		}
 		start = vi.fn().mockResolvedValue(undefined);
 		waitForChannelState = vi.fn(() => {
@@ -353,6 +365,7 @@ describe("SessionManager", () => {
 		localSpawnCount = 0;
 		sshSpawnCount = 0;
 		localChannelStateWaitCount = 0;
+		nextLocalAgentCapabilities = null;
 		mockLocalAgents.length = 0;
 		mockSshAgentInstance = null;
 		nextSshStartCallsAgentUpdated = false;
@@ -2781,6 +2794,193 @@ describe("SessionManager", () => {
 	// OUTPUT it hears while its ATTACH waits writes, from a cached ATTACH_OK,
 	// only what that answer holds: so after its snapshot it holds the output
 	// the hub has received, stored yet or not, within the tail's bound.
+	describe("whether the terminal's agent adapts input (#1012)", () => {
+		type Answer = {
+			type: string;
+			adaptsInput?: boolean;
+			cached?: boolean;
+			snapshot?: Record<string, unknown> | null;
+		};
+		const answers = (received: ProtocolMessage[], type: string) =>
+			received.filter((m) => m.type === type) as unknown as Answer[];
+
+		it("says so on SPAWN_OK and a live ATTACH_OK when the host's agent says input-modes", async () => {
+			nextLocalAgentCapabilities = ["multiplex", "snapshot", "input-modes"];
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c1", received));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+			await sm.handleAttach("c1", "local-ch-1");
+
+			expect(answers(received, "SPAWN_OK")[0]?.adaptsInput).toBe(true);
+			const live = answers(received, "ATTACH_OK")[0];
+			expect(live?.cached).toBe(false);
+			expect(live?.adaptsInput).toBe(true);
+		});
+
+		for (const [capabilities, adapts] of [
+			[["input-modes"], true],
+			[[], false],
+		] as const) {
+			it(`says ${adapts} on an ATTACH_OK answered from memory while the host's agent says ${capabilities.length > 0 ? "input-modes" : "nothing of it"}, whatever agent stored the snapshot`, async () => {
+				const { MetaDAL } = await import("../storage/meta.js");
+				const dal = new MetaDAL(dbManager.meta);
+				const host = dal.createHost({
+					type: "ssh",
+					label: "test-ssh-adapting",
+					sshHost: "user@localhost",
+					sshAuth: "key",
+					sshKeyPath: "/nonexistent/key",
+				});
+				sm.addClient(makeClient("c1", []));
+				await sm.handleSpawn("c1", { type: "SPAWN", hostId: host.id });
+				const agent = mockSshAgentInstance as unknown as {
+					helloMessage: unknown;
+					send: (msg: ProtocolMessage) => void;
+					_emit(event: string, msg: unknown): void;
+				};
+				agent.helloMessage = {
+					type: "HELLO",
+					version: 1,
+					agentVersion: "0.0.0",
+					capabilities: [...capabilities],
+				};
+				// Stored by an agent that adapted input.
+				const stored = {
+					serialized: "<cached-snap>",
+					cols: 80,
+					rows: 24,
+					cursorX: 0,
+					cursorY: 0,
+					alternateScreen: true,
+					inputModes: "\u001b[?2004h",
+				};
+				new SpoolDAL(dbManager.spool).insertChunk({
+					channelId: "ssh-ch-1",
+					seq: 10,
+					kind: "snapshot",
+					dataBlob: Buffer.from(JSON.stringify(stored)),
+					uncompressedLen: JSON.stringify(stored).length,
+				});
+				// Its ATTACH fails for another reason than a gone terminal: the hub
+				// answers from memory, the agent still connected.
+				const send = agent.send;
+				agent.send = (msg: ProtocolMessage) => {
+					if (msg.type !== "ATTACH") return send(msg);
+					const ask = msg as unknown as { channelId: string; requestId: string };
+					setImmediate(() =>
+						agent._emit("message", {
+							type: "ERROR",
+							code: "INTERNAL_ERROR",
+							message: "busy",
+							channelId: ask.channelId,
+							requestId: ask.requestId,
+						}),
+					);
+				};
+
+				const received: ProtocolMessage[] = [];
+				sm.addClient(makeClient("c2", received));
+				await sm.handleAttach("c2", "ssh-ch-1");
+
+				const cached = answers(received, "ATTACH_OK")[0];
+				expect(cached?.cached).toBe(true);
+				expect(cached?.snapshot?.inputModes).toBe("\u001b[?2004h");
+				expect(cached?.adaptsInput).toBe(adapts);
+			});
+		}
+
+		it("says not when the host's agent does not say input-modes", async () => {
+			nextLocalAgentCapabilities = ["multiplex", "snapshot"];
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c1", received));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+			await sm.handleAttach("c1", "local-ch-1");
+
+			expect(answers(received, "SPAWN_OK")[0]?.adaptsInput).toBe(false);
+			expect(answers(received, "ATTACH_OK")[0]?.adaptsInput).toBe(false);
+		});
+
+		it("says what the agent the hub has when it answers says, not the one it asked", async () => {
+			nextLocalAgentCapabilities = ["input-modes"];
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c1", received));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+			const agents = (sm as unknown as { ctx: { agents: Map<string, unknown> } }).ctx.agents;
+			const [hostId, entry] = [...agents.entries()][0] ?? [];
+			const asked = entry as { send: (msg: ProtocolMessage) => void };
+			// An agent that does not adapt takes the host's place while the
+			// asked one is answering the ATTACH.
+			const replacement = Object.create(asked, {
+				helloMessage: {
+					value: { type: "HELLO", version: 1, agentVersion: "0.0.0", capabilities: [] },
+				},
+			});
+			const send = asked.send;
+			asked.send = (msg: ProtocolMessage) => {
+				if (msg.type === "ATTACH") agents.set(hostId as string, replacement);
+				send(msg);
+			};
+
+			await sm.handleAttach("c1", "local-ch-1");
+
+			expect(answers(received, "ATTACH_OK")[0]?.adaptsInput).toBe(false);
+		});
+
+		it("answers from memory with the snapshot's state, and says not when the host has no agent, whatever agent stored it", async () => {
+			const { MetaDAL } = await import("../storage/meta.js");
+			const dal = new MetaDAL(dbManager.meta);
+			const host = dal.createHost({
+				type: "ssh",
+				label: "test-ssh-modes",
+				sshHost: "user@localhost",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+			});
+			sm.addClient(makeClient("c1", []));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: host.id });
+			sm.handleDetach("c1", "ssh-ch-1");
+			// Stored by an agent that adapted input.
+			const stored = {
+				serialized: "<cached-snap>",
+				cols: 80,
+				rows: 24,
+				cursorX: 0,
+				cursorY: 0,
+				alternateScreen: true,
+				inputModes: "\u001b[?2004h",
+			};
+			new SpoolDAL(dbManager.spool).insertChunk({
+				channelId: "ssh-ch-1",
+				seq: 10,
+				kind: "snapshot",
+				dataBlob: Buffer.from(JSON.stringify(stored)),
+				uncompressedLen: JSON.stringify(stored).length,
+			});
+			const agent = mockSshAgentInstance as unknown as {
+				helloMessage: unknown;
+				simulateClose(): void;
+			};
+			agent.helloMessage = {
+				type: "HELLO",
+				version: 1,
+				agentVersion: "0.0.0",
+				capabilities: ["input-modes"],
+			};
+			agent.simulateClose();
+			await new Promise((r) => setImmediate(r));
+
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c2", received));
+			await sm.handleAttach("c2", "ssh-ch-1");
+
+			const cached = answers(received, "ATTACH_OK")[0];
+			expect(cached?.cached).toBe(true);
+			expect(cached?.snapshot?.alternateScreen).toBe(true);
+			expect(cached?.snapshot?.inputModes).toBe("\u001b[?2004h");
+			expect(cached?.adaptsInput).toBe(false);
+		});
+	});
+
 	describe("an ATTACH answered from the spool (#956)", () => {
 		const SCREEN = { serialized: "<screen>", cols: 80, rows: 24, cursorX: 0, cursorY: 0 };
 

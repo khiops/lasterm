@@ -532,3 +532,138 @@ async fn input_to_a_held_back_terminal_does_not_block_its_connection() {
 
     tear_down(&daemon, &dir).await;
 }
+
+/// Read until `channel_id` has printed `marker`: its reader has processed it,
+/// and published its modes before passing the output on (#1012).
+#[cfg(unix)]
+async fn read_until_printed(hub: &mut TestHub, channel_id: &str, marker: &str) {
+    read_until_each_printed(hub, &[(channel_id, marker)]).await;
+}
+
+/// Read until each terminal has printed its marker. The output of every one
+/// is kept as it comes, whichever prints first: a frame read while waiting for
+/// another terminal is not lost.
+#[cfg(unix)]
+async fn read_until_each_printed(hub: &mut TestHub, waits: &[(&str, &str)]) {
+    let mut printed: Vec<Vec<u8>> = vec![Vec::new(); waits.len()];
+    let done = |printed: &[Vec<u8>]| {
+        waits
+            .iter()
+            .zip(printed)
+            .all(|((_, marker), out)| String::from_utf8_lossy(out).contains(marker))
+    };
+    tokio::time::timeout(DEADLINE, async {
+        while !done(&printed) {
+            let frame = hub.next_frame().await;
+            for (index, (channel_id, _)) in waits.iter().enumerate() {
+                if is_about(&frame, "OUTPUT", channel_id) {
+                    printed[index].extend_from_slice(output_data(&frame));
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let missing: Vec<_> = waits
+            .iter()
+            .zip(&printed)
+            .filter(|((_, marker), out)| !String::from_utf8_lossy(out).contains(marker))
+            .map(|((channel_id, marker), _)| format!("{channel_id} ({marker})"))
+            .collect();
+        panic!("{} did not print within {DEADLINE:?}", missing.join(", "))
+    });
+}
+
+/// The bytes a raw program wrote to `path` once it holds `len` of them.
+#[cfg(unix)]
+async fn raw_bytes(path: &Path, len: usize) -> Vec<u8> {
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            if let Ok(bytes) = std::fs::read(path) {
+                if bytes.len() >= len {
+                    return bytes;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "{} did not get {len} bytes within {DEADLINE:?}",
+            path.display()
+        )
+    })
+}
+
+/// The agent writes paste markers and cursor keys in the form the program
+/// asked for, from what its reader saw, and follows the program changing it
+/// (#1012). Unix only: ConPTY keeps a program's `?1h` to itself, and Windows
+/// has no raw reader to record what reaches the program.
+#[cfg(unix)]
+#[tokio::test]
+async fn input_reaches_the_program_in_the_form_it_asked_for() {
+    let dir = scratch("input-modes");
+    let first = dir.join("first");
+    let second = dir.join("second");
+    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+    let mut hub = TestHub::connect(&daemon, KEY_A, 1).await;
+    hub.spawn(spawn_running(
+        "modes",
+        &format!(
+            "stty raw -echo; printf '\\033[?1h\\033[?2004hREADY'; head -c 16 > {}; printf '\\033[?2004lCLEARED'; head -c 1 > {}",
+            first.display(),
+            second.display()
+        ),
+    ))
+    .await;
+    read_until_printed(&mut hub, "modes", "READY").await;
+
+    // Modes on: application cursor keys, and the markers kept.
+    hub.send(&input("modes", b"\x1b[A\x1b[200~x\x1b[201~".to_vec()))
+        .await;
+    assert_eq!(raw_bytes(&first, 16).await, b"\x1bOA\x1b[200~x\x1b[201~");
+
+    // Bracketed paste cleared by the program: the markers go.
+    read_until_printed(&mut hub, "modes", "CLEARED").await;
+    hub.send(&input("modes", b"\x1b[200~x\x1b[201~".to_vec()))
+        .await;
+    assert_eq!(raw_bytes(&second, 1).await, b"x");
+
+    tear_down(&daemon, &dir).await;
+}
+
+/// Each terminal's input follows its own program's modes, not another's.
+#[cfg(unix)]
+#[tokio::test]
+async fn each_terminal_adapts_its_input_to_its_own_program() {
+    let dir = scratch("input-modes-two");
+    let a = dir.join("a");
+    let b = dir.join("b");
+    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+    let mut hub = TestHub::connect(&daemon, KEY_A, 1).await;
+    hub.spawn(spawn_running(
+        "with-decckm",
+        &format!(
+            "stty raw -echo; printf '\\033[?1hREADY'; head -c 3 > {}",
+            a.display()
+        ),
+    ))
+    .await;
+    hub.spawn(spawn_running(
+        "without",
+        &format!(
+            "stty raw -echo; printf 'READY'; head -c 3 > {}",
+            b.display()
+        ),
+    ))
+    .await;
+    read_until_each_printed(&mut hub, &[("with-decckm", "READY"), ("without", "READY")]).await;
+
+    hub.send(&input("with-decckm", b"\x1b[A".to_vec())).await;
+    hub.send(&input("without", b"\x1b[A".to_vec())).await;
+    assert_eq!(raw_bytes(&a, 3).await, b"\x1bOA");
+    assert_eq!(raw_bytes(&b, 3).await, b"\x1b[A");
+
+    tear_down(&daemon, &dir).await;
+}

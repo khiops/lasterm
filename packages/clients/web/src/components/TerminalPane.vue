@@ -700,6 +700,14 @@ function takeAnswer(chId: string, facts: AttachFacts): void {
 }
 
 /**
+ * The screen stopped following the terminal, which ran on: answered from the
+ * hub's memory, or its host disconnected by its user. It stays so until a live
+ * answer, however the pane comes back (its Reconnect, the host connected from
+ * elsewhere, the hub's news), and that answer replaces it (#1010).
+ */
+let missedOutput = false;
+
+/**
  * Attach to the terminal, and let the hub's answer decide what covers it.
  *
  * Every attach goes through here: the pane opening, Reconnect, Restart, a new
@@ -737,6 +745,8 @@ async function attachAndCover(
 		return null;
 	}
 	takeAnswer(chId, factsFromAttachOk(result.cached));
+	// A live answer: the screen follows the terminal again, kept or replaced.
+	if (result.cached !== true) missedOutput = false;
 	return result;
 }
 
@@ -752,9 +762,9 @@ async function onReconnect(): Promise<void> {
 	if (chId === null || reattaching) return;
 	reattaching = true;
 	try {
-		// Over a screen answered from memory, the live answer replaces it: it
-		// holds what the terminal printed while its host was away (#1010).
-		await attachAndCover(chId, { preserveContent: true, replaceIfLive: isDetached.value });
+		// Over a screen that stopped following the terminal, the live answer
+		// replaces it: it holds what the terminal printed meanwhile (#1010).
+		await attachAndCover(chId, { preserveContent: true, replaceIfLive: missedOutput });
 	} catch {
 		// Still unreachable. The banner is already saying so.
 	} finally {
@@ -891,6 +901,24 @@ const hostDisconnectedByUser = computed(() => {
 	return hostId !== undefined && hostsStore.isDisconnectedByUser(hostId);
 });
 
+// Whether the screen missed output (#1010); its declaration is above
+// attachAndCover, which reads it. Nor is the pane attached live while its
+// host's user keeps the host disconnected: the hub's news that the terminal is
+// live again, the host connected from anywhere, brings it back.
+watch(
+	() => isDetached.value || hostDisconnectedByUser.value,
+	(away) => {
+		if (!away) return;
+		missedOutput = true;
+		attachedLive = false;
+	},
+	{ immediate: true },
+);
+// Another terminal: its first answer replaces the screen anyway.
+watch(effectiveChannelId, () => {
+	missedOutput = isDetached.value || hostDisconnectedByUser.value;
+});
+
 /** What the pane lays over its terminal, if anything. */
 const cover = computed(() =>
 	paneCover({
@@ -990,7 +1018,7 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 					// attachChannel would otherwise send (prevents SIGWINCH). A pane
 					// of another size sends its own.
 					suppressNextResize(spawned.cols, spawned.rows);
-					attachChannel(realId);
+					attachChannel(realId, { adaptsInput: spawned.adaptsInput });
 					attachedLive = true;
 					// Watched from its very start.
 					endWatch.starting(realId);

@@ -1002,25 +1002,26 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * size its PTY was spawned at, or the same error, with its `code` and
 	 * `asked`. A failed run stays until a Retry clears it.
 	 */
-	/** What each SPAWN_OK said of its agent's input (#1012), until its pane takes it. */
-	const spawnAdaptsInput = new Map<string, boolean>();
-	function takeSpawnAdaptsInput(channelId: string): boolean {
-		const adapts = spawnAdaptsInput.get(channelId) === true;
-		spawnAdaptsInput.delete(channelId);
-		return adapts;
-	}
-
 	function runPendingSpawn(tempId: string, cols: number, rows: number): PendingSpawnRun | null {
 		const record = pendingSpawns.get(tempId);
 		if (record === undefined) return null;
 		if (record.run !== null) return record.run;
+		// What its SPAWN_OK said of the agent's input (#1012).
+		let adaptsInput = false;
 		const run: PendingSpawnRun = {
 			state: "running",
-			outcome: spawnChannel(record.hostId, { cols, rows, select: false }).then(
+			outcome: spawnChannel(record.hostId, {
+				cols,
+				rows,
+				select: false,
+				onAdaptsInput: (adapts) => {
+					adaptsInput = adapts;
+				},
+			}).then(
 				(channelId) => {
 					run.state = "succeeded";
 					forgetIfUnheld(tempId, record);
-					return { channelId, cols, rows, adaptsInput: takeSpawnAdaptsInput(channelId) };
+					return { channelId, cols, rows, adaptsInput };
 				},
 				(err: unknown) => {
 					run.state = "failed";
@@ -1083,6 +1084,8 @@ export const useChannelsStore = defineStore("channels", () => {
 			 * disconnected is not connected again by it (#648).
 			 */
 			automatic?: boolean;
+			/** Told what the SPAWN_OK said of the agent's input (#1012), before it resolves. */
+			onAdaptsInput?: (adaptsInput: boolean) => void;
 		},
 	): Promise<string> {
 		const sessionStore = useSessionStore();
@@ -1162,7 +1165,7 @@ export const useChannelsStore = defineStore("channels", () => {
 					// on another host than the one in view reads its profile and its
 					// theme from this, and would take the host in view's meanwhile.
 					registerChannelHost(msg.channelId, hostId);
-					spawnAdaptsInput.set(msg.channelId, "adaptsInput" in msg && msg.adaptsInput === true);
+					opts?.onAdaptsInput?.("adaptsInput" in msg && msg.adaptsInput === true);
 					refreshAfterSpawn(hostId);
 					if (opts?.select !== false) {
 						selectChannel(msg.channelId);

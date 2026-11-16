@@ -53,11 +53,15 @@ impl vt100::Callbacks for MirrorCallbacks {
         params: &[&[u16]],
         c: char,
     ) {
-        if c == 'p' && (i1 == Some(b'!') || i2 == Some(b'!')) {
+        if c == 'p' && i1 == Some(b'!') && i2.is_none() {
             self.decstr = true;
         }
         // A combined sequence comes whole, with the params vt100 handled too.
-        if i1 == Some(b'?') && (c == 'h' || c == 'l') && params.iter().any(|p| *p == [1004]) {
+        if i1 == Some(b'?')
+            && i2.is_none()
+            && (c == 'h' || c == 'l')
+            && params.iter().any(|p| *p == [1004])
+        {
             self.focus = c == 'h';
         }
     }
@@ -85,9 +89,13 @@ pub struct HeadlessMirror {
     pending_bell: bool,
     pending_notification: Option<String>,
     pending_shell_cwd: Option<ShellReport>,
-    /// The last byte of the previous read: a DECSTR's `!` or a RIS's `ESC`
-    /// may end one read and its last byte start the next.
-    last_byte: Option<u8>,
+    /// The last byte seen that is not a C0 control, across reads: a DECSTR's
+    /// `!` comes right before its `p`, with only C0 controls between, which a
+    /// parser executes without leaving the sequence (#1012).
+    last_significant: Option<u8>,
+    /// An `ESC` was seen with only C0 controls since, across reads: a `c` now
+    /// ends a RIS. CAN and SUB cancel it, as they cancel any sequence.
+    escape: bool,
 }
 
 const BELL_THROTTLE_MS: u128 = 100;
@@ -131,7 +139,8 @@ impl HeadlessMirror {
             pending_bell: false,
             pending_notification: None,
             pending_shell_cwd: None,
-            last_byte: None,
+            last_significant: None,
+            escape: false,
         }
     }
 
@@ -140,17 +149,22 @@ impl HeadlessMirror {
     /// After calling, check pending_* fields for events.
     pub fn process(&mut self, data: &[u8]) {
         // Each byte that may end a DECSTR (`p` after `!`) or a RIS (`c` after
-        // `ESC`) ends a slice, so that what they reset is reset at their place
-        // in the stream, before the bytes after them (#1012).
+        // `ESC`), C0 controls between them aside, ends a slice, so that what
+        // they reset is reset at their place in the stream, before the bytes
+        // after them (#1012).
         let mut start = 0;
         for (idx, &byte) in data.iter().enumerate() {
-            let prev = if idx == 0 {
-                self.last_byte
-            } else {
-                Some(data[idx - 1])
-            };
-            let decstr_end = byte == b'p' && prev == Some(b'!');
-            let ris = byte == b'c' && prev == Some(0x1b);
+            let c0 = byte < 0x20 && byte != 0x1b;
+            let decstr_end = byte == b'p' && self.last_significant == Some(b'!');
+            let ris = byte == b'c' && self.escape;
+            if byte == 0x1b {
+                self.escape = true;
+            } else if !c0 || byte == 0x18 || byte == 0x1a {
+                self.escape = false;
+            }
+            if !c0 {
+                self.last_significant = Some(byte);
+            }
             if !decstr_end && !ris {
                 continue;
             }
@@ -168,9 +182,10 @@ impl HeadlessMirror {
         if start < data.len() {
             self.parser.process(&data[start..]);
         }
-        if let Some(&last) = data.last() {
-            self.last_byte = Some(last);
-        }
+        // A DECSTR's `p` follows its `!` (C0 controls aside), so its flag is
+        // taken at the cut above; none outlives the read, to meet an unrelated
+        // `!p` later.
+        self.parser.callbacks_mut().decstr = false;
 
         // Check for title change (OSC 0/2)
         let new_title = &self.parser.callbacks().title;
@@ -551,6 +566,7 @@ mod tests {
             snap.serialized
         );
         assert!(!snap.serialized.contains("31m"), "{:?}", snap.serialized);
+        assert_eq!(mirror.parser.screen().contents(), "X");
         // Parameters.
         let mut mirror = HeadlessMirror::new(20, 5, 100);
         mirror.process(b"\x1b[?1h\x1b[?2004h\x1b[0!p");
@@ -563,6 +579,18 @@ mod tests {
         // Position: what follows the DECSTR in the same read stays.
         let mut mirror = HeadlessMirror::new(20, 5, 100);
         mirror.process(b"\x1b[!p\x1b[?1h");
+        assert!(mirror.snapshot().input_modes.contains("\x1b[?1h"));
+        // C0 controls inside a DECSTR or a RIS, which parsers execute in place.
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1b[?1h\x1b[?2004h\x1b[!\x00p");
+        assert_eq!(mirror.snapshot().input_modes, reset_modes);
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1b[?1004h\x1b\x00c");
+        assert!(mirror.snapshot().input_modes.ends_with("\x1b[?1004l"));
+        // Another intermediate is no DECSTR, and no flag waits for a `!p` in text.
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        mirror.process(b"\x1b[?1h\x1b[!\"p");
+        mirror.process(b"Wow!pretty");
         assert!(mirror.snapshot().input_modes.contains("\x1b[?1h"));
         // RIS, whole and split.
         let mut mirror = HeadlessMirror::new(20, 5, 100);

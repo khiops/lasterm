@@ -211,8 +211,6 @@ impl PtyManager {
         self.shutting_down = true;
     }
 
-    /// Take a reader only while its channel remains registered. A daemon sweep
-    /// can remove the channel between spawn and reader registration.
     /// Where the channel's reader publishes its program's input modes (#1012).
     pub(crate) fn input_modes_for(&self, channel_id: &str) -> Option<Arc<InputModeCell>> {
         self.channels
@@ -220,6 +218,8 @@ impl PtyManager {
             .map(|channel| Arc::clone(&channel.input_modes))
     }
 
+    /// Take a reader only while its channel remains registered. A daemon sweep
+    /// can remove the channel between spawn and reader registration.
     pub(crate) fn reader_for(&mut self, channel_id: &str) -> Option<async_xpty::PtyReader> {
         #[cfg(test)]
         if std::mem::take(&mut self.sweep_next_reader_lookup) {

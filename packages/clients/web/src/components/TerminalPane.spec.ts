@@ -4063,10 +4063,11 @@ describe("TerminalPane pasting through an agent that adapts input (#1012)", () =
 	const END = "\u001b[201~";
 
 	/** A paste of `text` on the pane's xterm, as the browser fires it at its textarea. */
-	function paste(text: string): void {
+	function paste(text: string): Event {
 		const event = new Event("paste", { bubbles: true, cancelable: true });
 		Object.defineProperty(event, "clipboardData", { value: { getData: () => text } });
 		terminal().textarea.dispatchEvent(event);
+		return event;
 	}
 
 	/** A pane over T, the writer, attached with what the hub says of its agent. */
@@ -4130,8 +4131,9 @@ describe("TerminalPane pasting through an agent that adapts input (#1012)", () =
 		attachOk(T, "LIVE", { adaptsInput: true });
 		await settle();
 
-		paste("a");
+		const event = paste("a");
 
+		expect(event.defaultPrevented).toBe(true);
 		expect(inputs()).toEqual([]);
 	});
 
@@ -4139,8 +4141,9 @@ describe("TerminalPane pasting through an agent that adapts input (#1012)", () =
 		await attachedSaying(true);
 		(useSessionStore().wsClient as unknown as { isConnected: boolean }).isConnected = false;
 
-		paste("a");
+		const event = paste("a");
 
+		expect(event.defaultPrevented).toBe(true);
 		expect(inputs()).toEqual([]);
 	});
 

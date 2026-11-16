@@ -437,10 +437,11 @@ export function useTerminal(
 		// modes) arms this, and the report it makes is not sent: it is not news.
 		// A focus change the user makes, even while a long replay is parsed, and a
 		// program's own live `?1004h`, are sent as before.
-		let replayFocusReport = false;
+		// One report per `1004` in the sequence: xterm reports for each.
+		let replayFocusReports = 0;
 		term.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
-			if ((replaysParsing.get(term) ?? 0) > 0 && params.some((param) => param === 1004)) {
-				replayFocusReport = true;
+			if ((replaysParsing.get(term) ?? 0) > 0) {
+				replayFocusReports = params.filter((param) => param === 1004).length;
 			}
 			return false;
 		});
@@ -454,9 +455,19 @@ export function useTerminal(
 				if (!adaptsInput) return;
 				event.stopPropagation();
 				event.preventDefault();
-				const text = event.clipboardData?.getData("text/plain") ?? "";
-				const form = `${PASTE_START}${withoutPasteMarkers(text).replace(/\r?\n/g, "\r")}${PASTE_END}`;
-				if (new TextEncoder().encode(form).byteLength > MAX_INPUT_SIZE) {
+				// No clipboard data: nothing to paste, as xterm sends nothing then.
+				if (event.clipboardData === null) return;
+				const text = event.clipboardData.getData("text/plain");
+				// Each UTF-16 unit left is at least one UTF-8 byte: a text that long
+				// is refused before any of it is copied.
+				const fewestBytes =
+					text.length - (text.match(/\r\n/g)?.length ?? 0) + PASTE_START.length + PASTE_END.length;
+				const stripped = text.includes("\u001b") ? withoutPasteMarkers(text) : text;
+				const form = `${PASTE_START}${stripped.replace(/\r?\n/g, "\r")}${PASTE_END}`;
+				if (
+					(!text.includes("\u001b") && fewestBytes > MAX_INPUT_SIZE) ||
+					new TextEncoder().encode(form).byteLength > MAX_INPUT_SIZE
+				) {
 					useToastStore().show("warning", "This paste is too large to send (64 KiB at most).");
 					return;
 				}
@@ -470,9 +481,12 @@ export function useTerminal(
 
 		// Keyboard input → send INPUT to hub (only when holding write lock)
 		term.onData((data: string) => {
-			if (replayFocusReport) {
-				replayFocusReport = false;
-				if (data === FOCUS_IN || data === FOCUS_OUT) return;
+			if (replayFocusReports > 0) {
+				if (data === FOCUS_IN || data === FOCUS_OUT) {
+					replayFocusReports--;
+					return;
+				}
+				replayFocusReports = 0;
 			}
 			if (channelId && wsClient.isConnected && canWrite.value) {
 				wsClient.send({

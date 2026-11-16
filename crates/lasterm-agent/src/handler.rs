@@ -491,7 +491,7 @@ pub(crate) async fn handle_message(
                 mgr.owned_by(&channel_id, owner).map(|channel| {
                     // In the form the program asked for, whatever the client's
                     // terminal believes (#1012).
-                    let data = input_modes::adapt(&data, channel.input_modes.load());
+                    let data = input_modes::adapt(data, channel.input_modes.load());
                     channel.input.offer(data)
                 })
             };

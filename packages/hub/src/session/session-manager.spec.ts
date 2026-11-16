@@ -2817,6 +2817,55 @@ describe("SessionManager", () => {
 			expect(live?.adaptsInput).toBe(true);
 		});
 
+		it("says so on an ATTACH_OK answered from memory while the host's agent says input-modes", async () => {
+			const { MetaDAL } = await import("../storage/meta.js");
+			const dal = new MetaDAL(dbManager.meta);
+			const host = dal.createHost({
+				type: "ssh",
+				label: "test-ssh-adapting",
+				sshHost: "user@localhost",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+			});
+			sm.addClient(makeClient("c1", []));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: host.id });
+			const agent = mockSshAgentInstance as unknown as {
+				helloMessage: unknown;
+				send: (msg: ProtocolMessage) => void;
+				_emit(event: string, msg: unknown): void;
+			};
+			agent.helloMessage = {
+				type: "HELLO",
+				version: 1,
+				agentVersion: "0.0.0",
+				capabilities: ["input-modes"],
+			};
+			// Its ATTACH fails for another reason than a gone terminal: the hub
+			// answers from memory, the agent still connected.
+			const send = agent.send;
+			agent.send = (msg: ProtocolMessage) => {
+				if (msg.type !== "ATTACH") return send(msg);
+				const ask = msg as unknown as { channelId: string; requestId: string };
+				setImmediate(() =>
+					agent._emit("message", {
+						type: "ERROR",
+						code: "INTERNAL_ERROR",
+						message: "busy",
+						channelId: ask.channelId,
+						requestId: ask.requestId,
+					}),
+				);
+			};
+
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c2", received));
+			await sm.handleAttach("c2", "ssh-ch-1");
+
+			const cached = answers(received, "ATTACH_OK")[0];
+			expect(cached?.cached).toBe(true);
+			expect(cached?.adaptsInput).toBe(true);
+		});
+
 		it("says not when the host's agent does not say input-modes", async () => {
 			nextLocalAgentCapabilities = ["multiplex", "snapshot"];
 			const received: ProtocolMessage[] = [];

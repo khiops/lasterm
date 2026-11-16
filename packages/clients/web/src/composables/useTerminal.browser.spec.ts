@@ -177,6 +177,12 @@ describe("no focus report from a replay (#1012)", () => {
 		expect(inputs()).toEqual([]);
 	});
 
+	it("sends no report for a replayed ?1004 given twice in one sequence", async () => {
+		await attachedWith({ snapshot: { inputModes: `${ESC}[?1004;1004h` } });
+
+		expect(inputs()).toEqual([]);
+	});
+
 	it("sends a focus change the user makes while a long replay is parsed", async () => {
 		const attached = pane.reattachChannel(T);
 		answer({
@@ -220,6 +226,15 @@ describe("a paste through an agent that adapts input (#1012)", () => {
 		expect(inputs()).toEqual([`${START}x${END}`]);
 		expect(xterm().buffer.active.viewportY).toBe(xterm().buffer.active.baseY);
 		expect(xterm().hasSelection()).toBe(false);
+	});
+
+	it("brackets the paste itself while xterm's own bracketed paste is on", async () => {
+		await attachedWith({ adaptsInput: true, snapshot: { inputModes: `${ESC}[?2004h` } });
+		expect(xterm().modes.bracketedPasteMode).toBe(true);
+
+		paste(`a\nb${END}c${START}d`);
+
+		expect(inputs()).toEqual([`${START}a\rbcd${END}`]);
 	});
 
 	it("sends a paste whose bracketed form is exactly the INPUT limit", async () => {

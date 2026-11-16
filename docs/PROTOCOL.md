@@ -161,7 +161,7 @@ agent's default. A default profile the user set (`PUT /api/hosts/:id/profiles/:p
 replaced, and a profile the user hid is never marked (#800). The host's default profile is what a
 new terminal starts there, the local host's as an SSH host's (§ 4.4, #802).
 
-**Capabilities.** The hub logs the list, and gates nothing on it: every agent it can meet has all six, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"input-modes"` means an agent that sends the terminal's input modes and alternate screen with each snapshot (§ 3.3) and writes paste markers and cursor keys in its program's form (§ 3.4); the hub tells the UI so with `adapts_input` (§ 4.2, § 4.4). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
+**Capabilities.** The hub logs the list, and gates nothing on it but `adapts_input`, which follows `"input-modes"` (§ 4.2): every agent it can meet has all six, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"input-modes"` means an agent that sends the terminal's input modes and alternate screen with each snapshot (§ 3.3) and writes paste markers and cursor keys in its program's form (§ 3.4); the hub tells the UI so with `adapts_input` (§ 4.2, § 4.4). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
 
 ### 3.1b AUTH (Hub → Agent, daemon mode)
 
@@ -404,9 +404,9 @@ says in its terminal that what was typed was dropped because the terminal is not
 An agent that says `"input-modes"` writes each INPUT in the form its program asked for, from its own
 screen model, whatever the client's terminal believes (#1012):
 
-- **A paste** runs from an `ESC[200~` to the next `ESC[201~` in the same INPUT, or to its end. Its
-  markers are kept when the program set bracketed paste (`?2004`) and removed otherwise. Nothing
-  inside it is rewritten.
+- **A paste** runs from an `ESC[200~` to the next `ESC[201~` in the same INPUT. Its markers are kept
+  when the program set bracketed paste (`?2004`) and removed otherwise. Nothing inside it is
+  rewritten. A marker without its pair in the INPUT is no paste, and is written as it is.
 - **A cursor key outside a paste**, unmodified (`A`, `B`, `C`, `D`, Home `H`, End `F`), in either its
   CSI or its SS3 form, is written in SS3 form when the program set application cursor keys (`?1`) and
   in CSI form otherwise. A sequence with parameters, such as `ESC[1;5A`, is written as it is.

@@ -48,25 +48,26 @@ impl InputModeCell {
 
 /// Write one INPUT frame in the program's form.
 ///
-/// - A paste runs from an `ESC[200~` to the next `ESC[201~` in the frame (or
-///   to its end). Its markers are kept when the program set bracketed paste
-///   and removed otherwise; nothing inside it is rewritten.
+/// - A paste runs from an `ESC[200~` to the next `ESC[201~` in the frame. Its
+///   markers are kept when the program set bracketed paste and removed
+///   otherwise; nothing inside it is rewritten. A marker without its pair in
+///   the frame is no paste, and its bytes are written as they are.
 /// - Outside a paste, an unmodified cursor key (`A` `B` `C` `D`, Home `H`,
 ///   End `F`), in either its CSI or its SS3 form, is written in SS3 form when
 ///   the program set application cursor keys, and in CSI form otherwise.
 ///   Sequences with parameters, such as `ESC[1;5A`, are left as they are.
 /// - Only whole sequences within the frame match: one split across two
 ///   frames is written unchanged.
-pub(crate) fn adapt(data: &[u8], modes: InputModes) -> Vec<u8> {
+pub(crate) fn adapt(data: Vec<u8>, modes: InputModes) -> Vec<u8> {
     if !data.contains(&0x1b) {
-        return data.to_vec();
+        return data;
     }
     let mut out = Vec::with_capacity(data.len());
     let mut in_paste = false;
     let mut i = 0;
     while i < data.len() {
         let rest = &data[i..];
-        if !in_paste && rest.starts_with(OPEN) {
+        if !in_paste && rest.starts_with(OPEN) && contains(&rest[OPEN.len()..], CLOSE) {
             in_paste = true;
             if modes.bracketed_paste {
                 out.extend_from_slice(OPEN);
@@ -74,7 +75,7 @@ pub(crate) fn adapt(data: &[u8], modes: InputModes) -> Vec<u8> {
             i += OPEN.len();
             continue;
         }
-        if rest.starts_with(CLOSE) {
+        if in_paste && rest.starts_with(CLOSE) {
             in_paste = false;
             if modes.bracketed_paste {
                 out.extend_from_slice(CLOSE);
@@ -100,6 +101,12 @@ pub(crate) fn adapt(data: &[u8], modes: InputModes) -> Vec<u8> {
     out
 }
 
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,13 +130,16 @@ mod tests {
 
     #[test]
     fn a_paste_loses_its_markers_when_the_program_did_not_set_bracketed_paste() {
-        assert_eq!(adapt(b"\x1b[200~a\rb\r\x1b[201~", PASTE_OFF), b"a\rb\r");
+        assert_eq!(
+            adapt(b"\x1b[200~a\rb\r\x1b[201~".to_vec(), PASTE_OFF),
+            b"a\rb\r"
+        );
     }
 
     #[test]
     fn a_paste_keeps_its_markers_when_the_program_set_bracketed_paste() {
         assert_eq!(
-            adapt(b"\x1b[200~a\rb\r\x1b[201~", PASTE_ON),
+            adapt(b"\x1b[200~a\rb\r\x1b[201~".to_vec(), PASTE_ON),
             b"\x1b[200~a\rb\r\x1b[201~"
         );
     }
@@ -137,12 +147,12 @@ mod tests {
     #[test]
     fn cursor_keys_take_the_application_form_under_decckm() {
         assert_eq!(
-            adapt(b"\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[F", CURSOR_ON),
+            adapt(b"\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[F".to_vec(), CURSOR_ON),
             b"\x1bOA\x1bOB\x1bOC\x1bOD\x1bOH\x1bOF"
         );
         // Already in form: unchanged.
         assert_eq!(
-            adapt(b"\x1bOA\x1bOB\x1bOC\x1bOD\x1bOH\x1bOF", CURSOR_ON),
+            adapt(b"\x1bOA\x1bOB\x1bOC\x1bOD\x1bOH\x1bOF".to_vec(), CURSOR_ON),
             b"\x1bOA\x1bOB\x1bOC\x1bOD\x1bOH\x1bOF"
         );
     }
@@ -150,7 +160,7 @@ mod tests {
     #[test]
     fn cursor_keys_take_the_normal_form_without_decckm() {
         assert_eq!(
-            adapt(b"\x1bOA\x1bOB\x1bOC\x1bOD\x1bOH\x1bOF", PASTE_OFF),
+            adapt(b"\x1bOA\x1bOB\x1bOC\x1bOD\x1bOH\x1bOF".to_vec(), PASTE_OFF),
             b"\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[F"
         );
     }
@@ -158,26 +168,35 @@ mod tests {
     #[test]
     fn modified_keys_plain_text_and_split_sequences_are_left_as_they_are() {
         for modes in [PASTE_OFF, BOTH_ON] {
-            assert_eq!(adapt(b"\x1b[1;5A", modes), b"\x1b[1;5A");
-            assert_eq!(adapt(b"echo hello\r", modes), b"echo hello\r");
+            assert_eq!(adapt(b"\x1b[1;5A".to_vec(), modes), b"\x1b[1;5A");
+            assert_eq!(adapt(b"echo hello\r".to_vec(), modes), b"echo hello\r");
             // ESC[A split across two frames.
-            assert_eq!(adapt(b"x\x1b[", modes), b"x\x1b[");
-            assert_eq!(adapt(b"Ay", modes), b"Ay");
+            assert_eq!(adapt(b"x\x1b[".to_vec(), modes), b"x\x1b[");
+            assert_eq!(adapt(b"Ay".to_vec(), modes), b"Ay");
         }
         // A marker split across two frames, bracketed paste off.
-        assert_eq!(adapt(b"\x1b[20", PASTE_OFF), b"\x1b[20");
-        assert_eq!(adapt(b"0~x", PASTE_OFF), b"0~x");
+        assert_eq!(adapt(b"\x1b[20".to_vec(), PASTE_OFF), b"\x1b[20");
+        assert_eq!(adapt(b"0~x".to_vec(), PASTE_OFF), b"0~x");
     }
 
     #[test]
     fn nothing_inside_a_paste_is_rewritten() {
         assert_eq!(
-            adapt(b"\x1b[200~\x1b[Ax\x1b[201~\x1b[A", BOTH_ON),
+            adapt(b"\x1b[200~\x1b[Ax\x1b[201~\x1b[A".to_vec(), BOTH_ON),
             b"\x1b[200~\x1b[Ax\x1b[201~\x1bOA"
         );
         assert_eq!(
-            adapt(b"\x1b[200~\x1b[Ax\x1b[201~\x1b[A", CURSOR_ON),
+            adapt(b"\x1b[200~\x1b[Ax\x1b[201~\x1b[A".to_vec(), CURSOR_ON),
             b"\x1b[Ax\x1bOA"
+        );
+    }
+
+    #[test]
+    fn a_marker_without_its_pair_is_no_paste() {
+        assert_eq!(adapt(b"x\x1b[201~y".to_vec(), PASTE_OFF), b"x\x1b[201~y");
+        assert_eq!(
+            adapt(b"\x1b[200~\x1b[A".to_vec(), CURSOR_ON),
+            b"\x1b[200~\x1bOA"
         );
     }
 

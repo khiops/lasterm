@@ -4909,6 +4909,53 @@ describe("SessionManager", () => {
 			expect(agentsMap.has(host.id)).toBe(true);
 		});
 
+		it("keeps a terminal the daemon holds live when the first startup connection fails (#981)", async () => {
+			const { MetaDAL } = await import("../storage/meta.js");
+			const dal = new MetaDAL(dbManager.meta);
+
+			const host = dal.createHost({ type: "local", label: "held-local" });
+			const sessionId = "HELDSESS0000000000000000000001";
+			dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+			dal.createChannel({ id: "held-ch-1", sessionId, status: "live", shell: "/bin/sh" });
+
+			// The first connection fails; the second reaches a daemon that still
+			// runs the terminal. Like the real agent, it refuses a SPAWN under an
+			// id it holds.
+			const launch = vi.mocked(_connectOrLaunchForMock);
+			const fresh = launch.getMockImplementation()!;
+			launch
+				.mockRejectedValueOnce(new Error("pipe busy"))
+				.mockImplementationOnce(async (...args) => {
+					const agent = (await fresh(...args)) as unknown as Record<string, unknown>;
+					agent.waitForChannelState = vi.fn().mockResolvedValue([
+						{
+							type: "AGENT_CHANNEL_STATE",
+							channelId: "held-ch-1",
+							title: "sh",
+							pid: 4242,
+							alive: true,
+						},
+					]);
+					return agent as never;
+				});
+			nextLocalSpawnError = { code: "CHANNEL_EXISTS", message: "channel already exists" };
+
+			await sm.startup();
+			await new Promise((r) => setImmediate(r));
+			await new Promise((r) => setImmediate(r));
+
+			expect(launch).toHaveBeenCalledTimes(2);
+			const sent = mockLocalAgents.flatMap((a) =>
+				(a as unknown as { send: { mock: { calls: [ProtocolMessage][] } } }).send.mock.calls.map(
+					([m]) => m,
+				),
+			);
+			expect(sent.filter((m) => m.type === "SPAWN")).toEqual([]);
+			const channels = (sm as unknown as { channels: Map<string, { status: string }> }).channels;
+			expect(channels.get("held-ch-1")?.status).toBe("live");
+			expect(dal.getChannel("held-ch-1")?.status).toBe("live");
+		});
+
 		it("marks channels dead when no non-closed session exists for a host", async () => {
 			const { MetaDAL } = await import("../storage/meta.js");
 			const dal = new MetaDAL(dbManager.meta);
@@ -5097,7 +5144,6 @@ describe("SessionManager", () => {
 				});
 
 				// startup() triggers 1st warm restart (count=1)
-				// _warmRestartLocal now awaits _spawnChannelsForHost — start, flush, await.
 				let p: Promise<void> = sm.startup();
 				await vi.advanceTimersByTimeAsync(0);
 				await p;

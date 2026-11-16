@@ -44,6 +44,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Kernel",
     "Win32_System_SystemInformation",
+    # The Windows build, for conhost's wake-up after a paste's end (#1030).
+    "Wdk_System_SystemServices",
 ] }
 
 [target.'cfg(unix)'.dependencies]

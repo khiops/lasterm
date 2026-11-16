@@ -1311,4 +1311,70 @@ describe("HostModal Port field (#901)", () => {
 		expect(el("#panel-connection")?.textContent).toContain(PORT_ERROR);
 		expect(saveButton()?.disabled).toBe(true);
 	});
+
+	// The connection timeout is a field of the same kind (#1034): text, digits
+	// only, 20 to 120 seconds, empty for the default.
+	const TIMEOUT_ERROR = "Enter a whole number of seconds from 20 to 120";
+	function timeoutInput(): HTMLInputElement {
+		return input("#host-connect-timeout");
+	}
+
+	it("adds a host with a connection timeout (#1034)", async () => {
+		const saves = hubRecordingSaves();
+		useAuthStore().setToken("token");
+		await open("New Host");
+		type(timeoutInput(), "45");
+		await nextTick();
+		saveButton()?.click();
+		await settle();
+		expect(saves[0]).toHaveProperty("connect_timeout_seconds", 45);
+	});
+
+	it("adds a host without one when the field is left empty (#1034)", async () => {
+		const saves = hubRecordingSaves();
+		useAuthStore().setToken("token");
+		await open("New Host");
+		saveButton()?.click();
+		await settle();
+		expect(saves[0]).not.toHaveProperty("connect_timeout_seconds");
+	});
+
+	it("edits the connection timeout (#1034)", async () => {
+		const ON_60: Host = { ...ON_2222, connectTimeoutSeconds: 60 };
+		const saves = hubRecordingSaves();
+		useAuthStore().setToken("token");
+		mountModal(ON_60);
+		useHostsStore().hosts = [{ ...LOCAL }, { ...ON_60 }];
+		await nextTick();
+		expect(timeoutInput().value).toBe("60");
+
+		for (const text of ["19", "30.5"]) {
+			type(timeoutInput(), text);
+			await nextTick();
+			expect(el("#panel-connection")?.textContent).toContain(TIMEOUT_ERROR);
+			expect(saveButton()?.disabled).toBe(true);
+			expect(testButton()?.disabled).toBe(true);
+		}
+
+		type(timeoutInput(), "90");
+		await nextTick();
+		expect(saveButton()?.disabled).toBe(false);
+		saveButton()?.click();
+		await settle();
+		expect(saves).toEqual([{ connect_timeout_seconds: 90 }]);
+	});
+
+	it("clears the connection timeout when the field is emptied (#1034)", async () => {
+		const ON_60: Host = { ...ON_2222, connectTimeoutSeconds: 60 };
+		const saves = hubRecordingSaves();
+		useAuthStore().setToken("token");
+		mountModal(ON_60);
+		useHostsStore().hosts = [{ ...LOCAL }, { ...ON_60 }];
+		await nextTick();
+		type(timeoutInput(), "");
+		await nextTick();
+		saveButton()?.click();
+		await settle();
+		expect(saves).toEqual([{ connect_timeout_seconds: null }]);
+	});
 });

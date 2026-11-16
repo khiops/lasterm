@@ -99,9 +99,12 @@ export class AgentConnectionManager {
 		fence = captureQuitFence(this.ctx),
 	): Promise<SessionState> {
 		const existing = this.ctx.sessions.get(hostId);
+		// A detached session is still the host's: its agent is connected and its
+		// orphan terminals run under it. A terminal opened now joins it (#955).
 		if (
 			existing &&
 			(existing.status === "active" ||
+				existing.status === "detached" ||
 				existing.status === "disconnected" ||
 				(!isSsh && existing.status === "starting"))
 		) {

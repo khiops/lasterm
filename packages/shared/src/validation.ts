@@ -36,6 +36,28 @@ export function isValidInputData(data: unknown): data is Uint8Array {
 	return data instanceof Uint8Array && data.byteLength <= MAX_INPUT_SIZE;
 }
 
+/**
+ * A paste's chunk, as a pane sends it (#1014): small enough that a PASTE
+ * frame stays under `MAX_INPUT_SIZE` with its envelope, and under the desktop
+ * relay's message cap.
+ */
+export const PASTE_CHUNK_BYTES = 32_768;
+
+/**
+ * What a pane keeps sent and not yet acknowledged of a paste (#1014): eight
+ * chunks, a quarter of the agent's input queue, leaving room for what is
+ * typed. It bounds in bytes what a Cancel cannot recall, not a time.
+ */
+export const PASTE_WINDOW_BYTES = 262_144;
+
+/** The largest paste a pane sends, in UTF-8 bytes once normalised (#1014). */
+export const PASTE_MAX_BYTES = 16_777_216;
+
+/** A paste or chunk id: a whole number that fits a u32 (#1014). */
+export function isValidPasteNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xffff_ffff;
+}
+
 export const MAX_ENV_COUNT = 256;
 
 export function isValidEnv(env: unknown): env is Record<string, string> | null | undefined {

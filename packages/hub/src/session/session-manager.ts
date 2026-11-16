@@ -1,5 +1,6 @@
 import { sshAddress, targetRoute } from "../ssh-route.js";
-import { agentAdaptsInput } from "./input-modes.js";
+import { agentAdaptsInput, agentStreamsPaste } from "./input-modes.js";
+import { PasteRelay } from "./paste-relay.js";
 /**
  * SessionManager — coordinator for hub session management.
  *
@@ -35,6 +36,8 @@ import type {
 	Host,
 	InputMessage,
 	LiveCwd,
+	PasteCancelMessage,
+	PasteMessage,
 	ProtocolMessage,
 	ResizeMessage,
 	StateSyncMessage,
@@ -416,6 +419,7 @@ export class SessionManager {
 			elevationPromptOwners: new Map(),
 			promptIndex: new Map(),
 			getWriteLockHolder: null,
+			pastes: null,
 			metaDal,
 			spoolDal,
 			scheduler,
@@ -431,6 +435,7 @@ export class SessionManager {
 			hubKey: null,
 		};
 		this.ctx = ctx;
+		ctx.pastes = new PasteRelay(ctx);
 
 		this.broadcaster = new StateBroadcaster(ctx);
 		this.lifecycle = new ChannelLifecycleManager(ctx, this.broadcaster);
@@ -698,6 +703,7 @@ export class SessionManager {
 	}
 
 	removeClient(clientId: string): void {
+		this.ctx.pastes?.clientGone(clientId);
 		promptClientDisconnect(this.ctx, clientId, (newClientId, msg) => {
 			const newClient = this.ctx.clients.get(newClientId);
 			newClient?.send(msg as unknown as ProtocolMessage);
@@ -1915,6 +1921,7 @@ export class SessionManager {
 				...this.broadcaster.cwdFieldsOf(channelId),
 				filesPanel: this.broadcaster.filesPanelOf(channelId),
 				adaptsInput: agentAdaptsInput(this.ctx.agents, channel.hostId),
+				streamsPaste: agentStreamsPaste(this.ctx.agents, channel.hostId),
 			};
 			client.send(attachOk);
 			return true;
@@ -1960,6 +1967,7 @@ export class SessionManager {
 				...this.broadcaster.cwdFieldsOf(channelId),
 				filesPanel: this.broadcaster.filesPanelOf(channelId),
 				adaptsInput: agentAdaptsInput(this.ctx.agents, channel.hostId),
+				streamsPaste: agentStreamsPaste(this.ctx.agents, channel.hostId),
 			};
 			client.send(attachOk);
 		};
@@ -2043,6 +2051,7 @@ export class SessionManager {
 				...this.broadcaster.cwdFieldsOf(channelId),
 				filesPanel: this.broadcaster.filesPanelOf(channelId),
 				adaptsInput: agentAdaptsInput(this.ctx.agents, channel.hostId),
+				streamsPaste: agentStreamsPaste(this.ctx.agents, channel.hostId),
 			};
 			client.send(attachOk);
 		}
@@ -2101,6 +2110,21 @@ export class SessionManager {
 
 	handleDetach(clientId: string, channelId: string): void {
 		this.broadcaster.detachClient(clientId, channelId);
+	}
+
+	/** A PASTE from the window holding the write lock, fields checked (#1014). */
+	handlePaste(clientId: string, msg: PasteMessage): void {
+		this.ctx.pastes?.relay(clientId, msg);
+	}
+
+	/** A PASTE_CANCEL from a window (#1014). */
+	handlePasteCancel(clientId: string, msg: PasteCancelMessage): void {
+		this.ctx.pastes?.cancelFromClient(clientId, msg);
+	}
+
+	/** A terminal's write lock changed hands: a paste its owner no longer holds stops (#1014). */
+	pasteLockChanged(channelId: string): void {
+		this.ctx.pastes?.lockChanged(channelId);
 	}
 
 	handleInput(_clientId: string, channelId: string, data: Uint8Array): void {

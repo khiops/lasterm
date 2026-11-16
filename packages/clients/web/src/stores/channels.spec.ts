@@ -2217,6 +2217,7 @@ describe("useChannelsStore — a new terminal's spawn, whichever pane shows it (
 				cols: 80,
 				rows: 24,
 				adaptsInput: false,
+				streamsPaste: false,
 			});
 
 			store.releasePendingSpawn("pending-1");
@@ -2283,12 +2284,14 @@ describe("useChannelsStore — a new terminal's spawn, whichever pane shows it (
 			cols: 80,
 			rows: 24,
 			adaptsInput: false,
+			streamsPaste: false,
 		});
 		await expect(second?.outcome).resolves.toEqual({
 			channelId: "ch-2",
 			cols: 100,
 			rows: 30,
 			adaptsInput: false,
+			streamsPaste: false,
 		});
 	});
 });

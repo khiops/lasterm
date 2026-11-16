@@ -1599,6 +1599,29 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		expect(xterm.events).toEqual([]);
 	});
 
+	// Any live answer ends it, the socket's return's as well as a Reconnect's.
+	it("keeps the screen it watched end after a recovery by its socket's return, when the terminal is brought back live", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "BACK");
+		await settle();
+
+		expect(card()).toBeNull();
+		expect(xterm.events).toEqual([]);
+	});
+
 	it("attaches again when a terminal it saw end is brought back from elsewhere", async () => {
 		await openLive();
 		endIt();

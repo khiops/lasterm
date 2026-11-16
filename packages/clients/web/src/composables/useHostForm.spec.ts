@@ -1213,6 +1213,148 @@ describe("the hub's SSH config, read or refused (#734, #757)", () => {
 	});
 });
 
+describe("the host a chosen SSH config entry saves (#1022)", () => {
+	beforeEach(() => {
+		createHostSpy.mockClear();
+		knownHosts.length = 0;
+	});
+
+	it("stores the entry's alias and jump host as the import does", async () => {
+		knownHosts.push({ id: "bastion", label: "an unrelated host" } as Host);
+		const { source, sshConfigEntries, applySshConfigEntry, save } = useHostForm();
+		sshConfigEntries.value = [
+			{
+				name: "keyed",
+				hostname: "keyed.test",
+				port: 22,
+				user: "olivier",
+				identityFile: "~/.ssh/id_keyed",
+				proxyJump: "bastion",
+				isGitHost: false,
+			},
+		];
+
+		source.value = "ssh-config";
+		applySshConfigEntry("keyed");
+		await save();
+
+		expect(createHostSpy).toHaveBeenCalledOnce();
+		expect(createHostSpy.mock.calls[0]?.[0]).toMatchObject({
+			label: "keyed",
+			ssh_host: "keyed.test",
+			ssh_user: "olivier",
+			ssh_auth: "key",
+			ssh_key_path: "~/.ssh/id_keyed",
+			ssh_config_host: "keyed",
+			ssh_proxy_host_id: null,
+			ssh_proxy_spec: "bastion",
+		});
+	});
+
+	it("replaces every field the next entry leaves out", async () => {
+		const { form, source, sshConfigEntries, applySshConfigEntry, save } = useHostForm();
+		sshConfigEntries.value = [
+			{
+				name: "first",
+				hostname: "first.test",
+				port: 22,
+				user: "first-user",
+				identityFile: null,
+				proxyJump: "first-jump",
+				isGitHost: false,
+			},
+			{
+				name: "second",
+				hostname: null,
+				port: 22,
+				user: null,
+				identityFile: null,
+				proxyJump: null,
+				isGitHost: false,
+			},
+		];
+
+		source.value = "ssh-config";
+		applySshConfigEntry("first");
+		applySshConfigEntry("second");
+
+		expect(form.value).toMatchObject({
+			sshHost: "second",
+			sshUser: "",
+			sshProxy: "",
+		});
+		await save();
+		const body = createHostSpy.mock.calls[0]?.[0];
+		expect(body).toMatchObject({
+			ssh_host: "second",
+			ssh_config_host: "second",
+			ssh_proxy_host_id: null,
+			ssh_proxy_spec: null,
+		});
+		expect(body).not.toHaveProperty("ssh_user");
+	});
+
+	it("limits the alias and literal ProxyJump handling to the SSH config source", async () => {
+		knownHosts.push({ id: "bastion", label: "an unrelated host" } as Host);
+		const { form, source, sshConfigEntries, applySshConfigEntry, save } = useHostForm();
+		sshConfigEntries.value = [
+			{
+				name: "keyed",
+				hostname: "keyed.test",
+				port: 22,
+				user: "olivier",
+				identityFile: "~/.ssh/id_keyed",
+				proxyJump: "bastion",
+				isGitHost: false,
+			},
+		];
+
+		source.value = "ssh-config";
+		applySshConfigEntry("keyed");
+		source.value = "manual";
+		form.value.sshHost = "manual.test";
+		await save();
+
+		const body = createHostSpy.mock.calls[0]?.[0];
+		expect(body).toMatchObject({
+			ssh_host: "manual.test",
+			ssh_proxy_host_id: "bastion",
+			ssh_proxy_spec: null,
+		});
+		expect(body).not.toHaveProperty("ssh_config_host");
+	});
+
+	it("does not carry a picked alias into a Manual Quick Connect", async () => {
+		const { source, quickConnect, sshConfigEntries, applySshConfigEntry, save } = useHostForm();
+		sshConfigEntries.value = [
+			{
+				name: "prod",
+				hostname: "prod.test",
+				port: 22,
+				user: "prod-user",
+				identityFile: null,
+				proxyJump: null,
+				isGitHost: false,
+			},
+		];
+
+		source.value = "ssh-config";
+		applySshConfigEntry("prod");
+		source.value = "manual";
+		quickConnect.value = "alice@quick.test:2222";
+		await nextTick();
+		await save();
+
+		const body = createHostSpy.mock.calls[0]?.[0];
+		expect(body).toMatchObject({
+			ssh_host: "quick.test",
+			ssh_port: 2222,
+			ssh_user: "alice",
+		});
+		expect(body).not.toHaveProperty("ssh_config_host");
+	});
+});
+
 // The alias of an entry picked from ~/.ssh/config goes with the connection test
 // and with the new host, so the hub applies its settings (IdentityAgent none,
 // known_hosts under the alias) to both alike; never once the form no longer

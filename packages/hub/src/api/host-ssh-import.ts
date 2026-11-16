@@ -203,7 +203,8 @@ export function registerHostSshImportRoutes(
 			// same breath. Linking to it is what lets it carry its own
 			// authentication and its own pinned key; `jumpLinkFor` says when that
 			// is the jump ssh would make. The hosts are read once for the whole list.
-			const candidates = metaDal.listHosts();
+			// An import with no ProxyJump reads nothing more.
+			const candidates = hosts.some((host) => host.sshProxySpec) ? metaDal.listHosts() : [];
 			const linked = hosts.map((host) => linkHostToProxyJump(metaDal, host, candidates));
 
 			return reply.code(201).send(toSnakeCase(linked));

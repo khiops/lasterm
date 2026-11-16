@@ -747,8 +747,8 @@ const proxyHint = computed(() => {
 		if (known) return `Through ${known.label}, which brings its own key and sign-in.`;
 		return 'The host chosen as the jump is no longer saved.';
 	}
-	// A spec naming a saved host's alias was kept for its own user or port
-	// (#1040): the agent signs in, not that host.
+	// A spec naming a saved host's alias was kept as written (#1040): the agent
+	// signs in, not that host.
 	const parsed = parseJumpSpec(value);
 	if (
 		parsed.kind === 'spec' &&

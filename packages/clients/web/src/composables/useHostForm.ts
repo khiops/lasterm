@@ -420,10 +420,12 @@ export function useHostForm(editHost?: Host) {
 		form.value.sshUser = entry.user ?? "";
 		// The jump an import would give the entry: its saved bastion when the
 		// link reaches what ssh would, else the ProxyJump as written (#1040, #1042).
-		form.value.sshProxy =
-			entry.proxyJump == null
-				? ""
-				: (jumpLinkFor(entry.proxyJump, hostsStore.hosts)?.id ?? entry.proxyJump);
+		const bastion =
+			entry.proxyJump == null ? undefined : jumpLinkFor(entry.proxyJump, hostsStore.hosts);
+		form.value.sshProxy = bastion?.id ?? entry.proxyJump ?? "";
+		// The field may already hold that text, which the watch above does not
+		// see as a change: a linked pick is a host id whatever was there before.
+		if (bastion) proxyIsHostId.value = true;
 		// The entry's own method, whatever the form held, by the rule the import
 		// stores it with: its IdentityFile, else the agent (#1009, #917).
 		form.value.sshAuth = sshAuthFor(entry.identityFile);

@@ -1639,6 +1639,33 @@ describe("the jump a picked entry is tested and stored through (#1040, #1042)", 
 		});
 	});
 
+	// The pick writes the bastion's id even into a field that already held that
+	// text as a spec: the decision is the pick's, not the old text's (#1042).
+	it("links a pick whose bastion id the field already held as a spec", async () => {
+		knownHosts.length = 0;
+		const form = useHostForm();
+		form.form.value.sshProxy = "01GWBASTION";
+		knownHosts.push(gw);
+		form.sshConfigEntries.value = [
+			{
+				name: "target",
+				hostname: "target.example",
+				port: 22,
+				user: "deploy",
+				identityFile: null,
+				proxyJump: "gw",
+				isGitHost: false,
+			},
+		];
+		form.source.value = "ssh-config";
+		form.selectedSshConfigHost.value = "target";
+		form.applySshConfigEntry("target");
+
+		const sent = await testRequest(form.testConnectionInline);
+		expect(sent.sshProxyHostId).toBe("01GWBASTION");
+		expect(sent).not.toHaveProperty("sshProxySpec");
+	});
+
 	// On the Manual source nothing is decided for the person: a saved host's
 	// alias typed in the field is a spec (#1040).
 	it("does not link a saved host's alias typed on the Manual source", async () => {

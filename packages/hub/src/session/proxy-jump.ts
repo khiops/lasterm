@@ -10,8 +10,9 @@
  *   - **a spec**, `user@host:port`, the form `~/.ssh/config` uses, for a jump
  *     not linked to a host here (a bastion that is none, or one the spec
  *     reaches with another user or port, #1040). It authenticates through the
- *     SSH agent, because that is what a bastion is reached with, and has no row
- *     of its own to pin a key on, so the host that jumps through it pins it.
+ *     SSH agent, because that is what a bastion is reached with, and no host
+ *     row is linked to it to pin a key on, so the host that jumps through it
+ *     pins it.
  *
  * A chain (`ProxyJump a,b`) is refused rather than half-honoured: two hops is
  * not one hop twice as far, and silently taking only the first would connect

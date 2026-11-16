@@ -73,8 +73,8 @@ export function parseJumpSpec(raw: string): JumpSpecResult {
  * linked only when that reaches what `ssh` would: the spec names the host's
  * alias — the saved row stands for that alias's block, whose user and port
  * apply when the spec writes none — and any user or port it writes is the
- * host's. A spec naming an address is never linked: that literal name may have
- * a `Host` block of its own, which no saved host records. Two saved hosts
+ * host's. A host matched only by its address (`sshHost`) is never linked: that
+ * literal name may have a `Host` block of its own, which no saved host records. Two saved hosts
  * with the alias are no answer either, rather than a pick by list order.
  *
  * The import and the New Host dialog's pick both decide with this, so a picked

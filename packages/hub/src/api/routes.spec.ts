@@ -2647,10 +2647,10 @@ describe("POST /api/hosts/import — linking a ProxyJump to a saved bastion (#10
 			entry("gw", { hostname: "gateway.example", user: "base", port: 2222, ...gw }),
 			entry("target", { hostname: "target.example", proxyJump }),
 		]);
-		return {
-			gw: hosts.find((host) => host.label === "gw-host"),
-			target: hosts.find((host) => host.label === "target-host"),
-		};
+		const bastion = hosts.find((host) => host.label === "gw-host");
+		const target = hosts.find((host) => host.label === "target-host");
+		if (!bastion || !target) throw new Error("the import did not answer both hosts");
+		return { gw: bastion, target };
 	}
 
 	it.each([
@@ -2779,6 +2779,16 @@ describe("POST /api/hosts/import — linking a ProxyJump to a saved bastion (#10
 		]);
 		expect(target?.ssh_proxy_spec).toBe("gw,other");
 		expect(target?.ssh_proxy_host_id).toBeUndefined();
+	});
+
+	it("reads no hosts to link an import with no ProxyJump", async () => {
+		const listHosts = vi.spyOn(MetaDAL.prototype, "listHosts");
+		try {
+			await importEntries([entry("a", { hostname: "a.example" })]);
+			expect(listHosts).not.toHaveBeenCalled();
+		} finally {
+			listHosts.mockRestore();
+		}
 	});
 
 	it("reads the hosts once to link an import's ProxyJumps", async () => {

@@ -1024,7 +1024,7 @@ A host may declare a jump, in one of two ways and never both:
 | Field | Meaning |
 |---|---|
 | `ssh_proxy_host_id` | A host this hub knows. It brings its own `ssh_auth`, its own key path and its own pinned host key — nothing about it is described twice. |
-| `ssh_proxy_spec` | `user@host:port`, the form `~/.ssh/config` writes. For a jump not linked to a host here: it authenticates through the SSH agent, and its key is pinned in `ssh_proxy_fingerprint` on the host that jumps through it, since it has no row of its own. |
+| `ssh_proxy_spec` | `user@host:port`, the form `~/.ssh/config` writes. For a jump not linked to a host here: it authenticates through the SSH agent, and its key is pinned in `ssh_proxy_fingerprint` on the host that jumps through it, since no host row is linked to it, even when it names a saved host. |
 
 The target's connection runs inside a channel opened on the jump (`forwardOut`), so the jump's connection ends with it, whatever ended it: the hub, the host, the network, or an attempt that failed. Every connection to the host goes through the jump, read afresh from the host's settings each time: the first one, the retry after its key is confirmed, the reconnect a pane asks for, and the automatic reconnect after a dropped link, which asks nobody and uses only a passphrase already cached for the jump. Only a connection someone is making pins a jump's key; a reconnect goes through what is already trusted (#609). The jump's host key is verified against what is already trusted for it, and a jump nothing trusts yet is refused rather than accepted on sight (SECURITY.md §3.3b). A chain (`ProxyJump a,b`) is refused, naming the number of hops.
 

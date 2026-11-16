@@ -241,8 +241,6 @@ describe("GET /api/ssh-config and POST /api/hosts/import, as ssh resolves the fi
 			sshUser: "alice",
 			sshAuth: "key",
 			sshKeyPath: resolve(home, ".ssh/star"),
-			sshProxyHostId: null,
-			sshProxySpec: null,
 			sshConfigHost: "web",
 		});
 		expect(meta.getHostByLabel("db")).toMatchObject({
@@ -252,7 +250,6 @@ describe("GET /api/ssh-config and POST /api/hosts/import, as ssh resolves the fi
 			sshAuth: "key",
 			sshKeyPath: resolve(home, ".ssh/db key"),
 			sshProxyHostId: gw?.id,
-			sshProxySpec: null,
 		});
 		expect(gw).toMatchObject({
 			sshHost: "gw.internal",
@@ -260,9 +257,15 @@ describe("GET /api/ssh-config and POST /api/hosts/import, as ssh resolves the fi
 			sshUser: "deploy",
 			sshAuth: "key",
 			sshKeyPath: resolve(home, ".ssh/star"),
-			sshProxyHostId: null,
-			sshProxySpec: null,
 		});
+		// A host stored without a jump has neither field: no link, and no spec,
+		// `none` included, that a connection would try to reach.
+		for (const label of ["web", "db", "gw"]) {
+			expect(meta.getHostByLabel(label)?.sshProxySpec ?? null, label).toBeNull();
+		}
+		for (const label of ["web", "gw"]) {
+			expect(meta.getHostByLabel(label)?.sshProxyHostId ?? null, label).toBeNull();
+		}
 	});
 
 	it("applies the lines before any Host to every alias", async () => {

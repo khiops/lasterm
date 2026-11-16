@@ -378,6 +378,8 @@ Host myalias
 			"  User a\\\\b",
 			"Host h",
 			'  User "#x"',
+			"Host h2",
+			'  User "a #b"',
 			"Host u",
 			'  User "a b',
 			"  User ok",
@@ -386,7 +388,19 @@ Host myalias
 			"  HostName h1 h2",
 			"  User three",
 		]);
-		expect(Object.keys(entries)).toEqual(["a", "q", "r", "s", "e1", "e2", "e3", "h", "u", "v"]);
+		expect(Object.keys(entries)).toEqual([
+			"a",
+			"q",
+			"r",
+			"s",
+			"e1",
+			"e2",
+			"e3",
+			"h",
+			"h2",
+			"u",
+			"v",
+		]);
 		expect(entries.a).toMatchObject({ user: "deploy", port: 2222, proxyJump: "gw" });
 		expect(entries.q).toMatchObject({ user: "a b", port: 2201, proxyJump: "j1" });
 		expect(entries.r).toMatchObject({ user: "c d", hostname: "xy" });
@@ -395,6 +409,7 @@ Host myalias
 		expect(entries.e2?.user).toBe("a'b");
 		expect(entries.e3?.user).toBe("a\\b");
 		expect(entries.h?.user).toBe("#x");
+		expect(entries.h2?.user).toBe("a #b");
 		expect(entries.u?.user).toBe("ok");
 		expect(entries.v).toMatchObject({ user: "three", hostname: null });
 	});

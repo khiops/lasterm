@@ -143,6 +143,12 @@ export function useLayout() {
 	// ------------------------------------------------------------------
 
 	return {
+		/**
+		 * Whether a saved layout was read at load: absent or unreadable, the
+		 * layout is a new one, and says nothing of the panes a page before held.
+		 */
+		loadedSavedLayout: persisted !== null,
+
 		// Shared state
 		tabs,
 		activeTabIndex,

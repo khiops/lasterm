@@ -26,8 +26,13 @@
 		<div v-if="error" class="terminal-error">
 			<div class="terminal-error__box">
 				<span>{{ error }}</span>
+				<!-- A spawn the page before this one sent: its terminal may be running,
+				     listed under its host, which the sidebar may not be showing (#992). -->
+				<span v-if="interrupted === 'unconfirmed'">
+					If it started, it is listed under {{ paneHost?.label ?? 'this host' }}.
+				</span>
 				<div class="terminal-error__actions">
-					<button class="exit-btn" @click="onRetry">Retry</button>
+					<button class="exit-btn" @click="onRetry">{{ interrupted === 'never-sent' ? 'Start' : 'Retry' }}</button>
 					<button class="exit-btn" @click="onClosePaneFromOverlay">Close</button>
 				</div>
 			</div>
@@ -238,7 +243,7 @@ import { useVisualProfile } from '../composables/useVisualProfile.js';
 import { useWaitForHost } from '../composables/useWaitForHost.js';
 import { useWaitingAnswer } from '../composables/useWaitingAnswer.js';
 import { useWindowFocus } from '../composables/useWindowFocus.js';
-import { useChannelsStore } from '../stores/channels.js';
+import { type InterruptedSpawnError, SPAWN_INTERRUPTED, useChannelsStore } from '../stores/channels.js';
 import { useConfigStore } from '../stores/config.js';
 import { useFilesPanelStore } from '../stores/files-panel.js';
 import { useHostsStore } from '../stores/hosts.js';
@@ -362,6 +367,12 @@ const notificationStore = useNotificationStore();
 const terminalContainer = ref<HTMLElement | null>(null);
 const ready = ref(false);
 const error = ref<string | null>(null);
+/**
+ * The error shown is a spawn the page before this one owed (#992): one whose
+ * SPAWN never went out, so nothing started, or one whose start was never
+ * confirmed. Null for any other error.
+ */
+const interrupted = ref<'never-sent' | 'unconfirmed' | null>(null);
 /**
  * Why the terminal this pane was to start is not there: its host asked for a
  * password or passphrase and none was given (#875). No shell started, so it is
@@ -1112,6 +1123,13 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 			});
 		}
 	} catch (err) {
+		// A restored spawn's Retry that ended before its SPAWN, its connection
+		// refused: the record shows that failure again, so a pane remounted over
+		// the id waits for a click too, also one that replaced this pane while it
+		// waited (#992). The store keeps any run already there.
+		if (spawnFor !== null && props.channelId === spawnFor) {
+			channelsStore.failRestoredSpawnBeforeSend(spawnFor, err);
+		}
 		// Unmounted meanwhile: nobody is shown what came of it.
 		if (unmounted) return;
 		// A spawn that failed after the pane was given another terminal: not
@@ -1124,6 +1142,14 @@ async function openChannel(cols: number, rows: number): Promise<void> {
 		}
 		const msg = err instanceof Error ? err.message : String(err);
 		const code = (err as { code?: string } | null)?.code;
+		// The page before this one owed this spawn and went away before its
+		// terminal was known to have started (#992). Shown, and nothing more:
+		// only a click starts it.
+		if (code === SPAWN_INTERRUPTED) {
+			interrupted.value = (err as InterruptedSpawnError).neverSent ? 'never-sent' : 'unconfirmed';
+			error.value = msg;
+			return;
+		}
 		// The channel died between page load and ATTACH: the pane shows it dead,
 		// which is a state, not an error.
 		if (code === 'CHANNEL_DEAD' || msg.includes('is dead') || msg.includes('CHANNEL_DEAD')) {
@@ -1177,6 +1203,7 @@ onMounted(async () => {
 /** Try again: the error's Retry, and Connect once a password or passphrase was not given. */
 async function onRetry(): Promise<void> {
 	error.value = null;
+	interrupted.value = null;
 	notConnected.value = null;
 	// The spawn it owes failed: cleared as it is clicked, so the open below sends
 	// it again, or a pane remounted over the id while this one waits does (#980).
@@ -1230,6 +1257,12 @@ watch(
 		// trying again would ask again, unasked (#875).
 		if (!ready.value) {
 			if (notConnected.value !== null) return;
+			// A spawn the page before this one owed starts on a click only, also
+			// after a Retry that failed: it may have left a terminal (#992).
+			if (holdsSpawn.value && spawnFor !== null && channelsStore.pendingSpawnRestored(spawnFor)) {
+				if (error.value === null) reconnectedWhileOpening = true;
+				return;
+			}
 			if (error.value !== null) await onRetry();
 			// Still opening: the attempt in flight speaks to a socket that is
 			// gone, so let it fail and try again then.

@@ -142,6 +142,62 @@ export interface InputMessage {
 	data: Uint8Array;
 }
 
+/**
+ * UI → Hub, and Hub → Agent: chunk `seq` of a paste (#1014), the text without
+ * markers, which the agent writes itself. The UI's `pasteId` is its own; the
+ * hub sends the agent an id of its own and maps the answers back.
+ */
+export interface PasteMessage {
+	type: "PASTE";
+	channelId: string;
+	pasteId: number;
+	seq: number;
+	data: Uint8Array;
+	last: boolean;
+}
+
+/** UI → Hub, and Hub → Agent: stop a paste (#1014). */
+export interface PasteCancelMessage {
+	type: "PASTE_CANCEL";
+	channelId: string;
+	pasteId: number;
+}
+
+/**
+ * Agent → Hub, and Hub → UI: the terminal took chunk `seq` of the paste; for
+ * a bracketed paste's last chunk, its end marker too (#1014).
+ */
+export interface PasteAckMessage {
+	type: "PASTE_ACK";
+	channelId: string;
+	pasteId: number;
+	seq: number;
+}
+
+/** Why a paste ended before its end (#1014). */
+export type PasteClosedReason =
+	| "cancelled"
+	| "superseded"
+	| "out_of_order"
+	| "overflow"
+	| "connection"
+	| "unknown"
+	| "unsupported"
+	| "agent_lost";
+
+/**
+ * Agent → Hub, and Hub → UI: the paste ended before its end (#1014).
+ * `written` is how many of its data bytes reached the terminal, from the
+ * agent; absent when the hub closed it (`unsupported`, `agent_lost`).
+ */
+export interface PasteClosedMessage {
+	type: "PASTE_CLOSED";
+	channelId: string;
+	pasteId: number;
+	reason: PasteClosedReason;
+	written?: number;
+}
+
 /** Agent → Hub (also Hub → UI): PTY output data */
 export interface OutputMessage {
 	type: "OUTPUT";
@@ -503,6 +559,8 @@ export interface UiSpawnOkMessage {
 	requestId?: string;
 	/** As on ATTACH_OK (#1012): the pane brackets its pastes itself. Absent from an older hub. */
 	adaptsInput?: boolean;
+	/** As on ATTACH_OK (#1014): the pane sends its pastes as PASTE chunks. Absent from an older hub. */
+	streamsPaste?: boolean;
 }
 
 /** UI → Hub: attach this client to an existing channel */
@@ -558,6 +616,12 @@ export interface UiAttachOkMessage {
 	 * pastes itself (#1012). Absent from an older hub.
 	 */
 	adaptsInput?: boolean;
+	/**
+	 * Whether the agent that takes this terminal's input takes a paste as
+	 * PASTE chunks, so the pane streams its pastes (#1014). Absent from an
+	 * older hub.
+	 */
+	streamsPaste?: boolean;
 }
 
 /**
@@ -1093,7 +1157,9 @@ export type AgentMessage =
 	| AgentNotificationMessage
 	| AgentLogMessage
 	| AgentEnvMessage
-	| ErrorMessage;
+	| ErrorMessage
+	| PasteAckMessage
+	| PasteClosedMessage;
 
 /** All messages that the Hub sends to the Agent */
 export type HubToAgentMessage =
@@ -1102,6 +1168,8 @@ export type HubToAgentMessage =
 	| AgentSpawnMessage
 	| AgentEnvQueryMessage
 	| InputMessage
+	| PasteMessage
+	| PasteCancelMessage
 	| ResizeMessage
 	| SnapshotReqMessage
 	| AgentAttachMessage
@@ -1117,6 +1185,8 @@ export type UiMessage =
 	| UiAttachMessage
 	| DetachMessage
 	| InputMessage
+	| PasteMessage
+	| PasteCancelMessage
 	| ResizeMessage
 	| FilesPanelMessage
 	| WriteClaimMessage
@@ -1161,6 +1231,8 @@ export type HubToUiMessage =
 	| AgentBellMessage
 	| AgentNotificationMessage
 	| InputDroppedMessage
+	| PasteAckMessage
+	| PasteClosedMessage
 	| PongMessage
 	| HostVerifyMessage
 	| AuthPromptMessage
@@ -1241,6 +1313,10 @@ export type ProtocolMessage =
 	| AgentBellMessage
 	| AgentNotificationMessage
 	| InputDroppedMessage
+	| PasteMessage
+	| PasteCancelMessage
+	| PasteAckMessage
+	| PasteClosedMessage
 	| TestConnectMessage
 	| TestConnectOkMessage
 	| TestConnectFailMessage

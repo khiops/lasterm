@@ -6,6 +6,8 @@ import type {
 	FilesPanelMessage,
 	HostVerifyResponseMessage,
 	InputMessage,
+	PasteCancelMessage,
+	PasteMessage,
 	ProtocolMessage,
 	ResizeMessage,
 	TestConnectMessage,
@@ -37,6 +39,8 @@ import {
 	handleFilesPanel,
 	handleHostVerifyResponse,
 	handleInput,
+	handlePaste,
+	handlePasteCancel,
 	handlePing,
 	handleResize,
 	handleSpawn,
@@ -147,7 +151,10 @@ export async function registerWsRoutes(
 			}
 		},
 		onForce: (force) => server.security.writeLockForced(force),
-		onChange: (channelId) => transfers?.lockChanged(channelId),
+		onChange: (channelId) => {
+			transfers?.lockChanged(channelId);
+			sessionManager.pasteLockChanged(channelId);
+		},
 	});
 	// A hub stopping keeps no lock for a holder that left: the grace ends with it.
 	server.addHook("onClose", async () => {
@@ -417,6 +424,12 @@ export async function registerWsRoutes(
 					break;
 				case "INPUT":
 					handleInput(msg as InputMessage, ctx);
+					break;
+				case "PASTE":
+					handlePaste(msg as PasteMessage, ctx);
+					break;
+				case "PASTE_CANCEL":
+					handlePasteCancel(msg as PasteCancelMessage, ctx);
 					break;
 				case "RESIZE":
 					handleResize(msg as ResizeMessage, ctx);

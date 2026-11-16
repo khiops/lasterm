@@ -62,9 +62,13 @@ function nextSshChannelId(): string {
 }
 
 // ─── Mock agent-launcher (connectOrLaunch) ───────────────────────────────────
-vi.mock("./agent-launcher.js", () => {
+vi.mock("./agent-launcher.js", async () => {
 	// eslint-disable-next-line @typescript-eslint/no-require-imports
 	const { EventEmitter } = require("node:events");
+	// The hub's own version: an agent of another one is retired, which waits
+	// for a daemon stop this mock never answers.
+	const { HUB_VERSION } =
+		await vi.importActual<typeof import("../build-version.js")>("../build-version.js");
 
 	class MockLocalAgent extends EventEmitter {
 		private _connected = true;
@@ -78,7 +82,7 @@ vi.mock("./agent-launcher.js", () => {
 					: {
 							type: "HELLO",
 							version: 1,
-							agentVersion: "0.0.0",
+							agentVersion: HUB_VERSION,
 							capabilities: nextLocalAgentCapabilities,
 						};
 		}
@@ -2794,6 +2798,261 @@ describe("SessionManager", () => {
 	// OUTPUT it hears while its ATTACH waits writes, from a cached ATTACH_OK,
 	// only what that answer holds: so after its snapshot it holds the output
 	// the hub has received, stored yet or not, within the tail's bound.
+	// ─── Pastes relayed to the agent (#1014) ─────────────────────────────────
+	describe("pastes relayed between a window and the agent (#1014)", () => {
+		type Sent = { type: string; pasteId?: number; seq?: number; channelId?: string };
+		type LocalAgent = {
+			send: { mock: { calls: Array<[ProtocolMessage]> } };
+			emit(event: string, msg?: unknown): void;
+			simulateDisconnect(): void;
+		};
+		const CH = "local-ch-1";
+
+		/** A terminal on the local host, its agent saying `capabilities`, client c1 its writer. */
+		async function terminal(capabilities: string[] = ["input-modes", "paste-stream"]) {
+			nextLocalAgentCapabilities = capabilities;
+			let holder: string | null = "c1";
+			sm.setGetWriteLockHolder(() => holder);
+			const c1: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c1", c1));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+			const agent = mockLocalAgents.at(-1) as unknown as LocalAgent;
+			return {
+				c1,
+				agent,
+				setHolder: (id: string | null) => {
+					holder = id;
+				},
+				/** What the agent received of pastes. */
+				toAgent: () =>
+					agent.send.mock.calls
+						.map(([m]) => m as unknown as Sent)
+						.filter((m) => m.type === "PASTE" || m.type === "PASTE_CANCEL"),
+			};
+		}
+		const chunk = (pasteId: number, seq: number, last = false) =>
+			({
+				type: "PASTE",
+				channelId: CH,
+				pasteId,
+				seq,
+				data: new Uint8Array([0x61 + seq]),
+				last,
+			}) as const;
+		const pastes = (received: ProtocolMessage[]) =>
+			received.filter(
+				(m) => m.type === "PASTE_ACK" || m.type === "PASTE_CLOSED",
+			) as unknown as Array<{
+				type: string;
+				pasteId: number;
+				seq?: number;
+				reason?: string;
+				written?: number;
+			}>;
+
+		it("HB1: says streamsPaste on SPAWN_OK and ATTACH_OK when the agent says paste-stream", async () => {
+			const { c1 } = await terminal();
+			await sm.handleAttach("c1", CH);
+			const spawnOk = c1.find((m) => m.type === "SPAWN_OK") as { streamsPaste?: boolean };
+			const attachOk = c1.find((m) => m.type === "ATTACH_OK") as { streamsPaste?: boolean };
+			expect(spawnOk.streamsPaste).toBe(true);
+			expect(attachOk.streamsPaste).toBe(true);
+		});
+
+		it("HB1: says not when the agent does not say paste-stream", async () => {
+			const { c1 } = await terminal(["input-modes"]);
+			await sm.handleAttach("c1", CH);
+			expect(
+				(c1.find((m) => m.type === "SPAWN_OK") as { streamsPaste?: boolean }).streamsPaste,
+			).toBe(false);
+			expect(
+				(c1.find((m) => m.type === "ATTACH_OK") as { streamsPaste?: boolean }).streamsPaste,
+			).toBe(false);
+		});
+
+		it("HB2: relays the holder's chunk with its fields and the hub's own paste id", async () => {
+			const { toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(41, 0));
+			const sent = toAgent()[0] as Sent & { data: Uint8Array; last: boolean };
+			expect(sent).toMatchObject({ type: "PASTE", channelId: CH, seq: 0, last: false });
+			expect([...sent.data]).toEqual([0x61]);
+			expect(sent.pasteId).not.toBe(41);
+		});
+
+		it("HB2: answers unsupported, and sends the agent nothing, when it does not say paste-stream", async () => {
+			const { c1, toAgent } = await terminal(["input-modes"]);
+			sm.handlePaste("c1", chunk(1, 0));
+			expect(toAgent()).toEqual([]);
+			expect(pastes(c1)).toEqual([
+				expect.objectContaining({ type: "PASTE_CLOSED", pasteId: 1, reason: "unsupported" }),
+			]);
+		});
+
+		it("HB3: cancels the paste when its window leaves", async () => {
+			const { toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0));
+			const agentId = toAgent()[0]?.pasteId;
+			sm.removeClient("c1");
+			expect(toAgent().at(-1)).toEqual({ type: "PASTE_CANCEL", channelId: CH, pasteId: agentId });
+		});
+
+		it("HB3: cancels the paste when the write lock moves to another window", async () => {
+			const { toAgent, setHolder } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0));
+			setHolder("c2");
+			sm.pasteLockChanged(CH);
+			expect(toAgent().at(-1)?.type).toBe("PASTE_CANCEL");
+		});
+
+		it("HB3: still cancels after the last chunk, until its acknowledgement", async () => {
+			const { toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0, true));
+			sm.removeClient("c1");
+			expect(toAgent().at(-1)?.type).toBe("PASTE_CANCEL");
+		});
+
+		it("HB3: sends nothing once the last chunk is acknowledged", async () => {
+			const { agent, toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0, true));
+			const agentId = toAgent()[0]?.pasteId;
+			agent.emit("message", { type: "PASTE_ACK", channelId: CH, pasteId: agentId, seq: 0 });
+			sm.removeClient("c1");
+			expect(toAgent().map((m) => m.type)).toEqual(["PASTE"]);
+		});
+
+		it("HB4: routes acknowledgements and closes to the owning window only", async () => {
+			const { c1, agent, toAgent } = await terminal();
+			const c2: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c2", c2));
+			await sm.handleAttach("c2", CH);
+			sm.handlePaste("c1", chunk(5, 0));
+			const agentId = toAgent()[0]?.pasteId;
+			agent.emit("message", { type: "PASTE_ACK", channelId: CH, pasteId: agentId, seq: 0 });
+			agent.emit("message", {
+				type: "PASTE_CLOSED",
+				channelId: CH,
+				pasteId: agentId,
+				reason: "overflow",
+				written: 1,
+			});
+			expect(pastes(c1)).toEqual([
+				{ type: "PASTE_ACK", channelId: CH, pasteId: 5, seq: 0 },
+				{ type: "PASTE_CLOSED", channelId: CH, pasteId: 5, reason: "overflow", written: 1 },
+			]);
+			expect(pastes(c2)).toEqual([]);
+		});
+
+		it("HB4: relays every acknowledgement still in flight after the last chunk", async () => {
+			const { c1, agent, toAgent } = await terminal();
+			for (let seq = 0; seq < 8; seq++) sm.handlePaste("c1", chunk(5, seq, seq === 7));
+			const agentId = toAgent()[0]?.pasteId;
+			for (let seq = 0; seq < 8; seq++) {
+				agent.emit("message", { type: "PASTE_ACK", channelId: CH, pasteId: agentId, seq });
+			}
+			expect(pastes(c1).map((m) => m.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+		});
+
+		it("HB5: tells the owner agent_lost, with no written, when the agent closes", async () => {
+			const { c1, agent } = await terminal();
+			sm.handlePaste("c1", chunk(3, 0));
+			agent.simulateDisconnect();
+			expect(pastes(c1)).toEqual([
+				{ type: "PASTE_CLOSED", channelId: CH, pasteId: 3, reason: "agent_lost" },
+			]);
+		});
+
+		it("HB5: tells it once when the agent is replaced, and the old agent's late close spares a new paste", async () => {
+			const { c1, agent, toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(3, 0));
+			const agents = (sm as unknown as { ctx: { agents: Map<string, unknown> } }).ctx.agents;
+			const [hostId] = [...agents.keys()];
+			const replacement = Object.create(agent, {
+				send: { value: vi.fn() },
+				helloMessage: {
+					value: {
+						type: "HELLO",
+						version: 1,
+						agentVersion: "0.0.0",
+						capabilities: ["paste-stream"],
+					},
+				},
+			});
+			agents.set(hostId as string, replacement);
+			// The next chunk finds another agent: the paste is lost.
+			sm.handlePaste("c1", chunk(3, 1));
+			expect(pastes(c1)).toEqual([
+				{ type: "PASTE_CLOSED", channelId: CH, pasteId: 3, reason: "agent_lost" },
+			]);
+			sm.handlePaste("c1", chunk(4, 0));
+			agent.simulateDisconnect();
+			expect(pastes(c1)).toHaveLength(1);
+			expect(toAgent().filter((m) => m.pasteId !== undefined)).toHaveLength(1);
+		});
+
+		it("HB6: gives two windows' pastes with the same id different ids toward the agent", async () => {
+			const { toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0, true));
+			sm.addClient(makeClient("c2", []));
+			sm.handlePaste("c2", chunk(1, 0, true));
+			const ids = toAgent()
+				.filter((m) => m.type === "PASTE")
+				.map((m) => m.pasteId);
+			expect(new Set(ids).size).toBe(2);
+		});
+
+		it("HB6: never hands a cancelled paste's close to another window's paste", async () => {
+			const { agent, toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0));
+			const first = toAgent()[0]?.pasteId;
+			sm.removeClient("c1");
+			const c2: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c2", c2));
+			sm.handlePaste("c2", chunk(1, 0));
+			agent.emit("message", {
+				type: "PASTE_CLOSED",
+				channelId: CH,
+				pasteId: first,
+				reason: "cancelled",
+				written: 0,
+			});
+			expect(pastes(c2)).toEqual([]);
+			sm.handlePaste("c2", chunk(1, 1));
+			expect(toAgent().at(-1)).toMatchObject({ type: "PASTE", seq: 1 });
+		});
+
+		it("HB6: refuses the owner's own second paste, which would supersede its first", async () => {
+			const { c1, toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0));
+			sm.handlePaste("c1", chunk(2, 0));
+			expect(toAgent()).toHaveLength(1);
+			expect(c1.at(-1)).toMatchObject({ type: "ERROR", code: "INVALID_INPUT" });
+		});
+
+		it("HB6: drops a chunk of no registered paste, without an answer", async () => {
+			const { c1, toAgent } = await terminal();
+			const before = c1.length;
+			sm.handlePaste("c1", chunk(9, 3));
+			expect(toAgent()).toEqual([]);
+			expect(c1.length).toBe(before);
+		});
+
+		it("HB7: relays the owner's cancel under the agent's id, and not the close that follows", async () => {
+			const { c1, agent, toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(6, 0));
+			const agentId = toAgent()[0]?.pasteId;
+			sm.handlePasteCancel("c1", { type: "PASTE_CANCEL", channelId: CH, pasteId: 6 });
+			expect(toAgent().at(-1)).toEqual({ type: "PASTE_CANCEL", channelId: CH, pasteId: agentId });
+			agent.emit("message", {
+				type: "PASTE_CLOSED",
+				channelId: CH,
+				pasteId: agentId,
+				reason: "cancelled",
+				written: 1,
+			});
+			expect(pastes(c1)).toEqual([]);
+		});
+	});
+
 	describe("whether the terminal's agent adapts input (#1012)", () => {
 		type Answer = {
 			type: string;

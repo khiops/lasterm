@@ -1801,12 +1801,12 @@ describe("a new terminal's pane after a reload", () => {
 		return shown[0] as { lines: string[]; buttons: string[] };
 	}
 
-	/** The button of the error box shown, once the box shows it. */
-	async function boxButton(name: string): Promise<HTMLElement> {
+	/** The button of the error box shown (in `within`), once the box shows it. */
+	async function boxButton(name: string, within: ParentNode = document): Promise<HTMLElement> {
 		return vi.waitFor(() => {
-			const button = [
-				...document.querySelectorAll<HTMLElement>(".terminal-error__box button"),
-			].find((b) => b.textContent?.trim() === name);
+			const button = [...within.querySelectorAll<HTMLElement>(".terminal-error__box button")].find(
+				(b) => b.textContent?.trim() === name,
+			);
 			if (button === undefined) throw new Error(`no "${name}" in the pane's box`);
 			return button;
 		});
@@ -2117,10 +2117,9 @@ describe("a new terminal's pane after a reload", () => {
 		// held by its pane.
 		for (const spawn of firstHub.frames("SPAWN")) refuse(firstHub, spawn);
 		await settle();
-		const close = [
-			...(pane(one.paneId)?.querySelectorAll<HTMLElement>(".terminal-error__box button") ?? []),
-		].find((b) => b.textContent?.trim() === "Close");
-		close?.click();
+		const onePane = pane(one.paneId);
+		if (onePane === null) throw new Error("no pane for the first pending leaf");
+		(await boxButton("Close", onePane)).click();
 		await settle();
 
 		expect(Object.keys(stored() ?? {})).toEqual([other.channelId]);

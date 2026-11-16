@@ -1007,6 +1007,25 @@ describe("SessionManager", () => {
 		);
 	});
 
+	it("a terminal restarted while the host's session is detached makes it active", async () => {
+		sm.addClient(makeClient("c1", []));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbManager.meta);
+		const [first] = dal.listSessions();
+		sm.removeClient("c1");
+		expect(dal.getSession(first?.id ?? "")?.status).toBe("detached");
+
+		const c2: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c2", c2));
+		expect(await sm.restartChannel("local-ch-1")).toBe(true);
+
+		expect(dal.getSession(first?.id ?? "")?.status).toBe("active");
+		expect(c2).toContainEqual(
+			expect.objectContaining({ type: "SESSION_STATE", sessionId: first?.id, status: "active" }),
+		);
+	});
+
 	// ─── DB persistence ─────────────────────────────────────────────────────
 
 	it("handleSpawn creates a session record in meta.db with 'active' status", async () => {

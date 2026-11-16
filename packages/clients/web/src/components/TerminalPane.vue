@@ -410,8 +410,9 @@ let askAgainOnNewSocket = false;
 
 const hostsStore = useHostsStore();
 
-// Resolve per-host theme override (SC-03) from host.profileJson
-const hostThemeName = (() => {
+// Per-host theme override (SC-03) from host.profileJson: the host of the
+// terminal shown now, as its profile says now (#997).
+const hostThemeName = computed<string | undefined>(() => {
 	const paneHost = paneHostId.value;
 	if (!paneHost) return undefined;
 	const host = hostsStore.hosts.find((h) => h.id === paneHost);
@@ -422,7 +423,7 @@ const hostThemeName = (() => {
 	} catch {
 		return undefined;
 	}
-})();
+});
 
 const { profile: resolvedProfile, resolvedFor } = useResolvedProfile(
 	computed(() => paneHostId.value),

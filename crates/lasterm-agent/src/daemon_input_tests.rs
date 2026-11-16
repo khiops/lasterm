@@ -845,7 +845,12 @@ impl PasteTerminal {
     /// What the program has read, once it holds at least `len` bytes, and
     /// after a moment for anything that should not come.
     async fn read(&self, len: usize) -> Vec<u8> {
-        let deadline = tokio::time::Instant::now() + DEADLINE;
+        self.read_within(len, DEADLINE).await
+    }
+
+    /// `read`, with `limit` for the bytes to come.
+    async fn read_within(&self, len: usize, limit: Duration) -> Vec<u8> {
+        let deadline = tokio::time::Instant::now() + limit;
         loop {
             let got = std::fs::read(&self.out).unwrap_or_default();
             if got.len() >= len {
@@ -854,8 +859,9 @@ impl PasteTerminal {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "the program read {} of {len} bytes within {DEADLINE:?}",
-                got.len()
+                "the program read {} of {len} bytes within {limit:?}: {:?}",
+                got.len(),
+                String::from_utf8_lossy(&got)
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -1065,36 +1071,43 @@ async fn a_connection_that_ends_closes_its_paste() {
     tear_down(&daemon, &dir).await;
 }
 
+/// How soon a key typed after a paste's close reaches the program (#1030).
+const TYPED_WITHIN: Duration = Duration::from_secs(5);
+
 /// PS10 displaced, input of the new connection: a connection displaced by a
 /// newer one of its hub has its paste closed when it is displaced, even if
 /// its own handler never reaches its end; what the new one types follows the
-/// end marker.
+/// end marker, and reaches the program at once.
+///
+/// #1030 AC7: on Windows 26100 conhost could hold that key until more input
+/// came, about once in 30 here; 150 runs miss it with odds near 1 %.
 #[tokio::test]
 async fn a_displaced_connections_paste_closes_before_the_new_connection_types() {
-    let dir = scratch("paste-displaced");
-    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
-    let mut old = TestHub::connect(&daemon, KEY_A, 1).await;
-    let terminal = PasteTerminal::start(&mut old, &dir, "paste-displaced", true, None).await;
-    open_paste(&mut old, &terminal, 1).await;
-    // Its handler never runs its end: only the displacement can close it.
-    old.abort();
-    let mut new = TestHub::connect(&daemon, KEY_A, 2).await;
-    // A second byte, a moment later: conhost on Windows 26100 can hold what is
-    // typed after an end marker written alone until later input arrives; a
-    // byte sent at once is held with it. That is an open product regression
-    // (#1030); this only keeps the test about order and closing.
-    new.send(&input(&terminal.channel_id, b"x".to_vec())).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    new.send(&input(&terminal.channel_id, b"y".to_vec())).await;
-    let expected = [
-        crate::input::PASTE_START,
-        b"first",
-        crate::input::PASTE_END,
-        b"xy",
-    ]
-    .concat();
-    assert_eq!(terminal.read(expected.len()).await, expected);
-    tear_down(&daemon, &dir).await;
+    for run in 0..150 {
+        let name = format!("paste-displaced-{run}");
+        let dir = scratch(&name);
+        let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+        let mut old = TestHub::connect(&daemon, KEY_A, 1).await;
+        let terminal = PasteTerminal::start(&mut old, &dir, &name, true, None).await;
+        open_paste(&mut old, &terminal, 1).await;
+        // Its handler never runs its end: only the displacement can close it.
+        old.abort();
+        let mut new = TestHub::connect(&daemon, KEY_A, 2).await;
+        new.send(&input(&terminal.channel_id, b"x".to_vec())).await;
+        let expected = [
+            crate::input::PASTE_START,
+            b"first",
+            crate::input::PASTE_END,
+            b"x",
+        ]
+        .concat();
+        assert_eq!(
+            terminal.read_within(expected.len(), TYPED_WITHIN).await,
+            expected,
+            "run {run}"
+        );
+        tear_down(&daemon, &dir).await;
+    }
 }
 
 /// PS10 stale frames and stale INPUT: what a displaced connection still had
@@ -1153,42 +1166,46 @@ async fn a_displaced_connections_frames_are_dropped() {
 /// PS5 through the agent's frames: a PASTE_CANCEL from the connection that
 /// owns the paste closes it for the program, end marker included, and answers
 /// PASTE_CLOSED `cancelled` with how much of it went; what is typed after
-/// follows the end marker.
+/// follows the end marker, and reaches the program at once.
+///
+/// #1030 AC7: on Windows 26100 conhost could hold that key until more input
+/// came, about once in 10 here; 50 runs miss it with odds near 0.5 %.
 #[tokio::test]
 async fn a_paste_cancelled_by_its_connection_is_closed_for_the_program() {
-    let dir = scratch("paste-cancel");
-    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
-    let mut hub = TestHub::connect(&daemon, KEY_A, 1).await;
-    let terminal = PasteTerminal::start(&mut hub, &dir, "paste-cancel", true, None).await;
-    open_paste(&mut hub, &terminal, 4).await;
+    for run in 0..50 {
+        let name = format!("paste-cancel-{run}");
+        let dir = scratch(&name);
+        let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+        let mut hub = TestHub::connect(&daemon, KEY_A, 1).await;
+        let terminal = PasteTerminal::start(&mut hub, &dir, &name, true, None).await;
+        open_paste(&mut hub, &terminal, 4).await;
 
-    hub.send(&HubToAgent::PasteCancel {
-        channel_id: terminal.channel_id.clone(),
-        paste_id: 4,
-    })
-    .await;
-    let frames = hub
-        .read_through(|frame| is_about(frame, "PASTE_CLOSED", &terminal.channel_id))
+        hub.send(&HubToAgent::PasteCancel {
+            channel_id: terminal.channel_id.clone(),
+            paste_id: 4,
+        })
         .await;
-    let closed = frames.last().unwrap();
-    assert_eq!(closed["paste_id"].as_u64(), Some(4));
-    assert_eq!(closed["reason"].as_str(), Some("cancelled"));
-    assert_eq!(closed["written"].as_u64(), Some(5));
-    // A second byte, a moment later: conhost on Windows 26100 can hold what is
-    // typed after an end marker written alone until later input arrives; a
-    // byte sent at once is held with it. That is an open product regression
-    // (#1030); this only keeps the test about order and closing.
-    hub.send(&input(&terminal.channel_id, b"x".to_vec())).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    hub.send(&input(&terminal.channel_id, b"y".to_vec())).await;
+        let frames = hub
+            .read_through(|frame| is_about(frame, "PASTE_CLOSED", &terminal.channel_id))
+            .await;
+        let closed = frames.last().unwrap();
+        assert_eq!(closed["paste_id"].as_u64(), Some(4));
+        assert_eq!(closed["reason"].as_str(), Some("cancelled"));
+        assert_eq!(closed["written"].as_u64(), Some(5));
+        hub.send(&input(&terminal.channel_id, b"x".to_vec())).await;
 
-    let expected = [
-        crate::input::PASTE_START,
-        b"first",
-        crate::input::PASTE_END,
-        b"xy",
-    ]
-    .concat();
-    assert_eq!(terminal.read(expected.len()).await, expected);
-    tear_down(&daemon, &dir).await;
+        let expected = [
+            crate::input::PASTE_START,
+            b"first",
+            crate::input::PASTE_END,
+            b"x",
+        ]
+        .concat();
+        assert_eq!(
+            terminal.read_within(expected.len(), TYPED_WITHIN).await,
+            expected,
+            "run {run}"
+        );
+        tear_down(&daemon, &dir).await;
+    }
 }

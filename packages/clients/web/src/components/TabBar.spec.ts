@@ -8,6 +8,7 @@ import { BUNDLED_THEMES } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, type Component, createApp, h, nextTick, ref } from "vue";
+import { useChannelsStore } from "../stores/channels.js";
 import { useThemeStore } from "../stores/theme.js";
 import { shortcutLabel } from "../utils/app-shortcuts.js";
 import TabBar from "./TabBar.vue";
@@ -28,6 +29,8 @@ function mountBar(tabIds: string[], active = 0, bar: Component = TabBar) {
 	const closeTab = vi.fn();
 	const renameTab = vi.fn();
 	const reorderTab = vi.fn();
+	const split = vi.fn();
+	const pinia = createPinia();
 	root = document.createElement("div");
 	document.body.appendChild(root);
 	app = createApp({
@@ -42,11 +45,12 @@ function mountBar(tabIds: string[], active = 0, bar: Component = TabBar) {
 				onCloseTab: closeTab,
 				onRenameTab: renameTab,
 				onReorderTab: reorderTab,
+				onSplit: split,
 			}),
 	});
-	app.use(createPinia());
+	app.use(pinia);
 	app.mount(root);
-	return { selectTab, closeTab, renameTab, reorderTab };
+	return { selectTab, closeTab, renameTab, reorderTab, split, pinia };
 }
 
 beforeEach(() => {
@@ -316,8 +320,12 @@ describe("TabBar rename", () => {
 			new MouseEvent("mousedown", { button: 1, bubbles: true, cancelable: true }),
 		);
 		expect(closeTab).toHaveBeenCalledWith(1);
+		const input = renameField("t1");
 		await closeTabs("t1");
 		expect(root.querySelector("input.tab-rename-input")).toBeNull();
+		// Chromium may blur a focused field as it removes it, happy-dom does not: a blur commits.
+		input?.dispatchEvent(new Event("blur"));
+		expect(renameTab).not.toHaveBeenCalled();
 		// The next rename starts from the tab's own name, not the text typed for the closed tab.
 		const next = await rename("t2");
 		expect(next.value).toBe("Label t2");
@@ -375,6 +383,34 @@ describe("TabBar, when a tab closes under the menu or a drag", () => {
 		await closeTabs("t0");
 		menuItem("Close").click();
 		expect(closeTab).toHaveBeenCalledExactlyOnceWith(0);
+	});
+
+	it("acts on, and describes, the tab it was opened on", async () => {
+		const { split, pinia } = mountBar(["t0", "t1", "t2", "t3"], 0);
+		const channel = (id: string, more: object = {}) => ({
+			id,
+			hostId: "h",
+			status: "running",
+			...more,
+		});
+		useChannelsStore(pinia).channels = [
+			channel("ch-t0"),
+			channel("ch-t1"),
+			channel("ch-t2", { isWelcome: true, title: "Mine" }),
+			channel("ch-t3"),
+		] as never;
+		await openMenu("t2");
+		await closeTabs("t0");
+		expect(menuItem("Unset Welcome Tab").disabled).toBe(false);
+		expect(menuItem("Reset Title to Dynamic").disabled).toBe(false);
+		menuItem("Split Right").click();
+		expect(split).toHaveBeenCalledExactlyOnceWith("ch-t2", "vertical");
+		await openMenu("t2");
+		menuItem("Rename").click();
+		await nextTick();
+		await nextTick();
+		expect(renameField("t2")).not.toBeNull();
+		expect(root.querySelectorAll("input.tab-rename-input")).toHaveLength(1);
 	});
 
 	it("closes the menu when its tab closes", async () => {

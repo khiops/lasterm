@@ -14,7 +14,7 @@ use crate::expand::expand_vars;
 use crate::flow::{Flow, Flows, InTransit, Queued};
 use crate::framing::{encode_frame, FrameReader};
 use crate::headless::{HeadlessMirror, SnapshotInfo};
-use crate::input::Offer;
+use crate::input::{Offer, PasteEvent, PasteOffer, PasteReport};
 use crate::input_modes::{self, InputModeCell};
 use crate::owner::OwnerId;
 use crate::protocol::{error_codes, AgentToHub, SnapshotData};
@@ -113,6 +113,40 @@ pub(crate) type FrameSender = mpsc::UnboundedSender<Outgoing>;
 
 /// The one connection of stdio mode, as its hub's flow knows it.
 const STDIO_CONNECTION: u64 = 0;
+
+/// The connection a hub message came in on, as pastes know it (#1014): its
+/// id, and whether a newer connection of its hub has replaced it.
+#[derive(Clone)]
+pub(crate) struct ConnectionRef {
+    pub(crate) id: u64,
+    /// Set by the daemon when a newer connection of the same hub displaces
+    /// this one; stdio's one connection is never displaced.
+    displaced: Option<tokio::sync::watch::Receiver<bool>>,
+}
+
+impl ConnectionRef {
+    /// Stdio mode's one connection.
+    pub(crate) fn stdio() -> Self {
+        Self {
+            id: STDIO_CONNECTION,
+            displaced: None,
+        }
+    }
+
+    /// A daemon connection, displaced once its cancel is set.
+    pub(crate) fn daemon(id: u64, displaced: tokio::sync::watch::Receiver<bool>) -> Self {
+        Self {
+            id,
+            displaced: Some(displaced),
+        }
+    }
+
+    /// A newer connection of the same hub has replaced this one: what it
+    /// still has to dispatch must not reach a terminal (#1014).
+    pub(crate) fn is_displaced(&self) -> bool {
+        self.displaced.as_ref().is_some_and(|rx| *rx.borrow())
+    }
+}
 
 /// Per-channel sender for ChannelCommand.
 pub(crate) type SnapshotSenders =
@@ -235,6 +269,7 @@ pub async fn run_stdio() -> std::io::Result<DestroyAllSummary> {
             handle_message(
                 msg,
                 &owner,
+                &ConnectionRef::stdio(),
                 Arc::clone(&pty_manager),
                 frame_tx.clone(),
                 channel_events.clone(),
@@ -292,6 +327,9 @@ pub(crate) fn build_hello(daemon: bool) -> AgentToHub {
         // Writes paste markers and cursor keys in the program's form, and
         // sends the input modes and the alternate screen with a snapshot (#1012).
         "input-modes".into(),
+        // Takes a paste as PASTE chunks, acknowledged once the terminal took
+        // each, and writes and closes its markers itself (#1014).
+        "paste-stream".into(),
     ];
     if daemon {
         capabilities.push("hub-identity".into());
@@ -365,6 +403,7 @@ async fn visible_to(
 pub(crate) async fn handle_message(
     msg: crate::protocol::HubToAgent,
     owner: &OwnerId,
+    connection: &ConnectionRef,
     pty_manager: Arc<Mutex<PtyManager>>,
     frame_tx: FrameSender,
     channel_events: ChannelEventSender,
@@ -408,6 +447,24 @@ pub(crate) async fn handle_message(
         HubToAgent::EnvQuery { mode, .. } => format!("ENV_QUERY mode={mode:?}"),
         HubToAgent::Stop { force } => format!("STOP force={force}"),
         HubToAgent::Error { code, .. } => format!("ERROR {}", code),
+        HubToAgent::Paste {
+            channel_id,
+            paste_id,
+            seq,
+            data,
+            last,
+        } => format!(
+            "PASTE ch={} id={paste_id} seq={seq} {} bytes last={last}",
+            &channel_id[..8.min(channel_id.len())],
+            data.len()
+        ),
+        HubToAgent::PasteCancel {
+            channel_id,
+            paste_id,
+        } => format!(
+            "PASTE_CANCEL ch={} id={paste_id}",
+            &channel_id[..8.min(channel_id.len())]
+        ),
     };
     tracing::debug!(msg = %summary, owner = owner.short(), "hub message received");
 
@@ -488,6 +545,13 @@ pub(crate) async fn handle_message(
             // follow on this connection, other channels' included (#740).
             let offered = {
                 let mgr = pty_manager.lock().await;
+                // Checked under the lock the daemon closes a displaced
+                // connection's pastes under: keys it had read but not yet
+                // dispatched must not land in the new connection's paste.
+                if connection.is_displaced() {
+                    tracing::debug!(channel_id = %channel_id, "INPUT dropped: connection displaced");
+                    return Ok(());
+                }
                 mgr.owned_by(&channel_id, owner).map(|channel| {
                     // In the form the program asked for, whatever the client's
                     // terminal believes (#1012).
@@ -512,6 +576,61 @@ pub(crate) async fn handle_message(
                     tracing::debug!(channel_id = %channel_id, "INPUT dropped: terminal gone");
                 }
                 Some(Offer::Queued) => {}
+            }
+        }
+
+        HubToAgent::Paste {
+            channel_id,
+            paste_id,
+            seq,
+            data,
+            last,
+        } => {
+            let report = paste_report(&frame_tx, &channel_id, connection);
+            let offered = {
+                let mgr = pty_manager.lock().await;
+                if connection.is_displaced() {
+                    tracing::debug!(channel_id = %channel_id, "PASTE dropped: connection displaced");
+                    return Ok(());
+                }
+                mgr.owned_by(&channel_id, owner).map(|channel| {
+                    let modes = Arc::clone(&channel.input_modes);
+                    channel.input.offer_paste(
+                        connection.id,
+                        paste_id,
+                        seq,
+                        data,
+                        last,
+                        move || modes.load().bracketed_paste,
+                        report,
+                    )
+                })
+            };
+            match offered {
+                None => send_frame(&frame_tx, &channel_not_found(channel_id, None))?,
+                Some(PasteOffer::Unknown) => send_frame(
+                    &frame_tx,
+                    &AgentToHub::PasteClosed {
+                        channel_id,
+                        paste_id,
+                        reason: "unknown".into(),
+                        written: 0,
+                    },
+                )?,
+                Some(PasteOffer::Queued | PasteOffer::Closed | PasteOffer::Gone) => {}
+            }
+        }
+
+        HubToAgent::PasteCancel {
+            channel_id,
+            paste_id,
+        } => {
+            let mgr = pty_manager.lock().await;
+            if connection.is_displaced() {
+                return Ok(());
+            }
+            if let Some(channel) = mgr.owned_by(&channel_id, owner) {
+                channel.input.cancel_paste(connection.id, paste_id);
             }
         }
 
@@ -1513,6 +1632,41 @@ fn strip_dsr(data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Where a paste's events go: `channel_id`'s PASTE_ACK and PASTE_CLOSED, on
+/// the connection that sent it, unless a newer one has replaced it (#1014).
+fn paste_report(
+    frame_tx: &FrameSender,
+    channel_id: &str,
+    connection: &ConnectionRef,
+) -> PasteReport {
+    let frame_tx = frame_tx.clone();
+    let channel_id = channel_id.to_owned();
+    let connection = connection.clone();
+    Arc::new(move |event| {
+        if connection.is_displaced() {
+            return;
+        }
+        let msg = match event {
+            PasteEvent::Ack { paste_id, seq } => AgentToHub::PasteAck {
+                channel_id: channel_id.clone(),
+                paste_id,
+                seq,
+            },
+            PasteEvent::Closed {
+                paste_id,
+                reason,
+                written,
+            } => AgentToHub::PasteClosed {
+                channel_id: channel_id.clone(),
+                paste_id,
+                reason: reason.as_str().into(),
+                written,
+            },
+        };
+        let _ = send_frame(&frame_tx, &msg);
+    })
+}
+
 pub(crate) fn send_frame(tx: &FrameSender, msg: &AgentToHub) -> std::io::Result<()> {
     let frame = encode_frame(msg)?;
     // SendError means receiver dropped — treat as EOF, not a hard error
@@ -1662,6 +1816,7 @@ mod stdio_tests {
         handle_message(
             crate::protocol::HubToAgent::Stop { force: true },
             &OwnerId::stdio(),
+            &crate::handler::ConnectionRef::stdio(),
             manager,
             frame_tx,
             channel_events,
@@ -1687,6 +1842,7 @@ mod stdio_tests {
         handle_message(
             msg,
             &OwnerId::stdio(),
+            &crate::handler::ConnectionRef::stdio(),
             Arc::clone(manager),
             frame_tx,
             channel_events,
@@ -2332,6 +2488,22 @@ mod stdio_tests {
         }
     }
 
+    /// PS11: both kinds of agent take a paste as PASTE chunks (#1014).
+    #[test]
+    fn every_agent_says_paste_stream() {
+        for daemon in [true, false] {
+            match build_hello(daemon) {
+                AgentToHub::Hello { capabilities, .. } => {
+                    assert!(
+                        capabilities.contains(&"paste-stream".to_string()),
+                        "{daemon}"
+                    );
+                }
+                _ => unreachable!("build_hello builds HELLO"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn env_query_answers_with_the_base_for_that_mode_and_the_identity() {
         let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
@@ -2343,6 +2515,7 @@ mod stdio_tests {
                 mode: Some("minimal".into()),
             },
             &OwnerId::stdio(),
+            &crate::handler::ConnectionRef::stdio(),
             Arc::new(Mutex::new(PtyManager::new())),
             frame_tx,
             channel_events,
@@ -2807,6 +2980,7 @@ mod tests {
                 channel_id: channel_id.to_owned(),
             },
             &OwnerId::stdio(),
+            &crate::handler::ConnectionRef::stdio(),
             Arc::clone(&manager),
             frame_tx.clone(),
             channel_events.clone(),

@@ -516,6 +516,114 @@ describe("keystrokes leave no trace in the logs", () => {
 			await hub.close();
 		}
 	});
+
+	// A paste is a burst of PASTE frames (#1014): the same hot path. The bytes
+	// must not reach a log at any level, even as the byte array the decoded
+	// message holds, which JSON.stringify alone writes as numbered keys.
+	it("logs nothing at INFO or above for PASTE frames, and never their bytes at any level", async () => {
+		const pasted = "paste-secret-4242";
+		const channelId = "01HZZZZZZZZZZZZZZZZZZZZZZZ";
+		// The hub's own log at its most verbose, into the file the spec reads.
+		const hubLogger = new HubLogger(log.dir, {
+			level: "trace",
+			format: "jsonl",
+			output: "file",
+			maxAgeDays: 30,
+			maxSizeMb: 50,
+		});
+		const hub = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			authToken: PRIMARY_TOKEN,
+			authConfig: { tokenTtlDays: 90 },
+			securityLog: log.securityLog,
+			hubLogger,
+		});
+		try {
+			const bytesAsText = (_key: string, value: unknown): unknown => {
+				if (value instanceof Uint8Array) return new TextDecoder().decode(value);
+				if (
+					typeof value === "object" &&
+					value !== null &&
+					(value as { type?: unknown }).type === "Buffer" &&
+					Array.isArray((value as { data?: unknown }).data)
+				) {
+					return new TextDecoder().decode(Uint8Array.from((value as { data: number[] }).data));
+				}
+				return value;
+			};
+			const loud: string[] = [];
+			const every: string[] = [];
+			for (const level of ["fatal", "error", "warn", "info", "debug", "trace"] as const) {
+				vi.spyOn(hub.log, level).mockImplementation(((...args: unknown[]) => {
+					const line = `${level} ${JSON.stringify(args, bytesAsText)}`;
+					every.push(line);
+					if (level !== "debug" && level !== "trace") loud.push(line);
+				}) as never);
+			}
+			const ws = await openSocket(hub);
+			const received: ProtocolMessage[] = [];
+			ws.on("message", (data: unknown) => {
+				received.push(decodeMessage(new Uint8Array(data as Buffer)));
+			});
+			ws.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
+			await vi.waitFor(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
+			const beforePasting = loud.length;
+			const beforeAny = every.length;
+
+			// The window holds the terminal's write lock: its PASTE is accepted, and
+			// the relay answers agent_lost, there being no agent: proof it ran.
+			ws.send(encodeMessage({ type: "WRITE_CLAIM", channelId }));
+			const data = new TextEncoder().encode(pasted);
+			for (let seq = 0; seq < 8; seq++) {
+				ws.send(
+					encodeMessage({ type: "PASTE", channelId, pasteId: 1, seq, data, last: seq === 7 }),
+				);
+			}
+			ws.send(encodeMessage({ type: "PASTE_CANCEL", channelId, pasteId: 1 }));
+			ws.send(encodeMessage({ type: "PING" }));
+			await vi.waitFor(() => expect(received.some((m) => m.type === "PONG")).toBe(true));
+			expect(received.find((m) => m.type === "PASTE_CLOSED")).toMatchObject({
+				reason: "agent_lost",
+			});
+			expect(received.some((m) => m.type === "ERROR")).toBe(false);
+			ws.terminate();
+
+			expect(loud.slice(beforePasting)).toEqual([]);
+			expect(every.slice(beforeAny).join("\n")).not.toContain(pasted);
+			expect(log.text()).not.toContain(pasted);
+			// A byte array written to hub.jsonl is an object of numbered keys, or an
+			// array of numbers: read each back as text.
+			const asText = (value: unknown): string[] => {
+				if (Array.isArray(value)) {
+					return value.every((v) => typeof v === "number")
+						? [String.fromCharCode(...(value as number[]))]
+						: value.flatMap(asText);
+				}
+				if (typeof value === "object" && value !== null) {
+					const entries = Object.entries(value);
+					if (
+						entries.length > 0 &&
+						entries.every(([k, v]) => /^\d+$/.test(k) && typeof v === "number")
+					) {
+						return [String.fromCharCode(...entries.map(([, v]) => v as number))];
+					}
+					return entries.flatMap(([, v]) => asText(v));
+				}
+				return typeof value === "string" ? [value] : [];
+			};
+			const logged = log
+				.text()
+				.split("\n")
+				.filter(Boolean)
+				.flatMap((line) => asText(JSON.parse(line)));
+			expect(logged.join("\n")).not.toContain(pasted);
+		} finally {
+			await hub.close();
+		}
+	});
 });
 
 // ─── Requests ─────────────────────────────────────────────────────────────────

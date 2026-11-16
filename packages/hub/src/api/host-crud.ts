@@ -1,11 +1,10 @@
-import { isPlainObject, toSnakeCase, validateCustomCommand } from "@lasterm/shared";
+import { isPlainObject, sshAuthFor, toSnakeCase, validateCustomCommand } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
 import type { CreateHostBody, UpdateHostBody } from "./hosts.js";
 import {
 	readHostProfileJson,
-	sshAuthFor,
 	validateCreateHost,
 	validateIconImage,
 	validateUpdateHost,

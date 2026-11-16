@@ -23,15 +23,25 @@ let nextId = 1;
 export const useToastStore = defineStore("toast", () => {
 	const messages = ref<ToastMessage[]>([]);
 
+	/**
+	 * Show a toast, and return its id. It goes after `durationMs`; with `null`
+	 * it stays until its owner dismisses it, as a paste's progress does (#1014).
+	 */
 	function show(
 		level: ToastMessage["level"],
 		text: string,
-		durationMs = 5000,
+		durationMs: number | null = 5000,
 		action?: ToastAction,
-	): void {
+	): number {
 		const id = nextId++;
 		messages.value = [...messages.value, { id, level, text, ...(action ? { action } : {}) }];
-		setTimeout(() => dismiss(id), durationMs);
+		if (durationMs !== null) setTimeout(() => dismiss(id), durationMs);
+		return id;
+	}
+
+	/** Change a shown toast's text; a toast already gone stays gone (#1014). */
+	function update(id: number, text: string): void {
+		messages.value = messages.value.map((m) => (m.id === id ? { ...m, text } : m));
 	}
 
 	function dismiss(id: number): void {
@@ -45,5 +55,5 @@ export const useToastStore = defineStore("toast", () => {
 		message?.action?.run();
 	}
 
-	return { messages, show, dismiss, act };
+	return { messages, show, update, dismiss, act };
 });

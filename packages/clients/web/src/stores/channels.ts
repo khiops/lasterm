@@ -132,6 +132,8 @@ export interface SpawnedTerminal {
 	rows: number;
 	/** What its SPAWN_OK said of the agent's input (#1012); false from an older hub. */
 	adaptsInput: boolean;
+	/** What that SPAWN_OK said of pastes (#1014). */
+	streamsPaste: boolean;
 }
 
 /** The one spawn a pending id has sent: in flight, or what came of it. */
@@ -1008,20 +1010,22 @@ export const useChannelsStore = defineStore("channels", () => {
 		if (record.run !== null) return record.run;
 		// What its SPAWN_OK said of the agent's input (#1012).
 		let adaptsInput = false;
+		let streamsPaste = false;
 		const run: PendingSpawnRun = {
 			state: "running",
 			outcome: spawnChannel(record.hostId, {
 				cols,
 				rows,
 				select: false,
-				onAdaptsInput: (adapts) => {
+				onAdaptsInput: (adapts, streams) => {
 					adaptsInput = adapts;
+					streamsPaste = streams;
 				},
 			}).then(
 				(channelId) => {
 					run.state = "succeeded";
 					forgetIfUnheld(tempId, record);
-					return { channelId, cols, rows, adaptsInput };
+					return { channelId, cols, rows, adaptsInput, streamsPaste };
 				},
 				(err: unknown) => {
 					run.state = "failed";
@@ -1085,7 +1089,7 @@ export const useChannelsStore = defineStore("channels", () => {
 			 */
 			automatic?: boolean;
 			/** Told what the SPAWN_OK said of the agent's input (#1012), before it resolves. */
-			onAdaptsInput?: (adaptsInput: boolean) => void;
+			onAdaptsInput?: (adaptsInput: boolean, streamsPaste: boolean) => void;
 		},
 	): Promise<string> {
 		const sessionStore = useSessionStore();
@@ -1165,7 +1169,10 @@ export const useChannelsStore = defineStore("channels", () => {
 					// on another host than the one in view reads its profile and its
 					// theme from this, and would take the host in view's meanwhile.
 					registerChannelHost(msg.channelId, hostId);
-					opts?.onAdaptsInput?.("adaptsInput" in msg && msg.adaptsInput === true);
+					opts?.onAdaptsInput?.(
+						"adaptsInput" in msg && msg.adaptsInput === true,
+						"streamsPaste" in msg && msg.streamsPaste === true,
+					);
 					refreshAfterSpawn(hostId);
 					if (opts?.select !== false) {
 						selectChannel(msg.channelId);

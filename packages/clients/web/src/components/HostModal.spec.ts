@@ -1058,6 +1058,96 @@ describe("HostModal reading the hub's SSH config (#734, #757)", () => {
 			"~/.ssh/id_pi",
 		);
 	});
+
+	describe("the sign-in method a chosen entry brings, as the import stores it (#1009)", () => {
+		const entries = {
+			entries: [
+				{ name: "keyed", hostname: "keyed.test", identity_file: "~/.ssh/id_keyed" },
+				{ name: "plain", hostname: "plain.test", identity_file: null },
+			],
+			has_include: false,
+		};
+
+		const authSelect = (): HTMLSelectElement => {
+			const select = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select")).find(
+				(candidate) => Array.from(candidate.options).some((option) => option.value === "agent"),
+			);
+			if (!select) throw new Error("no Auth Method select");
+			return select;
+		};
+
+		async function pick(name: string): Promise<void> {
+			const select = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select")).find(
+				(candidate) => Array.from(candidate.options).some((option) => option.value === name),
+			);
+			if (!select) throw new Error("no SSH host select");
+			select.value = name;
+			select.dispatchEvent(new Event("change"));
+			await nextTick();
+		}
+
+		async function chooseAuth(method: string): Promise<void> {
+			const select = authSelect();
+			select.value = method;
+			select.dispatchEvent(new Event("change"));
+			await nextTick();
+		}
+
+		const keyPathInput = (): HTMLInputElement | null =>
+			el<HTMLInputElement>("input[placeholder='~/.ssh/id_ed25519']");
+		const addButton = (): HTMLButtonElement | null =>
+			Array.from(document.body.querySelectorAll<HTMLButtonElement>("button.btn-primary")).find(
+				(button) => button.textContent?.trim() === "Add Host",
+			) ?? null;
+
+		it("selects the agent for an entry naming no IdentityFile, and the host can be added", async () => {
+			sshConfigAnswers(json(200, entries));
+			mountModal(null);
+			await chooseSshConfig();
+
+			await pick("plain");
+
+			expect(authSelect().value).toBe("agent");
+			expect(keyPathInput()).toBeNull();
+			expect(addButton()?.disabled).toBe(false);
+		});
+
+		it("replaces a method chosen by hand with the entry's: password becomes the agent", async () => {
+			sshConfigAnswers(json(200, entries));
+			mountModal(null);
+			await chooseSshConfig();
+			await chooseAuth("password");
+
+			await pick("plain");
+
+			expect(authSelect().value).toBe("agent");
+		});
+
+		it("replaces a method chosen by hand with the entry's: the agent becomes its key", async () => {
+			sshConfigAnswers(json(200, entries));
+			mountModal(null);
+			await chooseSshConfig();
+			await chooseAuth("agent");
+
+			await pick("keyed");
+
+			expect(authSelect().value).toBe("key");
+			expect(keyPathInput()?.value).toBe("~/.ssh/id_keyed");
+		});
+
+		it("drops the previous entry's key when the next one names none", async () => {
+			sshConfigAnswers(json(200, entries));
+			mountModal(null);
+			await chooseSshConfig();
+			await pick("keyed");
+
+			await pick("plain");
+
+			expect(authSelect().value).toBe("agent");
+			await chooseAuth("key");
+			expect(keyPathInput()?.value).toBe("");
+		});
+	});
 });
 
 describe("live daemon edit guard", () => {

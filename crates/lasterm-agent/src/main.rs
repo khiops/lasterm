@@ -14,6 +14,7 @@ mod identity;
 mod input;
 mod input_modes;
 mod logging;
+mod output_cut;
 mod owner;
 mod platform_dirs;
 mod process;

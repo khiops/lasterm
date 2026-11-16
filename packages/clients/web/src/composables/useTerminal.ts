@@ -84,12 +84,17 @@ export interface AttachAnswer {
  */
 export const ATTACH_SUPERSEDED = "ATTACH_SUPERSEDED";
 
+/** RIS: xterm resets the terminal when it parses it, after what it was sent before. */
+const FULL_RESET = "\u001bc";
+
 /** An attach the hub has not answered yet. */
 interface PendingAttach {
 	request: number;
 	channelId: string;
 	/** Reconnect and Restart keep the screen; the hub's answer does not replace it. */
 	preserveContent: boolean;
+	/** Keeping the screen, a live answer replaces it all the same (#1010). */
+	replaceIfLive: boolean;
 	/** Keep the screen if the hub answers that the terminal has ended. */
 	keepScreenIfEnded: boolean;
 	stillWanted: () => boolean;
@@ -847,7 +852,8 @@ export function useTerminal(
 	/**
 	 * The terminal attached. Its answer is written once for every attach that
 	 * waited on it, by the one that keeps least: the screen is replaced unless
-	 * every one of them keeps it (#929, #930).
+	 * every one of them keeps it (#929, #930), and one that keeps a copy from
+	 * the hub's memory does not keep it from a live answer (#1010).
 	 */
 	function takeAttachOk(msg: UiAttachOkMessage): void {
 		const waiting = answeredBy(msg.channelId);
@@ -879,13 +885,22 @@ export function useTerminal(
 		// Restore the snapshot and its tail before binding the terminal: no
 		// RESIZE goes out while they are written. A replay: a bell in it
 		// already rang (#927).
-		const replaceScreen = waiting.some((entry) => !entry.preserveContent);
+		const replaceScreen = waiting.some(
+			(entry) => !entry.preserveContent || (entry.replaceIfLive && msg.cached !== true),
+		);
 		const tail = msg.tail ?? [];
+		// Listening while it waited (a re-attach that kept the screen, replaced
+		// because the answer is live, #1010), the xterm may not have parsed all
+		// it was sent yet, which the snapshot holds: a reset written after it
+		// clears it, where `reset()` would clear first and let it be parsed over
+		// the snapshot. The snapshot then sets the program's modes again (#1012).
+		const queuedOutput = listeningTo === id;
 		replay(() => {
 			const term = terminal.value;
 			if (!term || !replaceScreen) return;
 			if (msg.snapshot) {
-				term.reset();
+				if (queuedOutput) term.write(FULL_RESET);
+				else term.reset();
 				// The program's screen and input modes (#1012): the alternate screen
 				// before the screen is drawn into it, the modes after, and the tail
 				// after them, so that a mode the tail sets wins. An older agent
@@ -1011,6 +1026,12 @@ export function useTerminal(
 			/** Keep the screen and write what the terminal prints meanwhile (Reconnect, Restart). */
 			preserveContent?: boolean;
 			/**
+			 * Keeping the screen, replace it if the hub answers live: it is a copy
+			 * from the hub's memory, older than the agent's snapshot, which holds
+			 * everything the terminal printed before it (#1010, #931).
+			 */
+			replaceIfLive?: boolean;
+			/**
 			 * Keep the screen if the hub answers that the terminal has ended; an
 			 * ATTACH_OK replaces it as usual. For a pane over an ending it watched.
 			 */
@@ -1056,6 +1077,7 @@ export function useTerminal(
 				request,
 				channelId: id,
 				preserveContent,
+				replaceIfLive: opts?.replaceIfLive === true,
 				keepScreenIfEnded: opts?.keepScreenIfEnded === true && !elsewhere,
 				stillWanted: opts?.stillWanted ?? (() => true),
 				timer: setTimeout(() => onDeadline(entry), 10_000),

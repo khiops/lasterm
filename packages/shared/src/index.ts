@@ -14,6 +14,7 @@ export * from "./profile-write.js";
 export * from "./protocol.js";
 export * from "./sanitize.js";
 export * from "./socket-path.js";
+export * from "./ssh-auth.js";
 export * from "./theme.js";
 export * from "./themes/index.js";
 export * from "./transfer-protocol.js";

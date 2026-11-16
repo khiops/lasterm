@@ -700,6 +700,16 @@ function takeAnswer(chId: string, facts: AttachFacts): void {
 }
 
 /**
+ * The screen stopped following the terminal, which ran on: answered from the
+ * hub's memory, or its host disconnected by its user. It stays so until a live
+ * answer, however the pane comes back (its Reconnect, the host connected from
+ * elsewhere, the hub's news), and that answer replaces it (#1010). Its
+ * scrollback goes with it: the agent's snapshot is its screen, and the only
+ * record of what the terminal printed meanwhile.
+ */
+let missedOutput = false;
+
+/**
  * Attach to the terminal, and let the hub's answer decide what covers it.
  *
  * Every attach goes through here: the pane opening, Reconnect, Restart, a new
@@ -714,7 +724,7 @@ function takeAnswer(chId: string, facts: AttachFacts): void {
  */
 async function attachAndCover(
 	chId: string,
-	opts?: { preserveContent?: boolean; keepScreenIfEnded?: boolean },
+	opts?: { preserveContent?: boolean; replaceIfLive?: boolean; keepScreenIfEnded?: boolean },
 ): Promise<AttachResult | null> {
 	let result: AttachResult;
 	try {
@@ -737,6 +747,8 @@ async function attachAndCover(
 		return null;
 	}
 	takeAnswer(chId, factsFromAttachOk(result.cached));
+	// A live answer: the screen follows the terminal again, kept or replaced.
+	if (result.cached !== true) missedOutput = false;
 	return result;
 }
 
@@ -752,7 +764,9 @@ async function onReconnect(): Promise<void> {
 	if (chId === null || reattaching) return;
 	reattaching = true;
 	try {
-		await attachAndCover(chId, { preserveContent: true });
+		// Over a screen that stopped following the terminal, the live answer
+		// replaces it: it holds what the terminal printed meanwhile (#1010).
+		await attachAndCover(chId, { preserveContent: true, replaceIfLive: missedOutput });
 	} catch {
 		// Still unreachable. The banner is already saying so.
 	} finally {
@@ -888,6 +902,20 @@ const hostDisconnectedByUser = computed(() => {
 	const hostId = paneHostId.value;
 	return hostId !== undefined && hostsStore.isDisconnectedByUser(hostId);
 });
+
+// Whether the screen missed output (#1010); its declaration is above
+// attachAndCover, which reads it. Nor is the pane attached live while its
+// host's user keeps the host disconnected: the hub's news that the terminal is
+// live again, the host connected from anywhere, brings it back.
+watch(
+	() => isDetached.value || hostDisconnectedByUser.value,
+	(away) => {
+		if (!away) return;
+		missedOutput = true;
+		attachedLive = false;
+	},
+	{ immediate: true },
+);
 
 /** What the pane lays over its terminal, if anything. */
 const cover = computed(() =>

@@ -948,7 +948,10 @@ and `CHANNEL_DEAD` shows it has ended, whatever the pane showed before.
 - **An ATTACH_OK that replaces the screen** (any attach but a Reconnect or Restart over a screen the
   pane kept): after the reset, the pane writes `ESC[?1049h` when `alternate_screen` is true, then
   `serialized`, then `input_modes`, then the tail, so a mode the tail sets wins. An attach that keeps
-  the screen writes none of it.
+  the screen writes none of it, except over a screen that missed output (#1010): answered from
+  memory, or its host disconnected by its user, a live ATTACH_OK replaces it all the same, its
+  scrollback with it; an answer from memory still keeps it. The reset is then written as RIS, after
+  the output the pane received while it waited.
 - **No focus report from a replay:** a focus report xterm makes for the `?1004h` of a replay is not
   sent.
 - **An ended terminal's last output** (`last_output`) applies neither field.

@@ -1,0 +1,2 @@
+en: A terminal you reopen or reconnect now gets back its program's full-screen view and keyboard modes, so a multi-line paste reaches the shell as one paste instead of running line by line.
+fr: Un terminal rouvert ou reconnecté retrouve désormais l'affichage plein écran et les modes clavier de son programme : un collage de plusieurs lignes arrive au shell d'un seul bloc au lieu de s'exécuter ligne par ligne.

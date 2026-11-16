@@ -845,12 +845,7 @@ impl PasteTerminal {
     /// What the program has read, once it holds at least `len` bytes, and
     /// after a moment for anything that should not come.
     async fn read(&self, len: usize) -> Vec<u8> {
-        self.read_within(len, DEADLINE).await
-    }
-
-    /// `read`, with `limit` for the bytes to come.
-    async fn read_within(&self, len: usize, limit: Duration) -> Vec<u8> {
-        let deadline = tokio::time::Instant::now() + limit;
+        let deadline = tokio::time::Instant::now() + DEADLINE;
         loop {
             let got = std::fs::read(&self.out).unwrap_or_default();
             if got.len() >= len {
@@ -859,12 +854,25 @@ impl PasteTerminal {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "the program read {} of {len} bytes within {limit:?}: {:?}",
-                got.len(),
-                String::from_utf8_lossy(&got)
+                "the program read {} of {len} bytes within {DEADLINE:?}",
+                got.len()
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// What the program has read once it holds `len` bytes, or what it holds
+    /// when `limit` runs out; never fails.
+    async fn read_within_or_short(&self, len: usize, limit: Duration) -> Vec<u8> {
+        let deadline = tokio::time::Instant::now() + limit;
+        while tokio::time::Instant::now() < deadline {
+            if std::fs::read(&self.out).unwrap_or_default().len() >= len {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::read(&self.out).unwrap_or_default()
     }
 }
 
@@ -1101,12 +1109,12 @@ async fn a_displaced_connections_paste_closes_before_the_new_connection_types() 
             b"x",
         ]
         .concat();
-        assert_eq!(
-            terminal.read_within(expected.len(), TYPED_WITHIN).await,
-            expected,
-            "run {run}"
-        );
+        let got = terminal
+            .read_within_or_short(expected.len(), TYPED_WITHIN)
+            .await;
+        // Torn down first: a failed run leaves no terminal behind.
         tear_down(&daemon, &dir).await;
+        assert_eq!(got, expected, "run {run}");
     }
 }
 
@@ -1201,11 +1209,11 @@ async fn a_paste_cancelled_by_its_connection_is_closed_for_the_program() {
             b"x",
         ]
         .concat();
-        assert_eq!(
-            terminal.read_within(expected.len(), TYPED_WITHIN).await,
-            expected,
-            "run {run}"
-        );
+        let got = terminal
+            .read_within_or_short(expected.len(), TYPED_WITHIN)
+            .await;
+        // Torn down first: a failed run leaves no terminal behind.
         tear_down(&daemon, &dir).await;
+        assert_eq!(got, expected, "run {run}");
     }
 }

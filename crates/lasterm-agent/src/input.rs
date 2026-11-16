@@ -27,8 +27,9 @@
 //! of it and, when its start marker went out, writes its end marker right
 //! after the last of it that did, before anything queued later.
 //!
-//! On Windows 26100 and later, conhost can hold back the first input written
-//! after an end marker written on its own, until more input comes (#1030).
+//! On Windows 26100, conhost can hold back the first input written after an
+//! end marker written on its own, until more input comes (#1030); the record
+//! below goes out from build 26100 on.
 //! The writer then follows the next INPUT, 50 ms later, with a console input
 //! record that no program reads as bytes, a Shift key released
 //! (`wake_record_for`); written at once, conhost holds it with the INPUT. It
@@ -1484,7 +1485,7 @@ mod tests {
         pty.blocked().await;
         let waited = x_taken.elapsed();
         assert!(
-            waited >= WAKE_DELAY && waited < Duration::from_secs(1),
+            waited >= Duration::from_millis(50) && waited < Duration::from_secs(1),
             "the record's write was attempted {waited:?} after x was taken"
         );
         assert_eq!(pty.taken(), cat(&[&closed(), b"x"]), "x on its own write");

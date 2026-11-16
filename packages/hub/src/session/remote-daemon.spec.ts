@@ -298,6 +298,34 @@ describe("attachRemoteDaemon", () => {
 			}),
 		).rejects.toThrow(/did not answer/);
 	});
+
+	// A host with a connection timeout gives its daemon until 15 s short of it
+	// to answer (#1034): 10 s for 25 s, where the hub's own limit is 5 s.
+	it("waits for a slow daemon as long as its deadline allows (#1034)", async () => {
+		const attach = (connectTimeoutMs: number | undefined) => {
+			let clock = 0;
+			let launchedAt: number | null = null;
+			return attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: async (_c, command) => {
+					if (command.includes("--daemon")) launchedAt = clock;
+					return stateDirReply(dir);
+				},
+				open: async () => {
+					if (launchedAt === null || clock - launchedAt < 8_000) throw new Error("ECONNREFUSED");
+					return new PassThrough();
+				},
+				now: () => clock,
+				sleep: async (ms) => {
+					clock += ms;
+				},
+				...(connectTimeoutMs !== undefined && { connectTimeoutMs }),
+			});
+		};
+		await expect(attach(25_000)).resolves.toMatchObject({ started: true });
+		await expect(attach(undefined)).rejects.toThrow(/did not answer .* within 5000ms/);
+	});
 });
 
 // ─── The daemon's options ────────────────────────────────────────────────────

@@ -1084,6 +1084,27 @@ A client waits for that host's `SESSION_STATE` to say it is `active` (or `detach
 rather than show a failure (§ 4.14). Its own deadline for a SPAWN is longer than the hub's ten
 seconds, so that it hears the hub's answer.
 
+A SPAWN on an SSH host with no live agent waits while the hub connects that host, first terminal
+or follower of a connection already under way. The hub says so once per such SPAWN, before the
+connection's first wait, with its `request_id` as on the SPAWN's other answers (#1034):
+
+```typescript
+{ type: "HOST_CONNECTING", host_id: string, request_id?: string }
+```
+
+Each wait of that connection has its own bound: the jump's connection and its channel to the
+host, the SSH server up to authentication, reaching the agent (its command, or the whole attach
+to a daemon), and the agent's HELLO. A host's `connect_timeout_seconds` (§ 6), else a
+`ConnectTimeout` of 20 s or more that `~/.ssh/config` gives its alias and then its hostname, sets
+each of them, the daemon's socket retries stopping 15 s short; without one they are the hub's own
+(20 s, 20 s, 5 s or 15 s on Windows, and no bound on a jump's channel). A connection may dial more
+than once, after a host key or a password asked again. Every SPAWN told HOST_CONNECTING gets its
+SPAWN_OK or an ERROR, a connection its user cancelled (`POST /api/hosts/:id/disconnect`)
+included. The web then waits for that answer instead of its own 15 s, up to 30 minutes for a hub
+that stopped answering with its socket open, which a prompt shown meanwhile extends to its own
+5 minutes when that ends later; a socket that closes ends the wait at once. A client that does not
+know the message ignores it.
+
 A host its user disconnected (`POST /api/hosts/:id/disconnect`, § 6, #648) is not connected
 again by a start nobody asked for. A SPAWN with `automatic: true` on it is refused at once with
 the same `HOST_UNREACHABLE`, `host_status` being its session's status, or `"closed"` when it has
@@ -1428,7 +1449,8 @@ The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`re
   ssh_key_path?: string,
   ssh_user?: string,
   ssh_proxy_host_id?: string, // saved jump host; mutually exclusive with spec
-  ssh_proxy_spec?: string    // ProxyJump address
+  ssh_proxy_spec?: string,   // ProxyJump address
+  connect_timeout_seconds?: number // the form's connection timeout (#1034)
 }
 
 // Hub → UI (success)
@@ -1437,6 +1459,12 @@ The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`re
 // Hub → UI (failure)
 { type: "TEST_CONNECT_FAIL", host_id: string, message: string, code?: "AUTH_CANCELLED" }
 ```
+
+The test waits 10 s for the server, its jump's whole route included, unless the host has a
+connection timeout (#1034): `connect_timeout_seconds` when it is a whole number from 20 to 120 (any
+other value is ignored), else a `ConnectTimeout` of 20 s or more that `~/.ssh/config` gives the
+saved host's alias, which an edit keeps, then the hostname. With one, the server, the jump's
+connection and the jump's channel each get that long, as a session's connection does (§ 4.4).
 
 `code` is `AUTH_CANCELLED` when the person cancelled the password or passphrase asked for (§ 4.10):
 nothing failed, and the dialog ends the test without a result rather than show a failure (#815). It
@@ -2640,6 +2668,7 @@ hub drops its record; an interrupted one stays across restarts until it is resum
   ssh_proxy_host_id?: string | null,  // jump host this hub knows (SPEC.md § 4.5b)
   ssh_proxy_spec?: string | null,     // or a jump as user@host:port; never both
   ssh_remote_daemon?: boolean | null, // keep an agent running there (#79); null follows [ssh] remote_daemon
+  connect_timeout_seconds?: number | null, // 20-120 whole seconds per connection wait (#1034); null: the default
   icon_type?: 'auto' | 'emoji' | 'image',   // default 'auto'
   icon_value?: string | null,         // emoji char, or for 'image' a data:image/png|jpeg|gif|webp;base64 URI of at most 65536 chars
   color?: string | null,              // hex "#rrggbb" or null for auto

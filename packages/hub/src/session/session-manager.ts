@@ -1886,6 +1886,7 @@ export class SessionManager {
 
 		if (wasOrphan) {
 			this.broadcaster.updateChannelStatus(channelId, channel.sessionId, "live");
+			this.broadcaster.reactivateDetachedSession(channel.hostId);
 		}
 
 		let agent = this.ctx.agents.get(channel.hostId);

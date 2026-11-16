@@ -967,6 +967,46 @@ describe("SessionManager", () => {
 		expect(client.attachedChannels.size).toBe(0);
 	});
 
+	// #955: a detached session is the host's session; a terminal opened on it,
+	// or one attached again, makes it active (SPEC.md § 4.2).
+	it("a terminal opened while the host's session is detached joins that session", async () => {
+		sm.addClient(makeClient("c1", []));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbManager.meta);
+		const [first] = dal.listSessions();
+		sm.removeClient("c1");
+		expect(dal.getSession(first?.id ?? "")?.status).toBe("detached");
+
+		const c2: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c2", c2));
+		await sm.handleSpawn("c2", { type: "SPAWN", hostId: "local" });
+
+		expect(dal.listSessions().map((s) => [s.id, s.status])).toEqual([[first?.id, "active"]]);
+		expect(c2.find((m) => m.type === "SPAWN_OK")).toMatchObject({ sessionId: first?.id });
+		expect(c2).toContainEqual(
+			expect.objectContaining({ type: "SESSION_STATE", sessionId: first?.id, status: "active" }),
+		);
+	});
+
+	it("a terminal attached again while the host's session is detached makes it active", async () => {
+		sm.addClient(makeClient("c1", []));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbManager.meta);
+		const [first] = dal.listSessions();
+		sm.removeClient("c1");
+
+		const c2: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c2", c2));
+		await sm.handleAttach("c2", "local-ch-1");
+
+		expect(dal.getSession(first?.id ?? "")?.status).toBe("active");
+		expect(c2).toContainEqual(
+			expect.objectContaining({ type: "SESSION_STATE", sessionId: first?.id, status: "active" }),
+		);
+	});
+
 	// ─── DB persistence ─────────────────────────────────────────────────────
 
 	it("handleSpawn creates a session record in meta.db with 'active' status", async () => {

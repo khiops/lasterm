@@ -1110,7 +1110,7 @@ export const useChannelsStore = defineStore("channels", () => {
 
 			let timer = setTimeout(() => {
 				stopWaiting();
-				reject(new Error("SPAWN timeout — no SPAWN_OK after 10s"));
+				reject(new Error(`SPAWN timeout — no SPAWN_OK after ${SPAWN_DEADLINE_MS / 1000}s`));
 			}, SPAWN_DEADLINE_MS);
 
 			// The password or passphrase its host last asked for, if any: a refusal
@@ -1184,7 +1184,7 @@ export const useChannelsStore = defineStore("channels", () => {
 			// Cancel the spawn wait immediately on any ERROR — the hub sends ERROR
 			// (e.g. SSH_CONNECT_FAILED, SPAWN_FAILED) instead of SPAWN_OK when the
 			// session cannot be established. Without this the caller would silently
-			// wait 10 s before seeing the timeout message.
+			// wait out SPAWN_DEADLINE_MS before seeing the timeout message.
 			unsubErr = sessionStore.wsClient.on("ERROR", (msg) => {
 				if (msg.type === "ERROR") {
 					if (notOurs(msg)) return;

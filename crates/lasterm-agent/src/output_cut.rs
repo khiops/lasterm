@@ -610,6 +610,31 @@ mod tests {
                 "{first:x?}"
             );
         }
+        // Where a whole CSI looks done but is not: DEL and parameter bytes
+        // keep it open, as in xterm's table.
+        let open: &[(&[u8], &[u8], &[u8])] = &[
+            (b"\x1b[3\x7f", b"1m", b"\x1b[3\x7f1m"),
+            (b"\x1b[3<", b"m", b"\x1b[3<m"),
+            (b"\x1b[?2004", b"h", b"\x1b[?2004h"),
+            (b"\x1b[\x1f", b"m", b"\x1b[\x1fm"),
+        ];
+        // C1 controls and non-ASCII code points in the other states.
+        let c1: &[(&[u8], &[u8], &[u8])] = &[
+            (b"\x1b]0;\xc3\xa9", b"\x07", b"\x1b]0;\xc3\xa9\x07"),
+            (b"\x1b[1<\xc3\xa9", b"m", b"\x1b[1<\xc3\xa9m"),
+            (b"\x1bP1<\xc3\xa9", b"\x1b\\", b"\x1bP1<\xc3\xa9\x1b\\"),
+            (b"\xc2\x9d0;t", b"\x07", b"\xc2\x9d0;t\x07"),
+            (b"\xc2\x90q", b"x\xc2\x9c", b"\xc2\x90qx\xc2\x9c"),
+        ];
+        for (first, second, sent) in open.iter().chain(c1) {
+            assert_eq!(
+                takes(&[first, second]),
+                vec![Vec::new(), sent.to_vec()],
+                "{first:x?}"
+            );
+        }
+        // U+009C ends an OSC.
+        assert_eq!(takes(&[b"\x1b]0;t\xc2\x9c"]), bytes(&[b"\x1b]0;t\xc2\x9c"]));
         // DCS ignore ends only at ESC, CAN or SUB, not at a final byte.
         assert_eq!(
             takes(&[b"\x1bP1<", b"m", b"\x1b\\"]),

@@ -2507,6 +2507,37 @@ mod stdio_tests {
         assert!(last_output < title && title < log, "{seen:?}");
     }
 
+    /// A read that completes nothing sends no OUTPUT, not an empty one: here
+    /// the middle write, `al`, is all held (#954).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_that_completes_nothing_sends_no_output() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let mut events = start_shell_in(
+            "quiet",
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                "printf 'A\\033]2;fin'; sleep 0.3; printf 'al'; sleep 0.3; printf '\\007'".into(),
+            ],
+            None,
+            false,
+            &manager,
+            &senders,
+        )
+        .await;
+        let seen = events_until_closed(&mut events).await;
+
+        let outputs: Vec<&[u8]> = seen
+            .iter()
+            .filter(|(kind, ..)| kind == "OUTPUT")
+            .map(|(_, _, data)| data.as_slice())
+            .collect();
+        assert!(outputs.iter().all(|data| !data.is_empty()), "{seen:?}");
+        assert_eq!(outputs.concat(), b"A\x1b]2;final\x07", "{seen:?}");
+    }
+
     /// An ATTACH answered while a sequence is half read draws it whole: the
     /// reader sent its output only up to the sequence's start (#954). This
     /// proves the reader's wiring; the cut itself is proved in `output_cut`.

@@ -238,7 +238,14 @@ vi.mock("@xterm/xterm", () => ({
 		focus(): void {
 			this.textarea.focus();
 		}
-		scrollToBottom(): void {}
+		/** As xterm: the view goes down to the bottom of the buffer. */
+		scrollToBottom(): void {
+			this.buffer.active.viewportY = this.buffer.active.baseY;
+		}
+		/** As xterm: the selection goes. */
+		clearSelection(): void {
+			xterm.selection = false;
+		}
 		/** As xterm's `input`: data sent as if the user typed it, to the onData listeners. */
 		input(data: string, _wasUserInput = true): void {
 			for (const listener of [...this.dataListeners]) listener(data);
@@ -410,6 +417,8 @@ export let hear: (msg: Frame) => void;
 export let emitted: unknown[][];
 /** How many listeners the window has for frames of `type` now. */
 export let listening: (type: string) => number;
+/** The window's socket drops: it says it is down to those listening (#1014). */
+export let dropConnection: () => void;
 
 /** A hub the test answers: every frame the pane sends is kept in `sent`. */
 function fakeHub(): void {
@@ -418,6 +427,11 @@ function fakeHub(): void {
 		for (const cb of [...(listeners.get(msg.type) ?? [])]) cb(msg);
 	};
 	listening = (type) => listeners.get(type)?.length ?? 0;
+	const downListeners: Array<() => void> = [];
+	dropConnection = () => {
+		socket.isConnected = false;
+		for (const cb of [...downListeners]) cb();
+	};
 	const socket = {
 		isConnected: true,
 		on: vi.fn((type: string, cb: Listener) => {
@@ -429,7 +443,13 @@ function fakeHub(): void {
 				);
 		}),
 		onReconnect: () => () => {},
-		onDisconnect: () => () => {},
+		onDisconnect: (cb: () => void) => {
+			downListeners.push(cb);
+			return () => {
+				const at = downListeners.indexOf(cb);
+				if (at !== -1) downListeners.splice(at, 1);
+			};
+		},
 		send: vi.fn((msg: Frame) => {
 			sent.push(msg);
 		}),

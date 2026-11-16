@@ -34,6 +34,7 @@ import {
 	CLIENT,
 	closePane,
 	drain,
+	dropConnection,
 	dropQueueOf,
 	emitted,
 	type Frame,
@@ -4242,5 +4243,422 @@ describe("TerminalPane pasting through an agent that adapts input (#1012)", () =
 		await settle();
 
 		expect(xterm.events).toEqual(["<reset>", "LIVE-SNAP"]);
+	});
+});
+
+// ─── Streaming a paste (#1014) ───────────────────────────────────────────────
+//
+// While the hub says the terminal's agent takes a paste as PASTE chunks, the
+// pane sends it so: no markers (the agent writes them), at most 256 KiB not
+// yet acknowledged, what is typed meanwhile held behind it, its progress shown
+// after a second, and its outcome said when it ends early.
+
+describe("TerminalPane streaming a paste (#1014)", () => {
+	const CHUNK = 32 * 1024;
+	type PasteFrame = {
+		pasteId: number;
+		seq: number;
+		data: Uint8Array;
+		last: boolean;
+		channelId: string;
+	};
+
+	function paste(text: string): Event {
+		const event = new Event("paste", { bubbles: true, cancelable: true });
+		Object.defineProperty(event, "clipboardData", { value: { getData: () => text } });
+		terminal().textarea.dispatchEvent(event);
+		return event;
+	}
+	const chunks = () => sent.filter((m) => m.type === "PASTE") as unknown as PasteFrame[];
+	const cancels = () => sent.filter((m) => m.type === "PASTE_CANCEL");
+	const pasteId = () => chunks().at(-1)?.pasteId as number;
+	const toasts = () => useToastStore().messages.map((m) => m.text);
+	/** The order of what the pane sent of pastes and input. */
+	const order = () =>
+		sent
+			.filter((m) => m.type === "PASTE" || m.type === "PASTE_CANCEL" || m.type === "INPUT")
+			.map((m) =>
+				m.type === "INPUT"
+					? `INPUT ${new TextDecoder().decode(m.data as Uint8Array)}`
+					: m.type === "PASTE"
+						? `PASTE ${(m as unknown as PasteFrame).seq}`
+						: "CANCEL",
+			);
+	function ack(seq: number, id = pasteId(), channelId = T): void {
+		hear({ type: "PASTE_ACK", channelId, pasteId: id, seq });
+	}
+	function closed(reason: string, written?: number, id = pasteId()): void {
+		hear({
+			type: "PASTE_CLOSED",
+			channelId: T,
+			pasteId: id,
+			reason,
+			...(written === undefined ? {} : { written }),
+		});
+	}
+
+	/** A pane over T, the writer, its agent streaming pastes (or what `over` says). */
+	async function streaming(
+		over: Record<string, unknown> = { adaptsInput: true, streamsPaste: true },
+	) {
+		mountPane(ref(T), "live", { setUp: writer });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "LIVE", over);
+		await settle();
+	}
+
+	it("WB1: sends a window of 8 chunks, then one more per acknowledgement, the last marked, no markers", async () => {
+		await streaming();
+		const text = "a".repeat(1024 * 1024);
+
+		paste(text);
+
+		expect(chunks()).toHaveLength(8);
+		expect(chunks().map((c) => [c.seq, c.data.byteLength, c.last])).toEqual(
+			[0, 1, 2, 3, 4, 5, 6, 7].map((seq) => [seq, CHUNK, false]),
+		);
+		ack(0);
+		expect(chunks()).toHaveLength(9);
+		for (let seq = 1; seq < 32; seq++) ack(seq);
+		expect(chunks()).toHaveLength(32);
+		expect(chunks().at(-1)?.last).toBe(true);
+		expect(chunks().filter((c) => c.last)).toHaveLength(1);
+		const joined = new TextDecoder().decode(Uint8Array.from(chunks().flatMap((c) => [...c.data])));
+		expect(joined).toBe(text);
+		expect(inputs()).toEqual([]);
+	});
+
+	it("WB2: strips the markers and turns line ends into CR before chunking, even across a chunk boundary", async () => {
+		await streaming();
+		const before = "x".repeat(CHUNK - 3);
+		// The nested marker straddles the first chunk's end once stripped text is cut.
+		paste(`${before}\u001b[20\u001b[201~1~a\r\nb\nc`);
+		for (let seq = 0; seq < chunks().length; seq++) ack(seq);
+
+		const joined = new TextDecoder().decode(Uint8Array.from(chunks().flatMap((c) => [...c.data])));
+		expect(joined).toBe(`${before}a\rb\rc`);
+	});
+
+	it("WB2: applies the bound to the normalised bytes, not the raw text", async () => {
+		await streaming();
+
+		paste("a\r\n".repeat(6_000_000));
+
+		expect(toasts()).toEqual([]);
+		expect(chunks()).toHaveLength(8);
+	});
+
+	it("WB2: brings the view down and clears the selection, with no INPUT", async () => {
+		await streaming();
+		const active = terminal().buffer.active;
+		active.baseY = 70;
+		active.viewportY = 50;
+		xterm.selection = true;
+
+		paste("x");
+
+		expect(active.viewportY).toBe(70);
+		expect(xterm.selection).toBe(false);
+		expect(inputs()).toEqual([]);
+	});
+
+	it("WB3: holds what is typed behind unsent chunks, and sends it after the last one", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		type("ab");
+		expect(inputs()).toEqual([]);
+
+		ack(0);
+
+		expect(order().slice(-2)).toEqual(["PASTE 8", "INPUT ab"]);
+	});
+
+	it("WB3: cancels on Ctrl+C, then sends what was held, then the Ctrl+C", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		type("a");
+
+		type("\u0003");
+
+		expect(order().slice(-3)).toEqual(["CANCEL", "INPUT a", "INPUT \u0003"]);
+		ack(0);
+		expect(chunks()).toHaveLength(8);
+	});
+
+	it("WB3: sends what was held when the agent closes the paste", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		type("a");
+
+		closed("overflow", 4096);
+
+		expect(inputs()).toEqual(["a"]);
+	});
+
+	it("WB3: drops what was held when the agent is lost", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		type("a");
+
+		closed("agent_lost");
+
+		expect(inputs()).toEqual([]);
+	});
+
+	it("WB3: drops what was held when the write lock is lost, even once it comes back", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		type("a");
+
+		useWriteLockStore().handleWriteLock(T, OTHER_CLIENT);
+		await settle();
+		useWriteLockStore().handleWriteLock(T, CLIENT);
+		await settle();
+		ack(0);
+
+		expect(inputs()).toEqual([]);
+		expect(chunks()).toHaveLength(8);
+	});
+
+	it("WB3: drops what was held when the pane leaves the terminal, sending it nowhere", async () => {
+		const channel = ref(T);
+		mountPane(channel, "live", {
+			setUp: () => {
+				withU();
+				const lock = useWriteLockStore();
+				for (const id of [T, U]) lock.handleWriteLock(id, CLIENT);
+			},
+		});
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "T", { adaptsInput: true, streamsPaste: true });
+		await settle();
+		paste("a".repeat(9 * CHUNK));
+		type("a");
+
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		attachOk(U, "U", { adaptsInput: true, streamsPaste: true });
+		await settle();
+
+		expect(inputs()).toEqual([]);
+	});
+
+	it("WB3: refuses a second paste while chunks are unsent, and in its tail before the last acknowledgement", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		paste("second");
+		for (let seq = 0; seq < 8; seq++) ack(seq);
+		expect(chunks()).toHaveLength(9);
+		paste("third");
+
+		expect(chunks()).toHaveLength(9);
+		expect(toasts()).toEqual([
+			"A paste is still being sent to this terminal.",
+			"A paste is still being sent to this terminal.",
+		]);
+	});
+
+	it("WB3: cancels on Ctrl+C a paste whose chunks are all sent and not yet acknowledged", async () => {
+		await streaming();
+		paste("a".repeat(100 * 1024));
+		expect(chunks().at(-1)?.last).toBe(true);
+
+		type("\u0003");
+
+		expect(order().slice(-2)).toEqual(["CANCEL", "INPUT \u0003"]);
+	});
+
+	it("WB3: holds xterm's own reports behind unsent chunks, as typed keys", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+
+		type("\u001b[I");
+		expect(inputs()).toEqual([]);
+		ack(0);
+
+		expect(inputs()).toEqual(["\u001b[I"]);
+	});
+
+	it("WB4: shows the progress after a second, updates it, keeps it until the last acknowledgement", async () => {
+		await streaming();
+		paste("a".repeat(1024 * 1024));
+		expect(toasts()).toEqual([]);
+
+		vi.advanceTimersByTime(1000);
+		expect(toasts()).toEqual(["Pasting 0 B of 1 MB (0 %)"]);
+		expect(useToastStore().messages[0]?.action?.label).toBe("Cancel");
+		for (let seq = 0; seq < 16; seq++) ack(seq);
+		expect(toasts()).toEqual(["Pasting 512 KB of 1 MB (50 %)"]);
+
+		vi.advanceTimersByTime(10_000);
+		expect(toasts()).toHaveLength(1);
+		for (let seq = 16; seq < 32; seq++) ack(seq);
+		expect(toasts()).toEqual([]);
+	});
+
+	it("WB4: its Cancel sends PASTE_CANCEL, then what was held, sends no more chunks, and says what went", async () => {
+		await streaming();
+		paste("a".repeat(1024 * 1024));
+		type("a");
+		vi.advanceTimersByTime(1000);
+		ack(0);
+		ack(1);
+
+		const progress = useToastStore().messages[0];
+		useToastStore().act(progress?.id as number);
+		ack(2);
+
+		expect(order().slice(-2)).toEqual(["CANCEL", "INPUT a"]);
+		expect(chunks()).toHaveLength(10);
+		expect(toasts()).toEqual(["Paste cancelled: at least 64 KB of 1 MB reached the terminal."]);
+	});
+
+	it("WB4: says what went after a Ctrl+C too", async () => {
+		await streaming();
+		paste("a".repeat(1024 * 1024));
+		ack(0);
+
+		type("\u0003");
+
+		expect(toasts()).toEqual(["Paste cancelled: at least 32 KB of 1 MB reached the terminal."]);
+	});
+
+	it("WB4: dismissing the progress only hides it: the paste goes on", async () => {
+		await streaming();
+		paste("a".repeat(1024 * 1024));
+		vi.advanceTimersByTime(1000);
+
+		useToastStore().dismiss(useToastStore().messages[0]?.id as number);
+		for (let seq = 0; seq < 32; seq++) ack(seq);
+
+		expect(cancels()).toEqual([]);
+		expect(chunks()).toHaveLength(32);
+		expect(toasts()).toEqual([]);
+	});
+
+	it("WB5: says exactly how much went when the agent says, and sends no more", async () => {
+		await streaming();
+		paste("a".repeat(1024 * 1024));
+
+		closed("overflow", 98_304);
+		ack(0);
+
+		expect(chunks()).toHaveLength(8);
+		expect(toasts()).toEqual(["Paste interrupted: 96 KB of 1 MB reached the terminal."]);
+	});
+
+	it("WB5: says at least what was acknowledged when the agent is lost, or the socket drops", async () => {
+		await streaming();
+		paste("a".repeat(1024 * 1024));
+		for (let seq = 0; seq < 3; seq++) ack(seq);
+		closed("agent_lost");
+
+		paste("b".repeat(1024 * 1024));
+		for (let seq = 0; seq < 3; seq++) ack(seq);
+		dropConnection();
+
+		expect(toasts()).toEqual([
+			"Paste interrupted: at least 96 KB of 1 MB reached the terminal.",
+			"Paste interrupted: at least 96 KB of 1 MB reached the terminal.",
+		]);
+		expect(cancels()).toEqual([]);
+	});
+
+	it("WB6: cancels when the pane switches terminals, sends no more, and says what went", async () => {
+		const channel = ref(T);
+		mountPane(channel, "live", {
+			setUp: () => {
+				withU();
+				const lock = useWriteLockStore();
+				for (const id of [T, U]) lock.handleWriteLock(id, CLIENT);
+			},
+		});
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "T", { adaptsInput: true, streamsPaste: true });
+		await settle();
+		paste("a".repeat(1024 * 1024));
+		vi.advanceTimersByTime(1000);
+		const id = pasteId();
+
+		channel.value = U;
+		await vi.waitFor(() => expect(attachedTo()).toEqual([T, U]));
+		ack(0, id);
+
+		expect(cancels()).toEqual([{ type: "PASTE_CANCEL", channelId: T, pasteId: id }]);
+		expect(chunks()).toHaveLength(8);
+		expect(toasts()).toEqual(["Paste interrupted: at least 0 B of 1 MB reached the terminal."]);
+	});
+
+	it("WB6: a pane remounted for the same terminal gives its next paste a greater id", async () => {
+		const { channel, remount } = openNewRemountable();
+		useWriteLockStore().handleWriteLock(REAL, CLIENT);
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		hear({
+			type: "SPAWN_OK",
+			channelId: REAL,
+			requestId: spawns().at(-1)?.requestId,
+			streamsPaste: true,
+		});
+		await settle();
+		expect(channel.value).toBe(REAL);
+		paste("first");
+		const first = pasteId();
+		ack(0, first, REAL);
+
+		await remount();
+		await vi.waitFor(() => expect(attaches().length).toBeGreaterThan(0));
+		attachOk(REAL, "REAL", { streamsPaste: true });
+		await settle();
+		paste("second");
+
+		expect(pasteId()).toBeGreaterThan(first);
+	});
+
+	it("WB6: ignores an old paste's answers: the current one goes on, its credit unchanged", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+		const old = pasteId();
+		type("\u0003");
+		paste("b".repeat(9 * CHUNK));
+		expect(chunks()).toHaveLength(16);
+
+		ack(0, old);
+		closed("cancelled", 0, old);
+
+		expect(chunks()).toHaveLength(16);
+		expect(toasts().filter((t) => t.startsWith("Paste interrupted"))).toEqual([]);
+		ack(0);
+		expect(chunks()).toHaveLength(17);
+	});
+
+	it("WB7: keeps #1012's single frame when the agent adapts input but does not stream pastes", async () => {
+		await streaming({ adaptsInput: true, streamsPaste: false });
+
+		paste("a");
+		paste("x".repeat(65_530));
+
+		expect(chunks()).toEqual([]);
+		expect(inputs()).toEqual(["\u001b[200~a\u001b[201~"]);
+		expect(toasts()).toEqual(["This paste is too large to send (64 KiB at most)."]);
+	});
+
+	it("WB7: leaves the paste to xterm when the agent does neither", async () => {
+		await streaming({});
+
+		paste("a\nb");
+
+		expect(chunks()).toEqual([]);
+		expect(inputs()).toEqual(["a\rb"]);
+	});
+
+	it("WB8: refuses a paste over 16 MiB of UTF-8, and sends one of exactly 16 MiB", async () => {
+		await streaming();
+
+		paste("€".repeat(5_592_406)); // 16 777 218 bytes
+		expect(chunks()).toEqual([]);
+		expect(toasts()).toEqual(["This paste is too large to send (16 MiB at most)."]);
+
+		paste("x".repeat(16 * 1024 * 1024));
+		expect(chunks()).toHaveLength(8);
 	});
 });

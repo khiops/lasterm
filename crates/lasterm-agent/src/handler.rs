@@ -2219,13 +2219,17 @@ mod stdio_tests {
                     "-NoProfile".into(),
                     "-NoLogo".into(),
                     "-Command".into(),
-                    "[Console]::Write([char]27+'[?2004hREADY'); Start-Sleep 20".into(),
+                    "[Console]::Write([char]27+'[?2004h'+[char]27+'[?1049hREADY'); Start-Sleep 20"
+                        .into(),
                 ],
             )
         } else {
             (
                 "/bin/sh",
-                vec!["-c".into(), "printf '\\033[?2004hREADY'; sleep 20".into()],
+                vec![
+                    "-c".into(),
+                    "printf '\\033[?2004h\\033[?1049hREADY'; sleep 20".into(),
+                ],
             )
         };
         let mut events =
@@ -2267,7 +2271,7 @@ mod stdio_tests {
 
         let attached: serde_json::Value = rmp_serde::from_slice(&reply.frame[4..]).unwrap();
         assert_eq!(attached["type"], "ATTACH_OK");
-        assert_eq!(attached["snapshot"]["alternate_screen"], false);
+        assert_eq!(attached["snapshot"]["alternate_screen"], true);
         let modes = attached["snapshot"]["input_modes"]
             .as_str()
             .expect("input_modes");

@@ -458,20 +458,26 @@ export function useTerminal(
 				// No clipboard data: nothing to paste, as xterm sends nothing then.
 				if (event.clipboardData === null) return;
 				const text = event.clipboardData.getData("text/plain");
-				// Each UTF-16 unit left is at least one UTF-8 byte: a text that long
-				// is refused before any of it is copied.
-				const hasEscape = text.includes("\u001b");
+				// Each UTF-16 unit left is at least one UTF-8 byte. A marker taken out
+				// is six units holding one ESC, and may join a CR to an LF, which then
+				// make one: a text too long even so is refused before any of it is copied.
+				let escapes = 0;
+				let crlfs = 0;
+				for (let at = 0; at < text.length; at++) {
+					const unit = text.charCodeAt(at);
+					if (unit === 0x1b) escapes++;
+					else if (unit === 0x0a && at > 0 && text.charCodeAt(at - 1) === 0x0d) crlfs++;
+				}
 				const tooLarge = () =>
 					useToastStore().show("warning", "This paste is too large to send (64 KiB at most).");
 				if (
-					!hasEscape &&
-					text.length - (text.match(/\r\n/g)?.length ?? 0) + PASTE_START.length + PASTE_END.length >
-						MAX_INPUT_SIZE
+					text.length - 7 * escapes - crlfs + PASTE_START.length + PASTE_END.length >
+					MAX_INPUT_SIZE
 				) {
 					tooLarge();
 					return;
 				}
-				const stripped = hasEscape ? withoutPasteMarkers(text) : text;
+				const stripped = escapes > 0 ? withoutPasteMarkers(text) : text;
 				const form = `${PASTE_START}${stripped.replace(/\r?\n/g, "\r")}${PASTE_END}`;
 				if (new TextEncoder().encode(form).byteLength > MAX_INPUT_SIZE) {
 					tooLarge();

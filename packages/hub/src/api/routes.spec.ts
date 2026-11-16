@@ -2649,6 +2649,227 @@ describe("POST /api/hosts/import — the auth an entry is imported with", () => 
 	});
 });
 
+// A ProxyJump is linked to the saved bastion it names only when the link
+// reaches what `ssh` would: through the bastion's alias, and with any user or
+// port it writes being the bastion's. Otherwise it is kept as written (#1040).
+describe("POST /api/hosts/import — linking a ProxyJump to a saved bastion (#1040)", () => {
+	type Entry = {
+		name: string;
+		hostname: string | null;
+		port: number;
+		user: string | null;
+		identityFile: null;
+		proxyJump: string | null;
+		isGitHost: false;
+	};
+	function entry(name: string, values: Partial<Entry> = {}): Entry {
+		return {
+			name,
+			hostname: null,
+			port: 22,
+			user: null,
+			identityFile: null,
+			proxyJump: null,
+			isGitHost: false,
+			...values,
+		};
+	}
+	type Imported = {
+		id: string;
+		label: string;
+		ssh_proxy_host_id?: string;
+		ssh_proxy_spec?: string;
+	};
+
+	async function importEntries(entries: Entry[], names = entries.map((e) => e.name)) {
+		const { readSshConfig } = await import("../ssh/ssh-config-parser.js");
+		vi.mocked(readSshConfig).mockReturnValue({ entries, hasInclude: false });
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts/import",
+			payload: { entries: names.map((name) => ({ name, label: `${name}-host` })) },
+		});
+		expect(res.statusCode, res.body).toBe(201);
+		return res.json<Imported[]>();
+	}
+
+	async function saveHost(body: Record<string, unknown>): Promise<string> {
+		const res = await server.inject({
+			method: "POST",
+			url: "/api/hosts",
+			payload: { type: "ssh", ssh_auth: "agent", ...body },
+		});
+		expect(res.statusCode, res.body).toBe(201);
+		return res.json<{ id: string }>().id;
+	}
+
+	/** The bastion `gw`, imported with the target: gateway.example as base on 2222. */
+	async function importWithGw(proxyJump: string, gw: Partial<Entry> = {}) {
+		const hosts = await importEntries([
+			entry("gw", { hostname: "gateway.example", user: "base", port: 2222, ...gw }),
+			entry("target", { hostname: "target.example", proxyJump }),
+		]);
+		const bastion = hosts.find((host) => host.label === "gw-host");
+		const target = hosts.find((host) => host.label === "target-host");
+		if (!bastion || !target) throw new Error("the import did not answer both hosts");
+		return { gw: bastion, target };
+	}
+
+	it.each([
+		{ variant: "user", proxyJump: "relay@gw", gw: {} },
+		{ variant: "port", proxyJump: "gw:2200", gw: {} },
+		{ variant: "no-bastion-user", proxyJump: "relay@gw", gw: { user: null } },
+	])(
+		"keeps an imported ProxyJump whose user or port differs from the bastion's as written ($variant)",
+		async ({ proxyJump, gw }) => {
+			const { target } = await importWithGw(proxyJump, gw);
+			expect(target?.ssh_proxy_spec).toBe(proxyJump);
+			expect(target?.ssh_proxy_host_id).toBeUndefined();
+		},
+	);
+
+	it("keeps an imported ProxyJump whose user differs from the one in the bastion's address as written (sshhost-user)", async () => {
+		await saveHost({
+			label: "gw-saved",
+			ssh_host: "base@gateway.example",
+			ssh_config_host: "gw",
+			ssh_port: 2222,
+		});
+		const [target] = await importEntries([
+			entry("target", { hostname: "target.example", proxyJump: "relay@gw" }),
+		]);
+		expect(target?.ssh_proxy_spec).toBe("relay@gw");
+		expect(target?.ssh_proxy_host_id).toBeUndefined();
+	});
+
+	it.each([
+		{ variant: "same", proxyJump: "base@gw:2222" },
+		{ variant: "port-default", proxyJump: "gw" },
+	])(
+		"links an imported ProxyJump that agrees with the bastion's user and port ($variant)",
+		async ({ proxyJump }) => {
+			const { gw, target } = await importWithGw(proxyJump);
+			expect(target?.ssh_proxy_host_id).toBe(gw?.id);
+			expect(target?.ssh_proxy_spec).toBeUndefined();
+		},
+	);
+
+	it.each([
+		{ variant: "sshhost-user", sshHost: "base@gateway.example", sshUser: undefined },
+		{ variant: "sshuser-first", sshHost: "old@gateway.example", sshUser: "base" },
+	])(
+		"links an imported ProxyJump that agrees with the bastion's user and port ($variant)",
+		async ({ sshHost, sshUser }) => {
+			const gwId = await saveHost({
+				label: "gw-saved",
+				ssh_host: sshHost,
+				ssh_config_host: "gw",
+				ssh_port: 2222,
+				...(sshUser !== undefined && { ssh_user: sshUser }),
+			});
+			const [target] = await importEntries([
+				entry("target", { hostname: "target.example", proxyJump: "base@gw" }),
+			]);
+			expect(target?.ssh_proxy_host_id).toBe(gwId);
+			expect(target?.ssh_proxy_spec).toBeUndefined();
+		},
+	);
+
+	it.each([
+		{ variant: "both-compatible", users: ["base", "base"], proxyJump: "gw" },
+		{ variant: "one-compatible", users: ["base", "relay"], proxyJump: "base@gw" },
+	])(
+		"keeps an imported ProxyJump that names two saved hosts as written ($variant)",
+		async ({ users, proxyJump }) => {
+			for (const [index, user] of users.entries()) {
+				await saveHost({
+					label: `gw-${index}`,
+					ssh_host: `gateway-${index}.example`,
+					ssh_config_host: "gw",
+					ssh_user: user,
+				});
+			}
+			const [target] = await importEntries([
+				entry("target", { hostname: "target.example", proxyJump }),
+			]);
+			expect(target?.ssh_proxy_spec).toBe(proxyJump);
+			expect(target?.ssh_proxy_host_id).toBeUndefined();
+		},
+	);
+
+	it("keeps an imported ProxyJump naming the bastion's address as written", async () => {
+		await saveHost({ label: "gw-saved", ssh_host: "gateway.example", ssh_config_host: "gw" });
+		const [target] = await importEntries([
+			entry("target", { hostname: "target.example", proxyJump: "gateway.example" }),
+		]);
+		expect(target?.ssh_proxy_spec).toBe("gateway.example");
+		expect(target?.ssh_proxy_host_id).toBeUndefined();
+	});
+
+	it("links an imported ProxyJump only to another host carrying its alias (no-name)", async () => {
+		await saveHost({
+			label: "other-saved",
+			ssh_host: "gateway.example",
+			ssh_config_host: "other",
+			ssh_user: "base",
+			ssh_port: 2222,
+		});
+		const [target] = await importEntries([
+			entry("target", { hostname: "target.example", proxyJump: "gw" }),
+		]);
+		expect(target?.ssh_proxy_spec).toBe("gw");
+		expect(target?.ssh_proxy_host_id).toBeUndefined();
+	});
+
+	it("links an imported ProxyJump only to another host carrying its alias (self)", async () => {
+		const gwId = await saveHost({
+			label: "gw-saved",
+			ssh_host: "gateway.example",
+			ssh_config_host: "gw",
+		});
+		const [target] = await importEntries([
+			entry("gw", { hostname: "target.example", proxyJump: "gw" }),
+		]);
+		expect(target?.ssh_proxy_host_id).toBe(gwId);
+		expect(target?.ssh_proxy_spec).toBeUndefined();
+	});
+
+	it("keeps an imported ProxyJump chain as written", async () => {
+		await saveHost({ label: "gw-saved", ssh_host: "gateway.example", ssh_config_host: "gw" });
+		const [target] = await importEntries([
+			entry("target", { hostname: "target.example", proxyJump: "gw,other" }),
+		]);
+		expect(target?.ssh_proxy_spec).toBe("gw,other");
+		expect(target?.ssh_proxy_host_id).toBeUndefined();
+	});
+
+	it("reads no hosts to link an import with no ProxyJump", async () => {
+		const listHosts = vi.spyOn(MetaDAL.prototype, "listHosts");
+		try {
+			await importEntries([entry("a", { hostname: "a.example" })]);
+			expect(listHosts).not.toHaveBeenCalled();
+		} finally {
+			listHosts.mockRestore();
+		}
+	});
+
+	it("reads the hosts once to link an import's ProxyJumps", async () => {
+		await saveHost({ label: "gw-saved", ssh_host: "gateway.example", ssh_config_host: "gw" });
+		const listHosts = vi.spyOn(MetaDAL.prototype, "listHosts");
+		try {
+			const hosts = await importEntries([
+				entry("a", { hostname: "a.example", proxyJump: "gw" }),
+				entry("b", { hostname: "b.example", proxyJump: "gw" }),
+				entry("c", { hostname: "c.example", proxyJump: "gw" }),
+			]);
+			expect(hosts.map((host) => host.ssh_proxy_host_id).every(Boolean)).toBe(true);
+			expect(listHosts).toHaveBeenCalledTimes(1);
+		} finally {
+			listHosts.mockRestore();
+		}
+	});
+});
+
 describe("POST /api/hosts/import — remote daemon choice", () => {
 	function configEntry() {
 		return {

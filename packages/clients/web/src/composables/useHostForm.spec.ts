@@ -4,7 +4,12 @@ import { nextTick } from "vue";
 import { iconFields, proxyFields, useHostForm } from "./useHostForm.js";
 
 const daemonConnection = vi.hoisted(() => ({ connected: false }));
-const knownHosts = vi.hoisted(() => [] as Host[]);
+// Reactive, as the real store's list is: a form that watched it would see it
+// change (#1042).
+const knownHosts = await vi.hoisted(async () => {
+	const { reactive } = await import("vue");
+	return reactive([] as Host[]);
+});
 const testWsClient = vi.hoisted(() => ({ on: vi.fn(), send: vi.fn() }));
 const createHostSpy = vi
 	.fn()
@@ -1460,6 +1465,223 @@ describe("the picked ssh_config alias, tested and stored alike (#1037)", () => {
 		cleared.selectedSshConfigHost.value = "";
 		cleared.applySshConfigEntry("");
 		expect(await createBody(cleared.save)).not.toHaveProperty("ssh_config_host");
+	});
+});
+
+// A picked entry's ProxyJump is decided once, when it is picked: its saved
+// bastion when the link reaches what ssh would, else the ProxyJump as written.
+// Test Connection and Add Host then send the same jump, whatever the host list
+// does between them (#1040, #1042).
+describe("the jump a picked entry is tested and stored through (#1040, #1042)", () => {
+	const gw = {
+		id: "01GWBASTION",
+		type: "ssh",
+		label: "gw-label",
+		sshHost: "gateway.example",
+		sshConfigHost: "gw",
+		sshUser: "base",
+		sshPort: 22,
+	} as Host;
+
+	beforeEach(() => {
+		knownHosts.length = 0;
+		knownHosts.push(gw);
+		daemonConnection.connected = false;
+		createHostSpy.mockClear();
+		testWsClient.on.mockReset();
+		testWsClient.send.mockReset();
+	});
+
+	/** Run a connection test and return the TEST_CONNECT it sent; the hub answers a failure. */
+	async function testRequest(
+		testConnectionInline: () => Promise<void>,
+	): Promise<Record<string, unknown>> {
+		const failHandlers: Array<(message: Record<string, unknown>) => void> = [];
+		testWsClient.on.mockImplementation(
+			(type: string, handler: (message: Record<string, unknown>) => void) => {
+				if (type === "TEST_CONNECT_FAIL") failHandlers.push(handler);
+				return () => {};
+			},
+		);
+		const before = testWsClient.send.mock.calls.length;
+		const done = testConnectionInline();
+		await vi.waitFor(() => expect(testWsClient.send).toHaveBeenCalledTimes(before + 1));
+		const sent = testWsClient.send.mock.calls[before]?.[0] as Record<string, unknown>;
+		for (const handler of failHandlers) {
+			handler({ type: "TEST_CONNECT_FAIL", hostId: sent.hostId, message: "failed" });
+		}
+		await done;
+		return sent;
+	}
+
+	async function addBody(save: () => Promise<unknown>): Promise<Record<string, unknown>> {
+		await save();
+		return (createHostSpy.mock.calls.at(-1) as [Record<string, unknown>])[0];
+	}
+
+	/** A new-host form with the entry `target` picked, its ProxyJump `proxyJump`. */
+	function picked(proxyJump: string) {
+		const form = useHostForm();
+		form.sshConfigEntries.value = [
+			{
+				name: "target",
+				hostname: "target.example",
+				port: 22,
+				user: "deploy",
+				identityFile: null,
+				proxyJump,
+				isGitHost: false,
+			},
+		];
+		form.source.value = "ssh-config";
+		form.selectedSshConfigHost.value = "target";
+		form.applySshConfigEntry("target");
+		return form;
+	}
+
+	it("tests and stores a picked ProxyJump through the saved bastion it names", async () => {
+		const form = picked("gw");
+
+		const sent = await testRequest(form.testConnectionInline);
+		expect(sent.sshProxyHostId).toBe("01GWBASTION");
+		expect(sent).not.toHaveProperty("sshProxySpec");
+		expect(await addBody(form.save)).toMatchObject({
+			ssh_proxy_host_id: "01GWBASTION",
+			ssh_proxy_spec: null,
+		});
+	});
+
+	it("tests and stores a picked ProxyJump that differs from the bastion as written", async () => {
+		const form = picked("relay@gw");
+
+		const sent = await testRequest(form.testConnectionInline);
+		expect(sent.sshProxySpec).toBe("relay@gw");
+		expect(sent).not.toHaveProperty("sshProxyHostId");
+		expect(await addBody(form.save)).toMatchObject({
+			ssh_proxy_host_id: null,
+			ssh_proxy_spec: "relay@gw",
+		});
+	});
+
+	it("sends an edited jump to the test and the add alike", async () => {
+		const form = picked("gw");
+		form.form.value.sshProxy = "base@gw:22";
+
+		const sent = await testRequest(form.testConnectionInline);
+		expect(sent.sshProxySpec).toBe("base@gw:22");
+		expect(sent).not.toHaveProperty("sshProxyHostId");
+		expect(await addBody(form.save)).toMatchObject({
+			ssh_proxy_host_id: null,
+			ssh_proxy_spec: "base@gw:22",
+		});
+	});
+
+	describe("keeps a jump's kind while its field does not change", () => {
+		const other = { ...gw, id: "01OTHERHOST", label: "other", sshConfigHost: "other" } as Host;
+
+		it("pick: an id stays an id when the host list loses it", async () => {
+			const form = picked("gw");
+			expect((await testRequest(form.testConnectionInline)).sshProxyHostId).toBe("01GWBASTION");
+			knownHosts.length = 0;
+
+			expect(await addBody(form.save)).toMatchObject({
+				ssh_proxy_host_id: "01GWBASTION",
+				ssh_proxy_spec: null,
+			});
+		});
+
+		it("datalist: an id chosen on the Manual source stays an id when the host list loses it", async () => {
+			knownHosts.push(other);
+			const form = useHostForm();
+			form.form.value.sshHost = "target.example";
+			form.form.value.label = "target";
+			form.form.value.sshAuth = "agent";
+			form.form.value.sshProxy = "01OTHERHOST";
+			expect((await testRequest(form.testConnectionInline)).sshProxyHostId).toBe("01OTHERHOST");
+			knownHosts.splice(knownHosts.indexOf(other), 1);
+
+			expect(await addBody(form.save)).toMatchObject({
+				ssh_proxy_host_id: "01OTHERHOST",
+				ssh_proxy_spec: null,
+			});
+		});
+
+		it("typed-early: a spec stays a spec when the host list gains that id", async () => {
+			const form = useHostForm();
+			form.form.value.sshHost = "target.example";
+			form.form.value.label = "target";
+			form.form.value.sshAuth = "agent";
+			form.form.value.sshProxy = "01OTHERHOST";
+			expect((await testRequest(form.testConnectionInline)).sshProxySpec).toBe("01OTHERHOST");
+			knownHosts.push(other);
+
+			expect(await addBody(form.save)).toMatchObject({
+				ssh_proxy_host_id: null,
+				ssh_proxy_spec: "01OTHERHOST",
+			});
+		});
+
+		it("before-first-send: a spec stays a spec when the host list gains that id before any send", async () => {
+			const form = useHostForm();
+			form.form.value.sshHost = "target.example";
+			form.form.value.label = "target";
+			form.form.value.sshAuth = "agent";
+			form.form.value.sshProxy = "01OTHERHOST";
+			knownHosts.push(other);
+
+			const sent = await testRequest(form.testConnectionInline);
+			expect(sent.sshProxySpec).toBe("01OTHERHOST");
+			expect(sent).not.toHaveProperty("sshProxyHostId");
+			expect(await addBody(form.save)).toMatchObject({
+				ssh_proxy_host_id: null,
+				ssh_proxy_spec: "01OTHERHOST",
+			});
+		});
+	});
+
+	// The pick writes the bastion's id even into a field that already held that
+	// text as a spec: the decision is the pick's, not the old text's (#1042).
+	it("links a pick whose bastion id the field already held as a spec", async () => {
+		knownHosts.length = 0;
+		const form = useHostForm();
+		form.form.value.sshProxy = "01GWBASTION";
+		knownHosts.push(gw);
+		form.sshConfigEntries.value = [
+			{
+				name: "target",
+				hostname: "target.example",
+				port: 22,
+				user: "deploy",
+				identityFile: null,
+				proxyJump: "gw",
+				isGitHost: false,
+			},
+		];
+		form.source.value = "ssh-config";
+		form.selectedSshConfigHost.value = "target";
+		form.applySshConfigEntry("target");
+
+		const sent = await testRequest(form.testConnectionInline);
+		expect(sent.sshProxyHostId).toBe("01GWBASTION");
+		expect(sent).not.toHaveProperty("sshProxySpec");
+	});
+
+	// On the Manual source nothing is decided for the person: a saved host's
+	// alias typed in the field is a spec (#1040).
+	it("does not link a saved host's alias typed on the Manual source", async () => {
+		const form = useHostForm();
+		form.form.value.sshHost = "target.example";
+		form.form.value.label = "target";
+		form.form.value.sshAuth = "agent";
+		form.form.value.sshProxy = "gw";
+
+		const sent = await testRequest(form.testConnectionInline);
+		expect(sent.sshProxySpec).toBe("gw");
+		expect(sent).not.toHaveProperty("sshProxyHostId");
+		expect(await addBody(form.save)).toMatchObject({
+			ssh_proxy_host_id: null,
+			ssh_proxy_spec: "gw",
+		});
 	});
 });
 

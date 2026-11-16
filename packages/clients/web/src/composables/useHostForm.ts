@@ -1,5 +1,5 @@
 import type { Host, SshConfigEntry, TestConnectPlatform } from "@lasterm/shared";
-import { ErrorCode, generateId, sshPortFromText } from "@lasterm/shared";
+import { ErrorCode, generateId, sshAuthFor, sshPortFromText } from "@lasterm/shared";
 import { computed, readonly, ref, shallowRef, watch } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useHostsStore } from "../stores/hosts.js";
@@ -390,10 +390,10 @@ export function useHostForm(editHost?: Host) {
 		if (entry.hostname) form.value.sshHost = entry.hostname;
 		setPortText(portTextOf(entry.port));
 		if (entry.user) form.value.sshUser = entry.user;
-		if (entry.identityFile) {
-			form.value.sshKeyPath = entry.identityFile;
-			form.value.sshAuth = "key";
-		}
+		// The entry's own method, whatever the form held, by the rule the import
+		// stores it with: its IdentityFile, else the agent (#1009, #917).
+		form.value.sshAuth = sshAuthFor(entry.identityFile);
+		form.value.sshKeyPath = form.value.sshAuth === "key" ? (entry.identityFile ?? "") : "";
 		if (!form.value.label) form.value.label = name;
 	}
 

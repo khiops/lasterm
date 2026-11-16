@@ -1,4 +1,4 @@
-import { ELEVATION_METHODS_ALL, type Host, isPlainObject } from "@lasterm/shared";
+import { ELEVATION_METHODS_ALL, type Host, isBlankKeyPath, isPlainObject } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
@@ -228,27 +228,6 @@ function validateHostFields(fields: Record<string, unknown>): string | null {
 		return "ssh_remote_daemon must be boolean or null";
 	}
 	return validateSshPort(fields.ssh_port) ?? validateHostColor(fields.color);
-}
-
-/**
- * Whether a key path names no file: absent, or only ASCII whitespace (tab, LF,
- * VT, FF, CR, space). Migration 027 tests the same characters in SQL, so a
- * path reads alike whether the hub or the migration chose the method.
- */
-export function isBlankKeyPath(keyPath: string | null | undefined): boolean {
-	return keyPath == null || /^[\t\n\v\f\r ]*$/.test(keyPath);
-}
-
-/**
- * The default method of an SSH host sent without one (#917): the key it names,
- * else the agent, as an import reads a `~/.ssh/config` entry with or without an
- * `IdentityFile`. Only POST, the import, and a PUT that turns a local host with
- * no method into an SSH one store it; migration 027 applied the same rule to
- * the SSH hosts stored without one before. The direct connect and a jump
- * through the host then read the same stored method.
- */
-export function sshAuthFor(keyPath: string | null | undefined): "agent" | "key" {
-	return isBlankKeyPath(keyPath) ? "agent" : "key";
 }
 
 /** How an SSH host is reached and signs in, its fields already checked one by one. */

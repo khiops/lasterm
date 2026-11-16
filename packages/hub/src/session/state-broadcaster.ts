@@ -321,6 +321,14 @@ export class StateBroadcaster {
 		this.updateSessionStatus(hostId, session.id, "detached");
 	}
 
+	/** A terminal of a host went live: its detached session is active again (SPEC.md § 4.2). */
+	reactivateDetachedSession(hostId: string): void {
+		const session = this.ctx.sessions.get(hostId);
+		if (session?.status === "detached") {
+			this.updateSessionStatus(hostId, session.id, "active");
+		}
+	}
+
 	// ─── Broadcast primitives ────────────────────────────────────────────────
 
 	broadcastToChannel(channelId: string, msg: ProtocolMessage): void {

@@ -358,6 +358,7 @@ export class ChannelLifecycleManager {
 					this.ctx.scheduler.trackChannel(channelId);
 					this.ctx.chunker.trackChannel(channelId);
 					client.attachedChannels.add(channelId);
+					this.broadcaster.reactivateDetachedSession(hostId);
 
 					const channelStateMsg: ChannelStateMessage = {
 						type: "CHANNEL_STATE",
@@ -1025,9 +1026,7 @@ export class ChannelLifecycleManager {
 		};
 		this.broadcaster.broadcastToAllClients(channelStateMsg);
 
-		if (sessionEntry.status === "detached") {
-			this.broadcaster.updateSessionStatus(hostId, sessionEntry.id, "active");
-		}
+		this.broadcaster.reactivateDetachedSession(hostId);
 	}
 
 	// ─── Session close ────────────────────────────────────────────────────────

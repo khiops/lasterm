@@ -949,7 +949,7 @@ All protocol messages use **snake_case** for field names (e.g., `channel_id`, `c
 | disconnected | starting | Its user's Connect or Reconnect (§ 5.5b) |
 | disconnected | active | SSH reconnect succeeds + HELLO received |
 | disconnected | closed | Reconnect timeout (5 min) |
-| detached | active | Any client sends ATTACH for a channel in this session |
+| detached | active | Any client sends ATTACH for a channel in this session, or starts a terminal on its host (it joins this session) |
 | detached | closed | Session detach timeout (configurable, default 1h) |
 
 **Channel transitions:**

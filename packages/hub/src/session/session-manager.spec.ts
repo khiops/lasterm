@@ -967,6 +967,65 @@ describe("SessionManager", () => {
 		expect(client.attachedChannels.size).toBe(0);
 	});
 
+	// #955: a detached session is the host's session; a terminal opened on it,
+	// or one attached again, makes it active (SPEC.md § 4.2).
+	it("a terminal opened while the host's session is detached joins that session", async () => {
+		sm.addClient(makeClient("c1", []));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbManager.meta);
+		const [first] = dal.listSessions();
+		sm.removeClient("c1");
+		expect(dal.getSession(first?.id ?? "")?.status).toBe("detached");
+
+		const c2: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c2", c2));
+		await sm.handleSpawn("c2", { type: "SPAWN", hostId: "local" });
+
+		expect(dal.listSessions().map((s) => [s.id, s.status])).toEqual([[first?.id, "active"]]);
+		expect(c2.find((m) => m.type === "SPAWN_OK")).toMatchObject({ sessionId: first?.id });
+		expect(c2).toContainEqual(
+			expect.objectContaining({ type: "SESSION_STATE", sessionId: first?.id, status: "active" }),
+		);
+	});
+
+	it("a terminal attached again while the host's session is detached makes it active", async () => {
+		sm.addClient(makeClient("c1", []));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbManager.meta);
+		const [first] = dal.listSessions();
+		sm.removeClient("c1");
+
+		const c2: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c2", c2));
+		await sm.handleAttach("c2", "local-ch-1");
+
+		expect(dal.getSession(first?.id ?? "")?.status).toBe("active");
+		expect(c2).toContainEqual(
+			expect.objectContaining({ type: "SESSION_STATE", sessionId: first?.id, status: "active" }),
+		);
+	});
+
+	it("a terminal restarted while the host's session is detached makes it active", async () => {
+		sm.addClient(makeClient("c1", []));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbManager.meta);
+		const [first] = dal.listSessions();
+		sm.removeClient("c1");
+		expect(dal.getSession(first?.id ?? "")?.status).toBe("detached");
+
+		const c2: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c2", c2));
+		expect(await sm.restartChannel("local-ch-1")).toBe(true);
+
+		expect(dal.getSession(first?.id ?? "")?.status).toBe("active");
+		expect(c2).toContainEqual(
+			expect.objectContaining({ type: "SESSION_STATE", sessionId: first?.id, status: "active" }),
+		);
+	});
+
 	// ─── DB persistence ─────────────────────────────────────────────────────
 
 	it("handleSpawn creates a session record in meta.db with 'active' status", async () => {
@@ -4856,7 +4915,7 @@ describe("SessionManager", () => {
 			expect(dal.listChannels()).toHaveLength(0);
 		});
 
-		it("warm restarts local agent with same channel IDs", async () => {
+		it("attaches the local agent at startup and ends the terminals the daemon does not hold", async () => {
 			const { MetaDAL } = await import("../storage/meta.js");
 			const dal = new MetaDAL(dbManager.meta);
 
@@ -4907,6 +4966,78 @@ describe("SessionManager", () => {
 			// Agent should have been spawned for this host
 			const agentsMap = (sm as unknown as { agents: Map<string, unknown> }).agents;
 			expect(agentsMap.has(host.id)).toBe(true);
+		});
+
+		it("keeps a terminal the daemon holds live when the first startup connection fails (#981)", async () => {
+			const { MetaDAL } = await import("../storage/meta.js");
+			const dal = new MetaDAL(dbManager.meta);
+
+			const host = dal.createHost({ type: "local", label: "held-local" });
+			const sessionId = "HELDSESS0000000000000000000001";
+			dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+			dal.createChannel({ id: "held-ch-1", sessionId, status: "live", shell: "/bin/sh" });
+			dal.createChannel({ id: "lost-ch-1", sessionId, status: "live", shell: "/bin/sh" });
+
+			// The first connection fails; the second reaches a daemon that still
+			// runs one of the two terminals. Like the real agent, it refuses a
+			// SPAWN under an id it holds.
+			const launch = vi.mocked(_connectOrLaunchForMock);
+			const fresh = launch.getMockImplementation()!;
+			launch
+				.mockRejectedValueOnce(new Error("pipe busy"))
+				.mockImplementationOnce(async (...args) => {
+					const agent = (await fresh(...args)) as unknown as Record<string, unknown>;
+					agent.waitForChannelState = vi.fn().mockResolvedValue([
+						{
+							type: "AGENT_CHANNEL_STATE",
+							channelId: "held-ch-1",
+							title: "sh",
+							pid: 4242,
+							alive: true,
+						},
+					]);
+					return agent as never;
+				});
+			nextLocalSpawnError = { code: "CHANNEL_EXISTS", message: "channel already exists" };
+
+			await sm.startup();
+			await new Promise((r) => setImmediate(r));
+			await new Promise((r) => setImmediate(r));
+
+			expect(launch).toHaveBeenCalledTimes(2);
+			const sent = mockLocalAgents.flatMap((a) =>
+				(a as unknown as { send: { mock: { calls: [ProtocolMessage][] } } }).send.mock.calls.map(
+					([m]) => m,
+				),
+			);
+			expect(sent.filter((m) => m.type === "SPAWN")).toEqual([]);
+			const channels = (sm as unknown as { channels: Map<string, { status: string }> }).channels;
+			expect(channels.get("held-ch-1")?.status).toBe("live");
+			expect(dal.getChannel("held-ch-1")?.status).toBe("live");
+			// The one it does not hold has ended, and is not started again.
+			expect(channels.has("lost-ch-1")).toBe(false);
+			expect(dal.getChannel("lost-ch-1")?.status).toBe("dead");
+		});
+
+		it("closes the session when the daemon cannot be reached at startup, twice (#981)", async () => {
+			const { MetaDAL } = await import("../storage/meta.js");
+			const dal = new MetaDAL(dbManager.meta);
+
+			const host = dal.createHost({ type: "local", label: "unreachable-local" });
+			const sessionId = "UNREACHSESS0000000000000000001";
+			dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+			dal.createChannel({ id: "unreach-ch-1", sessionId, status: "live", shell: "/bin/sh" });
+
+			const launch = vi.mocked(_connectOrLaunchForMock);
+			launch
+				.mockRejectedValueOnce(new Error("pipe busy"))
+				.mockRejectedValueOnce(new Error("pipe busy"));
+
+			await sm.startup();
+
+			expect(launch).toHaveBeenCalledTimes(2);
+			expect(dal.getSession(sessionId)?.status).toBe("closed");
+			expect(dal.getChannel("unreach-ch-1")?.status).toBe("dead");
 		});
 
 		it("marks channels dead when no non-closed session exists for a host", async () => {
@@ -5097,7 +5228,6 @@ describe("SessionManager", () => {
 				});
 
 				// startup() triggers 1st warm restart (count=1)
-				// _warmRestartLocal now awaits _spawnChannelsForHost — start, flush, await.
 				let p: Promise<void> = sm.startup();
 				await vi.advanceTimersByTimeAsync(0);
 				await p;

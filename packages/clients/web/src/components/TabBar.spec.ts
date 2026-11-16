@@ -19,6 +19,8 @@ const activeTabIndex = ref(0);
 const visibleTabIds = ref<ReadonlySet<string> | null>(null);
 /** The bar's tabs, by id: a test closes one as App.vue does, by dropping it from the list. */
 const tabList = ref<string[]>([]);
+/** A tab's active pane's channel where a test moved it; `ch-<tab id>` otherwise. */
+const activeChannel = new Map<string, string>();
 
 function mountBar(tabIds: string[], active = 0, bar: Component = TabBar) {
 	activeTabIndex.value = active;
@@ -39,7 +41,7 @@ function mountBar(tabIds: string[], active = 0, bar: Component = TabBar) {
 				tabs: tabList.value.map((id) => ({ id })),
 				activeTabIndex: activeTabIndex.value,
 				getTabLabel: (id: string) => `Label ${id}`,
-				getActiveChannelId: (id: string) => `ch-${id}`,
+				getActiveChannelId: (id: string) => activeChannel.get(id) ?? `ch-${id}`,
 				visibleTabIds: visibleTabIds.value,
 				onSelectTab: selectTab,
 				onCloseTab: closeTab,
@@ -57,6 +59,7 @@ beforeEach(() => {
 	localStorage.clear();
 	setActivePinia(createPinia());
 	visibleTabIds.value = null;
+	activeChannel.clear();
 });
 
 afterEach(() => {
@@ -300,15 +303,30 @@ describe("TabBar rename", () => {
 	it("stays on the tab being renamed when a tab before it closes", async () => {
 		const { closeTab, renameTab } = mountBar(["t0", "t1", "t2"], 0);
 		const input = await rename("t1", "Build");
+		const draggable = () => [tab("t1"), tab("t2")].map((el) => el.getAttribute("draggable"));
+		expect(draggable()).toEqual(["false", "true"]);
 		tab("t0").dispatchEvent(
 			new MouseEvent("mousedown", { button: 1, bubbles: true, cancelable: true }),
 		);
 		expect(closeTab).toHaveBeenCalledWith(0);
 		await closeTabs("t0");
+		expect(draggable()).toEqual(["false", "true"]);
+		const drag = new Map<string, string>();
+		tab("t1").dispatchEvent(dragEvent("dragstart", drag));
+		expect(drag.size).toBe(0);
 		expect(renameField("t2")).toBeNull();
 		expect(renameField("t1")).toBe(input);
 		expect(input.value).toBe("Build");
 		expect(document.activeElement).toBe(input);
+		await press("Enter");
+		expect(renameTab).toHaveBeenCalledExactlyOnceWith("ch-t1", "Build");
+	});
+
+	// The tab's active pane can change under the field: its terminal ends, or a chord moves the focus.
+	it("renames the terminal whose name was being edited, not the pane active since", async () => {
+		const { renameTab } = mountBar(["t0", "t1"], 0);
+		await rename("t1", "Build");
+		activeChannel.set("t1", "ch-t1-other");
 		await press("Enter");
 		expect(renameTab).toHaveBeenCalledExactlyOnceWith("ch-t1", "Build");
 	});
@@ -353,6 +371,22 @@ async function rename(id: string, text?: string): Promise<HTMLInputElement> {
 		input.dispatchEvent(new Event("input", { bubbles: true }));
 	}
 	return input;
+}
+
+/** A drag event carrying `data`, as the browser gives it to the bar. */
+function dragEvent(type: string, data: Map<string, string>, clientX = 0): DragEvent {
+	const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX }) as DragEvent;
+	const dataTransfer = {
+		effectAllowed: "none",
+		dropEffect: "none",
+		get types() {
+			return [...data.keys()];
+		},
+		setData: (format: string, value: string) => data.set(format, value),
+		getData: (format: string) => data.get(format) ?? "",
+	};
+	Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
+	return event;
 }
 
 /** The parent drops tabs from the list, as App.vue does on close-tab or when a terminal ends. */
@@ -420,27 +454,14 @@ describe("TabBar, when a tab closes under the menu or a drag", () => {
 		expect(document.querySelector(".ctx-menu")).toBeNull();
 	});
 
-	function dragEvent(type: string, data: Map<string, string>, clientX = 0): DragEvent {
-		const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX }) as DragEvent;
-		const dataTransfer = {
-			effectAllowed: "none",
-			dropEffect: "none",
-			get types() {
-				return [...data.keys()];
-			},
-			setData: (format: string, value: string) => data.set(format, value),
-			getData: (format: string) => data.get(format) ?? "",
-		};
-		Object.defineProperty(event, "dataTransfer", { value: dataTransfer });
-		return event;
-	}
-
 	it("moves the tab that was dragged", async () => {
 		const { reorderTab } = mountBar(["t0", "t1", "t2"], 0);
 		const data = new Map<string, string>();
 		tab("t2").dispatchEvent(dragEvent("dragstart", data));
 		await nextTick();
 		await closeTabs("t0");
+		expect(tab("t2").classList.contains("tab--dragging")).toBe(true);
+		expect(tab("t1").classList.contains("tab--dragging")).toBe(false);
 		// Left of every tab's middle (happy-dom lays them all out at 0): before the first.
 		tab("t1").dispatchEvent(dragEvent("drop", data, -1));
 		expect(reorderTab).toHaveBeenCalledExactlyOnceWith(1, 0);

@@ -383,17 +383,14 @@ watch(
 // By id: closing another tab moves the tabs after it, and a field kept by position would move to
 // the neighbour with the text typed (#990).
 const editingTabId = ref<string | null>(null);
+// The channel whose name the field shows, taken when it opens: the tab's active pane can change
+// before the commit (its terminal ends, a chord moves the focus), and the name is for this one.
+let editingChannelId: string | null = null;
 
 const { editValue, editInput, isEditing, startRename: startRenameRaw, commitRename, cancelRename } = useRename({
 	onCommit: (newValue) => {
-		const tab = props.tabs.find((t) => t.id === editingTabId.value);
-		if (tab !== undefined) {
-			// Rename operates on the active pane's channel
-			const channelId = props.getActiveChannelId(tab.id);
-			if (channelId !== null) {
-				emit("rename-tab", channelId, newValue);
-			}
-		}
+		if (editingChannelId === null || !props.tabs.some((t) => t.id === editingTabId.value)) return;
+		emit("rename-tab", editingChannelId, newValue);
 	},
 });
 
@@ -408,6 +405,7 @@ watch(isEditing, (editing) => {
 
 function startRename(tabId: string): void {
 	editingTabId.value = tabId;
+	editingChannelId = props.getActiveChannelId(tabId);
 	startRenameRaw(props.getTabLabel(tabId));
 }
 

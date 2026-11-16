@@ -6,7 +6,9 @@
 //! would leave the rest of it to be drawn as text, and its effect lost. The
 //! reader therefore hands the mirror and the hub only output that ends where
 //! the pane's terminal, xterm 6.0.0, has its parser in ground and no partial
-//! character in its decoder, and holds the rest until a later read ends it.
+//! character in its decoder, and holds the rest until a later read ends it;
+//! except a sequence held past `HOLD_LIMIT`, and what is held when the PTY
+//! closes, which go out cut.
 //!
 //! The rules below follow xterm 6.0.0's `Utf8ToUtf32` decoding loop
 //! (`src/common/input/TextDecoder.ts`) and its `VT500_TRANSITION_TABLE`
@@ -48,7 +50,9 @@ impl OutputCut {
             None => Vec::new(),
         };
         if self.held.len() + self.dsr > HOLD_LIMIT {
-            out.extend(self.finish());
+            // Sent cut. A DSR's possible start stays with the stripping, which
+            // goes on: the next read may complete it.
+            out.append(&mut self.held);
         }
         out
     }
@@ -476,8 +480,10 @@ mod tests {
             b"\xe0\x80\x80",
             b"\xf4\x90\x80\x80",
             b"\xc0\x80",
-            // An overlong form of `A`, which would end the CSI if yielded.
+            // Overlong forms of `A`, which would end the CSI if yielded.
             b"\xc1\x81",
+            b"\xe0\x81\x81",
+            b"\xf0\x80\x81\x81",
         ] {
             let first = [&b"\x1b[3"[..], dropped].concat();
             let whole = [&first[..], b"1m"].concat();
@@ -536,6 +542,17 @@ mod tests {
         // The OSC goes on after the forced return.
         assert!(cut.take(b"x").is_empty());
         assert_eq!(cut.take(b"\x07z"), b"x\x07z");
+
+        // A DSR split at the forced return is still stripped.
+        let mut cut = OutputCut::default();
+        let mut sent = cut.take(b"\x1b]0;");
+        for _ in 0..15 {
+            sent.extend(cut.take(&read));
+        }
+        let last = [&[b'A'; 4092][..], b"\x1b[6"].concat();
+        sent.extend(cut.take(&last));
+        assert_eq!(sent.len(), 4 + 15 * 4096 + 4092, "held, then sent cut");
+        assert_eq!(cut.take(b"n\x07"), b"\x07");
     }
 
     #[test]
@@ -545,6 +562,14 @@ mod tests {
         assert!(cut.take(b"\x1b[3").is_empty());
         assert_eq!(cut.finish(), b"\x1b[3");
         assert!(cut.finish().is_empty());
+        // A DSR's possible start, held by its stripping, goes too.
+        for start in [&b"\x1b"[..], b"\x1b[", b"\x1b[6"] {
+            let mut cut = OutputCut::default();
+            let read = [&b"a"[..], start].concat();
+            assert_eq!(cut.take(&read), b"a");
+            assert_eq!(cut.finish(), start);
+            assert!(cut.finish().is_empty());
+        }
     }
 
     #[test]

@@ -371,8 +371,9 @@ stream (§ 3.5): it reaches the connection that asked after every OUTPUT of the 
 the snapshot shows, and before every OUTPUT it does not show (#931). `last_seq` is the `seq` of the
 last read before the snapshot, so on that connection the OUTPUT before it has `seq <= last_seq` and
 the OUTPUT after it `seq > last_seq`; it is 0 before the terminal's first read. The output the agent
-sends always ends between escape sequences and characters, so a pane that draws the snapshot and
-then that OUTPUT parses it from the start of a sequence (#954). An agent before #931
+sends ends between escape sequences and characters, so a pane that draws the snapshot and then that
+OUTPUT parses it from the start of a sequence (#954), except after a sequence held past 64 KiB or
+once the PTY has closed (§ 3.4). An agent before #931
 sent 0 whatever it held, and its ATTACH_OK could overtake output its snapshot already showed. The hub
 numbers its spool itself and does not read `last_seq`. Once the PTY has closed, the channel is ending: an
 ATTACH whose request finds that reader gone, or reaches it as it stops and is dropped, gets the

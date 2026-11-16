@@ -1376,8 +1376,8 @@ fn spawn_reader_task(
     });
 }
 
-/// Hand `data`, output that ends between sequences, to the mirror and the
-/// hub as the OUTPUT of read `seq`, then send what the mirror saw in it: a
+/// Hand `data`, output from `OutputCut`, to the mirror and the hub as the
+/// OUTPUT of read `seq`, then send what the mirror saw in it: a
 /// title, a bell, a notification, the shell's directory.
 #[allow(clippy::too_many_arguments)]
 fn emit_output(

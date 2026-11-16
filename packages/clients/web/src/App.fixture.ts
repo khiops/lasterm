@@ -75,6 +75,7 @@ export interface MountedWindow {
 
 let app: VueApp | null = null;
 let root: HTMLElement | null = null;
+let windowHub: FakeHub | null = null;
 
 /** Let promises and watchers run. */
 export async function settle(rounds = 8): Promise<void> {
@@ -92,6 +93,7 @@ export async function mountWindow(setup: WindowSetup = {}): Promise<MountedWindo
 	localStorage.clear();
 	sessionStorage.clear();
 	const hub = startHub();
+	windowHub = hub;
 	hub.hosts = setup.hosts ?? [{ id: HOST_A, label: "alpha", type: "local" }];
 	hub.hostGroups = setup.hostGroups ?? [];
 	hub.channels = setup.channels ?? [];
@@ -131,16 +133,39 @@ export async function mountWindow(setup: WindowSetup = {}): Promise<MountedWindo
 	return { hub, root };
 }
 
-/** Unmount the window, and close what stays open from one window to the next. */
-export function unmountWindow(): void {
-	useCommandPalette().close();
-	useShortcutsOverlay().close();
-	app?.unmount();
-	app = null;
-	root?.remove();
-	root = null;
-	document.body.replaceChildren();
-	(document.activeElement as HTMLElement | null)?.blur?.();
+/**
+ * Unmount the window, and close what stays open from one window to the next.
+ *
+ * Every SPAWN the window sent is refused first, while its storage is still its own. Left waiting,
+ * a SPAWN ends at its deadline, 15 s later: the store of a window long gone then writes its
+ * pending spawns into the storage of whichever test runs by then (#1052). A spawn already
+ * answered takes no notice of the refusal; the window only shows it as a toast.
+ */
+export async function unmountWindow(): Promise<void> {
+	const hub = windowHub;
+	windowHub = null;
+	try {
+		const spawns = hub?.frames("SPAWN") ?? [];
+		for (const spawn of spawns) {
+			hub?.hear({
+				type: "ERROR",
+				code: "SPAWN_FAILED",
+				message: "The window is closing.",
+				hostId: spawn.hostId,
+				requestId: spawn.requestId,
+			});
+		}
+		if (spawns.length > 0) await settle();
+	} finally {
+		useCommandPalette().close();
+		useShortcutsOverlay().close();
+		app?.unmount();
+		app = null;
+		root?.remove();
+		root = null;
+		document.body.replaceChildren();
+		(document.activeElement as HTMLElement | null)?.blur?.();
+	}
 }
 
 /** Press a key where the keyboard is (or on `target`), as a keydown the page can stop. */

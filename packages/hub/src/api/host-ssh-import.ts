@@ -1,11 +1,10 @@
 import type { SshConfigImport } from "@lasterm/shared";
-import { toSnakeCase } from "@lasterm/shared";
+import { sshAuthFor, toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import { parseJumpSpec } from "../session/proxy-jump.js";
 import type { ParseResult } from "../ssh/ssh-config-parser.js";
 import { readSshConfig } from "../ssh/ssh-config-parser.js";
 import type { MetaDAL } from "../storage/meta.js";
-import { sshAuthFor } from "./hosts.js";
 import type { AnnounceHostsChange } from "./hosts-changed.js";
 
 type SshConfigImportValidation = { entries: SshConfigImport[] } | { error: string };

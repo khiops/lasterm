@@ -50,6 +50,33 @@ describe("TEST_CONNECT proxy validation", () => {
 			expect(send).not.toHaveBeenCalled();
 		},
 	);
+	// The alias of a picked ~/.ssh/config entry (#1037).
+	it.each([
+		{ sshConfigHost: "" },
+		{ sshConfigHost: "  " },
+		{ sshConfigHost: null },
+		{ sshConfigHost: 1 },
+		{ sshConfigHost: "x".repeat(257) },
+	])("answers invalid alias %j with request-scoped failure", (fields) => {
+		const { ctx, send, handle } = setup();
+		handleTestConnect({ ...message, ...fields } as TestConnectMessage, ctx);
+		expect(send).toHaveBeenCalledWith({
+			type: "TEST_CONNECT_FAIL",
+			hostId: message.hostId,
+			message: "Invalid sshConfigHost",
+		});
+		expect(handle).not.toHaveBeenCalled();
+	});
+	it.each([{ sshConfigHost: "prod" }, { sshConfigHost: "x".repeat(256) }])(
+		"forwards valid alias %j",
+		(fields) => {
+			const { ctx, send, handle } = setup();
+			const msg = { ...message, ...fields };
+			handleTestConnect(msg, ctx);
+			expect(handle).toHaveBeenCalledWith("client", msg);
+			expect(send).not.toHaveBeenCalled();
+		},
+	);
 	it("retains ERROR for existing input checks", () => {
 		const { ctx, send } = setup();
 		handleTestConnect({ ...message, hostId: "", sshProxySpec: " " }, ctx);

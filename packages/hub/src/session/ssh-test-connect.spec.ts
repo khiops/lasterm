@@ -224,58 +224,70 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 		server = undefined;
 	});
 
-	it.each(["address", "saved-alias", "edited-alias", "pinned"])(
-		"checks target revocation under the eligible names (%s)",
-		async (name) => {
-			const mock = await sshServer();
-			server = mock.server;
-			const home = makeTempDir("lasterm-revoked-home-");
-			try {
-				mkdirSync(join(home, ".ssh"));
-				const key = utils.parseKey(HOST_KEY);
-				if (key instanceof Error || Array.isArray(key)) throw new Error("invalid mock key");
-				const knownHosts = join(home, ".ssh", "known_hosts");
-				writeFileSync(
-					knownHosts,
-					`@revoked [${name === "address" || name === "pinned" ? "127.0.0.1" : "alias"}]:${mock.port} ${key.type} ${key.getPublicSSH().toString("base64")}\n`,
-				);
-				vi.stubEnv("HOME", home);
-				vi.stubEnv("USERPROFILE", home);
-				const { ctx, client, mgr, updateHostFingerprint } = setup({
-					type: "ssh",
-					sshHost: name === "edited-alias" ? "127.0.0.2" : "127.0.0.1",
-					sshPort: mock.port,
-					sshConfigHost: "alias",
-					fingerprint:
-						name === "pinned"
-							? `SHA256:${createHash("sha256").update(key.getPublicSSH()).digest("base64").replace(/=+$/, "")}`
-							: null,
-				});
-				const done = mgr.handleTestConnect("c1", testMessage("saved-host", mock.port));
-				if (name === "edited-alias") {
-					const prompt = await hostVerifyPrompt(client);
-					mgr.handleHostVerifyResponse(prompt.promptId, "reject", "c1");
-				}
-				await done;
-				if (name !== "edited-alias") {
-					expect(client.send).toHaveBeenCalledWith({
-						type: "TEST_CONNECT_FAIL",
-						hostId: "saved-host",
-						message: `This host's key is marked @revoked in ${knownHosts}:1. Refusing to connect.`,
-					});
-					expect(client.send).not.toHaveBeenCalledWith(
-						expect.objectContaining({ type: "HOST_VERIFY" }),
-					);
-				}
-				expect(mock.auth.attempts).toBe(0);
-				expect(updateHostFingerprint).not.toHaveBeenCalled();
-				expect(ctx.trustedOnceFingerprints.size).toBe(0);
-			} finally {
-				vi.unstubAllEnvs();
-				removeTempDir(home);
+	// message-alias: the alias a New Host test carries for a picked ~/.ssh/config
+	// entry, on a host the hub has not saved; trusted-once, after a first test
+	// left its key trusted for the route (#1037).
+	it.each([
+		"address",
+		"saved-alias",
+		"edited-alias",
+		"pinned",
+		"message-alias",
+		"message-alias-trusted-once",
+	])("checks target revocation under the eligible names (%s)", async (name) => {
+		const mock = await sshServer();
+		server = mock.server;
+		const home = makeTempDir("lasterm-revoked-home-");
+		try {
+			mkdirSync(join(home, ".ssh"));
+			const key = utils.parseKey(HOST_KEY);
+			if (key instanceof Error || Array.isArray(key)) throw new Error("invalid mock key");
+			const knownHosts = join(home, ".ssh", "known_hosts");
+			writeFileSync(
+				knownHosts,
+				`@revoked [${name === "address" || name === "pinned" ? "127.0.0.1" : "alias"}]:${mock.port} ${key.type} ${key.getPublicSSH().toString("base64")}\n`,
+			);
+			vi.stubEnv("HOME", home);
+			vi.stubEnv("USERPROFILE", home);
+			const fingerprint = `SHA256:${createHash("sha256").update(key.getPublicSSH()).digest("base64").replace(/=+$/, "")}`;
+			const { ctx, client, mgr, updateHostFingerprint } = setup({
+				type: "ssh",
+				sshHost: name === "edited-alias" ? "127.0.0.2" : "127.0.0.1",
+				sshPort: mock.port,
+				sshConfigHost: "alias",
+				fingerprint: name === "pinned" ? fingerprint : null,
+			});
+			const fromMessage = name.startsWith("message-alias");
+			const message: TestConnectMessage = fromMessage
+				? { ...testMessage("new-host", mock.port), sshConfigHost: "alias" }
+				: testMessage("saved-host", mock.port);
+			if (name === "message-alias-trusted-once") {
+				ctx.trustedOnceFingerprints.set(testedRoute(message, ctx), fingerprint);
 			}
-		},
-	);
+			const done = mgr.handleTestConnect("c1", message);
+			if (name === "edited-alias") {
+				const prompt = await hostVerifyPrompt(client);
+				mgr.handleHostVerifyResponse(prompt.promptId, "reject", "c1");
+			}
+			await done;
+			if (name !== "edited-alias") {
+				expect(client.send).toHaveBeenCalledWith({
+					type: "TEST_CONNECT_FAIL",
+					hostId: message.hostId,
+					message: `This host's key is marked @revoked in ${knownHosts}:1. Refusing to connect.`,
+				});
+				expect(client.send).not.toHaveBeenCalledWith(
+					expect.objectContaining({ type: "HOST_VERIFY" }),
+				);
+			}
+			expect(mock.auth.attempts).toBe(0);
+			expect(updateHostFingerprint).not.toHaveBeenCalled();
+			expect(ctx.trustedOnceFingerprints.size).toBe(name === "message-alias-trusted-once" ? 1 : 0);
+		} finally {
+			vi.unstubAllEnvs();
+			removeTempDir(home);
+		}
+	});
 
 	it("asks about an unknown key before authenticating, and stops when it is rejected", async () => {
 		const mock = await sshServer();

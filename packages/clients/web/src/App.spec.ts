@@ -1734,3 +1734,59 @@ describe("the host-group dialogs when the hub refuses", () => {
 		expect(refusalShown()).toBeNull();
 	});
 });
+
+// A pane opened for a new terminal keeps its pending id in the saved layout, while the spawn it
+// owes was kept in memory only: after a reload it attached to that id, and said its terminal was
+// gone (#992).
+describe("a new terminal's pane after a reload", () => {
+	/** Open a new terminal in the empty pane, then reload the window over the layout it saved. */
+	async function reloadWhileSpawning(answer?: (hub: FakeHub) => void): Promise<{
+		hub: FakeHub;
+		pendingId: string;
+	}> {
+		const first = await mountWindow({ layout: { tabs: [{ id: "TAB1", root: vacant("V1") }] } });
+		first.hub.answersSpawns = false;
+		const row = [...document.querySelectorAll<HTMLElement>('.vacant-pane [role="option"]')].find(
+			(option) => option.querySelector(".host-pick-row__label")?.textContent?.trim() === "alpha",
+		);
+		if (row === undefined) throw new Error('no host "alpha" in the picker');
+		row.click();
+		await settle();
+		await vi.waitFor(() => expect(first.hub.frames("SPAWN")).toHaveLength(1));
+		answer?.(first.hub);
+		await settle();
+		const saved = localStorage.getItem("lasterm:layout");
+		expect(saved).not.toBeNull();
+		const pendingId = (JSON.parse(saved as string).layouts.TAB1 as { channelId: string }).channelId;
+		unmountWindow();
+		const { hub } = await mountWindow({ storage: { "lasterm:layout": saved as string } });
+		return { hub, pendingId };
+	}
+
+	function paneSays(): string {
+		return document.querySelector(".terminal-pane")?.textContent ?? "";
+	}
+
+	it("does not say the terminal is gone after a reload while its spawn ran", async () => {
+		const { hub, pendingId } = await reloadWhileSpawning();
+
+		expect(hub.frames("ATTACH").filter((f) => f.channelId === pendingId)).toEqual([]);
+		expect(paneSays()).not.toContain("This terminal no longer exists.");
+	});
+
+	it("does not say the terminal is gone after a reload once its spawn failed", async () => {
+		const { hub, pendingId } = await reloadWhileSpawning((first) => {
+			const spawn = first.frames("SPAWN")[0];
+			first.hear({
+				type: "ERROR",
+				code: "SPAWN_FAILED",
+				message: "The shell could not start.",
+				hostId: HOST_A,
+				requestId: spawn?.requestId,
+			});
+		});
+
+		expect(hub.frames("ATTACH").filter((f) => f.channelId === pendingId)).toEqual([]);
+		expect(paneSays()).not.toContain("This terminal no longer exists.");
+	});
+});

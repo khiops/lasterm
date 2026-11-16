@@ -4,7 +4,7 @@
  * decides on its own is tested beside it (utils/*.spec.ts, components/*.spec.ts); here, that the
  * window wires them together (#936).
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 vi.mock("./services/ws-client.js", () =>
 	import("./App.doubles.fixture.js").then((m) => m.wsClientModule),
@@ -2229,16 +2229,21 @@ describe("a new terminal's pane after a reload", () => {
 	function refuseWrites(refused: number[], removeToo = false): void {
 		let writes = 0;
 		const setItem = localStorage.setItem.bind(localStorage);
-		vi.spyOn(localStorage, "setItem").mockImplementation((key: string, value: string) => {
-			if (key === PENDING_KEY && refused.includes(++writes)) {
-				throw new DOMException("full", "QuotaExceededError");
-			}
-			setItem(key, value);
-		});
+		const writing = vi
+			.spyOn(localStorage, "setItem")
+			.mockImplementation((key: string, value: string) => {
+				if (key === PENDING_KEY && refused.includes(++writes)) {
+					throw new DOMException("full", "QuotaExceededError");
+				}
+				setItem(key, value);
+			});
+		// Restored with the test, failed or not: the next test's window writes the key too.
+		onTestFinished(() => writing.mockRestore());
 		if (removeToo) {
-			vi.spyOn(localStorage, "removeItem").mockImplementation(() => {
+			const removing = vi.spyOn(localStorage, "removeItem").mockImplementation(() => {
 				throw new DOMException("refused", "SecurityError");
 			});
+			onTestFinished(() => removing.mockRestore());
 		}
 	}
 

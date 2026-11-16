@@ -858,7 +858,10 @@ describe("useChannelsStore — spawnChannel waiting on a person", () => {
 
 			await vi.advanceTimersByTimeAsync(15_001);
 
-			expect(rejected).toHaveBeenCalled();
+			// The pane shows this message: it names the deadline that fired (#1033).
+			expect(rejected).toHaveBeenCalledWith(
+				expect.objectContaining({ message: "SPAWN timeout — no SPAWN_OK after 15s" }),
+			);
 		} finally {
 			vi.useRealTimers();
 		}

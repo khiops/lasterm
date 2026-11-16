@@ -1110,7 +1110,7 @@ export const useChannelsStore = defineStore("channels", () => {
 
 			let timer = setTimeout(() => {
 				stopWaiting();
-				reject(new Error("SPAWN timeout — no SPAWN_OK after 10s"));
+				reject(new Error(`SPAWN timeout — no SPAWN_OK after ${SPAWN_DEADLINE_MS / 1000}s`));
 			}, SPAWN_DEADLINE_MS);
 
 			// The password or passphrase its host last asked for, if any: a refusal

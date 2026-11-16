@@ -1,5 +1,5 @@
 import type { EndedOutput, TerminalProfile, UiAttachOkMessage } from "@lasterm/shared";
-import { MAX_INPUT_SIZE, sanitizeTitle } from "@lasterm/shared";
+import { MAX_INPUT_SIZE, PASTE_MAX_BYTES, sanitizeTitle } from "@lasterm/shared";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { Terminal } from "@xterm/xterm";
@@ -9,6 +9,7 @@ import { useChannelsStore } from "../stores/channels.js";
 import { useThemeStore } from "../stores/theme.js";
 import { useToastStore } from "../stores/toast.js";
 import { terminalScrollbarWidth } from "../utils/terminal-scrollbar.js";
+import { PasteStream, pasteInProgress } from "./paste-stream.js";
 import { awaitTerminalFont } from "./terminal-font.js";
 import { useTerminalSearch } from "./useTerminalSearch.js";
 
@@ -142,6 +143,11 @@ export function useTerminal(
 	 * pastes itself; otherwise xterm pastes as it always did.
 	 */
 	let adaptsInput = false;
+	/**
+	 * Whether that agent takes a paste as PASTE chunks, as the same answer said
+	 * (#1014). The pane then streams its pastes, of any size up to the bound.
+	 */
+	let streamsPaste = false;
 	/** The profile applied last, which a new xterm is made with. */
 	let currentProfile = profile;
 	/** Stops following the host's theme, once the pane is closed. */
@@ -190,6 +196,66 @@ export function useTerminal(
 	 * Defaults to true so single-client setups work without auth.
 	 */
 	const canWrite = ref(true);
+
+	/** Send typed input as INPUT, while the pane may: socket up, write lock held. */
+	function sendInput(data: string): void {
+		if (channelId && wsClient.isConnected && canWrite.value) {
+			wsClient.send({
+				type: "INPUT",
+				channelId,
+				data: new TextEncoder().encode(data),
+			});
+		}
+	}
+
+	/** This pane's paste on its way as PASTE chunks (#1014). */
+	const pasteStream = new PasteStream({
+		send: (msg) => wsClient.send(msg),
+		connected: () => wsClient.isConnected,
+		canSend: () => Boolean(channelId && wsClient.isConnected && canWrite.value),
+		toast: {
+			show: (level, text, durationMs, action) =>
+				useToastStore().show(level, text, durationMs, action),
+			update: (id, text) => useToastStore().update(id, text),
+			dismiss: (id) => useToastStore().dismiss(id),
+		},
+		sendInput,
+	});
+	let pasteUnsubscribe: (() => void) | null = null;
+	// The write lock lost: a paste being sent stops, what was held with it goes.
+	watch(canWrite, (writable) => {
+		if (!writable) pasteStream.interrupt();
+	});
+
+	/**
+	 * A paste to an agent that streams pastes (#1014): the text without
+	 * markers, line ends as xterm sends them, UTF-8, at most PASTE_MAX_BYTES,
+	 * one paste at a time.
+	 */
+	function streamPaste(term: Terminal, clipboard: DataTransfer | null): void {
+		if (clipboard === null) return;
+		const toast = useToastStore();
+		if (pasteInProgress(channelId) !== null) {
+			toast.show("warning", "A paste is still being sent to this terminal.");
+			return;
+		}
+		const text = clipboard.getData("text/plain");
+		const unmarked = text.includes("\u001b") ? withoutPasteMarkers(text) : text;
+		const normalised = unmarked.replace(/\r?\n/g, "\r");
+		const bytes = new TextEncoder().encode(normalised);
+		if (bytes.byteLength > PASTE_MAX_BYTES) {
+			toast.show("warning", "This paste is too large to send (16 MiB at most).");
+			return;
+		}
+		if (bytes.byteLength === 0 || channelId === null || !wsClient.isConnected || !canWrite.value) {
+			return;
+		}
+		// As xterm's own paste: the selection clears and the view goes down to
+		// where the text is typed.
+		term.clearSelection();
+		term.scrollToBottom();
+		pasteStream.start(channelId, bytes);
+	}
 
 	/**
 	 * The size the PTY has, as far as this pane knows: the last one it sent, or
@@ -477,10 +543,18 @@ export function useTerminal(
 
 		// The agent decides how a paste reaches its program (#1012): while it
 		// says so, the pane brackets every paste itself, one frame, its own
-		// markers taken out, and xterm pastes nothing of its own.
+		// markers taken out, and xterm pastes nothing of its own. An agent that
+		// streams pastes (#1014) gets them as PASTE chunks instead, unbracketed:
+		// it writes the markers itself.
 		term.element?.addEventListener(
 			"paste",
 			(event) => {
+				if (streamsPaste) {
+					event.stopPropagation();
+					event.preventDefault();
+					streamPaste(term, event.clipboardData);
+					return;
+				}
 				if (!adaptsInput) return;
 				event.stopPropagation();
 				event.preventDefault();
@@ -529,13 +603,10 @@ export function useTerminal(
 				}
 				replayFocusReports = 0;
 			}
-			if (channelId && wsClient.isConnected && canWrite.value) {
-				wsClient.send({
-					type: "INPUT",
-					channelId,
-					data: new TextEncoder().encode(data),
-				});
-			}
+			// Behind a paste still being sent to this terminal, from this pane or
+			// another showing it, or its Ctrl+C (#1014).
+			if (pasteInProgress(channelId)?.takeInput(data)) return;
+			sendInput(data);
 		});
 
 		// Terminal resize → send RESIZE to hub (debounced to coalesce rapid
@@ -599,7 +670,10 @@ export function useTerminal(
 	 */
 	function leaveHeld(): void {
 		leftHeld = true;
+		// A paste still going to the terminal left stops there (#1014).
+		pasteStream.interrupt();
 		adaptsInput = false;
+		streamsPaste = false;
 		titleStack.length = 0;
 		currentDynamicTitle.value = null;
 	}
@@ -620,6 +694,21 @@ export function useTerminal(
 				takePtySize(msg.cols, msg.rows);
 			}
 		});
+
+		// A paste's answers, for the paste this pane is sending (#1014).
+		pasteUnsubscribe?.();
+		const offAck = wsClient.on("PASTE_ACK", (msg) => {
+			if (msg.type === "PASTE_ACK") pasteStream.onAck(msg);
+		});
+		const offClosed = wsClient.on("PASTE_CLOSED", (msg) => {
+			if (msg.type === "PASTE_CLOSED") pasteStream.onClosed(msg);
+		});
+		const offDown = wsClient.onDisconnect(() => pasteStream.interrupt());
+		pasteUnsubscribe = () => {
+			offAck();
+			offClosed();
+			offDown();
+		};
 
 		// What was typed went nowhere: the terminal takes no input, and its agent
 		// drops what it cannot queue. Said here, once per gap as the agent says
@@ -689,14 +778,18 @@ export function useTerminal(
 	 * Subscribe to OUTPUT messages for the given channel and write to terminal.
 	 * Call after init() and after a successful SPAWN.
 	 */
-	function attachChannel(id: string, opts?: { adaptsInput?: boolean }): void {
+	function attachChannel(
+		id: string,
+		opts?: { adaptsInput?: boolean; streamsPaste?: boolean },
+	): void {
 		// A spawn that completes after the pane closed: nothing to bind, and
 		// nothing may listen for a pane that is gone (#971).
 		if (disposed) return;
 		channelId = id;
 		shownId = id;
-		// As the SPAWN_OK that made it said (#1012).
+		// As the SPAWN_OK that made it said (#1012, #1014).
 		adaptsInput = opts?.adaptsInput === true;
+		streamsPaste = opts?.streamsPaste === true;
 		leaveEndedSize();
 		listenTo(id);
 
@@ -791,8 +884,9 @@ export function useTerminal(
 		shownId = id;
 		leaveEndedSize();
 		// What the hub says of the agent that takes this terminal's input now
-		// (#1012); absent from an older hub.
+		// (#1012, #1014); absent from an older hub.
 		adaptsInput = msg.adaptsInput === true;
+		streamsPaste = msg.streamsPaste === true;
 
 		// The PTY's size. A pane that does not decide it draws the screen below
 		// at that size, the one it was drawn for (#831). One that decides it
@@ -1214,6 +1308,9 @@ export function useTerminal(
 		stopListening();
 		inputDroppedUnsubscribe?.();
 		inputDroppedUnsubscribe = null;
+		pasteStream.interrupt();
+		pasteUnsubscribe?.();
+		pasteUnsubscribe = null;
 		sizeUnsubscribe?.();
 		sizeUnsubscribe = null;
 		ptySize = null;

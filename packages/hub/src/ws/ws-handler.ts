@@ -6,6 +6,8 @@ import type {
 	FilesPanelMessage,
 	HostVerifyResponseMessage,
 	InputMessage,
+	PasteCancelMessage,
+	PasteMessage,
 	ProtocolMessage,
 	ResizeMessage,
 	TestConnectMessage,
@@ -37,6 +39,8 @@ import {
 	handleFilesPanel,
 	handleHostVerifyResponse,
 	handleInput,
+	handlePaste,
+	handlePasteCancel,
 	handlePing,
 	handleResize,
 	handleSpawn,
@@ -122,6 +126,20 @@ export interface WsRouteOptions {
 /** What `writerCheck` found: the holder, or why the request may not write. */
 export type WriterCheck = "holder" | "unknown-client" | "not-holder";
 
+/**
+ * What a terminal's write lock changing hands means beyond the lock: queued
+ * uploads may go or wait (#835), and a paste its owner no longer holds stops
+ * (#1014).
+ */
+export function onWriteLockChange(
+	channelId: string,
+	transfers: { lockChanged(channelId: string): void } | undefined,
+	sessionManager: { pasteLockChanged(channelId: string): void },
+): void {
+	transfers?.lockChanged(channelId);
+	sessionManager.pasteLockChanged(channelId);
+}
+
 export async function registerWsRoutes(
 	server: FastifyInstance,
 	sessionManager: SessionManager,
@@ -147,7 +165,7 @@ export async function registerWsRoutes(
 			}
 		},
 		onForce: (force) => server.security.writeLockForced(force),
-		onChange: (channelId) => transfers?.lockChanged(channelId),
+		onChange: (channelId) => onWriteLockChange(channelId, transfers, sessionManager),
 	});
 	// A hub stopping keeps no lock for a holder that left: the grace ends with it.
 	server.addHook("onClose", async () => {
@@ -417,6 +435,12 @@ export async function registerWsRoutes(
 					break;
 				case "INPUT":
 					handleInput(msg as InputMessage, ctx);
+					break;
+				case "PASTE":
+					handlePaste(msg as PasteMessage, ctx);
+					break;
+				case "PASTE_CANCEL":
+					handlePasteCancel(msg as PasteCancelMessage, ctx);
 					break;
 				case "RESIZE":
 					handleResize(msg as ResizeMessage, ctx);

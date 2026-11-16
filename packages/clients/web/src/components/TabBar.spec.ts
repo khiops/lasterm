@@ -333,16 +333,16 @@ describe("TabBar rename", () => {
 
 	it("ends the rename, renaming nothing, when the tab being renamed closes", async () => {
 		const { closeTab, renameTab } = mountBar(["t0", "t1", "t2"], 0);
-		await rename("t1", "Build");
+		const input = await rename("t1", "Build");
 		tab("t1").dispatchEvent(
 			new MouseEvent("mousedown", { button: 1, bubbles: true, cancelable: true }),
 		);
 		expect(closeTab).toHaveBeenCalledWith(1);
-		const input = renameField("t1");
+		expect(renameField("t1")).toBe(input);
 		await closeTabs("t1");
 		expect(root.querySelector("input.tab-rename-input")).toBeNull();
 		// Chromium may blur a focused field as it removes it, happy-dom does not: a blur commits.
-		input?.dispatchEvent(new Event("blur"));
+		input.dispatchEvent(new Event("blur"));
 		expect(renameTab).not.toHaveBeenCalled();
 		// The next rename starts from the tab's own name, not the text typed for the closed tab.
 		const next = await rename("t2");

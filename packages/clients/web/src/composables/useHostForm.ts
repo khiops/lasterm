@@ -283,6 +283,16 @@ export function useHostForm(editHost?: Host) {
 	const sshConfigEntries = ref<SshConfigEntry[]>([]);
 	const sshConfigHasInclude = ref(false);
 	const selectedSshConfigHost = ref<string>("");
+	/**
+	 * The alias of the ~/.ssh/config entry the form comes from: the test sends
+	 * it and the new host stores it, so the hub applies the entry's settings to
+	 * both (#1037). None once the source is Manual or the pick is cleared.
+	 */
+	const pickedSshConfigHost = computed(() =>
+		source.value === "ssh-config" && selectedSshConfigHost.value !== ""
+			? selectedSshConfigHost.value
+			: undefined,
+	);
 	const loadingSshConfig = ref(false);
 	/** Why the SSH config could not be read, as the hub said it, or that it did not answer (#734). */
 	const sshConfigError = ref<string | null>(null);
@@ -429,6 +439,7 @@ export function useHostForm(editHost?: Host) {
 			const sshUser = form.value.sshUser;
 			const sshProxy = form.value.sshProxy;
 			const proxy = formProxyFields(sshProxy);
+			const sshConfigHost = pickedSshConfigHost.value;
 
 			// Null when nothing was tested: the person cancelled the password or
 			// passphrase asked for (#815).
@@ -468,6 +479,7 @@ export function useHostForm(editHost?: Host) {
 					...(sshUser && { sshUser }),
 					...(proxy.ssh_proxy_host_id && { sshProxyHostId: proxy.ssh_proxy_host_id }),
 					...(proxy.ssh_proxy_spec && { sshProxySpec: proxy.ssh_proxy_spec }),
+					...(sshConfigHost && { sshConfigHost }),
 				});
 			});
 
@@ -517,6 +529,7 @@ export function useHostForm(editHost?: Host) {
 				// anything else is an address written the way ssh_config writes
 				// it. Empty clears whichever was set.
 				...formProxyFields(f.sshProxy),
+				...(pickedSshConfigHost.value && { ssh_config_host: pickedSshConfigHost.value }),
 				// An unavailable setting is recorded as null for a new Windows host.
 				// On an existing one, leave the stored answer alone instead.
 				...(!connectedThroughRemoteDaemon.value && (!isEdit || !sshRemoteDaemonUnavailable.value)

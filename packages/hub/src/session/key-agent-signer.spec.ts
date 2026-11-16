@@ -591,8 +591,14 @@ describe("key auth signed by the SSH agent that holds the key (#876)", () => {
 
 describe("a host's connection test, with the key signed by the SSH agent (#876)", () => {
 	/** A connection manager whose only host is the one tested, its key already trusted. */
-	function harness(port: number) {
-		const saved = { id: "saved-host", type: "ssh" as const, sshHost: "127.0.0.1", sshPort: port };
+	function harness(port: number, savedAlias?: string) {
+		const saved = {
+			id: "saved-host",
+			type: "ssh" as const,
+			sshHost: "127.0.0.1",
+			sshPort: port,
+			...(savedAlias ? { sshConfigHost: savedAlias } : {}),
+		};
 		const ctx = {
 			passphraseCache: new Map(),
 			promptContexts: new Map<string, PromptContext>(),
@@ -672,6 +678,86 @@ describe("a host's connection test, with the key signed by the SSH agent (#876)"
 			expect(sent("AUTH_PROMPT")).toHaveLength(1);
 			expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
 			expect(server.connections).toBe(2);
+		},
+		TEST_TIMEOUT,
+	);
+
+	/** A HOME whose ~/.ssh/config keeps the agent out of the host `box`. */
+	function identityAgentNoneForBox(): void {
+		const home = makeTempDir("lasterm-key-agent-home-");
+		homes.push(home);
+		mkdirSync(join(home, ".ssh"));
+		writeFileSync(
+			join(home, ".ssh", "config"),
+			"Host box\n  HostName 127.0.0.1\n  IdentityAgent none\n",
+		);
+		vi.stubEnv("HOME", home);
+		vi.stubEnv("USERPROFILE", home);
+	}
+
+	/** Answer the first AUTH_PROMPT with the key's passphrase, once it is sent. */
+	async function answerPassphrase(
+		mgr: SshConnectionManager,
+		sent: (type: string) => unknown[],
+	): Promise<void> {
+		const prompt = await vi.waitFor(() => {
+			const [asked] = sent("AUTH_PROMPT");
+			if (!asked) throw new Error("not asked yet");
+			return asked as { hostId: string; promptId: string; deliveryEpoch: number };
+		});
+		mgr.handleAuthPromptResponse("c1", {
+			hostId: prompt.hostId,
+			secret: PASSPHRASE,
+			promptId: prompt.promptId,
+			deliveryEpoch: prompt.deliveryEpoch,
+		});
+	}
+
+	// The New Host dialog's test of an entry picked from ~/.ssh/config: the host
+	// is not saved, and the alias comes with the request (#1037).
+	it(
+		"keeps the agent out of a test whose alias says IdentityAgent none (#1037)",
+		async () => {
+			identityAgentNoneForBox();
+			const server = await serve(OPENSSH_PRIVATE);
+			const agent = await useAgent([OPENSSH_PRIVATE]);
+			const { client, mgr, message, sent } = harness(server.port);
+			const request: TestConnectMessage = { ...message, hostId: "new-host", sshConfigHost: "box" };
+
+			const done = mgr.handleTestConnect("c1", request);
+			// The key is decrypted before the dial, so before the host key question.
+			await answerPassphrase(mgr, sent);
+			const verify = await vi.waitFor(() => {
+				const [asked] = sent("HOST_VERIFY");
+				if (!asked) throw new Error("not asked yet");
+				return asked as { promptId: string };
+			});
+			mgr.handleHostVerifyResponse(verify.promptId, "trust_once", "c1");
+			await done;
+
+			expect(sent("AUTH_PROMPT")).toHaveLength(1);
+			expect(agent.requests).toEqual([]);
+			expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "new-host" });
+		},
+		TEST_TIMEOUT,
+	);
+
+	it(
+		"keeps the agent out of a test of a saved host whose alias says IdentityAgent none",
+		async () => {
+			identityAgentNoneForBox();
+			const server = await serve(OPENSSH_PRIVATE);
+			const agent = await useAgent([OPENSSH_PRIVATE]);
+			const { client, mgr, message, sent } = harness(server.port, "box");
+
+			const done = mgr.handleTestConnect("c1", message);
+			await answerPassphrase(mgr, sent);
+			await done;
+
+			expect(sent("HOST_VERIFY")).toEqual([]);
+			expect(sent("AUTH_PROMPT")).toHaveLength(1);
+			expect(agent.requests).toEqual([]);
+			expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
 		},
 		TEST_TIMEOUT,
 	);

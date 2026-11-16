@@ -14,6 +14,7 @@
  * element) is in TerminalPane.browser.spec.ts.
  */
 import { BUNDLED_THEMES, type Channel } from "@lasterm/shared";
+import type { Terminal } from "@xterm/xterm";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { defineComponent, h, type Ref, ref } from "vue";
@@ -80,6 +81,11 @@ const NEW = "pending-1";
 const REAL = "01HZZZZZZZZZZZZZZZZZZZZZR5";
 /** Another window of the same hub. */
 const OTHER_CLIENT = "01HZZZZZZZZZZZZZZZZZZZZCL2";
+/**
+ * RIS: what the pane writes before a live snapshot over a screen it kept, in
+ * order after what xterm has not parsed yet (#1010).
+ */
+const FULL_RESET = "\u001bc";
 
 // ─── The window around the pane ──────────────────────────────────────────────
 
@@ -1476,6 +1482,168 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		expect(attaches()).toHaveLength(2);
 	});
 
+	// A screen answered from memory is the spool's copy: the terminal's own,
+	// once the host is back, replaces it (#1010).
+	it("draws the live answer over a screen answered from memory when the hub says the terminal is live (#1010)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP", { tail: [new TextEncoder().encode("TAIL")] });
+		await settle();
+
+		// A reset written in the stream, after what xterm has not parsed yet, then
+		// the snapshot, which sets the program's modes again (#1010, #1012).
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP", "TAIL"]);
+		expect(banner()).toBeNull();
+	});
+
+	it("draws the live answer to a Reconnect over a screen answered from memory (#1010)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
+	// Only a live answer ends the missed output: a Reconnect answered from
+	// memory again leaves the copy to be replaced (#930, #1010).
+	it("draws the live answer after a Reconnect answered from memory again (#1010)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "AGAIN", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
+	// A Reconnect that gets no answer at all changes nothing either: the next
+	// one, answered live, still replaces the copy (#1010).
+	it("draws the live answer to a Reconnect after one that got no answer (#1010)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		xterm.events.length = 0;
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
+	// The socket back over a live screen, answered from memory: the live
+	// answer after it replaces that copy as well (#1010).
+	it("draws the live answer over a copy from memory its socket's return brought (#1010)", async () => {
+		await openLive();
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
+	// What it drew live through the end it watched stays (#927).
+	it("keeps the screen it watched end when the terminal is brought back live", async () => {
+		await openLive();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "BACK");
+		await settle();
+
+		expect(card()).toBeNull();
+		expect(xterm.events).toEqual([]);
+	});
+
+	// A live answer ends the missed output: what the pane drew live after it,
+	// through an end it watched, stays as well (#927, #1010).
+	it("keeps the screen it watched end after a recovery from memory, when the terminal is brought back live", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "BACK");
+		await settle();
+
+		expect(card()).toBeNull();
+		expect(xterm.events).toEqual([]);
+	});
+
+	// Any live answer ends it, the socket's return's as well as a Reconnect's.
+	it("keeps the screen it watched end after a recovery by its socket's return, when the terminal is brought back live", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		attachOk(T, "BACK");
+		await settle();
+
+		expect(card()).toBeNull();
+		expect(xterm.events).toEqual([]);
+	});
+
 	it("attaches again when a terminal it saw end is brought back from elsewhere", async () => {
 		await openLive();
 		endIt();
@@ -1598,6 +1766,176 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		await settle();
 
 		expect(xterm.events).toEqual(["<reset>", "LAST-SCREEN", "fail: no such file", MOUSE_OFF]);
+	});
+});
+
+// ─── The live screen over one from memory, as xterm draws it (#1010) ─────────
+
+/** What vt100's `contents_formatted` starts with: the cursor shown, plain attributes, a clear screen. */
+const CLEAR = "\u001b[?25h\u001b[m\u001b[H\u001b[J";
+
+/**
+ * xterm itself (6.0.0), unopened, at the PTY's size: it parses every write and
+ * reset the pane's stand-in takes, in the order the pane makes them.
+ */
+async function realXterm(): Promise<Terminal> {
+	const { Terminal: Xterm } = await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
+	const real = new Xterm({ cols: 100, rows: 30, allowProposedApi: true });
+	onTestFinished(() => real.dispose());
+	xterm.onWrite = (_term, text) => real.write(text);
+	xterm.onReset = () => real.reset();
+	return real;
+}
+
+/** Let `real` parse all it took: xterm parses on a timer, which these tests fake. */
+async function parsedBy(real: Terminal): Promise<void> {
+	let parsed = false;
+	real.write("", () => {
+		parsed = true;
+	});
+	for (let tick = 0; !parsed && tick < 100; tick++) await vi.advanceTimersByTimeAsync(1);
+	expect(parsed).toBe(true);
+}
+
+/**
+ * A pane over T, answered from memory with a copy whose tail ends in `left`,
+ * then answered live, once the hub says T is live, with `snapshot` and `tail`:
+ * xterm, having parsed all the pane wrote.
+ */
+async function liveOverRemembered(
+	left: string,
+	snapshot: string,
+	tail = "",
+	during = "",
+	inputModes = "",
+): Promise<Terminal> {
+	mountPane(ref(T), "live");
+	const real = await realXterm();
+	await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+	attachOk(T, `${CLEAR}REMEMBERED`, { cached: true, tail: [new TextEncoder().encode(left)] });
+	await settle();
+
+	useChannelsStore().updateChannelStatus(T, "live");
+	await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+	// Printed while the attach waits: the live snapshot holds it (#931).
+	if (during !== "") print(T, during);
+	attachOk(T, snapshot, {
+		tail: tail === "" ? [] : [new TextEncoder().encode(tail)],
+		...(inputModes !== "" && {
+			snapshot: { serialized: snapshot, cols: 100, rows: 30, cursorX: 0, cursorY: 0, inputModes },
+		}),
+	});
+	await settle();
+	await parsedBy(real);
+	return real;
+}
+
+/** The screen's first `count` rows, as xterm holds them, trailing blanks dropped. */
+function screenRows(real: Terminal, count: number): string[] {
+	const buffer = real.buffer.active;
+	return Array.from(
+		{ length: count },
+		(_, row) => buffer.getLine(buffer.baseY + row)?.translateToString(true) ?? "",
+	);
+}
+
+// The copy from memory ends in whatever its program left set. The live answer
+// replaces it as an attach that resets does: the snapshot assumes how a reset
+// draws text, and carries the input modes the program has now (#1012).
+describe("TerminalPane drawing the live screen over one from memory (#1010)", () => {
+	it("draws what was printed while it waited before the snapshot, which covers it", async () => {
+		const real = await liveOverRemembered("", `${CLEAR}live`, "", "DURING");
+
+		expect(xterm.events.slice(-3)).toEqual(["DURING", FULL_RESET, `${CLEAR}live`]);
+		expect(screenRows(real, 2)).toEqual(["live", ""]);
+	});
+
+	it("draws it from the top, whatever scrolling region and origin mode the copy left", async () => {
+		const real = await liveOverRemembered(
+			"\u001b[2;4r\u001b[?6h",
+			`${CLEAR}one\r\ntwo\r\nthree\r\nfour\r\nfive`,
+			// The program sets a region, then goes to the screen's top left corner.
+			"\u001b[3;5r\u001b[HX",
+		);
+
+		expect(screenRows(real, 6)).toEqual(["Xne", "two", "three", "four", "five", ""]);
+	});
+
+	it("draws it in ASCII, whatever character set the copy left in use", async () => {
+		const real = await liveOverRemembered(
+			// DEC line drawing in G0 and G1, and G1 in use.
+			"\u001b(0\u001b)0\u000e",
+			`${CLEAR}live`,
+			// The program readies line drawing in G1, as a terminal's `enacs` does,
+			// and goes on writing in G0.
+			"\u001b)0 now",
+		);
+
+		expect(screenRows(real, 1)).toEqual(["live now"]);
+	});
+
+	it("wraps its long rows, whatever the copy left of autowrap", async () => {
+		const real = await liveOverRemembered("\u001b[?7l", `${CLEAR}${"a".repeat(100)}bc`);
+
+		expect(screenRows(real, 2)).toEqual(["a".repeat(100), "bc"]);
+	});
+
+	it("writes over its text, whatever the copy left of insert mode", async () => {
+		const real = await liveOverRemembered("\u001b[4h", `${CLEAR}live\u001b[H`, "L");
+
+		expect(screenRows(real, 1)).toEqual(["Live"]);
+	});
+
+	it("draws it in the main buffer, as an attach that resets does", async () => {
+		const real = await liveOverRemembered(`\u001b[?1049h${CLEAR}ALT`, `${CLEAR}live`);
+
+		expect(real.buffer.active.type).toBe("normal");
+		expect(screenRows(real, 1)).toEqual(["live"]);
+	});
+
+	it("draws it at once, whatever frame the copy left open", async () => {
+		const real = await liveOverRemembered("\u001b[?2026h", `${CLEAR}live`);
+
+		expect(real.modes.synchronizedOutputMode).toBe(false);
+	});
+
+	it("links none of it, whatever hyperlink the copy left open", async () => {
+		const real = await liveOverRemembered(
+			"\u001b]8;;https://example.invalid/\u001b\\",
+			`${CLEAR}live`,
+		);
+
+		expect(screenRows(real, 1)).toEqual(["live"]);
+		// xterm keeps a cell's link in its own cell data, which its API leaves out.
+		const cell = real.buffer.active.getLine(real.buffer.active.baseY)?.getCell(0) as unknown as {
+			extended: { urlId: number };
+		};
+		expect(cell.extended.urlId).toBe(0);
+	});
+
+	it("takes the input modes the program has now from the live snapshot, not those of the copy", async () => {
+		const real = await liveOverRemembered(
+			"\u001b[?1h\u001b=\u001b[?1000h",
+			`${CLEAR}live`,
+			"",
+			"",
+			"\u001b[?2004h\u001b[?1004h",
+		);
+
+		expect(real.modes).toMatchObject({
+			applicationCursorKeysMode: false,
+			applicationKeypadMode: false,
+			bracketedPasteMode: true,
+			mouseTrackingMode: "none",
+			sendFocusMode: true,
+		});
+	});
+
+	it("drops the copy's scrollback, as an attach that resets does", async () => {
+		const real = await liveOverRemembered(`${"\r\n".repeat(30)}older`, `${CLEAR}live`);
+
+		expect(real.buffer.active.baseY).toBe(0);
+		expect(screenRows(real, 1)).toEqual(["live"]);
 	});
 });
 
@@ -3677,6 +4015,64 @@ describe("TerminalPane over a host its user disconnected (#648)", () => {
 		connected({ ok: true, status: 200, body: {} });
 
 		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+	});
+
+	// The terminal ran on while its host was disconnected: what it printed
+	// then is in the live snapshot only (#1010).
+	it("draws the live answer to its Reconnect over what it last showed (#1010)", async () => {
+		await openLive();
+		useHostsStore().setDisconnectedByUser([HOST]);
+		await settle();
+		xterm.events.length = 0;
+		// Connecting the host clears its disconnection before the attach goes.
+		vi.spyOn(useHostsStore(), "connectHost").mockImplementation(async () => {
+			useHostsStore().setDisconnectedByUser([]);
+			return { ok: true, status: 200, body: {} };
+		});
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
+	});
+
+	it("draws the live answer to its Reconnect when it opened over a host already disconnected (#1010)", async () => {
+		mountPane(ref(T), "live", { setUp: () => useHostsStore().setDisconnectedByUser([HOST]) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+		vi.spyOn(useHostsStore(), "connectHost").mockImplementation(async () => {
+			useHostsStore().setDisconnectedByUser([]);
+			return { ok: true, status: 200, body: {} };
+		});
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+	});
+
+	it("draws the live answer over what it last showed when its host is connected from elsewhere (#1010)", async () => {
+		await openLive();
+		useHostsStore().setDisconnectedByUser([HOST]);
+		useChannelsStore().updateChannelStatus(T, "orphan");
+		await settle();
+		xterm.events.length = 0;
+
+		useHostsStore().setDisconnectedByUser([]);
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
+		expect(banner()).toBeNull();
 	});
 
 	it("attaches at once on a Reconnect whose host nobody disconnected", async () => {

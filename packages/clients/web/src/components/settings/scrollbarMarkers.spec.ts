@@ -162,6 +162,7 @@ const wsClient = {
 	isConnected: false,
 	send: vi.fn(),
 	on: vi.fn(() => () => {}),
+	onDisconnect: vi.fn(() => () => {}),
 } as unknown as IWsClient;
 
 /**

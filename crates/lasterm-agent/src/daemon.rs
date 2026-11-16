@@ -17,7 +17,7 @@ use crate::away::AwayQueue;
 use crate::batch::{batch_loop, BatchedEvent, ChannelEventSender, Delivery};
 use crate::flow::{Flows, InTransit, Marks};
 use crate::framing::{encode_frame, FrameReader};
-use crate::handler::{handle_message, FrameSender, Outgoing, SnapshotSenders};
+use crate::handler::{handle_message, ConnectionRef, FrameSender, Outgoing, SnapshotSenders};
 use crate::owner::{ct_eq, OwnerId};
 use crate::platform_dirs::{lasterm_dir, DirKind};
 use crate::protocol::{error_codes, AgentToHub, HubToAgent};
@@ -989,7 +989,15 @@ where
         owner = owner.short(),
         "auth handshake succeeded"
     );
-    register_active(&daemon.routes, &owner, connection_id, &cancel, &frame_tx).await;
+    let displaced =
+        register_active(&daemon.routes, &owner, connection_id, &cancel, &frame_tx).await;
+    if let Some(displaced) = displaced {
+        // Its cancel is set: what it still dispatches is dropped (#1014). Its
+        // pastes close now, before this connection dispatches anything, so
+        // their end markers precede whatever this one queues.
+        close_connection_pastes(&daemon.pty_manager, displaced).await;
+    }
+    let connection = ConnectionRef::daemon(connection_id, cancel.subscribe());
 
     // --- Step 3: this hub's channels, and how many other hubs hold ---
     let (states, other_owner_channels) = {
@@ -1039,7 +1047,7 @@ where
     let mut buf = vec![0u8; 8192];
     'connection: loop {
         while let Some(msg) = pending.pop_front() {
-            if let Err(e) = dispatch(msg, &daemon, &owner, &frame_tx, connection_id).await {
+            if let Err(e) = dispatch(msg, &daemon, &owner, &frame_tx, &connection).await {
                 tracing::error!("message dispatch error: {}", e);
                 // What arrived with the message that failed is dropped with it.
                 pending.clear();
@@ -1073,6 +1081,19 @@ where
     }
 
     clear_active_if_ours(&daemon.routes, &owner, &cancel).await;
+    // However it ended, what it was pasting is closed for the programs
+    // (#1014). A displaced connection's pastes were closed when it was
+    // displaced; this finds none of them open.
+    close_connection_pastes(&daemon.pty_manager, connection_id).await;
+}
+
+/// Close every paste `connection_id` still has open, on every terminal: the
+/// connection ended or was displaced (#1014).
+async fn close_connection_pastes(pty_manager: &Mutex<PtyManager>, connection_id: u64) {
+    let mgr = pty_manager.lock().await;
+    for channel in mgr.channels.values() {
+        channel.input.close_connection(connection_id);
+    }
 }
 
 /// Act on one message from a registered connection. STOP is the daemon's to
@@ -1082,17 +1103,18 @@ async fn dispatch(
     daemon: &DaemonShared,
     owner: &OwnerId,
     frame_tx: &FrameSender,
-    connection_id: u64,
+    connection: &ConnectionRef,
 ) -> std::io::Result<()> {
     match msg {
         HubToAgent::Stop { force } => {
-            handle_stop(daemon, owner, force, frame_tx, connection_id).await;
+            handle_stop(daemon, owner, force, frame_tx, connection.id).await;
             Ok(())
         }
         msg => {
             handle_message(
                 msg,
                 owner,
+                connection,
                 Arc::clone(&daemon.pty_manager),
                 frame_tx.clone(),
                 daemon.channel_events.clone(),
@@ -1278,8 +1300,9 @@ async fn register_active(
     connection_id: u64,
     cancel: &Cancel,
     frame_tx: &FrameSender,
-) {
+) -> Option<u64> {
     let mut routes = routes.lock().await;
+    let mut displaced = None;
     if let Some(old) = routes.connections.remove(owner) {
         tracing::info!(
             connection_id,
@@ -1301,6 +1324,7 @@ async fn register_active(
         };
         let _ = send_encoded(&old.frame_tx, &notice);
         old.cancel.send_replace(true);
+        displaced = Some(old.connection_id);
     }
     // From now on, this connection's queue is what holds the hub's terminals
     // back. Whatever the replaced one still holds, stuck on a socket nobody
@@ -1329,6 +1353,7 @@ async fn register_active(
             frame_tx: frame_tx.clone(),
         },
     );
+    displaced
 }
 
 /// Unregister this connection, if it is still its hub's current one. A newer

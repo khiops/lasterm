@@ -1,4 +1,4 @@
-import type { SshConfigImport } from "@lasterm/shared";
+import type { Host, SshConfigImport } from "@lasterm/shared";
 import { sshAuthFor, toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import { parseJumpSpec } from "../session/proxy-jump.js";
@@ -54,6 +54,26 @@ export function validateSshConfigImportEntries(body: unknown): SshConfigImportVa
 	}
 
 	return { entries };
+}
+
+export function linkHostToProxyJump(metaDal: MetaDAL, host: Host): Host {
+	const spec = host.sshProxySpec;
+	if (!spec) return host;
+	const parsed = parseJumpSpec(spec);
+	if (parsed.kind !== "spec") return host;
+	const match = metaDal
+		.listHosts()
+		.find(
+			(candidate) =>
+				candidate.id !== host.id &&
+				candidate.type === "ssh" &&
+				(candidate.sshConfigHost === parsed.spec.host || candidate.sshHost === parsed.spec.host),
+		);
+	if (!match) return host;
+	return metaDal.updateHost(host.id, {
+		sshProxyHostId: match.id,
+		sshProxySpec: null,
+	});
 }
 
 /**
@@ -184,26 +204,7 @@ export function registerHostSshImportRoutes(
 			// A bastion is usually a host of its own, imported in the same breath.
 			// Linking to it rather than keeping its address twice is what lets it
 			// carry its own authentication and its own pinned key.
-			const linked = hosts.map((host) => {
-				const spec = host.sshProxySpec;
-				if (!spec) return host;
-				const parsed = parseJumpSpec(spec);
-				if (parsed.kind !== "spec") return host;
-				const match = metaDal
-					.listHosts()
-					.find(
-						(candidate) =>
-							candidate.id !== host.id &&
-							candidate.type === "ssh" &&
-							(candidate.sshConfigHost === parsed.spec.host ||
-								candidate.sshHost === parsed.spec.host),
-					);
-				if (!match) return host;
-				return metaDal.updateHost(host.id, {
-					sshProxyHostId: match.id,
-					sshProxySpec: null,
-				});
-			});
+			const linked = hosts.map((host) => linkHostToProxyJump(metaDal, host));
 
 			return reply.code(201).send(toSnakeCase(linked));
 		},

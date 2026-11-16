@@ -12,6 +12,7 @@ export function handleTestConnect(msg: TestConnectMessage, ctx: WsHandlerContext
 	for (const [field, limit] of [
 		["sshProxyHostId", 128],
 		["sshProxySpec", 4096],
+		["sshConfigHost", 256],
 	] as const) {
 		const value = msg[field];
 		if (

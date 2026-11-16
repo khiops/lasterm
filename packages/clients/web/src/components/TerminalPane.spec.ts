@@ -1496,8 +1496,8 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 		attachOk(T, "LIVE-SNAP", { tail: [new TextEncoder().encode("TAIL")] });
 		await settle();
 
-		// No reset, which would drop the input modes the program set: how text is
-		// drawn is put back first, in the stream (#1010, drawn below by xterm).
+		// A reset written in the stream, after what xterm has not parsed yet, then
+		// the snapshot, which sets the program's modes again (#1010, #1012).
 		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP", "TAIL"]);
 		expect(banner()).toBeNull();
 	});
@@ -1546,6 +1546,30 @@ describe("TerminalPane after a Reconnect (#556)", () => {
 
 		useChannelsStore().updateChannelStatus(T, "live");
 		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "BACK");
+		await settle();
+
+		expect(card()).toBeNull();
+		expect(xterm.events).toEqual([]);
+	});
+
+	// A live answer ends the missed output: what the pane drew live after it,
+	// through an end it watched, stays as well (#927, #1010).
+	it("keeps the screen it watched end after a recovery from memory, when the terminal is brought back live", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		xterm.events.length = 0;
+
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
 		attachOk(T, "BACK");
 		await settle();
 
@@ -3946,6 +3970,25 @@ describe("TerminalPane over a host its user disconnected (#648)", () => {
 
 		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
 		expect(banner()).toBeNull();
+	});
+
+	it("draws the live answer to its Reconnect when it opened over a host already disconnected (#1010)", async () => {
+		mountPane(ref(T), "live", { setUp: () => useHostsStore().setDisconnectedByUser([HOST]) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "REMEMBERED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+		vi.spyOn(useHostsStore(), "connectHost").mockImplementation(async () => {
+			useHostsStore().setDisconnectedByUser([]);
+			return { ok: true, status: 200, body: {} };
+		});
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		attachOk(T, "LIVE-SNAP");
+		await settle();
+
+		expect(xterm.events).toEqual([FULL_RESET, "LIVE-SNAP"]);
 	});
 
 	it("draws the live answer over what it last showed when its host is connected from elsewhere (#1010)", async () => {

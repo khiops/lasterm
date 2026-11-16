@@ -703,7 +703,9 @@ function takeAnswer(chId: string, facts: AttachFacts): void {
  * The screen stopped following the terminal, which ran on: answered from the
  * hub's memory, or its host disconnected by its user. It stays so until a live
  * answer, however the pane comes back (its Reconnect, the host connected from
- * elsewhere, the hub's news), and that answer replaces it (#1010).
+ * elsewhere, the hub's news), and that answer replaces it (#1010). Its
+ * scrollback goes with it: the agent's snapshot is its screen, and the only
+ * record of what the terminal printed meanwhile.
  */
 let missedOutput = false;
 

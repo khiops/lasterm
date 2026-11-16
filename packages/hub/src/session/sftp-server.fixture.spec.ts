@@ -40,7 +40,12 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 let root = "";
+let host: Awaited<ReturnType<typeof startMockSshHost>> | null = null;
 afterEach(async () => {
+	// A test that failed early still lets the open go and closes what it left.
+	held.release();
+	await host?.close().catch(() => {});
+	host = null;
 	for (const file of held.files) if (file.fd !== -1) await file.close();
 	await removeTempDir(root);
 });
@@ -48,15 +53,17 @@ afterEach(async () => {
 it("closes, before its close resolves, a file an OPEN was still opening", async () => {
 	root = makeTempDir("lasterm-sftp-close-");
 	held.path = join(root, "x.bin.partial");
-	const host = await startMockSshHost({ view: { style: "posix", root } });
+	host = await startMockSshHost({ view: { style: "posix", root } });
+	const { client } = host;
 	const sftp = await new Promise<SFTPWrapper>((resolve, reject) =>
-		host.client.sftp((error, session) => (error ? reject(error) : resolve(session))),
+		client.sftp((error, session) => (error ? reject(error) : resolve(session))),
 	);
 	sftp.open("/x.bin.partial", "w", () => {});
 	await vi.waitFor(() => expect(held.started).toBe(1));
 
 	// Held until the close resolves, or for long enough that a close waiting for it is.
 	const closed = host.close();
+	host = null;
 	await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 500))]);
 	held.release();
 	await closed;

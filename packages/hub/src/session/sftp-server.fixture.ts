@@ -374,7 +374,9 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 								(error) => {
 									if (!closing) status(id, error);
 								},
-							);
+							)
+							// A failure here must neither escape as unhandled nor stop close.
+							.catch(() => {});
 						opening.add(opened);
 						void opened.finally(() => opening.delete(opened));
 					});

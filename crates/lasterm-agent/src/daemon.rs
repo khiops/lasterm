@@ -494,6 +494,30 @@ fn get_pipe_name() -> String {
     format!(r"\\.\pipe\lasterm-agent-{}", username)
 }
 
+/// Refuses a `--socket` that is not a named pipe (`\\.\pipe\<name>`).
+///
+/// A filesystem path cannot be listened on here, and the daemon used to listen
+/// on the default pipe instead, leaving the hub to connect to the path it was
+/// given (#733). The prefix is matched without regard to case, as Windows does.
+#[cfg(windows)]
+pub(crate) fn require_pipe_name(socket: &str) -> std::io::Result<()> {
+    const PREFIX: &str = r"\\.\pipe\";
+    let is_pipe = socket.len() > PREFIX.len()
+        && socket.is_char_boundary(PREFIX.len())
+        && socket[..PREFIX.len()].eq_ignore_ascii_case(PREFIX);
+    if is_pipe {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "--socket {socket:?} is not a named pipe: on Windows it must look like {PREFIX}<name> \
+             (leave it out for the default {})",
+            get_pipe_name()
+        ),
+    ))
+}
+
 /// Run the agent in daemon mode (Windows named pipe).
 ///
 /// Listens on a Windows named pipe. Serves several hubs at once, one
@@ -528,12 +552,10 @@ async fn run_daemon_impl(
     mut shutdown: ShutdownReceiver,
     bound: Option<oneshot::Sender<()>>,
 ) -> std::io::Result<DestroyAllSummary> {
-    let pipe_name = if socket_path.starts_with(r"\\.\pipe\") {
-        socket_path.clone()
-    } else {
-        // Caller passed a non-pipe path (e.g. legacy XDG path on wrong OS) — use canonical name
-        get_pipe_name()
-    };
+    // Never another pipe than the one asked for: a hub that looks at the path it
+    // was given would otherwise reach nothing (#733).
+    require_pipe_name(&socket_path)?;
+    let pipe_name = socket_path.clone();
 
     tracing::info!("daemon listening on {}", pipe_name);
 
@@ -1459,6 +1481,57 @@ mod tests {
     fn test_socket_path_validation_too_long() {
         let long_path = format!("/tmp/{}/agent.sock", "a".repeat(200));
         assert!(PathBuf::from(&long_path).as_os_str().len() > 100);
+    }
+
+    /// #733: only `\\.\pipe\<name>` is a Windows endpoint; anything else is refused.
+    #[cfg(windows)]
+    #[test]
+    fn require_pipe_name_accepts_pipes_and_refuses_the_rest() {
+        for good in [
+            r"\\.\pipe\lasterm-agent-x",
+            r"\\.\PIPE\lasterm-agent-x",
+            r"\\.\pipe\a",
+        ] {
+            assert!(require_pipe_name(good).is_ok(), "{good} is a pipe");
+        }
+        for bad in [
+            "",
+            "/run/user/1000/lasterm/agent.sock",
+            r"C:\Users\x\agent.sock",
+            r"\\.\pipe\",
+            r"\\server\share\agent",
+            "agent.sock",
+            "é\u{301}é\u{301}é\u{301}é\u{301}é\u{301}é\u{301}é\u{301}é",
+        ] {
+            let error = require_pipe_name(bad).expect_err(bad);
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{bad}");
+            assert!(error.to_string().contains("not a named pipe"), "{error}");
+        }
+    }
+
+    /// #733: a daemon given a filesystem path fails, rather than listening on
+    /// the default pipe where the hub, looking at that path, would never come.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn daemon_refuses_a_non_pipe_socket_without_listening() {
+        let dir = std::env::temp_dir().join(format!("lasterm-733-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Bounded: a daemon that listens instead of refusing would never return.
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_daemon_impl(
+                r"C:\not\a\pipe.sock".into(),
+                dir.to_string_lossy().into_owned(),
+                dir.clone(),
+                no_shutdown_request(),
+                None,
+            ),
+        )
+        .await
+        .expect("a non-pipe socket must be refused, not listened on")
+        .expect_err("a non-pipe socket must not start a daemon");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Verify the Windows pipe name follows the canonical format.
@@ -3982,6 +4055,40 @@ mod tests {
                 (own, others)
             }
 
+            /// Wait for a file a shell creates once it has done what the test
+            /// waits for.
+            async fn until_created(path: &std::path::Path) {
+                let deadline = tokio::time::Instant::now() + DEADLINE;
+                while !path.exists() {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "{} was not created within {DEADLINE:?}",
+                        path.display()
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+
+            /// Wait until the daemon holds no terminal for a hub other than
+            /// KEY_B, as KEY_B's CHANNEL_STATE_END counts them: a terminal that
+            /// ended is no longer held once the daemon has seen it end.
+            async fn until_other_hubs_hold_none(daemon: &TestDaemon) {
+                let deadline = tokio::time::Instant::now() + DEADLINE;
+                loop {
+                    let (probe, frames) = daemon.connect_as(KEY_B).await;
+                    drop(probe);
+                    let (_, others) = state(&frames);
+                    if others == 0 {
+                        return;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "other hubs still held {others} terminals after {DEADLINE:?}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+
             /// Each hub gets its own terminals' output and state, and nothing
             /// of another hub's. All output used to go to whichever hub had
             /// connected last, and the state listed every channel.
@@ -4060,17 +4167,23 @@ mod tests {
                 let daemon = TestDaemon::start("back").await;
                 let (mut a, _) = daemon.connect_as(KEY_A).await;
                 let (mut b, mut seen_by_b) = daemon.connect_as(KEY_B).await;
-                // Waits for a line, prints a second later, then waits again.
+                // Waits for a line, prints a second later, marks that it has in
+                // its working directory, then waits again.
                 let command = if cfg!(windows) {
-                    "set /p line=& ping -n 2 127.0.0.1 >nul & echo printed-while-^away& set /p done="
+                    "set /p line=& ping -n 2 127.0.0.1 >nul & echo printed-while-^away& type nul > printed & set /p done="
                 } else {
-                    r#"read line; sleep 1; echo "printed-while-""away"; read done"#
+                    r#"read line; sleep 1; echo "printed-while-""away"; : > printed; read done"#
                 };
-                spawned(&mut a, spawn("back-ch-a", command)).await;
+                let mut spawn_in_state_dir = spawn("back-ch-a", command);
+                if let HubToAgent::Spawn { cwd, .. } = &mut spawn_in_state_dir {
+                    *cwd = Some(daemon.state_dir.to_string_lossy().into_owned());
+                }
+                spawned(&mut a, spawn_in_state_dir).await;
                 let go: &[u8] = if cfg!(windows) { b"go\r" } else { b"go\n" };
                 a.send(&input("back-ch-a", go.to_vec())).await;
                 drop(a);
-                tokio::time::sleep(Duration::from_millis(2500)).await;
+                // A fixed wait lost to a slow shell under load (#570).
+                until_created(&daemon.state_dir.join("printed")).await;
 
                 let (mut a2, mut seen_by_a2) = daemon.connect_as(KEY_A).await;
                 assert_eq!(state(&seen_by_a2), (vec!["back-ch-a".to_string()], 0));
@@ -4088,11 +4201,19 @@ mod tests {
                     .and_then(|attached| attached["snapshot"]["serialized"].as_str())
                     .unwrap_or("")
                     .to_string();
-                assert!(
-                    output_of(&seen_by_a2, "back-ch-a").contains("printed-while-away")
-                        || snapshot.contains("printed-while-away"),
-                    "what the terminal printed while its hub was away is lost"
-                );
+                // The shell had printed when it made its mark, but the daemon may
+                // read that from the terminal only after the snapshot: it then
+                // arrives as OUTPUT.
+                if !snapshot.contains("printed-while-away") {
+                    let deadline = tokio::time::Instant::now() + DEADLINE;
+                    while !output_of(&seen_by_a2, "back-ch-a").contains("printed-while-away") {
+                        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                        let Some(frame) = a2.frame_within(left).await else {
+                            panic!("what the terminal printed while its hub was away is lost");
+                        };
+                        seen_by_a2.push(frame);
+                    }
+                }
 
                 seen_by_b.extend(b.frames_until_quiet(Duration::from_millis(300)).await);
                 assert_eq!(mentions(&seen_by_b, "back-ch-a"), Vec::<String>::new());
@@ -4276,7 +4397,9 @@ mod tests {
                 let go: &[u8] = if cfg!(windows) { b"go\r" } else { b"go\n" };
                 a.send(&input("flush-restarted", go.to_vec())).await;
                 drop(a);
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                // A fixed wait lost to a slow shell under load: the restart
+                // then met the old shell still running (#570).
+                until_other_hubs_hold_none(&daemon).await;
 
                 let (mut a2, mut seen) = daemon.connect_as(KEY_A).await;
                 seen.extend(spawned(&mut a2, interactive("flush-restarted")).await);

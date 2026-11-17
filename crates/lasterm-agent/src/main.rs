@@ -230,6 +230,8 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
             Some(socket) => socket,
             None => default_socket_path()?,
         };
+        #[cfg(windows)]
+        daemon::require_pipe_name(&socket)?;
         let socket_identity = identity::socket_identity(&socket);
         let outcome = identity::stop(
             &identity::state_dir_for_socket(&socket_identity)?,
@@ -266,6 +268,8 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
             return Err(error);
         }
 
+        #[cfg(windows)]
+        daemon::require_pipe_name(&socket)?;
         let socket_identity = identity::socket_identity(&socket);
         let identity_state_dir = identity::state_dir_for_socket(&socket_identity)?;
         let daemon_identity = daemon_identity_for_endpoint(socket_identity, &identity_state_dir)?;

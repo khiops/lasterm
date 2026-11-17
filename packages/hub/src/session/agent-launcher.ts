@@ -80,7 +80,18 @@ export function stopLocalAgent(
 	} = {},
 ): Promise<AgentStopResult> {
 	const agentPath = options.agentPath ?? resolveAgentPath();
-	const socketPath = getSocketPath(socketPathOverride);
+	let socketPath: string;
+	try {
+		socketPath = getSocketPath(socketPathOverride);
+	} catch (error) {
+		// A socket_path the platform refuses never named a daemon: nothing to stop (#733).
+		return Promise.resolve({
+			stopped: false,
+			diagnostic: error instanceof Error ? error.message : String(error),
+			stdout: "",
+			stderr: "",
+		});
+	}
 	const spawnProcess = options.spawn ?? spawn;
 	const timeoutMs = options.timeoutMs ?? AGENT_STOP_TIMEOUT_MS;
 

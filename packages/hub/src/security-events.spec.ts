@@ -101,6 +101,15 @@ const PRIMARY_TOKEN = "5a".repeat(32);
 const WRONG_TOKEN = "c7".repeat(32);
 
 /**
+ * Poll until the hub has answered. The bound is against a hub that never does,
+ * not a measure of speed: on a loaded Windows runner, finishing a 3 MB upload
+ * took over `vi.waitFor`'s default second (#1065).
+ */
+function eventually<T>(check: () => T | Promise<T>): Promise<T> {
+	return vi.waitFor(check, { timeout: 10_000 });
+}
+
+/**
  * The events as a reader finds them: written by the hub's own logger to
  * `hub.jsonl`, and read back as text. Asserting on the file, not on the
  * objects handed to it, is what shows a secret never reaches the log.
@@ -495,7 +504,7 @@ describe("keystrokes leave no trace in the logs", () => {
 				received.push(decodeMessage(new Uint8Array(data as Buffer)));
 			});
 			ws.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
-			await vi.waitFor(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
+			await eventually(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
 			const beforeTyping = lines.length;
 
 			// One frame per key, as typed, then the whole string at once, as pasted.
@@ -506,7 +515,7 @@ describe("keystrokes leave no trace in the logs", () => {
 			// Frames on a socket are handled in order, so the PONG shows every INPUT
 			// before it went through the dispatcher.
 			ws.send(encodeMessage({ type: "PING" }));
-			await vi.waitFor(() => expect(received.some((m) => m.type === "PONG")).toBe(true));
+			await eventually(() => expect(received.some((m) => m.type === "PONG")).toBe(true));
 			ws.terminate();
 
 			expect(lines.slice(beforeTyping)).toEqual([]);
@@ -569,7 +578,7 @@ describe("keystrokes leave no trace in the logs", () => {
 				received.push(decodeMessage(new Uint8Array(data as Buffer)));
 			});
 			ws.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
-			await vi.waitFor(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
+			await eventually(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
 			const beforePasting = loud.length;
 			const beforeAny = every.length;
 
@@ -584,7 +593,7 @@ describe("keystrokes leave no trace in the logs", () => {
 			}
 			ws.send(encodeMessage({ type: "PASTE_CANCEL", channelId, pasteId: 1 }));
 			ws.send(encodeMessage({ type: "PING" }));
-			await vi.waitFor(() => expect(received.some((m) => m.type === "PONG")).toBe(true));
+			await eventually(() => expect(received.some((m) => m.type === "PONG")).toBe(true));
 			expect(received.find((m) => m.type === "PASTE_CLOSED")).toMatchObject({
 				reason: "agent_lost",
 			});
@@ -871,9 +880,9 @@ describe("a host's environment leaves no trace in the logs (#576)", () => {
 				received.push(decodeMessage(new Uint8Array(data as Buffer)));
 			});
 			ws.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
-			await vi.waitFor(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
+			await eventually(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
 			ws.send(encodeMessage({ type: "SPAWN", hostId, cols: 80, rows: 24 } as ProtocolMessage));
-			await vi.waitFor(() => expect(received.some((m) => m.type === "SPAWN_OK")).toBe(true));
+			await eventually(() => expect(received.some((m) => m.type === "SPAWN_OK")).toBe(true));
 			const from = serverLog.mark();
 
 			const res = await hub.inject({
@@ -943,12 +952,12 @@ describe("the paths and names a client browses leave no trace in the logs (#832)
 				received.push(decodeMessage(new Uint8Array(data as Buffer)));
 			});
 			ws.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
-			await vi.waitFor(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
+			await eventually(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
 			const clientId = (received.find((m) => m.type === "AUTH_OK") as { clientId: string })
 				.clientId;
 			ws.send(encodeMessage({ type: "WRITE_CLAIM", channelId: channels.local } as ProtocolMessage));
 			ws.send(encodeMessage({ type: "PING" }));
-			await vi.waitFor(() => expect(received.some((m) => m.type === "PONG")).toBe(true));
+			await eventually(() => expect(received.some((m) => m.type === "PONG")).toBe(true));
 			const from = serverLog.mark();
 
 			const get = (channelId: string, route: string, at: string) =>
@@ -1055,7 +1064,7 @@ describe("a terminal's directory leaves no trace in the logs (#834)", () => {
 				received.push(decodeMessage(new Uint8Array(data as Buffer)));
 			});
 			ws.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
-			await vi.waitFor(() => expect(received.some((m) => m.type === "STATE_SYNC")).toBe(true));
+			await eventually(() => expect(received.some((m) => m.type === "STATE_SYNC")).toBe(true));
 			return received;
 		};
 		try {
@@ -1068,14 +1077,14 @@ describe("a terminal's directory leaves no trace in the logs (#834)", () => {
 			sockets[0]?.send(
 				encodeMessage({ type: "SPAWN", hostId, cols: 80, rows: 24 } as ProtocolMessage),
 			);
-			await vi.waitFor(() => expect(first.filter((m) => m.type === "CWD_CHANGE")).toHaveLength(2));
+			await eventually(() => expect(first.filter((m) => m.type === "CWD_CHANGE")).toHaveLength(2));
 
 			// Another window: the directory in its STATE_SYNC, then in its ATTACH_OK.
 			const second = await connect();
 			const sync = second.find((m) => m.type === "STATE_SYNC");
 			expect(JSON.stringify(sync)).toContain(`${dir}/sub`);
 			sockets[1]?.send(encodeMessage({ type: "ATTACH", channelId: "01HZZZZZZZZZZZZZZZZZZZZZZY" }));
-			await vi.waitFor(() =>
+			await eventually(() =>
 				expect(second.find((m) => m.type === "ATTACH_OK")).toMatchObject({
 					cwd: `${dir}/sub`,
 					cwdSource: "shell",
@@ -1143,7 +1152,7 @@ describe("an upload's paths, names and chunks leave no trace in the logs (#833)"
 				received.push(decodeMessage(new Uint8Array(data as Buffer)) as never);
 			});
 			ws.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
-			await vi.waitFor(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
+			await eventually(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
 			const clientId = (received.find((m) => m.type === "AUTH_OK") as { clientId: string })
 				.clientId;
 			const from = serverLog.mark();
@@ -1159,7 +1168,7 @@ describe("an upload's paths, names and chunks leave no trace in the logs (#833)"
 					} as never),
 				);
 			const answer = (requestId: string) =>
-				vi.waitFor(() => {
+				eventually(() => {
 					const found = received.find((m) => m.requestId === requestId);
 					expect(found).toBeDefined();
 					return found as Record<string, unknown>;
@@ -1178,7 +1187,7 @@ describe("an upload's paths, names and chunks leave no trace in the logs (#833)"
 			const accepted = await answer("upload");
 			expect(accepted.type).toBe("TRANSFER_ACCEPTED");
 			const transferId = accepted.transferId as string;
-			await vi.waitFor(() =>
+			await eventually(() =>
 				expect(
 					received.some(
 						(m) =>
@@ -1219,7 +1228,7 @@ describe("an upload's paths, names and chunks leave no trace in the logs (#833)"
 					action: "skip",
 				} as never),
 			);
-			await vi.waitFor(() => expect(received.some((m) => m.type === "TRANSFER_DONE")).toBe(true));
+			await eventually(() => expect(received.some((m) => m.type === "TRANSFER_DONE")).toBe(true));
 			const listed = await hub.inject({
 				method: "GET",
 				url: `/api/transfers/${transferId}`,
@@ -1284,13 +1293,13 @@ describe("an upload's paths, names and chunks leave no trace in the logs (#833)"
 				received.push(decodeMessage(new Uint8Array(data as Buffer)) as never);
 			});
 			socket.send(encodeMessage({ type: "AUTH", token: PRIMARY_TOKEN }));
-			await vi.waitFor(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
+			await eventually(() => expect(received.some((m) => m.type === "AUTH_OK")).toBe(true));
 			const clientId = (received.find((m) => m.type === "AUTH_OK") as { clientId: string })
 				.clientId;
 			return { socket, received, clientId };
 		};
 		const sending = (received: Record<string, unknown>[]) =>
-			vi.waitFor(() =>
+			eventually(() =>
 				expect(
 					received.some(
 						(m) =>
@@ -1329,7 +1338,7 @@ describe("an upload's paths, names and chunks leave no trace in the logs (#833)"
 					onConflict: "ask",
 				} as never),
 			);
-			const accepted = await vi.waitFor(() => {
+			const accepted = await eventually(() => {
 				const found = first.received.find((m) => m.requestId === "kept");
 				expect(found?.type).toBe("TRANSFER_ACCEPTED");
 				return found as Record<string, unknown>;
@@ -1369,12 +1378,12 @@ describe("an upload's paths, names and chunks leave no trace in the logs (#833)"
 			await sending(second.received);
 			expect((await put(second.clientId, chunk)).statusCode).toBe(200);
 			ws.send(encodeMessage({ type: "TRANSFER_DISCARD", transferIds: [transferId] } as never));
-			await vi.waitFor(() =>
+			await eventually(() =>
 				expect(
 					second.received.some((m) => m.type === "TRANSFER_STATE" && m.state === "discarded"),
 				).toBe(true),
 			);
-			await vi.waitFor(() =>
+			await eventually(() =>
 				expect(
 					fs.readdirSync(path.join(dest, folderName)).filter((name) => name.endsWith(".partial")),
 				).toEqual([]),
@@ -1434,7 +1443,7 @@ describe("no logged request carries a secret, at any level", () => {
 				socket.on("error", () => undefined);
 				socket.on("close", () => resolve());
 			});
-			await vi.waitFor(() =>
+			await eventually(() =>
 				expect(serverLog.entries().some((entry) => entry.msg === "client error")).toBe(true),
 			);
 
@@ -1566,7 +1575,7 @@ describe("an SSH key's passphrase leaves no trace in the logs (#644)", () => {
 			// Asked for: the person types a wrong one first, and asks the hub to
 			// remember it.
 			const asked = connect();
-			await vi.waitFor(() => expect(sent).toHaveLength(1));
+			await eventually(() => expect(sent).toHaveLength(1));
 			const first = sent[0] as AuthPromptMessage;
 			expect(first).toMatchObject({ type: "AUTH_PROMPT", hostId, promptType: "passphrase" });
 			manager.handleAuthPromptResponse(client.id, {
@@ -1577,7 +1586,7 @@ describe("an SSH key's passphrase leaves no trace in the logs (#644)", () => {
 				deliveryEpoch: first.deliveryEpoch,
 			});
 			// Asked again, saying so: the right one this time.
-			await vi.waitFor(() => expect(sent).toHaveLength(2));
+			await eventually(() => expect(sent).toHaveLength(2));
 			const prompt = sent[1] as AuthPromptMessage;
 			expect(prompt).toMatchObject({ type: "AUTH_PROMPT", hostId, promptType: "passphrase" });
 			expect(prompt.message).toMatch(/^Wrong passphrase/);
@@ -1709,10 +1718,10 @@ describe("an SSH password leaves no trace in the logs, refused or taken (#815)",
 		try {
 			const started = agent.start(fingerprintOf(parsedKey.getPublicSSH()));
 			// A wrong one first, which the server refuses.
-			await vi.waitFor(() => expect(sent).toHaveLength(1));
+			await eventually(() => expect(sent).toHaveLength(1));
 			answer(sent[0] as AuthPromptMessage, wrong);
 			// Asked again, saying so: the right one this time.
-			await vi.waitFor(() => expect(sent).toHaveLength(2));
+			await eventually(() => expect(sent).toHaveLength(2));
 			expect((sent[1] as AuthPromptMessage).message).toBe(
 				"Wrong password for pi@127.0.0.1. Try again.",
 			);

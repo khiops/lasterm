@@ -58,6 +58,9 @@ vi.mock("@xterm/xterm", () => ({
 			this.rows = rows;
 			for (const listener of this.resizeListeners) listener({ cols, rows });
 		}
+		onBinary() {
+			return { dispose() {} };
+		}
 		onTitleChange() {
 			return { dispose() {} };
 		}

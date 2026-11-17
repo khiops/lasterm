@@ -3,7 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getSocketPath, probeSocket } from "./socket-path.js";
+import { getSocketPath, isWindowsPipePath, probeSocket } from "./socket-path.js";
 
 describe("getSocketPath", () => {
 	const originalPlatform = process.platform;
@@ -65,6 +65,34 @@ describe("getSocketPath", () => {
 
 			expect(result).toBe("\\\\.\\pipe\\lasterm-agent-alice");
 		});
+
+		it("returns a pipe override as given", () => {
+			Object.defineProperty(process, "platform", { value: "win32" });
+
+			expect(getSocketPath("\\\\.\\pipe\\mine")).toBe("\\\\.\\pipe\\mine");
+		});
+
+		it("refuses an override that is not a named pipe, naming the key (#733)", () => {
+			Object.defineProperty(process, "platform", { value: "win32" });
+
+			expect(() => getSocketPath("/run/user/1000/lasterm/agent.sock")).toThrow(
+				/\[agent\] socket_path .* is not a named pipe/,
+			);
+		});
+	});
+});
+
+describe("isWindowsPipePath", () => {
+	it.each([
+		["\\\\.\\pipe\\lasterm-agent-x", true],
+		["\\\\.\\PIPE\\x", true],
+		["\\\\.\\pipe\\", false],
+		["C:\\Users\\x\\agent.sock", false],
+		["/run/agent.sock", false],
+		["\\\\server\\share\\x", false],
+		["", false],
+	])("%s -> %s", (value, expected) => {
+		expect(isWindowsPipePath(value)).toBe(expected);
 	});
 });
 

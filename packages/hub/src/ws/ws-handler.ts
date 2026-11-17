@@ -238,8 +238,10 @@ export async function registerWsRoutes(
 
 		// End the session now. What it holds, a write lock above all, is released
 		// before the close handshake, which a client that ignores it can drag out
-		// for as long as the WebSocket library waits.
-		const end = (code: number, reason: string) => {
+		// for as long as the WebSocket library waits. A socket refused at AUTH ends
+		// here too, without a code when it was told why in AUTH_FAIL: its AUTH
+		// deadline is cleared and nothing it sends meanwhile is acted on.
+		const end = (code?: number, reason?: string) => {
 			if (ending) return;
 			ending = true;
 			release();
@@ -318,7 +320,7 @@ export async function registerWsRoutes(
 					server.log.warn({ clientId }, "ws-auth: first message must be AUTH");
 					server.security.authFailed({ via: "ws", sourceIp, clientId, reason: "not_auth_first" });
 					client.send({ type: "AUTH_FAIL", message: "First message must be AUTH" });
-					socket.close();
+					end();
 					return;
 				}
 
@@ -334,7 +336,7 @@ export async function registerWsRoutes(
 						reason: "database_unavailable",
 					});
 					client.send({ type: "AUTH_FAIL", message: "Database unavailable" });
-					socket.close();
+					end();
 					return;
 				}
 				// DB-backed validation: checks expiry and revocation status
@@ -346,7 +348,7 @@ export async function registerWsRoutes(
 					// token and reconnect, which succeeds once the store answers. Nor
 					// is it an authentication failure in the security log: the token
 					// was not judged, and reportTokenStore records the outage once.
-					socket.close(WS_CLOSE_TRY_AGAIN_LATER, "AUTH_UNAVAILABLE");
+					end(WS_CLOSE_TRY_AGAIN_LATER, "AUTH_UNAVAILABLE");
 					return;
 				}
 				if (validation.status === "invalid") {
@@ -362,7 +364,7 @@ export async function registerWsRoutes(
 						tokenStatus: validation.reason,
 					});
 					client.send({ type: "AUTH_FAIL", message: "Invalid token" });
-					socket.close();
+					end();
 					return;
 				}
 				// Best effort, as on the REST path: the credential has been checked,

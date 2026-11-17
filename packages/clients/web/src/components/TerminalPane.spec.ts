@@ -4664,6 +4664,17 @@ describe("TerminalPane pasting through an agent that adapts input (#1012)", () =
 		expect(inputs()).toEqual([]);
 	});
 
+	it("sends no mouse report without the write lock (#1016)", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "LIVE", { adaptsInput: true });
+		await settle();
+
+		typeBinary("\u001b[M !!");
+
+		expect(inputs()).toEqual([]);
+	});
+
 	it("sends nothing, and lets xterm paste nothing, while the socket is down", async () => {
 		await attachedSaying(true);
 		(useSessionStore().wsClient as unknown as { isConnected: boolean }).isConnected = false;
@@ -4916,6 +4927,16 @@ describe("TerminalPane streaming a paste (#1014)", () => {
 		ack(0);
 
 		expect(order().slice(-2)).toEqual(["PASTE 8", "INPUT ab"]);
+	});
+
+	it("drops a binary mouse report made while a paste is being sent (#1016)", async () => {
+		await streaming();
+		paste("a".repeat(9 * CHUNK));
+
+		typeBinary("\u001b[M !!");
+		ack(0);
+
+		expect(inputs()).toEqual([]);
 	});
 
 	it("WB3: cancels on Ctrl+C, then sends what was held, then the Ctrl+C", async () => {

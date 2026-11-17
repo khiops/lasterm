@@ -4094,33 +4094,23 @@ mod tests {
                 let daemon = TestDaemon::start("back").await;
                 let (mut a, _) = daemon.connect_as(KEY_A).await;
                 let (mut b, mut seen_by_b) = daemon.connect_as(KEY_B).await;
-                // Waits for a line, prints a second later, marks that it has,
-                // then waits again.
-                let printed = daemon.state_dir.join("printed");
-                // Unquoted for cmd.exe, which takes the `\"` its argument is
-                // escaped with literally.
-                assert!(
-                    !printed.to_string_lossy().contains(' '),
-                    "the mark's path has a space: {}",
-                    printed.display()
-                );
+                // Waits for a line, prints a second later, marks that it has in
+                // its working directory, then waits again.
                 let command = if cfg!(windows) {
-                    format!(
-                        "set /p line=& ping -n 2 127.0.0.1 >nul & echo printed-while-^away& type nul > {} & set /p done=",
-                        printed.display()
-                    )
+                    "set /p line=& ping -n 2 127.0.0.1 >nul & echo printed-while-^away& type nul > printed & set /p done="
                 } else {
-                    format!(
-                        r#"read line; sleep 1; echo "printed-while-""away"; : > '{}'; read done"#,
-                        printed.display()
-                    )
+                    r#"read line; sleep 1; echo "printed-while-""away"; : > printed; read done"#
                 };
-                spawned(&mut a, spawn("back-ch-a", &command)).await;
+                let mut spawn_in_state_dir = spawn("back-ch-a", command);
+                if let HubToAgent::Spawn { cwd, .. } = &mut spawn_in_state_dir {
+                    *cwd = Some(daemon.state_dir.to_string_lossy().into_owned());
+                }
+                spawned(&mut a, spawn_in_state_dir).await;
                 let go: &[u8] = if cfg!(windows) { b"go\r" } else { b"go\n" };
                 a.send(&input("back-ch-a", go.to_vec())).await;
                 drop(a);
                 // A fixed wait lost to a slow shell under load (#570).
-                until_created(&printed).await;
+                until_created(&daemon.state_dir.join("printed")).await;
 
                 let (mut a2, mut seen_by_a2) = daemon.connect_as(KEY_A).await;
                 assert_eq!(state(&seen_by_a2), (vec!["back-ch-a".to_string()], 0));
@@ -4138,11 +4128,19 @@ mod tests {
                     .and_then(|attached| attached["snapshot"]["serialized"].as_str())
                     .unwrap_or("")
                     .to_string();
-                assert!(
-                    output_of(&seen_by_a2, "back-ch-a").contains("printed-while-away")
-                        || snapshot.contains("printed-while-away"),
-                    "what the terminal printed while its hub was away is lost"
-                );
+                // The shell had printed when it made its mark, but the daemon may
+                // read that from the terminal only after the snapshot: it then
+                // arrives as OUTPUT.
+                if !snapshot.contains("printed-while-away") {
+                    let deadline = tokio::time::Instant::now() + DEADLINE;
+                    while !output_of(&seen_by_a2, "back-ch-a").contains("printed-while-away") {
+                        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                        let Some(frame) = a2.frame_within(left).await else {
+                            panic!("what the terminal printed while its hub was away is lost");
+                        };
+                        seen_by_a2.push(frame);
+                    }
+                }
 
                 seen_by_b.extend(b.frames_until_quiet(Duration::from_millis(300)).await);
                 assert_eq!(mentions(&seen_by_b, "back-ch-a"), Vec::<String>::new());

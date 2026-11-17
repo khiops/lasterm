@@ -38,6 +38,8 @@ const xterm = vi.hoisted(() => ({
 vi.mock("@xterm/xterm", () => ({
 	Terminal: class {
 		options: Record<string, unknown>;
+		/** As xterm's parser: handlers for sequences, which this double never calls (#1012). */
+		parser = { registerCsiHandler: () => ({ dispose() {} }) };
 		cols = 80;
 		rows = 24;
 		unicode = { activeVersion: "" };
@@ -52,7 +54,16 @@ vi.mock("@xterm/xterm", () => ({
 		onResize() {
 			return { dispose() {} };
 		}
+		onBinary() {
+			return { dispose() {} };
+		}
 		onTitleChange() {
+			return { dispose() {} };
+		}
+		onBell() {
+			return { dispose() {} };
+		}
+		onScroll() {
 			return { dispose() {} };
 		}
 		dispose(): void {}
@@ -154,6 +165,7 @@ const wsClient = {
 	isConnected: false,
 	send: vi.fn(),
 	on: vi.fn(() => () => {}),
+	onDisconnect: vi.fn(() => () => {}),
 } as unknown as IWsClient;
 
 /**

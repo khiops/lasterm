@@ -46,7 +46,7 @@ afterEach(() => {
 	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe.sequential("hub startup lock", () => {
+describe("hub startup lock", { concurrent: false }, () => {
 	it("uses a separate, stable authority file rather than runtime.json", () => {
 		const stateDir = makeStateDir();
 		expect(getHubLockPath(stateDir)).toBe(path.join(stateDir, "hub.lock"));

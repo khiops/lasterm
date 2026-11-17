@@ -1,6 +1,6 @@
 [package]
 name = "lasterm-agent"
-version = "0.17.1"
+version = "0.18.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 repository = "https://github.com/khiops/lasterm"
@@ -44,6 +44,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Kernel",
     "Win32_System_SystemInformation",
+    # The Windows build, for conhost's wake-up after a paste's end (#1030).
+    "Wdk_System_SystemServices",
 ] }
 
 [target.'cfg(unix)'.dependencies]

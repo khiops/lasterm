@@ -99,9 +99,12 @@ export class AgentConnectionManager {
 		fence = captureQuitFence(this.ctx),
 	): Promise<SessionState> {
 		const existing = this.ctx.sessions.get(hostId);
+		// A detached session is still the host's: its agent is connected and its
+		// orphan terminals run under it. A terminal opened now joins it (#955).
 		if (
 			existing &&
 			(existing.status === "active" ||
+				existing.status === "detached" ||
 				existing.status === "disconnected" ||
 				(!isSsh && existing.status === "starting"))
 		) {
@@ -454,6 +457,9 @@ export class AgentConnectionManager {
 					type: "INPUT_DROPPED",
 					channelId: msg.channelId,
 				} satisfies InputDroppedMessage);
+			} else if (msg.type === "PASTE_ACK" || msg.type === "PASTE_CLOSED") {
+				// To the window that sent the paste, under its own id (#1014).
+				this.ctx.pastes?.fromAgent(agent, msg);
 			} else if ((msg as { type: string }).type === "LOG") {
 				const logMsg = msg as unknown as AgentLogMessage;
 				// Validate level before casting
@@ -501,6 +507,8 @@ export class AgentConnectionManager {
 
 		agent.on("close", () => {
 			this.ctx.hubLogger?.log("info", "agent-connection-manager: agent closed", { hostId });
+			// Current or replaced, the pastes it took end for their windows (#1014).
+			this.ctx.pastes?.agentGone(agent);
 			if (this.ctx.quitState === "QUITTING" && this.ctx.stoppingAgents.has(hostId)) return;
 			const session = this.ctx.sessions.get(hostId);
 			const host = this.ctx.metaDal.getHost(hostId);
@@ -569,7 +577,11 @@ export class AgentConnectionManager {
 	 */
 	private recordSshConnection(hostId: string, agent: SshAgent): void {
 		const host = this.ctx.metaDal.getHost(hostId);
-		const authMethod = host?.sshAuth ?? "key";
+		// The method this connection signed in with, which an edit made while it
+		// connected does not change (#917). `start` refuses a host without one, so
+		// a connection that authenticated has it.
+		const authMethod = agent.authMethod;
+		if (authMethod === undefined) return;
 		this.ctx.security.sshConnected({
 			hostId,
 			hostLabel: host?.label ?? "",
@@ -738,24 +750,15 @@ export class AgentConnectionManager {
 			return;
 		}
 
-		let agent: LastermAgent;
+		// Attaching is the whole restart: it reconciles with what the daemon
+		// holds, which keeps those terminals and forgets the rest. A SPAWN
+		// after it could only name a terminal the daemon holds, or one whose
+		// own start is under way; the agent refuses the id, and the refusal
+		// reported a running terminal dead (#981).
 		try {
-			agent = await this.attachDaemon(hostId, sessionId);
+			await this.attachDaemon(hostId, sessionId);
 		} catch {
 			this.lifecycle.closeSession(hostId, sessionId);
-			return;
 		}
-
-		await this.lifecycle.spawnChannelsForHost(
-			hostId,
-			agent,
-			(channelId) => {
-				this.ctx.scheduler.trackChannel(channelId);
-				this.ctx.chunker.trackChannel(channelId);
-			},
-			(channelId, ch) => {
-				this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead");
-			},
-		);
 	}
 }

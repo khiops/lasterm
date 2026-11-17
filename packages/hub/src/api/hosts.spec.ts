@@ -71,12 +71,20 @@ describe("validateCreateHost", () => {
 	});
 
 	it("refuses key auth without a key path, or with a blank one", () => {
-		for (const ssh_key_path of [undefined, null, "", "  "]) {
+		for (const ssh_key_path of [undefined, null, "", "  ", " \t"]) {
 			const host = { type: "ssh", label: "key", ssh_host: "10.0.0.1", ssh_auth: "key" };
 			expect(validateCreateHost(body({ ...host, ssh_key_path }))).toBe(
 				"ssh_key_path is required when ssh_auth is 'key'",
 			);
 		}
+	});
+
+	// Blank is the one test the hub's default and migration 027 share: only
+	// ASCII whitespace, so a path the default stores as a key is one key auth
+	// takes (#917).
+	it("takes key auth with a key path blank by no ASCII whitespace rule", () => {
+		const host = { type: "ssh", label: "key", ssh_host: "10.0.0.1", ssh_auth: "key" };
+		expect(validateCreateHost(body({ ...host, ssh_key_path: "\u00a0" }))).toBeNull();
 	});
 
 	// A text column took a number or a boolean as text, and failed the write on
@@ -419,5 +427,41 @@ describe("sameJson", () => {
 		let deep: unknown = "x";
 		for (let i = 0; i < 100_000; i++) deep = { a: deep };
 		expect(sameJson({ a: { a: "x" } }, deep)).toBe(false);
+	});
+});
+
+// A host's connection timeout is 20 to 120 whole seconds, or none (#1034).
+describe("connect_timeout_seconds", () => {
+	const MESSAGE = "connect_timeout_seconds must be an integer between 20 and 120";
+	const stored: Host = {
+		id: "01HOST",
+		type: "ssh",
+		label: "pi",
+		sshHost: "10.0.0.1",
+		sshAuth: "agent",
+		iconType: "auto",
+		trustRemoteHints: "apply",
+		sortOrder: 0,
+		os: null,
+		arch: null,
+		createdAt: "2026-11-16T00:00:00.000Z",
+		updatedAt: "2026-11-16T00:00:00.000Z",
+	};
+	const create = (value: unknown): string | null =>
+		validateCreateHost(
+			body({ type: "ssh", label: "slow", ssh_host: "10.0.0.1", connect_timeout_seconds: value }),
+		);
+	const update = (value: unknown): string | null =>
+		validateUpdateHost(stored, { connect_timeout_seconds: value } as unknown as UpdateHostBody);
+
+	it("refuses a connection timeout outside 20-120 whole seconds (#1034)", () => {
+		for (const value of [19, 121, 30.5, "60", true]) {
+			expect([value, create(value)]).toEqual([value, MESSAGE]);
+			expect([value, update(value)]).toEqual([value, MESSAGE]);
+		}
+		for (const value of [20, 120, null, undefined]) {
+			expect([value, create(value)]).toEqual([value, null]);
+			expect([value, update(value)]).toEqual([value, null]);
+		}
 	});
 });

@@ -5,8 +5,10 @@ use std::time::Duration;
 use async_xpty::{CommandBuilder, ExitStatus, PtyProcess};
 use tokio::task::JoinHandle;
 
-use crate::input::{InputQueue, INPUT_QUEUE_BYTES};
+use crate::input::{wake_record_for, InputQueue, INPUT_QUEUE_BYTES};
+use crate::input_modes::InputModeCell;
 use crate::owner::OwnerId;
+use std::sync::Arc;
 
 const CHANNEL_TEARDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -18,6 +20,9 @@ pub(crate) struct PtyChannelState {
     /// What the hub typed and the terminal has not taken yet. Its writer ends
     /// when the channel is removed (#740).
     pub(crate) input: InputQueue,
+    /// The modes its reader last saw, which decide how its input is written
+    /// (#1012).
+    pub(crate) input_modes: Arc<InputModeCell>,
 }
 
 impl PtyChannelState {
@@ -206,6 +211,13 @@ impl PtyManager {
         self.shutting_down = true;
     }
 
+    /// Where the channel's reader publishes its program's input modes (#1012).
+    pub(crate) fn input_modes_for(&self, channel_id: &str) -> Option<Arc<InputModeCell>> {
+        self.channels
+            .get(channel_id)
+            .map(|channel| Arc::clone(&channel.input_modes))
+    }
+
     /// Take a reader only while its channel remains registered. A daemon sweep
     /// can remove the channel between spawn and reader registration.
     pub(crate) fn reader_for(&mut self, channel_id: &str) -> Option<async_xpty::PtyReader> {
@@ -282,13 +294,15 @@ impl PtyManager {
         let pid = process.pid();
         let kill_tree_scope = process.kill_tree_scope();
         tracing::debug!(channel_id = %id, ?kill_tree_scope, "PTY kill-tree scope");
-        let input = InputQueue::start(&id, process.writer(), self.input_bound);
+        let input =
+            InputQueue::start_waking(&id, process.writer(), self.input_bound, wake_record());
         self.channels.insert(
             id.clone(),
             PtyChannelState {
                 process,
                 owner,
                 input,
+                input_modes: Arc::default(),
             },
         );
         Ok((id, pid))
@@ -535,6 +549,31 @@ impl Default for PtyManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The record a terminal's input writer follows an INPUT with after an end
+/// marker on this machine (#1030): Windows' build, read once.
+fn wake_record() -> Option<&'static [u8]> {
+    static RECORD: std::sync::OnceLock<Option<&'static [u8]>> = std::sync::OnceLock::new();
+    *RECORD.get_or_init(|| wake_record_for(windows_build()))
+}
+
+/// This Windows' build number; none elsewhere, or when it cannot be read.
+#[cfg(windows)]
+fn windows_build() -> Option<u32> {
+    use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+    // SAFETY: a zeroed OSVERSIONINFOW with its size set, filled by ntdll.
+    let mut info: OSVERSIONINFOW = unsafe { std::mem::zeroed() };
+    info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+    // SAFETY: `info` is a valid, writable OSVERSIONINFOW.
+    let status = unsafe { RtlGetVersion(&mut info) };
+    (status == 0).then_some(info.dwBuildNumber)
+}
+
+#[cfg(not(windows))]
+fn windows_build() -> Option<u32> {
+    None
 }
 
 #[cfg(test)]
@@ -1081,6 +1120,7 @@ mod tests {
                     channel_id: channel_id.clone(),
                 },
                 &OwnerId::stdio(),
+                &crate::handler::ConnectionRef::stdio(),
                 Arc::clone(&manager),
                 frame_tx,
                 channel_events,

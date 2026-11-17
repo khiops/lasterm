@@ -1058,6 +1058,185 @@ describe("HostModal reading the hub's SSH config (#734, #757)", () => {
 			"~/.ssh/id_pi",
 		);
 	});
+
+	describe("the sign-in method a chosen entry brings, as the import stores it (#1009)", () => {
+		const entries = {
+			entries: [
+				{ name: "keyed", hostname: "keyed.test", identity_file: "~/.ssh/id_keyed" },
+				{ name: "plain", hostname: "plain.test", identity_file: null },
+			],
+			has_include: false,
+		};
+
+		const authSelect = (): HTMLSelectElement => {
+			const select = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select")).find(
+				(candidate) => Array.from(candidate.options).some((option) => option.value === "agent"),
+			);
+			if (!select) throw new Error("no Auth Method select");
+			return select;
+		};
+
+		async function pick(name: string): Promise<void> {
+			const select = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select")).find(
+				(candidate) => Array.from(candidate.options).some((option) => option.value === name),
+			);
+			if (!select) throw new Error("no SSH host select");
+			select.value = name;
+			select.dispatchEvent(new Event("change"));
+			await nextTick();
+		}
+
+		async function chooseAuth(method: string): Promise<void> {
+			const select = authSelect();
+			select.value = method;
+			select.dispatchEvent(new Event("change"));
+			await nextTick();
+		}
+
+		const keyPathInput = (): HTMLInputElement | null =>
+			el<HTMLInputElement>("input[placeholder='~/.ssh/id_ed25519']");
+		const addButton = (): HTMLButtonElement | null =>
+			Array.from(document.body.querySelectorAll<HTMLButtonElement>("button.btn-primary")).find(
+				(button) => button.textContent?.trim() === "Add Host",
+			) ?? null;
+
+		it("selects the agent for an entry naming no IdentityFile, and the host can be added", async () => {
+			sshConfigAnswers(json(200, entries));
+			mountModal(null);
+			await chooseSshConfig();
+
+			await pick("plain");
+
+			expect(authSelect().value).toBe("agent");
+			expect(keyPathInput()).toBeNull();
+			expect(addButton()?.disabled).toBe(false);
+		});
+
+		it("replaces a method chosen by hand with the entry's: password becomes the agent", async () => {
+			sshConfigAnswers(json(200, entries));
+			mountModal(null);
+			await chooseSshConfig();
+			await chooseAuth("password");
+
+			await pick("plain");
+
+			expect(authSelect().value).toBe("agent");
+		});
+
+		it("replaces a method chosen by hand with the entry's: the agent becomes its key", async () => {
+			sshConfigAnswers(json(200, entries));
+			mountModal(null);
+			await chooseSshConfig();
+			await chooseAuth("agent");
+
+			await pick("keyed");
+
+			expect(authSelect().value).toBe("key");
+			expect(keyPathInput()?.value).toBe("~/.ssh/id_keyed");
+		});
+
+		it("drops the previous entry's key when the next one names none", async () => {
+			sshConfigAnswers(json(200, entries));
+			mountModal(null);
+			await chooseSshConfig();
+			await pick("keyed");
+
+			await pick("plain");
+
+			expect(authSelect().value).toBe("agent");
+			await chooseAuth("key");
+			expect(keyPathInput()?.value).toBe("");
+		});
+	});
+
+	// The hint says the jump as Test Connection and Add Host send it: a saved
+	// host's id, or a spec the agent signs in to (#1040, #1042).
+	describe("the hint under a picked entry's jump (#1040, #1042)", () => {
+		const GW: Host = {
+			...SSH,
+			id: "01GWBASTION000000000000000",
+			label: "gw-label",
+			sshHost: "gateway.example",
+			sshConfigHost: "gw",
+			sshUser: "base",
+			sshPort: 22,
+		};
+
+		const proxyInput = (): HTMLInputElement => {
+			const input = el<HTMLInputElement>("input[list='host-proxy-options']");
+			if (!input) throw new Error("no Jump host field");
+			return input;
+		};
+		const hint = (): string | undefined =>
+			proxyInput().parentElement?.querySelector(".field-hint")?.textContent?.trim();
+
+		async function pickTarget(proxyJump: string, hosts: Host[] = [GW]): Promise<void> {
+			sshConfigAnswers(
+				json(200, {
+					entries: [{ name: "target", hostname: "target.example", proxy_jump: proxyJump }],
+					has_include: false,
+				}),
+			);
+			mountModal(null);
+			useHostsStore().hosts = [{ ...LOCAL }, { ...SSH }, ...hosts];
+			await chooseSshConfig();
+			const select = Array.from(document.body.querySelectorAll<HTMLSelectElement>("select")).find(
+				(candidate) => Array.from(candidate.options).some((option) => option.value === "target"),
+			);
+			if (!select) throw new Error("no SSH host select");
+			select.value = "target";
+			select.dispatchEvent(new Event("change"));
+			await nextTick();
+		}
+
+		it("names the saved bastion a picked ProxyJump links to", async () => {
+			await pickTarget("gw");
+
+			expect(proxyInput().value).toBe(GW.id);
+			expect(hint()).toBe("Through gw-label, which brings its own key and sign-in.");
+		});
+
+		it.each([
+			{ variant: "one", hosts: [GW] },
+			{
+				variant: "ambiguous",
+				hosts: [GW, { ...GW, id: "01GWSECOND0000000000000000", label: "gw-second" }],
+			},
+		])(
+			"says a kept ProxyJump does not use the saved bastion's sign-in ($variant)",
+			async ({ hosts }) => {
+				await pickTarget("relay@gw", hosts);
+
+				expect(proxyInput().value).toBe("relay@gw");
+				expect(hint()).toBe("Through relay@gw, using your SSH agent, not a saved host's sign-in.");
+			},
+		);
+
+		it("says a chosen jump host is no longer saved", async () => {
+			await pickTarget("gw");
+
+			useHostsStore().hosts = [{ ...LOCAL }, { ...SSH }];
+			await nextTick();
+
+			expect(proxyInput().value).toBe(GW.id);
+			expect(hint()).toBe("The host chosen as the jump is no longer saved.");
+		});
+
+		it("describes a jump typed as a spec as a spec", async () => {
+			mountModal(null);
+			const input = proxyInput();
+			input.value = GW.id;
+			input.dispatchEvent(new Event("input"));
+			await nextTick();
+
+			useHostsStore().hosts = [{ ...LOCAL }, { ...SSH }, GW];
+			await nextTick();
+
+			expect(hint()).toBe(
+				`Through ${GW.id}, using your SSH agent. Add it as a host to give it a key of its own.`,
+			);
+		});
+	});
 });
 
 describe("live daemon edit guard", () => {
@@ -1220,5 +1399,71 @@ describe("HostModal Port field (#901)", () => {
 		expect(portInput().value).toBe("0");
 		expect(el("#panel-connection")?.textContent).toContain(PORT_ERROR);
 		expect(saveButton()?.disabled).toBe(true);
+	});
+
+	// The connection timeout is a field of the same kind (#1034): text, digits
+	// only, 20 to 120 seconds, empty for the default.
+	const TIMEOUT_ERROR = "Enter a whole number of seconds from 20 to 120";
+	function timeoutInput(): HTMLInputElement {
+		return input("#host-connect-timeout");
+	}
+
+	it("adds a host with a connection timeout (#1034)", async () => {
+		const saves = hubRecordingSaves();
+		useAuthStore().setToken("token");
+		await open("New Host");
+		type(timeoutInput(), "45");
+		await nextTick();
+		saveButton()?.click();
+		await settle();
+		expect(saves[0]).toHaveProperty("connect_timeout_seconds", 45);
+	});
+
+	it("adds a host without one when the field is left empty (#1034)", async () => {
+		const saves = hubRecordingSaves();
+		useAuthStore().setToken("token");
+		await open("New Host");
+		saveButton()?.click();
+		await settle();
+		expect(saves[0]).not.toHaveProperty("connect_timeout_seconds");
+	});
+
+	it("edits the connection timeout (#1034)", async () => {
+		const ON_60: Host = { ...ON_2222, connectTimeoutSeconds: 60 };
+		const saves = hubRecordingSaves();
+		useAuthStore().setToken("token");
+		mountModal(ON_60);
+		useHostsStore().hosts = [{ ...LOCAL }, { ...ON_60 }];
+		await nextTick();
+		expect(timeoutInput().value).toBe("60");
+
+		for (const text of ["19", "30.5"]) {
+			type(timeoutInput(), text);
+			await nextTick();
+			expect(el("#panel-connection")?.textContent).toContain(TIMEOUT_ERROR);
+			expect(saveButton()?.disabled).toBe(true);
+			expect(testButton()?.disabled).toBe(true);
+		}
+
+		type(timeoutInput(), "90");
+		await nextTick();
+		expect(saveButton()?.disabled).toBe(false);
+		saveButton()?.click();
+		await settle();
+		expect(saves).toEqual([{ connect_timeout_seconds: 90 }]);
+	});
+
+	it("clears the connection timeout when the field is emptied (#1034)", async () => {
+		const ON_60: Host = { ...ON_2222, connectTimeoutSeconds: 60 };
+		const saves = hubRecordingSaves();
+		useAuthStore().setToken("token");
+		mountModal(ON_60);
+		useHostsStore().hosts = [{ ...LOCAL }, { ...ON_60 }];
+		await nextTick();
+		type(timeoutInput(), "");
+		await nextTick();
+		saveButton()?.click();
+		await settle();
+		expect(saves).toEqual([{ connect_timeout_seconds: null }]);
 	});
 });

@@ -161,7 +161,7 @@ agent's default. A default profile the user set (`PUT /api/hosts/:id/profiles/:p
 replaced, and a profile the user hid is never marked (#800). The host's default profile is what a
 new terminal starts there, the local host's as an SSH host's (§ 4.4, #802).
 
-**Capabilities.** The hub logs the list, and gates nothing on it: every agent it can meet has all six, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
+**Capabilities.** The hub logs the list, and gates nothing on it but `adapts_input`, which follows `"input-modes"` (§ 4.2), and `streams_paste` and its PASTE relay, which follow `"paste-stream"` (§ 3.21, § 4.21): every agent it can meet has the others but `"hub-identity"`, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"input-modes"` means an agent that sends the terminal's input modes and alternate screen with each snapshot (§ 3.3) and writes paste markers and cursor keys in its program's form (§ 3.4); the hub tells the UI so with `adapts_input` (§ 4.2, § 4.4). `"paste-stream"` means an agent that takes a paste as PASTE chunks, acknowledges each once its terminal took it, and writes and closes its markers itself (§ 3.21); the hub tells the UI so with `streams_paste`. `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
 
 ### 3.1b AUTH (Hub → Agent, daemon mode)
 
@@ -336,11 +336,32 @@ Re-attach to existing channel (after reconnect).
     cols: number,
     rows: number,
     cursor_x: number,
-    cursor_y: number
+    cursor_y: number,
+    alternate_screen?: boolean, // the program is in the alternate screen (#1012)
+    input_modes?: string        // every input mode the program set, as escape sequences (#1012)
   },
   last_seq: number
 }
 ```
+
+`serialized` draws the visible screen (vt100's `contents_formatted`), then sets the character sets
+the program holds (#1013): the designations of G0–G3 that differ from US (`ESC ( f`, `ESC ) f`,
+`ESC * f`, `ESC + f`), then the shift into GL when it is not G0 (SO, `ESC n`, `ESC o`). Where a
+restore of the cursor (DECRC, `?1049l`) left the active set different from the shifted G's, the
+shifted G is designated as the active set. vt100 does not follow character sets, so the agent
+follows them as xterm 6.0.0 does and stores each character drawn through DEC Special Graphics as
+the one xterm draws (`┌` for `l`); the bytes it sends as OUTPUT are the program's own. An agent that says
+`"input-modes"` also sends `alternate_screen` and `input_modes`; an older one sends neither.
+`input_modes` sets each mode whatever a terminal held before: a reset of the mouse modes, the mouse
+encodings and the cursor style (`ESC[?9l ESC[?1000l ESC[?1002l ESC[?1003l ESC[?1005l ESC[?1006l
+ESC[0 q`), then vt100's `input_mode_formatted` (keypad, cursor keys and bracketed paste in either
+state, then the mouse mode, encoding and cursor style when not the default), then `ESC[?1004h` or
+`ESC[?1004l` for focus reporting, which the agent follows itself. The agent also follows DECSTR
+(`CSI … ! p`, any parameters), which resets cursor keys, the keypad, bracketed paste, focus, the
+cursor style, cursor visibility and the attributes as xterm does, and RIS (`ESC c`), at their place
+in the stream. Not carried: the scroll region, origin mode, the saved cursor, autowrap, insert mode,
+the character sets saved with the cursor, the normal screen behind an alternate one, and the mode
+forms vt100 does not follow (`?66`, `?1047`, `?1016`).
 
 An ATTACH the agent cannot answer, for a channel it does not have or cannot see (§ 3.1b), gets
 `ERROR { code: "CHANNEL_NOT_FOUND", channel_id, request_id }`. The hub names every ATTACH with a
@@ -354,8 +375,11 @@ The agent answers every ATTACH it receives, and at once. The snapshot comes from
 reader, which serves it while it reads the PTY, and sends the ATTACH_OK into the channel's output
 stream (§ 3.5): it reaches the connection that asked after every OUTPUT of the channel whose bytes
 the snapshot shows, and before every OUTPUT it does not show (#931). `last_seq` is the `seq` of the
-last read the snapshot holds, so on that connection the OUTPUT before it has `seq <= last_seq` and
-the OUTPUT after it `seq > last_seq`; it is 0 before the terminal's first read. An agent before #931
+last read before the snapshot, so on that connection the OUTPUT before it has `seq <= last_seq` and
+the OUTPUT after it `seq > last_seq`; it is 0 before the terminal's first read. The output the agent
+sends ends between escape sequences and characters, so a pane that draws the snapshot and then that
+OUTPUT parses it from the start of a sequence (#954), except after a sequence held past 64 KiB or
+once the PTY has closed (§ 3.4). An agent before #931
 sent 0 whatever it held, and its ATTACH_OK could overtake output its snapshot already showed. The hub
 numbers its spool itself and does not read `last_seq`. Once the PTY has closed, the channel is ending: an
 ATTACH whose request finds that reader gone, or reaches it as it stops and is dropped, gets the
@@ -386,6 +410,21 @@ after it until its terminal has taken what is queued. The first one dropped is a
 relays each one to the clients attached to that channel as `INPUT_DROPPED` (§ 4.12), and the pane
 says in its terminal that what was typed was dropped because the terminal is not taking input.
 
+An agent that says `"input-modes"` writes each INPUT in the form its program asked for, from its own
+screen model, whatever the client's terminal believes (#1012):
+
+- **A paste** runs from an `ESC[200~` to the next `ESC[201~` in the same INPUT. Its markers are kept
+  when the program set bracketed paste (`?2004`) and removed otherwise. Nothing inside it is
+  rewritten. A marker without its pair in the INPUT is no paste, and is written as it is.
+- **A cursor key outside a paste**, unmodified (`A`, `B`, `C`, `D`, Home `H`, End `F`), in either its
+  CSI or its SS3 form, is written in SS3 form when the program set application cursor keys (`?1`) and
+  in CSI form otherwise. A sequence with parameters, such as `ESC[1;5A`, is written as it is.
+- Only whole sequences within one INPUT match: one split across two is written unchanged.
+
+A paste larger than one INPUT goes as PASTE chunks to an agent that says `"paste-stream"` (§ 3.21).
+An INPUT from a daemon connection that a newer connection of the same hub has displaced, still
+waiting to be dispatched, is dropped: it would land inside a paste the new connection sends.
+
 ### 3.5 OUTPUT (Agent → Hub)
 
 ```typescript
@@ -401,6 +440,10 @@ says in its terminal that what was typed was dropped because the terminal is not
 `seq` counts the reads of the channel's current workload, from 1; a restart, which reuses the
 channel id, starts again from 1. A frame merges several reads and carries the last one's, so seqs
 can go unseen between two frames, and a read that held only stripped DSR queries carries none.
+Output is sent only up to where xterm is between escape sequences and characters: the bytes of a
+read after that wait, and go out with the read that ends their sequence, under its `seq`, so a read
+whose bytes all wait carries none either. They wait for at most 64 KiB, then go out as they are.
+When the PTY closes, what still waits goes out as one more read, with the next `seq` (#954).
 
 **Batching:** Buffer 16ms or 4KB, whichever comes first, then flush. Any other frame about a
 channel (CHANNEL_EXIT, TITLE_CHANGE, PROCESS_TITLE, CWD_CHANGE, BELL, NOTIFICATION, LOG) first
@@ -428,13 +471,15 @@ Agent MUST resize both the PTY and the channel's `vt100` screen, so the next sna
   type: "SNAPSHOT_RES",
   channel_id: string,
   snapshot: { serialized: string, cols: number, rows: number,
-              cursor_x: number, cursor_y: number },
+              cursor_x: number, cursor_y: number,
+              alternate_screen?: boolean, input_modes?: string },  // as on ATTACH_OK (§ 3.3)
   last_seq: number
 }
 ```
 
 It comes in the channel's output stream as ATTACH_OK does (§ 3.3): after every OUTPUT its screen
-holds, before every OUTPUT it does not, with `last_seq` the `seq` of the last read it holds (#931).
+holds, before every OUTPUT it does not, with `last_seq` the `seq` of the last read before it (#931,
+#954).
 
 ### 3.8 CHANNEL_EXIT (Agent → Hub)
 
@@ -749,6 +794,43 @@ use it yet: the first CWD_CHANGE for that channel after the question is its answ
 `not-found` on that channel's `CHANNEL_NOT_FOUND`, and after 2 s, or when the host has no agent
 connected, what was said last.
 
+### 3.21 PASTE / PASTE_CANCEL / PASTE_ACK / PASTE_CLOSED (`paste-stream`)
+
+```typescript
+// Hub → Agent
+{ type: "PASTE", channel_id: string, paste_id: number, seq: number, data: Uint8Array, last: boolean }
+{ type: "PASTE_CANCEL", channel_id: string, paste_id: number }
+// Agent → Hub
+{ type: "PASTE_ACK", channel_id: string, paste_id: number, seq: number }
+{ type: "PASTE_CLOSED", channel_id: string, paste_id: number,
+  reason: "cancelled" | "superseded" | "out_of_order" | "overflow" | "unknown",
+  written: number }  // the paste's data bytes written to the terminal
+```
+
+A paste (#1014) is its text, without markers, in chunks `seq` 0, 1, …, the last one `last: true`.
+`paste_id` is the hub's, unique while it runs (§ 4.21). The agent:
+
+- **opens** it at `seq` 0, closing any other paste the same connection has open on the channel
+  (`superseded`); it decides
+  then, from its screen model, whether the paste is bracketed (`?2004`), for both markers;
+- **takes** a later chunk only as the next one of that connection's open paste: one out of order closes
+  the paste (`out_of_order`); one for no open paste of the connection changes nothing and is answered
+  `unknown`, unless that paste is closed and not yet finished, whose PASTE_CLOSED is then the answer; one that would take the channel's input queue (§ 3.4) past its bound closes it
+  (`overflow`). A chunk is judged by the bound alone, never by INPUT's dropping;
+- **writes** `ESC[200~` before the first chunk and `ESC[201~` after the last when bracketed, and the
+  data unchanged; INPUT's adaptation is not applied to it;
+- **acknowledges** each chunk once its PTY writer has accepted its last byte, the last chunk of a
+  bracketed paste once the end marker has been accepted too: that PASTE_ACK is the final answer. On
+  Windows "accepted" is the PTY crate's own queue, up to 65 writes of 4 KiB ahead of ConPTY;
+- **closes** it on PASTE_CANCEL (`cancelled`), even after its last chunk until that is written, and
+  when the connection that sent it ends or is displaced, with no frame then. Closing skips what is
+  still queued of it, finishes a write already started, and, when its start marker went out, writes
+  `ESC[201~` right after the last of it that did, before anything queued later. PASTE_CLOSED follows
+  on the connection that sent it, while it is current.
+
+PASTE and PASTE_CANCEL from a displaced connection are dropped and change no paste. The hub keeps at
+most `PASTE_WINDOW_BYTES` (256 KiB) of a paste unacknowledged, through the pane (§ 4.21).
+
 ## 4. Message Types — Hub ↔ UI (WS)
 
 ### 4.1 AUTH
@@ -803,11 +885,12 @@ sends a frame or disconnects.
 {
   type: "ATTACH_OK",
   channel_id: string,
-  snapshot: { serialized, cols, rows, cursor_x, cursor_y } | null,
+  snapshot: { serialized, cols, rows, cursor_x, cursor_y,
+              alternate_screen?, input_modes? } | null,  // the agent's, as § 3.3 has it
   tail: Uint8Array[],          // output since last snapshot
   write_lock_holder: string | null,
   cached: boolean,             // true = from local cache, agent unreachable
-  truncated?: true,            // output after the snapshot was too much to send, and is left out
+  truncated?: true,            // a snapshot or output was not sent (rules below)
   dynamic_title?: string,      // the title the terminal set (OSC 0/2), when it set one
   process_title?: string,      // its foreground process, when known
   display_title: string,       // the title a tab shows
@@ -818,7 +901,13 @@ sends a frame or disconnects.
   cwd?: string | null,
   cwd_source?: "shell" | "process" | "start",
   foreground?: string,         // the program holding the terminal, when not the shell
-  files_panel: { open: boolean } // whether the writer's files panel is open on it (§ 4.20, #838)
+  files_panel: { open: boolean }, // whether the writer's files panel is open on it (§ 4.20, #838)
+  // Whether the agent that takes this terminal's input now says "input-modes" (§ 3.1), read when the
+  // answer is sent, from the connected agent INPUT goes to, never from a stored snapshot (#1012).
+  adapts_input: boolean,
+  // Whether that agent says "paste-stream" (§ 3.1), read the same way: the pane streams its
+  // pastes as PASTE chunks (§ 4.21, #1014).
+  streams_paste: boolean
 }
 
 // UI → Hub
@@ -836,7 +925,7 @@ lock: bringing an ended one back is a SPAWN that names it, which is the user's R
 last_output: {
   snapshot: { serialized, cols, rows, cursor_x, cursor_y } | null,
   tail: Uint8Array[],   // the output after the snapshot, as one element; [] when none is sent
-  truncated?: true,     // there was output to send, and it was not
+  truncated?: true,     // a snapshot or output was not sent (rules below)
   cols: number,         // the terminal's last size, which the pane draws them at (resizes are not stored)
   rows: number
 }
@@ -854,14 +943,40 @@ screen it was not written for shows something wrong without saying so:
 - a channel the GC emptied, or one that printed nothing, has `snapshot: null` and `tail: []`;
 - a spool the hub cannot read leaves `last_output` out: the refusal goes as an older hub's.
 
-The tail follows the cached ATTACH_OK's rule: sent when it totals at most 128 KiB, else `tail: []`
-and `truncated`. A snapshot stored above 256 KiB is not sent (`snapshot: null`, `truncated`): the
+The tail is sent when it totals at most 128 KiB, else `tail: []` and `truncated`. A snapshot stored above 256 KiB is not sent (`snapshot: null`, `truncated`): the
 answer stays under the 512 KiB the desktop takes in one message. The pane draws it at `cols` ×
 `rows` under its exit card, read-only.
+
+A cached ATTACH_OK (`cached: true`: the agent is gone, or did not answer the hub's ATTACH) carries
+the same as `last_output`, read under the same rules, with one difference: with no snapshot stored it
+carries nothing (`snapshot: null`, `tail: []`, no `truncated`), not the stream from its first seq,
+since a pane keeps the screen it shows when an ATTACH_OK has no snapshot. Its output after the
+snapshot includes what the hub had received and not yet stored.
 
 The answer is what a pane shows, and a pane attaches again whenever its socket is replaced: an
 ATTACH_OK from the terminal leaves it uncovered, one with `cached: true` shows it is not connected,
 and `CHANNEL_DEAD` shows it has ended, whatever the pane showed before.
+
+**What the pane does with them (#1012).**
+
+- **An ATTACH_OK that replaces the screen** (any attach but a Reconnect or Restart over a screen the
+  pane kept): after the reset, the pane writes `ESC[?1049h` when `alternate_screen` is true, then
+  `serialized`, then `input_modes`, then the tail, so a mode the tail sets wins. An attach that keeps
+  the screen writes none of it, except over a screen that missed output (#1010): answered from
+  memory, or its host disconnected by its user, a live ATTACH_OK replaces it all the same, its
+  scrollback with it; an answer from memory still keeps it. The reset is then written as RIS, after
+  the output the pane received while it waited.
+- **No focus report from a replay:** a focus report xterm makes for the `?1004h` of a replay is not
+  sent.
+- **An ended terminal's last output** (`last_output`) applies neither field.
+- **While `adapts_input` is true** for the terminal it shows, from the ATTACH_OK or SPAWN_OK that bound
+  it:
+  - the pane brackets every paste itself: its text without any paste marker (removed until none is
+    left), line breaks as `\r`, between `ESC[200~` and `ESC[201~`, in one INPUT;
+  - a paste whose bracketed form is over 65,536 bytes is refused with a notice;
+  - xterm pastes nothing of its own.
+- **While `streams_paste` is true,** the pane streams every paste instead (§ 4.21).
+- **Otherwise,** xterm pastes as it always did.
 
 ### 4.3 INPUT / OUTPUT / RESIZE / CHANNEL_SIZE
 
@@ -915,7 +1030,8 @@ smaller than that scroll rather than scaling the text.
 }
 
 // Hub → UI
-{ type: "SPAWN_OK", channel_id: string, host_id: string, session_id: string, request_id?: string }
+{ type: "SPAWN_OK", channel_id: string, host_id: string, session_id: string, request_id?: string,
+  adapts_input: boolean, streams_paste: boolean }  // as on ATTACH_OK (§ 4.2)
 ```
 
 A SPAWN that names neither `shell` nor a launch profile, as the `+` button, the host picker and an
@@ -981,6 +1097,27 @@ terminal: started again once the host is back, it may well run. Two cases:
 A client waits for that host's `SESSION_STATE` to say it is `active` (or `detached`) again,
 rather than show a failure (§ 4.14). Its own deadline for a SPAWN is longer than the hub's ten
 seconds, so that it hears the hub's answer.
+
+A SPAWN on an SSH host with no live agent waits while the hub connects that host, first terminal
+or follower of a connection already under way. The hub says so once per such SPAWN, before the
+connection's first wait, with its `request_id` as on the SPAWN's other answers (#1034):
+
+```typescript
+{ type: "HOST_CONNECTING", host_id: string, request_id?: string }
+```
+
+Each wait of that connection has its own bound: the jump's connection and its channel to the
+host, the SSH server up to authentication, reaching the agent (its command, or the whole attach
+to a daemon), and the agent's HELLO. A host's `connect_timeout_seconds` (§ 6), else a
+`ConnectTimeout` of 20 s or more that `~/.ssh/config` gives its alias and then its hostname, sets
+each of them, the daemon's socket retries stopping 15 s short; without one they are the hub's own
+(20 s, 20 s, 5 s or 15 s on Windows, and no bound on a jump's channel). A connection may dial more
+than once, after a host key or a password asked again. Every SPAWN told HOST_CONNECTING gets its
+SPAWN_OK or an ERROR, a connection its user cancelled (`POST /api/hosts/:id/disconnect`)
+included. The web then waits for that answer instead of its own 15 s, up to 30 minutes for a hub
+that stopped answering with its socket open, which a prompt shown meanwhile extends to its own
+5 minutes when that ends later; a socket that closes ends the wait at once. A client that does not
+know the message ignores it.
 
 A host its user disconnected (`POST /api/hosts/:id/disconnect`, § 6, #648) is not connected
 again by a start nobody asked for. A SPAWN with `automatic: true` on it is refused at once with
@@ -1311,7 +1448,9 @@ hub's memory, per host and client, for 5 min when it was typed to open an elevat
 
 ### 4.11 TEST_CONNECT (SSH Connectivity Test)
 
-Allows the UI to test SSH connectivity for a host without creating a full session, through its declared jump under the session's jump rules (`docs/SECURITY.md` §3.3b). The hub may send `AUTH_PROMPT` messages for the target or bastion and `HOST_VERIFY` for the target; an unknown bastion is refused without a `HOST_VERIFY`, possibly after its credential was asked for. Invalid proxy fields receive `TEST_CONNECT_FAIL` with the request's `host_id`.
+Allows the UI to test SSH connectivity for a host without creating a full session, through its declared jump under the session's jump rules (`docs/SECURITY.md` §3.3b). The hub may send `AUTH_PROMPT` messages for the target or bastion and `HOST_VERIFY` for the target; an unknown bastion is refused without a `HOST_VERIFY`, possibly after its credential was asked for. Invalid proxy fields or an invalid `ssh_config_host` receive `TEST_CONNECT_FAIL` with the request's `host_id`.
+
+`ssh_config_host` is the `~/.ssh/config` alias of the entry the New Host dialog's picker filled the host from; the dialog sends it only while its source is that picker and an entry is picked, and stores the same alias on the new host. The hub applies it as a session of the saved host does: its `IdentityAgent none` keeps the SSH agent from signing a key file, and it is one of the names an `@revoked` line in `known_hosts` is looked up under. Absent, a saved host's own alias applies while the request keeps its route.
 
 The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`ready`, `download`, `unsupported`, or `unknown`), and `agentVersion`.
 
@@ -1326,7 +1465,9 @@ The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`re
   ssh_key_path?: string,
   ssh_user?: string,
   ssh_proxy_host_id?: string, // saved jump host; mutually exclusive with spec
-  ssh_proxy_spec?: string    // ProxyJump address
+  ssh_proxy_spec?: string,   // ProxyJump address
+  ssh_config_host?: string,  // ~/.ssh/config alias of the picked entry, 1-256 characters
+  connect_timeout_seconds?: number // the form's connection timeout (#1034)
 }
 
 // Hub → UI (success)
@@ -1335,6 +1476,12 @@ The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`re
 // Hub → UI (failure)
 { type: "TEST_CONNECT_FAIL", host_id: string, message: string, code?: "AUTH_CANCELLED" }
 ```
+
+The test waits 10 s for the server, its jump's whole route included, unless the host has a
+connection timeout (#1034): `connect_timeout_seconds` when it is a whole number from 20 to 120 (any
+other value is ignored), else a `ConnectTimeout` of 20 s or more that `~/.ssh/config` gives the
+saved host's alias, which an edit keeps, then the hostname. With one, the server, the jump's
+connection and the jump's channel each get that long, as a session's connection does (§ 4.4).
 
 `code` is `AUTH_CANCELLED` when the person cancelled the password or passphrase asked for (§ 4.10):
 nothing failed, and the dialog ends the test without a result rather than show a failure (#815). It
@@ -1878,6 +2025,45 @@ A hub older than this neither sends nor reads any of it, and answers a FILES_PAN
 the web then reads every writer's panel as closed. The hub logs a FILES_PANEL it applies at DEBUG,
 with its channel and state.
 
+### 4.21 PASTE / PASTE_CANCEL / PASTE_ACK / PASTE_CLOSED (#1014)
+
+```typescript
+// UI → Hub
+{ type: "PASTE", channel_id: string, paste_id: number, seq: number, data: Uint8Array, last: boolean }
+{ type: "PASTE_CANCEL", channel_id: string, paste_id: number }
+// Hub → UI, to the window that sent the paste only
+{ type: "PASTE_ACK", channel_id: string, paste_id: number, seq: number }
+{ type: "PASTE_CLOSED", channel_id: string, paste_id: number,
+  reason: "cancelled" | "superseded" | "out_of_order" | "overflow" | "unknown"
+        | "unsupported" | "agent_lost",
+  written?: number }  // from the agent; absent when the hub closed it
+```
+
+**The hub** relays a PASTE only from the terminal's write-lock holder (`isHolder`, stricter than
+INPUT's check, which lets anyone through while nobody holds the lock), with a valid channel id,
+`data` of at most 65,536 bytes, `paste_id` and `seq` whole numbers that fit a u32, and a boolean
+`last`; otherwise `ERROR INVALID_INPUT` or `WRITE_LOCK_DENIED`. To an agent that does not say
+`"paste-stream"` it answers `unsupported` and relays nothing. It gives each paste its own id toward the
+agent and maps the answers back, so an answer never reaches another window's paste. A window's `seq` 0
+while its own paste is still registered is refused (`INVALID_INPUT`); a later chunk of no registered
+paste is dropped silently. It cancels a paste at the agent when its window leaves or the lock moves
+to another window, also after its last chunk until its final answer, and tells the window
+`agent_lost` when the agent that took it closes or is replaced. It relays PASTE_ACK and PASTE_CLOSED
+to the owning window only, and forgets a paste at its final answer or a cancel.
+
+**The pane**, while `streams_paste` is true for the terminal it shows:
+
+- takes the clipboard text, removes the paste markers in it (as § 4.2), turns line breaks into `\r`,
+  and refuses with a notice a text over `PASTE_MAX_BYTES` (16 MiB) in UTF-8;
+- sends it in chunks of `PASTE_CHUNK_BYTES` (32 KiB), never more than `PASTE_WINDOW_BYTES` (256 KiB)
+  unacknowledged, and takes an answer only for its current paste and a `seq` it sent;
+- holds every `onData` (typed keys and xterm's own reports) while chunks are unsent, and sends it after
+  the last one; a Ctrl+C cancels the paste while it is in progress, then goes;
+- shows the progress with a Cancel button after a second, and says how much reached the terminal when
+  a paste ends early: exactly with the agent's `written`, otherwise at least what was acknowledged;
+- stops a paste when its socket drops, it loses the write lock or leaves the terminal, dropping what
+  it held; refuses a second paste until the first's final answer.
+
 ## 5. Protocol Sequences
 
 ### 5.1 Local Session
@@ -2199,8 +2385,8 @@ unconfirmed, so none of those closes lets Replace end channels as `stopped`.
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/ssh-config` | ● | `{ entries, has_include }` — parses `~/.ssh/config`. 404 `NOT_FOUND` when there is none |
-| POST | `/api/hosts/import` | ● | `{ entries: { name, label, sshRemoteDaemon?: boolean \| null }[] }` (the key is camelCase) → `Host[]` (201). 409 `CONFLICT` with `error.conflicting_labels` when a label is in use, and nothing is created; 400 `VALIDATION_ERROR` for a `name` not in `~/.ssh/config` |
+| GET | `/api/ssh-config` | ● | `{ entries, has_include }` — parses `~/.ssh/config`: one entry per alias, each field the first value in file order across the parts that apply to it, `Host *` included, as ssh takes it; `identity_file` is the first usable one, as for the import below, `hostname` stays as written, no default is filled in but port 22, `Match` is not evaluated and `Include` not followed (#1038). 404 `NOT_FOUND` when there is none |
+| POST | `/api/hosts/import` | ● | `{ entries: { name, label, sshRemoteDaemon?: boolean \| null }[] }` (the key is camelCase) → `Host[]` (201). An entry is stored as `key` with the path of its first usable `IdentityFile` (not `none`, no `%` or `${` token, an existing file), as `agent` when it has none, whether or not an SSH agent answers at import time (#917, #1038). 409 `CONFLICT` with `error.conflicting_labels` when a label is in use, and nothing is created; 400 `VALIDATION_ERROR` for a `name` not in `~/.ssh/config` |
 
 #### SSH Keys
 
@@ -2383,7 +2569,7 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 |--------|------|------|--------------|
 | GET | `/api/launch-profiles` | ● | `LaunchProfile[]`, or a page with `?limit=&offset=` (see Pagination) |
 | POST | `/api/launch-profiles` | ● | CreateLaunchProfile → `LaunchProfile` (201) |
-| PUT | `/api/launch-profiles/order` | ● | `{ ids }` → 204 |
+| PUT | `/api/launch-profiles/order` | ● | `{ ids }` → 204. 400 `VALIDATION_ERROR` for a body that is not an object, or `ids` that are not an array of strings; nothing is reordered then |
 | GET | `/api/launch-profiles/:id` | ● | `LaunchProfile` |
 | PUT | `/api/launch-profiles/:id` | ● | UpdateLaunchProfile → `LaunchProfile` |
 | DELETE | `/api/launch-profiles/:id` | ● | 204. 400 `LAST_PROFILE` for the only one left. A host whose default it was gets back at once the one its agent's default shell was given (#802) |
@@ -2493,12 +2679,13 @@ hub drops its record; an interrupted one stays across restarts until it is resum
   ssh_host?: string,                  // required if type=ssh, "hostname" or "ip"
   ssh_port?: number | null,           // range 1-65535; none or null is 22
   ssh_user?: string | null,           // SSH username
-  ssh_auth?: 'agent' | 'key' | 'password',
+  ssh_auth?: 'agent' | 'key' | 'password',  // left out on an SSH host: 'key' with a key path, else 'agent'
   ssh_key_path?: string | null,       // required if ssh_auth=key
   ssh_config_host?: string,           // Host alias from ~/.ssh/config
   ssh_proxy_host_id?: string | null,  // jump host this hub knows (SPEC.md § 4.5b)
   ssh_proxy_spec?: string | null,     // or a jump as user@host:port; never both
   ssh_remote_daemon?: boolean | null, // keep an agent running there (#79); null follows [ssh] remote_daemon
+  connect_timeout_seconds?: number | null, // 20-120 whole seconds per connection wait (#1034); null: the default
   icon_type?: 'auto' | 'emoji' | 'image',   // default 'auto'
   icon_value?: string | null,         // emoji char, or for 'image' a data:image/png|jpeg|gif|webp;base64 URI of at most 65536 chars
   color?: string | null,              // hex "#rrggbb" or null for auto
@@ -2516,6 +2703,17 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 **UpdateHost:** Same fields as CreateHost, all optional (partial update, deep merge). A field
 left out keeps its stored value; `null` clears one that may be empty, such as `ssh_port` (back
 to 22), `ssh_user`, `ssh_key_path` or `color` (#792).
+
+Three writes give a sign-in method to an SSH host sent without `ssh_auth` (#917): CreateHost, an
+UpdateHost that turns a local host with no stored method into an SSH one, and the import;
+migration 027 gave one to the SSH hosts stored without it before. CreateHost stores `key` when
+`ssh_key_path` is not blank, and `agent` otherwise; a key path made only of ASCII whitespace is
+blank. That UpdateHost does the same, on the key path sent, or the stored one when `ssh_key_path`
+is left out. Any other edit changes the stored method only when `ssh_auth` is sent:
+`{ ssh_key_path }` alone on a host on `agent` leaves it on `agent`, and an edit without `ssh_auth`
+leaves an SSH host stored without a method, as an internal writer can leave one, with none.
+`ssh_auth: null` is refused on a host that is SSH once saved. A duplicate copies the method as
+stored, none included. Connecting to an SSH host without a method, or through it, is refused.
 
 Both routes answer 400 `VALIDATION_ERROR` for a field of another type than the one above, or a
 value outside its choices (#795). An edit gets CreateHost's rules: each field it sends is checked
@@ -2615,11 +2813,23 @@ A host group answers `{ id, name, sort_order, color, created_at, updated_at }`.
   icon_type?: 'auto' | 'emoji' | 'image', // default 'auto'
   icon_value?: string | null,   // at most 256 chars
   color?: string | null,        // hex "#rrggbb"
-  profile_overrides?: Partial<TerminalProfile> | null, // stored as sent, camelCase inside
-  sort_order?: number,
+  profile_overrides?: Partial<TerminalProfile> | null, // camelCase keys; see below
+  sort_order?: number | null,   // a safe integer; default 0
   report_directory?: boolean    // default false: its PowerShell reports its directory (§ 3.2, #839)
 }
 ```
+
+A body that is not an object is refused with 400 `VALIDATION_ERROR` `body must be an object`.
+`profile_overrides` is checked as a terminal's profile write (#916): it must be an object (400
+`VALIDATION_ERROR` otherwise); a key that is not a profile key, or one set only globally or for a
+host (`transferFallbackDir`, `transferVerify`), 400 `VALIDATION_ERROR`; a number that is not
+finite, a value nested more than 32 deep, or a file-transfer value outside its table 400
+`INVALID_VALUE` naming its key. A `null` member is checked only against the list of profile
+keys: under a key set only globally or for a host it is accepted. Keys are camelCase
+on write; a response gives them in snake_case, so a client sending a response's overrides back
+converts them first. `sort_order` that is not a safe integer: 400 `VALIDATION_ERROR`
+`sort_order must be an integer`. Every refusal stores nothing, and comes before the 409 for a
+taken name.
 
 **UpdateLaunchProfile:** Same fields as CreateLaunchProfile, all optional. A field left out keeps
 its stored value. `null` clears a field that may be empty (`args`, `cwd`, `env`, `icon_value`,

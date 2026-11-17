@@ -1,4 +1,4 @@
-import { isPlainObject, toSnakeCase, validateCustomCommand } from "@lasterm/shared";
+import { isPlainObject, sshAuthFor, toSnakeCase, validateCustomCommand } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
@@ -118,7 +118,11 @@ export function registerHostCrudRoutes(
 			label: body.label.trim(),
 			...(body.ssh_host !== undefined && { sshHost: body.ssh_host }),
 			...(body.ssh_port !== undefined && { sshPort: body.ssh_port }),
-			...(body.ssh_auth !== undefined && { sshAuth: body.ssh_auth }),
+			// An SSH host gets the method sent, else `sshAuthFor` its key path; a local
+			// host only one sent (#917).
+			...(body.ssh_auth !== undefined
+				? { sshAuth: body.ssh_auth }
+				: body.type === "ssh" && { sshAuth: sshAuthFor(body.ssh_key_path) }),
 			...(body.ssh_key_path !== undefined && { sshKeyPath: body.ssh_key_path }),
 			...(body.icon_type !== undefined && { iconType: body.icon_type }),
 			...(body.icon_value !== undefined && { iconValue: body.icon_value }),
@@ -131,6 +135,9 @@ export function registerHostCrudRoutes(
 			...(body.ssh_proxy_host_id !== undefined && { sshProxyHostId: body.ssh_proxy_host_id }),
 			...(body.ssh_proxy_spec !== undefined && { sshProxySpec: body.ssh_proxy_spec }),
 			...(body.ssh_remote_daemon !== undefined && { sshRemoteDaemon: body.ssh_remote_daemon }),
+			...(body.connect_timeout_seconds !== undefined && {
+				connectTimeoutSeconds: body.connect_timeout_seconds,
+			}),
 			...(profile.value != null && { profileJson: profile.value }),
 			...(body.elevation_method !== undefined && { elevationMethod: body.elevation_method }),
 			...(body.custom_command !== undefined && { customCommand: body.custom_command }),
@@ -138,6 +145,8 @@ export function registerHostCrudRoutes(
 			...(body.arch !== undefined && { arch: body.arch }),
 		});
 
+		// The jump is stored as sent: the New Host dialog decided it when an
+		// entry was picked, and tested that same jump (#1042).
 		announce("hosts");
 		return reply.code(201).send(toSnakeCase(host));
 	});
@@ -256,6 +265,14 @@ export function registerHostCrudRoutes(
 			if (body.ssh_host !== undefined) updateInput.sshHost = body.ssh_host;
 			if (body.ssh_port !== undefined) updateInput.sshPort = body.ssh_port;
 			if (body.ssh_auth !== undefined) updateInput.sshAuth = body.ssh_auth;
+			else if (body.type === "ssh" && host.type === "local" && host.sshAuth === undefined) {
+				// A local host with no method turned into an SSH one gets `sshAuthFor` its
+				// key path, sent or stored; any other edit that sends no method keeps the
+				// stored one, none included (#917).
+				updateInput.sshAuth = sshAuthFor(
+					body.ssh_key_path !== undefined ? body.ssh_key_path : host.sshKeyPath,
+				);
+			}
 			if (body.ssh_key_path !== undefined) updateInput.sshKeyPath = body.ssh_key_path;
 			if (body.icon_type !== undefined) updateInput.iconType = body.icon_type;
 			if (body.icon_value !== undefined) updateInput.iconValue = body.icon_value;
@@ -272,6 +289,9 @@ export function registerHostCrudRoutes(
 			if (body.ssh_proxy_spec !== undefined) updateInput.sshProxySpec = body.ssh_proxy_spec;
 			if (body.ssh_remote_daemon !== undefined) {
 				updateInput.sshRemoteDaemon = body.ssh_remote_daemon;
+			}
+			if (body.connect_timeout_seconds !== undefined) {
+				updateInput.connectTimeoutSeconds = body.connect_timeout_seconds;
 			}
 			if (profile.value !== undefined) updateInput.profileJson = profile.value;
 			if (body.elevation_method !== undefined) updateInput.elevationMethod = body.elevation_method;

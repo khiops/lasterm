@@ -30,10 +30,57 @@ export function sshPortFromText(text: string): number | null {
 	return port >= 1 && port <= 65535 ? port : null;
 }
 
+/**
+ * The shortest and longest connection timeout a host may set, in seconds
+ * (#1034). Never under the hub's own 20 s: the setting only gives a slow host
+ * more time, since ssh2's clock covers authentication, where a person may be.
+ */
+export const CONNECT_TIMEOUT_MIN_SECONDS = 20;
+export const CONNECT_TIMEOUT_MAX_SECONDS = 120;
+
+/** Whether `value` is a connection timeout a host may store: a whole number of seconds from 20 to 120. */
+export function isConnectTimeoutSeconds(value: unknown): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isInteger(value) &&
+		value >= CONNECT_TIMEOUT_MIN_SECONDS &&
+		value <= CONNECT_TIMEOUT_MAX_SECONDS
+	);
+}
+
+/** The connection timeout a text names, digits only as for the port, or null. */
+export function connectTimeoutFromText(text: string): number | null {
+	if (!/^[0-9]+$/.test(text)) return null;
+	const seconds = Number(text);
+	return isConnectTimeoutSeconds(seconds) ? seconds : null;
+}
+
 export const MAX_INPUT_SIZE = 65_536; // 64 KB
 
 export function isValidInputData(data: unknown): data is Uint8Array {
 	return data instanceof Uint8Array && data.byteLength <= MAX_INPUT_SIZE;
+}
+
+/**
+ * A paste's chunk, as a pane sends it (#1014): small enough that a PASTE
+ * frame stays under `MAX_INPUT_SIZE` with its envelope, and under the desktop
+ * relay's message cap.
+ */
+export const PASTE_CHUNK_BYTES = 32_768;
+
+/**
+ * What a pane keeps sent and not yet acknowledged of a paste (#1014): eight
+ * chunks, a quarter of the agent's input queue, leaving room for what is
+ * typed. It bounds in bytes what a Cancel cannot recall, not a time.
+ */
+export const PASTE_WINDOW_BYTES = 262_144;
+
+/** The largest paste a pane sends, in UTF-8 bytes once normalised (#1014). */
+export const PASTE_MAX_BYTES = 16_777_216;
+
+/** A paste or chunk id: a whole number that fits a u32 (#1014). */
+export function isValidPasteNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xffff_ffff;
 }
 
 export const MAX_ENV_COUNT = 256;

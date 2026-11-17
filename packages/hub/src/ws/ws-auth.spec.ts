@@ -148,6 +148,46 @@ describe("WebSocket authentication against the token store", () => {
 			expect(failures()).toEqual([]);
 		});
 
+		// A socket the hub refused is done with. What it sends while it closes is
+		// not acted on, and its AUTH deadline passing later, before its
+		// close handshake ends or after the hub stopped, is not a second failure.
+		// It used to log `auth_timeout` for it (#571).
+		it.each([
+			// With the store still failing, a second AUTH would prove nothing: a
+			// PING acted on would be refused as not AUTH first, and logged.
+			["the store cannot be read", { type: "AUTH", token: TEST_TOKEN }, { type: "PING" }, []],
+			[
+				"the token is unknown",
+				{ type: "AUTH", token: "b".repeat(64) },
+				{ type: "AUTH", token: TEST_TOKEN },
+				[expect.objectContaining({ reason: "invalid_token", tokenStatus: "unknown" })],
+			],
+			[
+				"its first frame is not AUTH",
+				{ type: "PING" },
+				{ type: "AUTH", token: TEST_TOKEN },
+				[expect.objectContaining({ reason: "not_auth_first" })],
+			],
+		] as const)(
+			"acts on nothing more, and logs no AUTH timeout, for a socket it refused because %s",
+			async (why, refused, then, logged) => {
+				vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+				if (why === "the store cannot be read") failTokenStore(dbs);
+				const ws = await server.injectWS("/ws");
+				const observed = observe(ws);
+				ws.send(encodeMessage(refused as ProtocolMessage));
+				ws.send(encodeMessage(then as ProtocolMessage));
+				await vi.waitFor(() => expect(ws.readyState).not.toBe(ws.OPEN));
+
+				// Past the hub's 10 s AUTH deadline.
+				vi.advanceTimersByTime(10_000);
+
+				expect(observed.types()).not.toContain("AUTH_OK");
+				expect(security.filter((fields) => fields.event === "auth.success")).toEqual([]);
+				expect(failures()).toEqual(logged);
+			},
+		);
+
 		// A client takes an ERROR without its SPAWN's request id as about
 		// something else only from a hub that says it echoes one (#777).
 		it("says in AUTH_OK that it echoes a SPAWN's request id", async () => {

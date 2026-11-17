@@ -32,6 +32,10 @@ const QUIT_NOT_UNDER_TEST = {
 	onQuitDelivered: () => {},
 };
 
+/** An endpoint the platform accepts: a named pipe on Windows, where a path is refused (#733). */
+const AGENT_ENDPOINT =
+	process.platform === "win32" ? "\\\\.\\pipe\\lasterm-agent-spec" : "/tmp/lasterm-agent.sock";
+
 describe("gracefulShutdown", () => {
 	afterEach(() => {
 		resetGracefulShutdownForTests();
@@ -457,7 +461,7 @@ describe("POST /api/shutdown", () => {
 			{
 				beginQuit: () => calls.push("beginQuit"),
 				stopLocalAgent: () =>
-					stopLocalAgent("/tmp/lasterm-agent.sock", {
+					stopLocalAgent(AGENT_ENDPOINT, {
 						agentPath: "/opt/lasterm-agent",
 						spawn: stopper as unknown as typeof spawn,
 					}),

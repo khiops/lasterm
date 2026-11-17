@@ -5,6 +5,7 @@ export { handleDetach } from "./detach.js";
 export { handleFilesPanel } from "./files-panel.js";
 export { handleHostVerifyResponse } from "./host-verify-response.js";
 export { handleInput } from "./input.js";
+export { handlePaste, handlePasteCancel } from "./paste.js";
 export { handlePing } from "./ping.js";
 export { handleResize } from "./resize.js";
 export { handleSpawn } from "./spawn.js";

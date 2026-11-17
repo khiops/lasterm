@@ -6,6 +6,8 @@ import type {
 	FilesPanelMessage,
 	HostVerifyResponseMessage,
 	InputMessage,
+	PasteCancelMessage,
+	PasteMessage,
 	ProtocolMessage,
 	ResizeMessage,
 	TestConnectMessage,
@@ -37,6 +39,8 @@ import {
 	handleFilesPanel,
 	handleHostVerifyResponse,
 	handleInput,
+	handlePaste,
+	handlePasteCancel,
 	handlePing,
 	handleResize,
 	handleSpawn,
@@ -122,6 +126,20 @@ export interface WsRouteOptions {
 /** What `writerCheck` found: the holder, or why the request may not write. */
 export type WriterCheck = "holder" | "unknown-client" | "not-holder";
 
+/**
+ * What a terminal's write lock changing hands means beyond the lock: queued
+ * uploads may go or wait (#835), and a paste its owner no longer holds stops
+ * (#1014).
+ */
+export function onWriteLockChange(
+	channelId: string,
+	transfers: { lockChanged(channelId: string): void } | undefined,
+	sessionManager: { pasteLockChanged(channelId: string): void },
+): void {
+	transfers?.lockChanged(channelId);
+	sessionManager.pasteLockChanged(channelId);
+}
+
 export async function registerWsRoutes(
 	server: FastifyInstance,
 	sessionManager: SessionManager,
@@ -147,7 +165,7 @@ export async function registerWsRoutes(
 			}
 		},
 		onForce: (force) => server.security.writeLockForced(force),
-		onChange: (channelId) => transfers?.lockChanged(channelId),
+		onChange: (channelId) => onWriteLockChange(channelId, transfers, sessionManager),
 	});
 	// A hub stopping keeps no lock for a holder that left: the grace ends with it.
 	server.addHook("onClose", async () => {
@@ -220,8 +238,10 @@ export async function registerWsRoutes(
 
 		// End the session now. What it holds, a write lock above all, is released
 		// before the close handshake, which a client that ignores it can drag out
-		// for as long as the WebSocket library waits.
-		const end = (code: number, reason: string) => {
+		// for as long as the WebSocket library waits. A socket refused at AUTH ends
+		// here too, without a code when it was told why in AUTH_FAIL: its AUTH
+		// deadline is cleared and nothing it sends meanwhile is acted on.
+		const end = (code?: number, reason?: string) => {
 			if (ending) return;
 			ending = true;
 			release();
@@ -300,7 +320,7 @@ export async function registerWsRoutes(
 					server.log.warn({ clientId }, "ws-auth: first message must be AUTH");
 					server.security.authFailed({ via: "ws", sourceIp, clientId, reason: "not_auth_first" });
 					client.send({ type: "AUTH_FAIL", message: "First message must be AUTH" });
-					socket.close();
+					end();
 					return;
 				}
 
@@ -316,7 +336,7 @@ export async function registerWsRoutes(
 						reason: "database_unavailable",
 					});
 					client.send({ type: "AUTH_FAIL", message: "Database unavailable" });
-					socket.close();
+					end();
 					return;
 				}
 				// DB-backed validation: checks expiry and revocation status
@@ -328,7 +348,7 @@ export async function registerWsRoutes(
 					// token and reconnect, which succeeds once the store answers. Nor
 					// is it an authentication failure in the security log: the token
 					// was not judged, and reportTokenStore records the outage once.
-					socket.close(WS_CLOSE_TRY_AGAIN_LATER, "AUTH_UNAVAILABLE");
+					end(WS_CLOSE_TRY_AGAIN_LATER, "AUTH_UNAVAILABLE");
 					return;
 				}
 				if (validation.status === "invalid") {
@@ -344,7 +364,7 @@ export async function registerWsRoutes(
 						tokenStatus: validation.reason,
 					});
 					client.send({ type: "AUTH_FAIL", message: "Invalid token" });
-					socket.close();
+					end();
 					return;
 				}
 				// Best effort, as on the REST path: the credential has been checked,
@@ -417,6 +437,12 @@ export async function registerWsRoutes(
 					break;
 				case "INPUT":
 					handleInput(msg as InputMessage, ctx);
+					break;
+				case "PASTE":
+					handlePaste(msg as PasteMessage, ctx);
+					break;
+				case "PASTE_CANCEL":
+					handlePasteCancel(msg as PasteCancelMessage, ctx);
 					break;
 				case "RESIZE":
 					handleResize(msg as ResizeMessage, ctx);

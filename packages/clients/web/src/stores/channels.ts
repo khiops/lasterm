@@ -116,6 +116,17 @@ const SPAWN_DEADLINE_MS = 15_000;
 const SPAWN_PROMPTED_DEADLINE_MS = 300_000;
 
 /**
+ * How long it waits once the hub says it is connecting the host (#1034).
+ *
+ * Each wait of a connection has its own bound on the hub, up to 120 s when the
+ * host sets one, and a connection may dial more than once (a host key or a
+ * password asked again): the hub answers when it is done. This is only for a
+ * hub that stopped answering with its socket still open; a socket that closes
+ * ends the wait at once.
+ */
+const SPAWN_CONNECTING_DEADLINE_MS = 1_800_000;
+
+/**
  * A spawn's rejection, as a sentence for the pane. The hub's messages are
  * written for people; the code in front of them (`SSH_CONNECT_FAILED: …`) is
  * for logs.
@@ -130,6 +141,10 @@ export interface SpawnedTerminal {
 	channelId: string;
 	cols: number;
 	rows: number;
+	/** What its SPAWN_OK said of the agent's input (#1012); false from an older hub. */
+	adaptsInput: boolean;
+	/** What that SPAWN_OK said of pastes (#1014). */
+	streamsPaste: boolean;
 }
 
 /** The one spawn a pending id has sent: in flight, or what came of it. */
@@ -143,6 +158,83 @@ interface PendingSpawn {
 	readonly hostId: string;
 	holders: number;
 	run: PendingSpawnRun | null;
+	/**
+	 * Left by the page before this one (#992). Nothing starts it by itself: not
+	 * the load, not the connection coming back, not a pane remounted over it.
+	 * Only a click on the pane does.
+	 */
+	readonly restored: boolean;
+	/** A run of it was started, so its SPAWN may have gone out. */
+	sent: boolean;
+}
+
+/**
+ * The code of the failure a restored spawn shows: the page that owed it went
+ * away before its terminal was known to have started (#992). No hub sends it.
+ */
+export const SPAWN_INTERRUPTED = "SPAWN_INTERRUPTED";
+
+/** What a restored spawn's pane is told: whether its SPAWN can have gone out. */
+export interface InterruptedSpawnError extends Error {
+	code: typeof SPAWN_INTERRUPTED;
+	/** No SPAWN went out: nothing can have started, so starting it duplicates nothing. */
+	neverSent: boolean;
+}
+
+/**
+ * The spawns new terminals owe, kept for the next page (#992): the layout is
+ * saved with their pending ids, and a page that finds one in it with no record
+ * took it for a terminal and said it was gone.
+ */
+const PENDING_SPAWNS_KEY = "lasterm:pending-spawns";
+
+interface StoredSpawn {
+	hostId: string;
+	sent: boolean;
+}
+
+/** The spawns the page before this one owed. Anything unreadable is left out. */
+function loadStoredSpawns(): Map<string, StoredSpawn> {
+	const stored = new Map<string, StoredSpawn>();
+	let parsed: unknown;
+	try {
+		const raw = localStorage.getItem(PENDING_SPAWNS_KEY);
+		if (raw === null) return stored;
+		parsed = JSON.parse(raw);
+	} catch {
+		return stored;
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return stored;
+	for (const [tempId, entry] of Object.entries(parsed)) {
+		if (typeof entry !== "object" || entry === null) continue;
+		const { hostId, sent } = entry as { hostId?: unknown; sent?: unknown };
+		if (typeof hostId !== "string" || hostId === "") continue;
+		// Anything but a plain false may have sent its SPAWN: it is read as the
+		// one that claims less.
+		stored.set(tempId, { hostId, sent: sent !== false });
+	}
+	return stored;
+}
+
+/** Write the spawns still owed. Throws what `localStorage` throws. */
+function writeStoredSpawns(spawns: ReadonlyMap<string, StoredSpawn>): void {
+	localStorage.setItem(PENDING_SPAWNS_KEY, JSON.stringify(Object.fromEntries(spawns)));
+}
+
+/** A restored spawn's run: failed, with the reason its pane shows. */
+function interruptedRun(neverSent: boolean): PendingSpawnRun {
+	const error = Object.assign(
+		new Error(
+			neverSent
+				? "This terminal was never started."
+				: "The window reloaded before this terminal's start was confirmed.",
+		),
+		{ code: SPAWN_INTERRUPTED, neverSent },
+	) as InterruptedSpawnError;
+	const outcome = Promise.reject<SpawnedTerminal>(error);
+	// No pane may ever show it: one the layout no longer holds is pruned.
+	outcome.catch(() => {});
+	return { state: "failed", outcome };
 }
 
 /** Why the last attempt to bring a terminal back failed. */
@@ -962,10 +1054,98 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * it is in flight. The panes count themselves in and out, so it is no
 	 * reactive state.
 	 */
-	const pendingSpawns = new Map<string, PendingSpawn>();
+	const pendingSpawns = new Map<string, PendingSpawn>(
+		[...loadStoredSpawns()].map(([tempId, { hostId, sent }]) => [
+			tempId,
+			{ hostId, holders: 0, run: interruptedRun(!sent), restored: true, sent },
+		]),
+	);
+
+	/** The records as the next page is to find them. */
+	function storedSpawns(except?: string): Map<string, StoredSpawn> {
+		const spawns = new Map<string, StoredSpawn>();
+		for (const [tempId, { hostId, sent }] of pendingSpawns) {
+			if (tempId !== except) spawns.set(tempId, { hostId, sent });
+		}
+		return spawns;
+	}
+
+	/**
+	 * Keep the records for the next page. A storage that refuses is ignored, as
+	 * the layout's is: no pane of this page depends on it, and the next page finds
+	 * what was last accepted.
+	 */
+	function storePendingSpawns(): void {
+		try {
+			writeStoredSpawns(storedSpawns());
+		} catch {
+			// Nothing to do: the next page finds what was last written.
+		}
+	}
+
+	/**
+	 * The next page must never offer to start a terminal whose SPAWN went out:
+	 * the hub may have made it. If the write saying so is refused, a refused
+	 * write keeps the value before it, which says no SPAWN went out, so the
+	 * record is taken out of storage instead, whole key if need be, and that page
+	 * knows nothing of it, as before #992. A storage that refuses even the removal
+	 * keeps what it last accepted.
+	 */
+	function storeSent(tempId: string): void {
+		try {
+			writeStoredSpawns(storedSpawns());
+			return;
+		} catch {
+			// Below.
+		}
+		try {
+			writeStoredSpawns(storedSpawns(tempId));
+			return;
+		} catch {
+			// Below.
+		}
+		try {
+			localStorage.removeItem(PENDING_SPAWNS_KEY);
+		} catch {
+			// Refused too: what it last accepted stays, which nothing here can change.
+		}
+	}
 
 	function registerPendingSpawn(tempId: string, hostId: string): void {
-		pendingSpawns.set(tempId, { hostId, holders: 0, run: null });
+		pendingSpawns.set(tempId, { hostId, holders: 0, run: null, restored: false, sent: false });
+		storePendingSpawns();
+	}
+
+	/** Whether `tempId`'s record was left by the page before this one (#992). */
+	function pendingSpawnRestored(tempId: string): boolean {
+		return pendingSpawns.get(tempId)?.restored === true;
+	}
+
+	/**
+	 * A load forgets the records of ids its saved layout no longer holds: no pane
+	 * will show them (#992).
+	 */
+	function forgetPendingSpawnsNotIn(heldIds: ReadonlySet<string>): void {
+		let forgot = false;
+		for (const tempId of [...pendingSpawns.keys()]) {
+			if (heldIds.has(tempId)) continue;
+			pendingSpawns.delete(tempId);
+			forgot = true;
+		}
+		if (forgot) storePendingSpawns();
+	}
+
+	/**
+	 * A Retry on a restored record that ended before its SPAWN was asked for,
+	 * its connection refused: the record shows that failure again, so a pane
+	 * remounted over the id waits for a click too, instead of spawning (#992).
+	 */
+	function failRestoredSpawnBeforeSend(tempId: string, err: unknown): void {
+		const record = pendingSpawns.get(tempId);
+		if (record === undefined || !record.restored || record.run !== null) return;
+		const outcome = Promise.reject<SpawnedTerminal>(err);
+		outcome.catch(() => {});
+		record.run = { state: "failed", outcome };
 	}
 
 	/**
@@ -989,7 +1169,9 @@ export const useChannelsStore = defineStore("channels", () => {
 
 	function forgetIfUnheld(tempId: string, record: PendingSpawn): void {
 		if (record.holders > 0 || record.run?.state === "running") return;
-		if (pendingSpawns.get(tempId) === record) pendingSpawns.delete(tempId);
+		if (pendingSpawns.get(tempId) !== record) return;
+		pendingSpawns.delete(tempId);
+		storePendingSpawns();
 	}
 
 	/**
@@ -1004,13 +1186,29 @@ export const useChannelsStore = defineStore("channels", () => {
 		const record = pendingSpawns.get(tempId);
 		if (record === undefined) return null;
 		if (record.run !== null) return record.run;
+		// Its SPAWN may go out from here: a page that loads it after this must not
+		// offer to start a second terminal (#992). Written for every run: one that
+		// a refused write took out of storage comes back once storage accepts.
+		record.sent = true;
+		storeSent(tempId);
+		// What its SPAWN_OK said of the agent's input (#1012).
+		let adaptsInput = false;
+		let streamsPaste = false;
 		const run: PendingSpawnRun = {
 			state: "running",
-			outcome: spawnChannel(record.hostId, { cols, rows, select: false }).then(
+			outcome: spawnChannel(record.hostId, {
+				cols,
+				rows,
+				select: false,
+				onAdaptsInput: (adapts, streams) => {
+					adaptsInput = adapts;
+					streamsPaste = streams;
+				},
+			}).then(
 				(channelId) => {
 					run.state = "succeeded";
 					forgetIfUnheld(tempId, record);
-					return { channelId, cols, rows };
+					return { channelId, cols, rows, adaptsInput, streamsPaste };
 				},
 				(err: unknown) => {
 					run.state = "failed";
@@ -1073,6 +1271,8 @@ export const useChannelsStore = defineStore("channels", () => {
 			 * disconnected is not connected again by it (#648).
 			 */
 			automatic?: boolean;
+			/** Told what the SPAWN_OK said of the agent's input (#1012), before it resolves. */
+			onAdaptsInput?: (adaptsInput: boolean, streamsPaste: boolean) => void;
 		},
 	): Promise<string> {
 		const sessionStore = useSessionStore();
@@ -1084,17 +1284,37 @@ export const useChannelsStore = defineStore("channels", () => {
 			let unsubOk: () => void;
 			let unsubErr: () => void;
 			let unsubPrompts: Array<() => void> = [];
+			let unsubConnecting: () => void = () => {};
+			let unsubDisconnect: () => void = () => {};
 
 			const stopWaiting = (): void => {
 				unsubOk();
 				unsubErr();
 				for (const unsub of unsubPrompts) unsub();
+				unsubConnecting();
+				unsubDisconnect();
 			};
 
+			let deadline = Date.now() + SPAWN_DEADLINE_MS;
 			let timer = setTimeout(() => {
 				stopWaiting();
-				reject(new Error("SPAWN timeout — no SPAWN_OK after 10s"));
+				reject(new Error(`SPAWN timeout — no SPAWN_OK after ${SPAWN_DEADLINE_MS / 1000}s`));
 			}, SPAWN_DEADLINE_MS);
+			// Waits longer, for `why`: never shorter than a hold already given, so
+			// that a prompt shown while the hub connects keeps the connection's
+			// wait, and a late one gets its own in full (#1034).
+			const holdFor = (ms: number, why: string): void => {
+				const until = Date.now() + ms;
+				if (until <= deadline) return;
+				deadline = until;
+				clearTimeout(timer);
+				timer = setTimeout(() => {
+					stopWaiting();
+					reject(new Error(why));
+				}, ms);
+			};
+			/** The hub said it is connecting the host for this SPAWN (#1034). */
+			let connecting = false;
 
 			// The password or passphrase its host last asked for, if any: a refusal
 			// because none was given says which (#875).
@@ -1107,15 +1327,16 @@ export const useChannelsStore = defineStore("channels", () => {
 			// SPAWN_OK, or the ERROR the hub sends when the answer was no.
 			type Prompt = { type: string; hostId?: string; promptType?: string };
 			const holdForAnAnswer = (msg: Prompt): void => {
-				if (msg.hostId !== undefined && msg.hostId !== hostId) return;
-				if (msg.promptType === "password" || msg.promptType === "passphrase") {
+				// While the hub connects the host, a prompt for the jump the
+				// connection goes through names the jump, not this host (#1034).
+				if (!connecting && msg.hostId !== undefined && msg.hostId !== hostId) return;
+				if (
+					(msg.hostId === undefined || msg.hostId === hostId) &&
+					(msg.promptType === "password" || msg.promptType === "passphrase")
+				) {
 					asked = msg.promptType;
 				}
-				clearTimeout(timer);
-				timer = setTimeout(() => {
-					stopWaiting();
-					reject(new Error("The hub stopped answering while a prompt was open."));
-				}, SPAWN_PROMPTED_DEADLINE_MS);
+				holdFor(SPAWN_PROMPTED_DEADLINE_MS, "The hub stopped answering while a prompt was open.");
 			};
 			unsubPrompts = (["HOST_VERIFY", "AUTH_PROMPT", "AGENT_BINARY_VERIFY"] as const).map((type) =>
 				sessionStore.wsClient.on(type, (msg) => {
@@ -1152,6 +1373,10 @@ export const useChannelsStore = defineStore("channels", () => {
 					// on another host than the one in view reads its profile and its
 					// theme from this, and would take the host in view's meanwhile.
 					registerChannelHost(msg.channelId, hostId);
+					opts?.onAdaptsInput?.(
+						"adaptsInput" in msg && msg.adaptsInput === true,
+						"streamsPaste" in msg && msg.streamsPaste === true,
+					);
 					refreshAfterSpawn(hostId);
 					if (opts?.select !== false) {
 						selectChannel(msg.channelId);
@@ -1163,7 +1388,7 @@ export const useChannelsStore = defineStore("channels", () => {
 			// Cancel the spawn wait immediately on any ERROR — the hub sends ERROR
 			// (e.g. SSH_CONNECT_FAILED, SPAWN_FAILED) instead of SPAWN_OK when the
 			// session cannot be established. Without this the caller would silently
-			// wait 10 s before seeing the timeout message.
+			// wait out SPAWN_DEADLINE_MS before seeing the timeout message.
 			unsubErr = sessionStore.wsClient.on("ERROR", (msg) => {
 				if (msg.type === "ERROR") {
 					if (notOurs(msg)) return;
@@ -1188,6 +1413,23 @@ export const useChannelsStore = defineStore("channels", () => {
 						}),
 					);
 				}
+			});
+
+			// The hub connects the host before it answers, each wait under its own
+			// bound: the pane waits for that answer rather than its 15 s, and gives
+			// up at once if the socket it would come on closes (#1034).
+			unsubConnecting = sessionStore.wsClient.on("HOST_CONNECTING", (msg) => {
+				if (msg.type !== "HOST_CONNECTING" || notOurs(msg) || connecting) return;
+				connecting = true;
+				holdFor(
+					SPAWN_CONNECTING_DEADLINE_MS,
+					"The hub stopped answering while it connected the host.",
+				);
+				unsubDisconnect = sessionStore.wsClient.onDisconnect(() => {
+					clearTimeout(timer);
+					stopWaiting();
+					reject(new Error("The connection to the hub was lost while it connected the host."));
+				});
 			});
 
 			// Auto-assign to first group when configured
@@ -1689,6 +1931,9 @@ export const useChannelsStore = defineStore("channels", () => {
 		runPendingSpawn,
 		pendingSpawnRun,
 		clearFailedPendingSpawn,
+		pendingSpawnRestored,
+		forgetPendingSpawnsNotIn,
+		failRestoredSpawnBeforeSend,
 		registerChannelHost,
 		addGroup,
 		removeGroup,

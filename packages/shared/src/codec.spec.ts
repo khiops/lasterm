@@ -170,6 +170,77 @@ describe("encodeMessage / decodeMessage round-trip", () => {
 		expect(decoded.lastSeq).toBe(100);
 	});
 
+	// The snapshot's terminal state and the UI's adaptsInput flag (#1012).
+	it("converts the snapshot's terminal state and adaptsInput to snake_case on the wire, and back", () => {
+		const msg = {
+			type: "ATTACH_OK",
+			channelId: "chan-1",
+			snapshot: {
+				serialized: "S",
+				cols: 80,
+				rows: 24,
+				cursorX: 0,
+				cursorY: 0,
+				alternateScreen: true,
+				inputModes: "\u001b[?2004h",
+			},
+			adaptsInput: true,
+		};
+		expect(toSnakeCase(msg)).toEqual({
+			type: "ATTACH_OK",
+			channel_id: "chan-1",
+			snapshot: {
+				serialized: "S",
+				cols: 80,
+				rows: 24,
+				cursor_x: 0,
+				cursor_y: 0,
+				alternate_screen: true,
+				input_modes: "\u001b[?2004h",
+			},
+			adapts_input: true,
+		});
+		expect(decodeMessage(encodeMessage(msg as unknown as ProtocolMessage))).toEqual(msg);
+	});
+
+	// SH1: the paste messages' fields and the UI's streamsPaste flag (#1014).
+	it("converts the paste fields and streamsPaste to snake_case on the wire, and back", () => {
+		const chunk: ProtocolMessage = {
+			type: "PASTE",
+			channelId: "chan-1",
+			pasteId: 3,
+			seq: 7,
+			data: new Uint8Array([0x61]),
+			last: true,
+		};
+		expect(toSnakeCase({ ...chunk, data: "d" })).toEqual({
+			type: "PASTE",
+			channel_id: "chan-1",
+			paste_id: 3,
+			seq: 7,
+			data: "d",
+			last: true,
+		});
+		expect(decodeMessage(encodeMessage(chunk))).toEqual(chunk);
+		const closed: ProtocolMessage = {
+			type: "PASTE_CLOSED",
+			channelId: "chan-1",
+			pasteId: 3,
+			reason: "overflow",
+			written: 98_304,
+		};
+		expect(decodeMessage(encodeMessage(closed))).toEqual(closed);
+		const spawnOk = {
+			type: "SPAWN_OK",
+			channelId: "c",
+			hostId: "h",
+			sessionId: "s",
+			streamsPaste: true,
+		};
+		expect(toSnakeCase(spawnOk)).toMatchObject({ streams_paste: true });
+		expect(decodeMessage(encodeMessage(spawnOk as ProtocolMessage))).toEqual(spawnOk);
+	});
+
 	it("round-trips a WRITE_LOCK message with null holder", () => {
 		const msg: ProtocolMessage = {
 			type: "WRITE_LOCK",

@@ -1,13 +1,15 @@
 import type { EndedOutput, TerminalProfile, UiAttachOkMessage } from "@lasterm/shared";
-import { sanitizeTitle } from "@lasterm/shared";
+import { MAX_INPUT_SIZE, PASTE_MAX_BYTES, sanitizeTitle } from "@lasterm/shared";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { Terminal } from "@xterm/xterm";
-import { type Ref, ref } from "vue";
+import { type MaybeRefOrGetter, type Ref, ref, shallowRef, toValue, watch } from "vue";
 import type { IWsClient } from "../services/ws-client.js";
 import { useChannelsStore } from "../stores/channels.js";
 import { useThemeStore } from "../stores/theme.js";
+import { useToastStore } from "../stores/toast.js";
 import { terminalScrollbarWidth } from "../utils/terminal-scrollbar.js";
+import { PasteStream, pasteInProgress } from "./paste-stream.js";
 import { awaitTerminalFont } from "./terminal-font.js";
 import { useTerminalSearch } from "./useTerminalSearch.js";
 
@@ -31,6 +33,43 @@ const DEFAULT_XTERM_SCROLLBAR_WIDTH = 14;
  */
 const MOUSE_REPORTING_OFF = "\u001b[?1000l";
 
+/** A paste's markers (#1012). */
+const PASTE_START = "\u001b[200~";
+const PASTE_END = "\u001b[201~";
+
+/**
+ * A pasted text with no paste marker left in it (#1012). One pass: each
+ * character is kept, and a marker is dropped as soon as the kept text ends with
+ * one, so that one formed again from the pieces around another is dropped too.
+ * The two markers cannot overlap (each starts with the text's only ESC and
+ * ends with `~`), so this leaves what removing them until none remains would,
+ * in time linear in the text, however deeply its markers nest.
+ */
+function withoutPasteMarkers(text: string): string {
+	const kept: string[] = [];
+	for (let i = 0; i < text.length; i++) {
+		const unit = text.charAt(i);
+		kept.push(unit);
+		const n = kept.length;
+		if (
+			unit === "~" &&
+			n >= PASTE_START.length &&
+			kept[n - 6] === "\u001b" &&
+			kept[n - 5] === "[" &&
+			kept[n - 4] === "2" &&
+			kept[n - 3] === "0" &&
+			(kept[n - 2] === "0" || kept[n - 2] === "1")
+		) {
+			kept.length = n - PASTE_START.length;
+		}
+	}
+	return kept.join("");
+}
+
+/** What xterm reports on a focus change, when the program asked for it (`?1004`). */
+const FOCUS_IN = "\u001b[I";
+const FOCUS_OUT = "\u001b[O";
+
 /** What an ATTACH_OK gives the pane that asked: everything else it already wrote. */
 export interface AttachAnswer {
 	writeLockHolder: string | null;
@@ -45,12 +84,17 @@ export interface AttachAnswer {
  */
 export const ATTACH_SUPERSEDED = "ATTACH_SUPERSEDED";
 
+/** RIS: xterm resets the terminal when it parses it, after what it was sent before. */
+const FULL_RESET = "\u001bc";
+
 /** An attach the hub has not answered yet. */
 interface PendingAttach {
 	request: number;
 	channelId: string;
 	/** Reconnect and Restart keep the screen; the hub's answer does not replace it. */
 	preserveContent: boolean;
+	/** Keeping the screen, a live answer replaces it all the same (#1010). */
+	replaceIfLive: boolean;
 	/** Keep the screen if the hub answers that the terminal has ended. */
 	keepScreenIfEnded: boolean;
 	stillWanted: () => boolean;
@@ -63,19 +107,56 @@ export function useTerminal(
 	containerRef: Ref<HTMLElement | null>,
 	wsClient: IWsClient,
 	profile?: TerminalProfile,
-	/** Explicit per-host theme name from host.profileJson (SC-03 override). */
-	hostThemeName?: string,
+	/**
+	 * The theme the pane's host names in its own profile (SC-03), read again
+	 * whenever it changes: the pane's host, or that host's profile (#997).
+	 */
+	hostThemeName?: MaybeRefOrGetter<string | undefined>,
 ) {
-	const terminal = ref<Terminal | null>(null);
+	/**
+	 * The pane's xterm. Each one holds one terminal's output for its whole life:
+	 * the pane makes a new one before it writes another terminal's (#966).
+	 * Shallow, so that it yields the xterm itself, which work tied to one xterm
+	 * compares against.
+	 */
+	const terminal = shallowRef<Terminal | null>(null);
 	const fitAddon = new FitAddon();
 	const search = useTerminalSearch();
 	let channelId: string | null = null;
 	/**
-	 * The terminal whose output the screen holds: the one attached last, or
-	 * the ended one whose last output it shows (#927). A refusal with nothing
-	 * to show keeps a screen that is already that terminal's.
+	 * The terminal whose output the screen holds: the one attached last, the
+	 * one listened to over a screen that held none, or the ended one whose last
+	 * output it shows (#927). A refusal with nothing to show keeps a screen that
+	 * is already that terminal's. Null for an xterm given no terminal yet.
 	 */
 	let shownId: string | null = null;
+	/**
+	 * The pane has asked for a terminal other than the one its xterm holds, and
+	 * that xterm is still the pane's: what it reports about a terminal (a bell, a
+	 * title, a scroll) is about the one left, and goes nowhere (#966).
+	 */
+	let leftHeld = false;
+	/**
+	 * Whether the agent that takes the shown terminal's input writes paste
+	 * markers and cursor keys in its program's form, as the hub said on the
+	 * SPAWN_OK or ATTACH_OK that bound it (#1012). The pane then brackets its
+	 * pastes itself; otherwise xterm pastes as it always did.
+	 */
+	let adaptsInput = false;
+	/**
+	 * Whether that agent takes a paste as PASTE chunks, as the same answer said
+	 * (#1014). The pane then streams its pastes, of any size up to the bound.
+	 */
+	let streamsPaste = false;
+	/** The profile applied last, which a new xterm is made with. */
+	let currentProfile = profile;
+	/** Stops following the host's theme, once the pane is closed. */
+	let stopHostTheme: (() => void) | null = null;
+	/** The terminal colours the theme subscription gave last: a new xterm takes them. */
+	let lastTheme: Record<string, string> | null = null;
+	/** What `TerminalPane` wants told of every xterm's bells and scrolls. */
+	const bellListeners: Array<(heldId: string) => void> = [];
+	const scrollListeners: Array<(term: Terminal) => void> = [];
 	/**
 	 * Set while the pane shows an ended terminal's last output: the size that
 	 * output was drawn at, which the pane keeps whatever its write lock says,
@@ -94,12 +175,13 @@ export function useTerminal(
 	/** The pane is closed: it asks for no terminal and waits for no answer (#929). */
 	let disposed = false;
 	/**
-	 * Replays xterm is parsing now (#927). xterm parses a write later than it
-	 * takes it, or inside `write()` right after user input, and calls each
+	 * Replays each xterm is parsing now (#927). xterm parses a write later than
+	 * it takes it, or inside `write()` right after user input, and calls each
 	 * write's callback once that write is parsed: markers written around a
-	 * replay therefore bracket its parse, whichever way it goes.
+	 * replay therefore bracket its parse, whichever way it goes. Counted per
+	 * xterm: one the pane replaced may still parse its markers, or never (#966).
 	 */
-	let replaysParsing = 0;
+	const replaysParsing = new WeakMap<Terminal, number>();
 	let resizeObserver: ResizeObserver | null = null;
 	let onScrollbarChanged: (() => void) | null = null;
 	/** Whether search matches are marked in the scrollbar gutter (profile). */
@@ -114,6 +196,66 @@ export function useTerminal(
 	 * Defaults to true so single-client setups work without auth.
 	 */
 	const canWrite = ref(true);
+
+	/** Send typed input as INPUT, while the pane may: socket up, write lock held. */
+	function sendInput(data: string): void {
+		sendInputBytes(new TextEncoder().encode(data));
+	}
+
+	function sendInputBytes(data: Uint8Array): void {
+		if (channelId && wsClient.isConnected && canWrite.value) {
+			wsClient.send({ type: "INPUT", channelId, data });
+		}
+	}
+
+	/** This pane's paste on its way as PASTE chunks (#1014). */
+	const pasteStream = new PasteStream({
+		send: (msg) => wsClient.send(msg),
+		connected: () => wsClient.isConnected,
+		canSend: () => Boolean(channelId && wsClient.isConnected && canWrite.value),
+		toast: {
+			show: (level, text, durationMs, action) =>
+				useToastStore().show(level, text, durationMs, action),
+			update: (id, text) => useToastStore().update(id, text),
+			dismiss: (id) => useToastStore().dismiss(id),
+		},
+		sendInput,
+	});
+	let pasteUnsubscribe: (() => void) | null = null;
+	// The write lock lost: a paste being sent stops, what was held with it goes.
+	watch(canWrite, (writable) => {
+		if (!writable) pasteStream.interrupt();
+	});
+
+	/**
+	 * A paste to an agent that streams pastes (#1014): the text without
+	 * markers, line ends as xterm sends them, UTF-8, at most PASTE_MAX_BYTES,
+	 * one paste at a time.
+	 */
+	function streamPaste(term: Terminal, clipboard: DataTransfer | null): void {
+		if (clipboard === null) return;
+		const toast = useToastStore();
+		if (pasteInProgress(channelId) !== null) {
+			toast.show("warning", "A paste is still being sent to this terminal.");
+			return;
+		}
+		const text = clipboard.getData("text/plain");
+		const unmarked = text.includes("\u001b") ? withoutPasteMarkers(text) : text;
+		const normalised = unmarked.replace(/\r?\n/g, "\r");
+		const bytes = new TextEncoder().encode(normalised);
+		if (bytes.byteLength > PASTE_MAX_BYTES) {
+			toast.show("warning", "This paste is too large to send (16 MiB at most).");
+			return;
+		}
+		if (bytes.byteLength === 0 || channelId === null || !wsClient.isConnected || !canWrite.value) {
+			return;
+		}
+		// As xterm's own paste: the selection clears and the view goes down to
+		// where the text is typed.
+		term.clearSelection();
+		term.scrollToBottom();
+		pasteStream.start(channelId, bytes);
+	}
 
 	/**
 	 * The size the PTY has, as far as this pane knows: the last one it sent, or
@@ -155,7 +297,6 @@ export function useTerminal(
 	 * null when stack is empty (fallback handled by useTabTitle).
 	 */
 	const currentDynamicTitle = ref<string | null>(null);
-	let titleChangeDispose: (() => void) | null = null;
 
 	/** Size xterm's scrollbar and ruler from the appearance setting and the profile. */
 	function applyScrollbarWidth(term: Terminal): void {
@@ -308,45 +449,76 @@ export function useTerminal(
 		);
 	}
 
-	function init(): { cols: number; rows: number } {
-		if (!containerRef.value) {
-			console.error("[useTerminal] containerRef is null — cannot init");
-			return { cols: 80, rows: 24 };
-		}
-
-		const p = profile;
-		const themeStore = useThemeStore();
-
-		// Per-host theme override (SC-03): use hostThemeName from host.profileJson
-		// if explicitly set. Otherwise use the runtime active theme.
-		const hostTheme = hostThemeName
-			? themeStore.availableThemes.find((t) => t.name === hostThemeName)
-			: undefined;
-		const initialColors = (hostTheme ?? themeStore.activeTheme)?.colors;
-		const initialXtermTheme = initialColors ? themeStore.toXtermTheme(initialColors) : {};
-
-		scrollbarMarkers = p?.scrollbarMarkers !== false; // default true
-		const term = new Terminal({
-			allowProposedApi: true,
-			allowTransparency: true,
+	/**
+	 * The xterm options a profile sets, alike for an xterm made with it and one
+	 * it is applied to later: an option set only at making stays as it was
+	 * when the profile changes (#998).
+	 */
+	function profileOptions(p: TerminalProfile | undefined) {
+		return {
 			cursorBlink: p?.cursorStyle !== "underline", // blink except underline (xterm default)
 			fontSize: p?.fontSize ?? DEFAULT_FONT_SIZE,
 			fontFamily: p?.fontFamily ?? DEFAULT_FONT_FAMILY,
 			cursorStyle: p?.cursorStyle ?? "block",
 			scrollback: p?.scrollback ?? 5000,
+		};
+	}
+
+	/** The theme the pane's host names, when the themes include it (SC-03). */
+	function hostTheme(): ReturnType<typeof useThemeStore>["availableThemes"][number] | undefined {
+		const name = toValue(hostThemeName);
+		return name ? useThemeStore().availableThemes.find((t) => t.name === name) : undefined;
+	}
+
+	/**
+	 * The terminal colours to draw with: the host's own theme if it has one,
+	 * else those the theme subscription gave last, else the active theme's.
+	 */
+	function themeInForce(): Record<string, string> {
+		const themeStore = useThemeStore();
+		const own = hostTheme();
+		if (own) return themeStore.toXtermTheme(own.colors);
+		if (lastTheme !== null) return lastTheme;
+		const colors = themeStore.activeTheme?.colors;
+		return colors ? themeStore.toXtermTheme(colors) : {};
+	}
+
+	/**
+	 * Make an xterm in the pane and make it the pane's: the first one at mount,
+	 * and each one that replaces it (#966). Every one is set up alike, from the
+	 * profile applied last and the theme in force. One that replaces another
+	 * starts at the old one's size and is sized by `layout()` after, since a
+	 * pane out of sight has none of its own to fit to.
+	 */
+	function makeXterm(container: HTMLElement, size?: { cols: number; rows: number }): Terminal {
+		const p = currentProfile;
+		const themeStore = useThemeStore();
+
+		scrollbarMarkers = p?.scrollbarMarkers !== false; // default true
+		const term = new Terminal({
+			allowProposedApi: true,
+			allowTransparency: true,
+			...profileOptions(p),
 			overviewRuler: {
 				width: terminalScrollbarWidth(themeStore.appearance.scrollbar, scrollbarMarkers),
 			},
-			theme: initialXtermTheme,
+			theme: themeInForce(),
+			...size,
 		});
 
 		term.loadAddon(fitAddon);
 		term.loadAddon(new Unicode11Addon());
 		term.unicode.activeVersion = "11";
-		term.open(containerRef.value);
+		term.open(container);
 		// Before the first fit, since what it counts is what the PTY is spawned with.
 		syncMeasuredFont(term);
-		fitAddon.fit();
+		if (size === undefined) {
+			fitAddon.fit();
+			search.init(term, { scrollbarMarkers });
+		} else {
+			search.rebind(term, { scrollbarMarkers });
+		}
+		terminal.value = term;
 		// A font arriving late changes the cell, and with it the count: fit again
 		// so the terminal and its PTY agree even when the wait above was skipped.
 		void refitWhenFontSettles(
@@ -354,23 +526,178 @@ export function useTerminal(
 			p?.fontFamily ?? DEFAULT_FONT_FAMILY,
 			p?.fontSize ?? DEFAULT_FONT_SIZE,
 		);
-		search.init(term, { scrollbarMarkers });
-		terminal.value = term;
+
+		// xterm answers a `?1004h` with a focus report at once, inside the call
+		// to its own handler (#1012). A replay's `?1004h` (the snapshot's input
+		// modes) arms this, and the report it makes is not sent: it is not news.
+		// A focus change the user makes, even while a long replay is parsed, and a
+		// program's own live `?1004h`, are sent as before.
+		// One report per `1004` in the sequence: xterm reports for each.
+		let replayFocusReports = 0;
+		term.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
+			if ((replaysParsing.get(term) ?? 0) > 0) {
+				replayFocusReports = params.filter((param) => param === 1004).length;
+			}
+			return false;
+		});
+
+		// The agent decides how a paste reaches its program (#1012): while it
+		// says so, the pane brackets every paste itself, one frame, its own
+		// markers taken out, and xterm pastes nothing of its own. An agent that
+		// streams pastes (#1014) gets them as PASTE chunks instead, unbracketed:
+		// it writes the markers itself.
+		term.element?.addEventListener(
+			"paste",
+			(event) => {
+				if (streamsPaste) {
+					event.stopPropagation();
+					event.preventDefault();
+					streamPaste(term, event.clipboardData);
+					return;
+				}
+				if (!adaptsInput) return;
+				event.stopPropagation();
+				event.preventDefault();
+				// No clipboard data: nothing to paste, as xterm sends nothing then.
+				if (event.clipboardData === null) return;
+				const text = event.clipboardData.getData("text/plain");
+				// Each UTF-16 unit left is at least one UTF-8 byte. A marker taken out
+				// is six units holding one ESC, and may join a CR to an LF, which then
+				// make one: a text too long even so is refused before any of it is copied.
+				let escapes = 0;
+				let crlfs = 0;
+				for (let at = 0; at < text.length; at++) {
+					const unit = text.charCodeAt(at);
+					if (unit === 0x1b) escapes++;
+					else if (unit === 0x0a && at > 0 && text.charCodeAt(at - 1) === 0x0d) crlfs++;
+				}
+				const tooLarge = () =>
+					useToastStore().show("warning", "This paste is too large to send (64 KiB at most).");
+				if (
+					text.length - 7 * escapes - crlfs + PASTE_START.length + PASTE_END.length >
+					MAX_INPUT_SIZE
+				) {
+					tooLarge();
+					return;
+				}
+				const stripped = escapes > 0 ? withoutPasteMarkers(text) : text;
+				const form = `${PASTE_START}${stripped.replace(/\r?\n/g, "\r")}${PASTE_END}`;
+				if (new TextEncoder().encode(form).byteLength > MAX_INPUT_SIZE) {
+					tooLarge();
+					return;
+				}
+				// xterm's own user-input path: the view goes to the bottom and the
+				// selection clears, as for a paste xterm makes, and the gate below
+				// sends it.
+				term.input(form, true);
+			},
+			{ capture: true },
+		);
 
 		// Keyboard input → send INPUT to hub (only when holding write lock)
 		term.onData((data: string) => {
-			if (channelId && wsClient.isConnected && canWrite.value) {
-				wsClient.send({
-					type: "INPUT",
-					channelId,
-					data: new TextEncoder().encode(data),
-				});
+			if (replayFocusReports > 0) {
+				if (data === FOCUS_IN || data === FOCUS_OUT) {
+					replayFocusReports--;
+					return;
+				}
+				replayFocusReports = 0;
 			}
+			// Behind a paste still being sent to this terminal, from this pane or
+			// another showing it, or its Ctrl+C (#1014).
+			if (pasteInProgress(channelId)?.takeInput(data)) return;
+			sendInput(data);
+		});
+
+		// Mouse reports in xterm's default encoding (no SGR) come as binary: each
+		// character is one byte, 0-255, which TextEncoder would turn into two
+		// above 127 (#1016).
+		// A report is useless late, so one made while a paste is being sent is
+		// dropped rather than spliced into it or held behind it (#1014).
+		term.onBinary((data: string) => {
+			if (pasteInProgress(channelId)) return;
+			const bytes = new Uint8Array(data.length);
+			for (let at = 0; at < data.length; at++) bytes[at] = data.charCodeAt(at) & 0xff;
+			sendInputBytes(bytes);
 		});
 
 		// Terminal resize → send RESIZE to hub (debounced to coalesce rapid
 		// resizes), when this pane decides the size and still has one of its own.
 		term.onResize(scheduleSync);
+
+		// Terminal title change (OSC 0/2) → push to title stack, unless the pane
+		// has left the terminal this xterm holds (#966).
+		term.onTitleChange((raw: string) => {
+			if (leftHeld) return;
+			const clean = sanitizeTitle(raw); // defense-in-depth
+			if (clean === "") {
+				// INV-09: empty title — don't push, show top of stack instead
+				return;
+			}
+			titleStack.push(clean);
+			if (titleStack.length > MAX_TITLE_STACK) {
+				titleStack.shift();
+			}
+			currentDynamicTitle.value = clean;
+		});
+
+		// A bell or a scroll is about the terminal this xterm holds, and only
+		// while the pane has not left it (#966).
+		term.onBell(() => {
+			const held = shownId;
+			if (leftHeld || held === null) return;
+			for (const listener of [...bellListeners]) listener(held);
+		});
+		term.onScroll(() => {
+			if (leftHeld) return;
+			for (const listener of [...scrollListeners]) listener(term);
+		});
+		return term;
+	}
+
+	/**
+	 * Give the pane a new xterm before it writes another terminal's output, and
+	 * dispose the one holding the terminal it left (#966). What that one still
+	 * parses (an answer to a query, a title, a mode, a bell, a scroll) then
+	 * reaches nothing: a disposed xterm emits nothing. The keyboard follows when
+	 * the old one had it.
+	 */
+	function replaceXterm(): void {
+		const old = terminal.value;
+		const container = containerRef.value;
+		if (old === null || container === null) return;
+		const hadKeyboard = old.element?.contains(document.activeElement) === true;
+		const term = makeXterm(container, { cols: old.cols, rows: old.rows });
+		if (hadKeyboard) term.focus();
+		old.dispose();
+		shownId = null;
+		leftHeld = false;
+		layout();
+	}
+
+	/**
+	 * The pane asks for a terminal other than the one its xterm holds: that
+	 * xterm's title, bells and scrolls are the left terminal's from now on, and
+	 * its titles leave the tab (#966).
+	 */
+	function leaveHeld(): void {
+		leftHeld = true;
+		// A paste still going to the terminal left stops there (#1014).
+		pasteStream.interrupt();
+		adaptsInput = false;
+		streamsPaste = false;
+		titleStack.length = 0;
+		currentDynamicTitle.value = null;
+	}
+
+	function init(): { cols: number; rows: number } {
+		if (!containerRef.value) {
+			console.error("[useTerminal] containerRef is null — cannot init");
+			return { cols: 80, rows: 24 };
+		}
+
+		const themeStore = useThemeStore();
+		const term = makeXterm(containerRef.value);
 
 		// The PTY's size changed: the pane draws at it unless it decides it (#831).
 		sizeUnsubscribe?.();
@@ -379,6 +706,21 @@ export function useTerminal(
 				takePtySize(msg.cols, msg.rows);
 			}
 		});
+
+		// A paste's answers, for the paste this pane is sending (#1014).
+		pasteUnsubscribe?.();
+		const offAck = wsClient.on("PASTE_ACK", (msg) => {
+			if (msg.type === "PASTE_ACK") pasteStream.onAck(msg);
+		});
+		const offClosed = wsClient.on("PASTE_CLOSED", (msg) => {
+			if (msg.type === "PASTE_CLOSED") pasteStream.onClosed(msg);
+		});
+		const offDown = wsClient.onDisconnect(() => pasteStream.interrupt());
+		pasteUnsubscribe = () => {
+			offAck();
+			offClosed();
+			offDown();
+		};
 
 		// What was typed went nowhere: the terminal takes no input, and its agent
 		// drops what it cannot queue. Said here, once per gap as the agent says
@@ -395,38 +737,24 @@ export function useTerminal(
 			layout();
 		});
 		resizeObserver.observe(containerRef.value);
+		// The xterm the pane has when the setting changes, not the one made first (#966).
 		onScrollbarChanged = (): void => {
-			applyScrollbarWidth(term);
+			const current = terminal.value;
+			if (current) applyScrollbarWidth(current);
 			layout();
 		};
 		window.addEventListener("nt:scrollbar-changed", onScrollbarChanged);
 
-		// Terminal title change (OSC 0/2) → push to title stack
-		titleChangeDispose?.();
-		const titleDisposable = term.onTitleChange((raw: string) => {
-			const clean = sanitizeTitle(raw); // defense-in-depth
-			if (clean === "") {
-				// INV-09: empty title — don't push, show top of stack instead
-				return;
-			}
-			titleStack.push(clean);
-			if (titleStack.length > MAX_TITLE_STACK) {
-				titleStack.shift();
-			}
-			currentDynamicTitle.value = clean;
-		});
-		titleChangeDispose = () => titleDisposable.dispose();
-
 		// Subscribe to global theme changes so all terminals update live.
 		// Per-host override (SC-03): if a host-specific theme is set, keep it.
 		themeUnsubscribe = themeStore.onTerminalThemeChange((xtermTheme) => {
-			if (terminal.value) {
-				if (hostTheme) {
-					terminal.value.options.theme = themeStore.toXtermTheme(hostTheme.colors);
-				} else {
-					terminal.value.options.theme = xtermTheme;
-				}
-			}
+			lastTheme = xtermTheme;
+			if (terminal.value) terminal.value.options.theme = themeInForce();
+		});
+		// The host's own theme follows the pane's host, that host's profile, and
+		// the themes fetched from the hub, which may come after the pane (#997).
+		stopHostTheme = watch(hostTheme, () => {
+			if (terminal.value) terminal.value.options.theme = themeInForce();
 		});
 
 		return { cols: term.cols, rows: term.rows };
@@ -437,6 +765,8 @@ export function useTerminal(
 	 * the terminal already listened to keeps the same listener.
 	 */
 	function listenTo(id: string): void {
+		// Listening writes: an xterm that held none holds this terminal now (#966).
+		if (shownId === null) shownId = id;
 		if (listeningTo === id && outputUnsubscribe !== null) return;
 		outputUnsubscribe?.();
 		listeningTo = id;
@@ -460,12 +790,18 @@ export function useTerminal(
 	 * Subscribe to OUTPUT messages for the given channel and write to terminal.
 	 * Call after init() and after a successful SPAWN.
 	 */
-	function attachChannel(id: string): void {
+	function attachChannel(
+		id: string,
+		opts?: { adaptsInput?: boolean; streamsPaste?: boolean },
+	): void {
 		// A spawn that completes after the pane closed: nothing to bind, and
 		// nothing may listen for a pane that is gone (#971).
 		if (disposed) return;
 		channelId = id;
 		shownId = id;
+		// As the SPAWN_OK that made it said (#1012, #1014).
+		adaptsInput = opts?.adaptsInput === true;
+		streamsPaste = opts?.streamsPaste === true;
 		leaveEndedSize();
 		listenTo(id);
 
@@ -544,16 +880,25 @@ export function useTerminal(
 	/**
 	 * The terminal attached. Its answer is written once for every attach that
 	 * waited on it, by the one that keeps least: the screen is replaced unless
-	 * every one of them keeps it (#929, #930).
+	 * every one of them keeps it (#929, #930), and one that keeps a copy from
+	 * the hub's memory does not keep it from a live answer (#1010).
 	 */
 	function takeAttachOk(msg: UiAttachOkMessage): void {
 		const waiting = answeredBy(msg.channelId);
 		if (waiting.length === 0 || !stillWanted(waiting)) return;
 		const id = msg.channelId;
 
+		// The xterm holds another terminal's output: this one gets a new one,
+		// before anything of it is written or sized, whatever the answer carries
+		// (#966).
+		if (shownId !== null && shownId !== id) replaceXterm();
 		// A terminal attached: the size rules of #831 apply again.
 		shownId = id;
 		leaveEndedSize();
+		// What the hub says of the agent that takes this terminal's input now
+		// (#1012, #1014); absent from an older hub.
+		adaptsInput = msg.adaptsInput === true;
+		streamsPaste = msg.streamsPaste === true;
 
 		// The PTY's size. A pane that does not decide it draws the screen below
 		// at that size, the one it was drawn for (#831). One that decides it
@@ -568,15 +913,30 @@ export function useTerminal(
 		// Restore the snapshot and its tail before binding the terminal: no
 		// RESIZE goes out while they are written. A replay: a bell in it
 		// already rang (#927).
-		const replaceScreen = waiting.some((entry) => !entry.preserveContent);
+		const replaceScreen = waiting.some(
+			(entry) => !entry.preserveContent || (entry.replaceIfLive && msg.cached !== true),
+		);
 		const tail = msg.tail ?? [];
+		// Listening while it waited (a re-attach that kept the screen, replaced
+		// because the answer is live, #1010), the xterm may not have parsed all
+		// it was sent yet, which the snapshot holds: a reset written after it
+		// clears it, where `reset()` would clear first and let it be parsed over
+		// the snapshot. The snapshot then sets the program's modes again (#1012).
+		const queuedOutput = listeningTo === id;
 		replay(() => {
 			const term = terminal.value;
 			if (!term || !replaceScreen) return;
 			if (msg.snapshot) {
-				term.reset();
+				if (queuedOutput) term.write(FULL_RESET);
+				else term.reset();
+				// The program's screen and input modes (#1012): the alternate screen
+				// before the screen is drawn into it, the modes after, and the tail
+				// after them, so that a mode the tail sets wins. An older agent
+				// sends neither.
+				if (msg.snapshot.alternateScreen === true) term.write("\u001b[?1049h");
 				const serialized = (msg.snapshot as { serialized?: string }).serialized;
 				if (serialized) term.write(serialized);
+				if (msg.snapshot.inputModes) term.write(msg.snapshot.inputModes);
 			}
 			for (const chunk of tail) {
 				term.write(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk as ArrayBuffer));
@@ -640,6 +1000,11 @@ export function useTerminal(
 		// decision to make by reading a sentence, which changes.
 		const refusal = Object.assign(new Error(msg.message ?? msg.code), { code: msg.code });
 		try {
+			// An answer about another terminal than the one the xterm holds: a new
+			// xterm, so that nothing of the one left stays under this one's card
+			// (#966). Asked over that other terminal's screen, none of the attaches
+			// waiting keeps the screen (`reattachChannel`).
+			if (shownId !== null && shownId !== first.channelId) replaceXterm();
 			if (msg.code === "CHANNEL_DEAD") {
 				const keepScreen = waiting.every(
 					(entry) => entry.preserveContent || entry.keepScreenIfEnded,
@@ -689,6 +1054,12 @@ export function useTerminal(
 			/** Keep the screen and write what the terminal prints meanwhile (Reconnect, Restart). */
 			preserveContent?: boolean;
 			/**
+			 * Keeping the screen, replace it if the hub answers live: it is a copy
+			 * from the hub's memory, older than the agent's snapshot, which holds
+			 * everything the terminal printed before it (#1010, #931).
+			 */
+			replaceIfLive?: boolean;
+			/**
 			 * Keep the screen if the hub answers that the terminal has ended; an
 			 * ATTACH_OK replaces it as usual. For a pane over an ending it watched.
 			 */
@@ -708,7 +1079,13 @@ export function useTerminal(
 		// itself and resizes go nowhere until an answer binds this one, rather
 		// than to the terminal the pane left (#929).
 		if (channelId !== null && channelId !== id) channelId = null;
-		const preserveContent = opts?.preserveContent === true;
+		// The xterm holds another terminal: what it still reports is that one's,
+		// and there is no screen of this one's to keep, so the attach replaces it
+		// (#966). Asking again for the terminal it holds takes its reports again.
+		const elsewhere = shownId !== null && shownId !== id;
+		if (elsewhere) leaveHeld();
+		else if (shownId === id) leftHeld = false;
+		const preserveContent = opts?.preserveContent === true && !elsewhere;
 		// Keeping the screen, the pane writes what the terminal prints while it
 		// waits: the snapshot that holds it is not written (#930). Any other
 		// attach writes the snapshot, which holds it; while one waits for this
@@ -728,7 +1105,8 @@ export function useTerminal(
 				request,
 				channelId: id,
 				preserveContent,
-				keepScreenIfEnded: opts?.keepScreenIfEnded === true,
+				replaceIfLive: opts?.replaceIfLive === true,
+				keepScreenIfEnded: opts?.keepScreenIfEnded === true && !elsewhere,
 				stillWanted: opts?.stillWanted ?? (() => true),
 				timer: setTimeout(() => onDeadline(entry), 10_000),
 				resolve,
@@ -802,17 +1180,18 @@ export function useTerminal(
 			return;
 		}
 		term.write("", () => {
-			replaysParsing++;
+			replaysParsing.set(term, (replaysParsing.get(term) ?? 0) + 1);
 		});
 		write();
 		term.write("", () => {
-			replaysParsing--;
+			replaysParsing.set(term, (replaysParsing.get(term) ?? 0) - 1);
 		});
 	}
 
-	/** Whether xterm is parsing a replay now: a bell it reports is not news. */
+	/** Whether the pane's xterm is parsing a replay now: a bell it reports is not news. */
 	function bellMuted(): boolean {
-		return replaysParsing > 0;
+		const term = terminal.value;
+		return term !== null && (replaysParsing.get(term) ?? 0) > 0;
 	}
 
 	/** Turn mouse reporting off in this pane's xterm, as over an ended terminal (#927). */
@@ -867,12 +1246,10 @@ export function useTerminal(
 
 	/** Re-apply profile options (font, cursor, scrollback, scrollbar markers) to the live terminal. */
 	function applyProfile(p: TerminalProfile): void {
+		currentProfile = p;
 		const term = terminal.value;
 		if (!term) return;
-		term.options.fontFamily = p.fontFamily ?? DEFAULT_FONT_FAMILY;
-		term.options.fontSize = p.fontSize ?? DEFAULT_FONT_SIZE;
-		term.options.cursorStyle = p.cursorStyle ?? "block";
-		term.options.scrollback = p.scrollback ?? 5000;
+		Object.assign(term.options, profileOptions(p));
 		scrollbarMarkers = p.scrollbarMarkers !== false;
 		applyScrollbarWidth(term);
 		search.setScrollbarMarkers(scrollbarMarkers);
@@ -936,13 +1313,16 @@ export function useTerminal(
 		supersede([...pendingAttaches]);
 		if (resizeTimer !== null) clearTimeout(resizeTimer);
 		resizeTimer = null;
-		titleChangeDispose?.();
-		titleChangeDispose = null;
 		themeUnsubscribe?.();
 		themeUnsubscribe = null;
+		stopHostTheme?.();
+		stopHostTheme = null;
 		stopListening();
 		inputDroppedUnsubscribe?.();
 		inputDroppedUnsubscribe = null;
+		pasteStream.interrupt();
+		pasteUnsubscribe?.();
+		pasteUnsubscribe = null;
 		sizeUnsubscribe?.();
 		sizeUnsubscribe = null;
 		ptySize = null;
@@ -957,10 +1337,26 @@ export function useTerminal(
 		terminal.value = null;
 		channelId = null;
 		shownId = null;
+		leftHeld = false;
 		endedSize = null;
-		replaysParsing = 0;
+		bellListeners.length = 0;
+		scrollListeners.length = 0;
 		titleStack.length = 0;
 		currentDynamicTitle.value = null;
+	}
+
+	/**
+	 * Tell `listener` of a bell in the pane's xterm, whichever it is then, with
+	 * the terminal that xterm holds (#966). Not for a replay's bells: see
+	 * `bellMuted`.
+	 */
+	function onBell(listener: (heldId: string) => void): void {
+		bellListeners.push(listener);
+	}
+
+	/** Tell `listener` each time the pane's xterm, whichever it is then, scrolls (#966). */
+	function onScroll(listener: (term: Terminal) => void): void {
+		scrollListeners.push(listener);
 	}
 
 	return {
@@ -975,6 +1371,8 @@ export function useTerminal(
 		isBoundTo,
 		turnMouseReportingOff,
 		bellMuted,
+		onBell,
+		onScroll,
 		applyProfile,
 		suppressNextResize,
 		syncChannelSize,

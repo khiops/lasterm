@@ -59,6 +59,61 @@ function nested(levels: number, inner = '"x"'): string {
 	return `${'{"a":'.repeat(levels)}${inner}${"}".repeat(levels)}`;
 }
 
+// The New Host dialog decides a picked entry's jump when it is picked, and
+// tests that jump: the create stores it as sent rather than deciding again
+// after the test (#1042).
+describe("POST /api/hosts stores the jump it is sent (#1042)", () => {
+	it("stores a picked ProxyJump as sent", async () => {
+		await createHost({
+			type: "ssh",
+			label: "bastion",
+			ssh_auth: "agent",
+			ssh_host: "10.0.0.1",
+			ssh_config_host: "jump",
+		});
+
+		const res = await send("POST", "/api/hosts", {
+			value: {
+				type: "ssh",
+				label: "target",
+				ssh_host: "target.example.org",
+				ssh_auth: "agent",
+				ssh_config_host: "target",
+				ssh_proxy_spec: "jump",
+			},
+		});
+
+		expect(res.statusCode, res.body).toBe(201);
+		const id = res.json<{ id: string }>().id;
+		expect(res.json()).toMatchObject({ ssh_proxy_spec: "jump" });
+		expect(res.json().ssh_proxy_host_id).toBeUndefined();
+		const stored = meta.getHost(id);
+		expect(stored?.sshProxySpec).toBe("jump");
+		expect(stored?.sshProxyHostId).toBeUndefined();
+	});
+
+	it("leaves a manual POST's literal ProxyJump unlinked", async () => {
+		await createHost({
+			type: "ssh",
+			label: "bastion",
+			ssh_host: "bastion.example.org",
+			ssh_auth: "agent",
+		});
+
+		const id = await createHost({
+			type: "ssh",
+			label: "target",
+			ssh_host: "target.example.org",
+			ssh_auth: "agent",
+			ssh_proxy_spec: "bastion.example.org",
+		});
+
+		const stored = meta.getHost(id);
+		expect(stored?.sshProxyHostId).toBeUndefined();
+		expect(stored?.sshProxySpec).toBe("bastion.example.org");
+	});
+});
+
 // ─── A body that is not an object (#798) ─────────────────────────────────────
 
 describe("the seven routes that read a JSON body refuse one that is not an object (#798)", () => {

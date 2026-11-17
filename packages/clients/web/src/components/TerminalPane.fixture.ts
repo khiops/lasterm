@@ -31,11 +31,32 @@ export interface StandInTerminal {
 	rows: number;
 	options: Record<string, unknown>;
 	element: HTMLElement;
+	/** Its helper textarea, where the keyboard and a paste arrive. */
+	textarea: HTMLTextAreaElement;
+	/** Where its view is in its buffer: `scrollToBottom` brings `viewportY` to `baseY`. */
+	buffer: { active: { viewportY: number; baseY: number; length: number } };
 	/** The key handler xterm was last given: xterm keeps one. */
 	keyHandler: ((ev: KeyboardEvent) => boolean) | null;
 	dataListeners: Array<(data: string) => void>;
+	/** As xterm's `onBinary`: where it puts mouse reports in its default encoding. */
+	binaryListeners: Array<(data: string) => void>;
+	/** What it parsed since it was made or last reset: its screen. */
+	parsed: string[];
+	/** Disposed: out of the page, telling nothing to anyone. */
+	disposed: boolean;
+	unicode: { activeVersion: string };
+	/** Takes the keyboard, in its helper textarea. */
+	focus(): void;
 	/** As xterm: a change of size is told to its listeners. */
 	resize(cols: number, rows: number): void;
+}
+
+/** The search addon a terminal was given, as the stand-in keeps it. */
+export interface StandInSearch {
+	findNext: ReturnType<typeof vi.fn>;
+	dispose: ReturnType<typeof vi.fn>;
+	/** The addon reports results, as `onDidChangeResults` does. */
+	report(resultCount: number, resultIndex: number): void;
 }
 
 /** What the pane asked its profile for, and the profile it holds. */
@@ -60,7 +81,7 @@ const xterm = vi.hoisted(() => ({
 	 * A parse rings the bell for a BEL, then calls the write's callback.
 	 */
 	parse: "now" as "now" | "later",
-	queue: [] as Array<() => void>,
+	queue: [] as Array<(() => void) & { terminal?: unknown }>,
 	/** The terminal settings the pane reads. */
 	profile: {} as Record<string, unknown>,
 	/** Whether a pane's profile is read as soon as it asks, and again whenever it asks anew. */
@@ -71,6 +92,8 @@ const xterm = vi.hoisted(() => ({
 	profiles: [] as unknown[],
 	/** The terminals made, in order. */
 	terminals: [] as unknown[],
+	/** The search addons made, in order. */
+	searches: [] as unknown[],
 	/** The size a fit gives a terminal: what its pane holds. */
 	fit: { cols: 80, rows: 24 },
 	/** Told of every write a terminal takes, as it takes it. */
@@ -84,9 +107,40 @@ const xterm = vi.hoisted(() => ({
 	answer: null as ((text: string) => string | null) | null,
 }));
 
-/** Parse every write taken so far, in order. */
+/** Parse every write taken so far, in order, whichever terminal took it. */
 export function drain(): void {
 	for (let next = xterm.queue.shift(); next !== undefined; next = xterm.queue.shift()) next();
+}
+
+/**
+ * Parse the writes `terminal` took, in order, leaving every other terminal's
+ * queued: each real xterm parses on a timer of its own. `count` parses only
+ * that many.
+ */
+export function parseOf(terminal: StandInTerminal, count = Number.POSITIVE_INFINITY): void {
+	for (let done = 0; done < count; done++) {
+		const at = xterm.queue.findIndex((parse) => parse.terminal === terminal);
+		if (at === -1) return;
+		const [parse] = xterm.queue.splice(at, 1);
+		parse?.();
+	}
+}
+
+/** Drop what `terminal` has not parsed yet, as an xterm disposed on xterm's development branch does. */
+export function dropQueueOf(terminal: StandInTerminal): void {
+	xterm.queue = xterm.queue.filter((parse) => parse.terminal !== terminal);
+}
+
+/** The OSC 0 and 2 titles, ended by a BEL, in what is parsed: what xterm reports to `onTitleChange`. */
+function titlesIn(text: string): string[] {
+	const titles: string[] = [];
+	for (const start of ["\u001b]0;", "\u001b]2;"]) {
+		for (let at = text.indexOf(start); at !== -1; at = text.indexOf(start, at + 1)) {
+			const end = text.indexOf("\u0007", at);
+			if (end !== -1) titles.push(text.slice(at + start.length, end));
+		}
+	}
+	return titles;
 }
 
 vi.mock("@xterm/xterm", () => ({
@@ -94,21 +148,54 @@ vi.mock("@xterm/xterm", () => ({
 		options: Record<string, unknown>;
 		cols = 80;
 		rows = 24;
-		unicode = { activeVersion: "" };
+		/** As xterm's: refuses a version no addon provides. */
+		unicode = {
+			versions: ["6"],
+			active: "6",
+			get activeVersion(): string {
+				return this.active;
+			},
+			set activeVersion(version: string) {
+				if (!this.versions.includes(version))
+					throw new Error(`unknown Unicode version "${version}"`);
+				this.active = version;
+			},
+		};
 		element = document.createElement("div");
 		buffer = { active: { viewportY: 0, baseY: 0, length: 0 } };
 		_core = { _renderService: { dimensions: { css: { cell: { width: 9, height: 17 } } } } };
 		keyHandler: ((ev: KeyboardEvent) => boolean) | null = null;
 		dataListeners: Array<(data: string) => void> = [];
+		binaryListeners: Array<(data: string) => void> = [];
+		/** What it parsed since it was made or last reset: its screen. */
+		parsed: string[] = [];
+		disposed = false;
 		private resizeListeners: Array<(size: { cols: number; rows: number }) => void> = [];
 		private bellListeners: Array<() => void> = [];
+		private titleListeners: Array<(title: string) => void> = [];
+		private scrollListeners: Array<() => void> = [];
 		/** Where xterm takes the keyboard: its helper textarea, inside its element. */
-		private input = document.createElement("textarea");
+		textarea = document.createElement("textarea");
+		/** As xterm's parser: handlers for sequences, which this double never calls (#1012). */
+		parser = { registerCsiHandler: () => ({ dispose() {} }) };
 		constructor(options: Record<string, unknown>) {
 			this.options = { ...options };
+			// As xterm: it starts at the size it is given, 80×24 otherwise.
+			if (typeof options.cols === "number") this.cols = options.cols;
+			if (typeof options.rows === "number") this.rows = options.rows;
 			this.element.className = "xterm";
-			this.input.className = "xterm-helper-textarea";
-			this.element.appendChild(this.input);
+			this.textarea.className = "xterm-helper-textarea";
+			this.element.appendChild(this.textarea);
+			// As xterm 6.0.0: it pastes on a paste event at its textarea or its
+			// element, stopping it there, here as with bracketed paste off
+			// (`Clipboard.ts`, `handlePasteEvent`).
+			const paste = (event: ClipboardEvent): void => {
+				event.stopPropagation();
+				const text = event.clipboardData?.getData("text/plain") ?? "";
+				this.input(text.replace(/\r?\n/g, "\r"));
+			};
+			this.textarea.addEventListener("paste", paste);
+			this.element.addEventListener("paste", paste);
 			xterm.terminals.push(this);
 		}
 		loadAddon(addon: { activate?: (terminal: unknown) => void }): void {
@@ -125,6 +212,14 @@ vi.mock("@xterm/xterm", () => ({
 				},
 			};
 		}
+		onBinary(listener: (data: string) => void) {
+			this.binaryListeners.push(listener);
+			return {
+				dispose: () => {
+					this.binaryListeners = this.binaryListeners.filter((l) => l !== listener);
+				},
+			};
+		}
 		onResize(listener: (size: { cols: number; rows: number }) => void) {
 			this.resizeListeners.push(listener);
 			return {
@@ -133,14 +228,17 @@ vi.mock("@xterm/xterm", () => ({
 				},
 			};
 		}
-		onTitleChange() {
+		onTitleChange(listener: (title: string) => void) {
+			this.titleListeners.push(listener);
 			return { dispose() {} };
 		}
 		onBell(listener: () => void) {
 			this.bellListeners.push(listener);
 			return { dispose() {} };
 		}
-		onScroll() {
+		/** As xterm: a parse that moves the screen by a line reports a scroll, at the bottom. */
+		onScroll(listener: () => void) {
+			this.scrollListeners.push(listener);
 			return { dispose() {} };
 		}
 		/** As xterm: the handler given last is the one it asks. */
@@ -151,9 +249,20 @@ vi.mock("@xterm/xterm", () => ({
 			return xterm.selection;
 		}
 		focus(): void {
-			this.input.focus();
+			this.textarea.focus();
 		}
-		scrollToBottom(): void {}
+		/** As xterm: the view goes down to the bottom of the buffer. */
+		scrollToBottom(): void {
+			this.buffer.active.viewportY = this.buffer.active.baseY;
+		}
+		/** As xterm: the selection goes. */
+		clearSelection(): void {
+			xterm.selection = false;
+		}
+		/** As xterm's `input`: data sent as if the user typed it, to the onData listeners. */
+		input(data: string, _wasUserInput = true): void {
+			for (const listener of [...this.dataListeners]) listener(data);
+		}
 		/** As xterm: a change of size is told to its listeners. */
 		resize(cols: number, rows: number): void {
 			if (cols === this.cols && rows === this.rows) return;
@@ -163,23 +272,46 @@ vi.mock("@xterm/xterm", () => ({
 		}
 		reset(): void {
 			xterm.events.push("<reset>");
+			this.parsed = [];
 			xterm.onReset?.(toRaw(this) as unknown as StandInTerminal);
 		}
 		write(data: string | Uint8Array, callback?: () => void): void {
 			const text = typeof data === "string" ? data : new TextDecoder().decode(data);
 			if (text !== "") xterm.events.push(text);
 			// The pane holds its terminal in a ref: `this` may be its reactive proxy.
-			xterm.onWrite?.(toRaw(this) as unknown as StandInTerminal, text);
-			const parse = () => {
-				if (text.includes("\u0007")) for (const listener of this.bellListeners) listener();
-				const answer = xterm.answer?.(text) ?? null;
-				if (answer !== null) for (const listener of [...this.dataListeners]) listener(answer);
-				callback?.();
-			};
+			const self = toRaw(this);
+			xterm.onWrite?.(self as unknown as StandInTerminal, text);
+			const parse = Object.assign(
+				() => {
+					if (text !== "") self.parsed.push(text);
+					for (const title of titlesIn(text)) {
+						for (const listener of [...self.titleListeners]) listener(title);
+					}
+					if (text.includes("\u0007")) for (const listener of [...self.bellListeners]) listener();
+					if (text.includes("\n")) for (const listener of [...self.scrollListeners]) listener();
+					const answer = xterm.answer?.(text) ?? null;
+					if (answer !== null) for (const listener of [...self.dataListeners]) listener(answer);
+					callback?.();
+				},
+				{ terminal: self },
+			);
 			if (xterm.parse === "now") parse();
 			else xterm.queue.push(parse);
 		}
-		dispose(): void {}
+		/**
+		 * As xterm 6.0.0: its element leaves the page and its listeners go, but
+		 * what it took still parses, callbacks included.
+		 */
+		dispose(): void {
+			this.disposed = true;
+			this.dataListeners = [];
+			this.binaryListeners = [];
+			this.bellListeners = [];
+			this.titleListeners = [];
+			this.scrollListeners = [];
+			this.resizeListeners = [];
+			this.element.remove();
+		}
 	},
 }));
 
@@ -196,7 +328,14 @@ vi.mock("@xterm/addon-fit", () => ({
 	},
 }));
 
-vi.mock("@xterm/addon-unicode11", () => ({ Unicode11Addon: class {} }));
+// As xterm's: it provides version 11 to the terminal it is loaded into.
+vi.mock("@xterm/addon-unicode11", () => ({
+	Unicode11Addon: class {
+		activate(terminal: { unicode: { versions: string[] } }): void {
+			terminal.unicode.versions.push("11");
+		}
+	},
+}));
 
 vi.mock("@xterm/addon-search", () => ({
 	SearchAddon: class {
@@ -205,7 +344,19 @@ vi.mock("@xterm/addon-search", () => ({
 		clearDecorations = vi.fn();
 		clearActiveDecoration = vi.fn();
 		dispose = vi.fn();
-		onDidChangeResults = vi.fn(() => ({ dispose() {} }));
+		private resultListeners: Array<(e: { resultCount: number; resultIndex: number }) => void> = [];
+		onDidChangeResults = vi.fn(
+			(listener: (e: { resultCount: number; resultIndex: number }) => void) => {
+				this.resultListeners.push(listener);
+				return { dispose() {} };
+			},
+		);
+		constructor() {
+			xterm.searches.push(this);
+		}
+		report(resultCount: number, resultIndex: number): void {
+			for (const listener of [...this.resultListeners]) listener({ resultCount, resultIndex });
+		}
 	},
 }));
 
@@ -280,6 +431,8 @@ export let hear: (msg: Frame) => void;
 export let emitted: unknown[][];
 /** How many listeners the window has for frames of `type` now. */
 export let listening: (type: string) => number;
+/** The window's socket drops: it says it is down to those listening (#1014). */
+export let dropConnection: () => void;
 
 /** A hub the test answers: every frame the pane sends is kept in `sent`. */
 function fakeHub(): void {
@@ -288,6 +441,11 @@ function fakeHub(): void {
 		for (const cb of [...(listeners.get(msg.type) ?? [])]) cb(msg);
 	};
 	listening = (type) => listeners.get(type)?.length ?? 0;
+	const downListeners: Array<() => void> = [];
+	dropConnection = () => {
+		socket.isConnected = false;
+		for (const cb of [...downListeners]) cb();
+	};
 	const socket = {
 		isConnected: true,
 		on: vi.fn((type: string, cb: Listener) => {
@@ -299,7 +457,13 @@ function fakeHub(): void {
 				);
 		}),
 		onReconnect: () => () => {},
-		onDisconnect: () => () => {},
+		onDisconnect: (cb: () => void) => {
+			downListeners.push(cb);
+			return () => {
+				const at = downListeners.indexOf(cb);
+				if (at !== -1) downListeners.splice(at, 1);
+			};
+		},
 		send: vi.fn((msg: Frame) => {
 			sent.push(msg);
 		}),
@@ -515,6 +679,11 @@ export function type(data: string): void {
 	for (const listener of [...terminal().dataListeners]) listener(data);
 }
 
+/** A mouse report in xterm's default encoding, as it hands it on: one character per byte. */
+export function typeBinary(data: string): void {
+	for (const listener of [...terminal().binaryListeners]) listener(data);
+}
+
 beforeEach(() => {
 	// A test's timers are its own: a request it leaves unanswered times out
 	// within it, or never, rather than ten seconds later in another test, where
@@ -542,6 +711,7 @@ export function forgetWindow(): void {
 	xterm.selection = false;
 	xterm.profiles.length = 0;
 	xterm.terminals.length = 0;
+	xterm.searches.length = 0;
 	xterm.fit = { cols: 80, rows: 24 };
 	xterm.onWrite = null;
 	xterm.onReset = null;

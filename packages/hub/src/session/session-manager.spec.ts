@@ -8,6 +8,7 @@ import type {
 	EndedOutput,
 	ErrorMessage,
 	ProtocolMessage,
+	UiAttachOkMessage,
 	UiSpawnMessage,
 } from "@lasterm/shared";
 import { ErrorCode } from "@lasterm/shared";
@@ -18,6 +19,7 @@ import { openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
+import { onWriteLockChange } from "../ws/ws-handler.js";
 import type { AgentConnection } from "./agent-connection.js";
 import { connectOrLaunch as _connectOrLaunchForMock } from "./agent-launcher.js";
 import { AuthCancelledError } from "./auth-cancelled.js";
@@ -31,6 +33,7 @@ import {
 import type { CommitProtectedMap } from "./session-context.js";
 import { SessionManager, type WsClient } from "./session-manager.js";
 import { seedShellProfiles } from "./shell-profile-seed.js";
+import { WriteLockManager } from "./write-lock.js";
 
 // ─── Mock channel ID helpers ──────────────────────────────────────────────────
 // Per-test counters reset in beforeEach; each SPAWN emits a unique channelId.
@@ -42,6 +45,8 @@ let nextLocalSpawnError: { code: string; message: string } | null = null;
 let nextLocalAttachNotFoundChannelId: string | null = null;
 let localChannelStateWaitCount = 0;
 let nextLocalChannelStateFailure: Error | null = null;
+/** The capabilities the next local agent says in its HELLO; none said when null. */
+let nextLocalAgentCapabilities: string[] | null = null;
 const mockLocalAgents: Array<{
 	send: ReturnType<typeof vi.fn>;
 	close: ReturnType<typeof vi.fn>;
@@ -59,15 +64,29 @@ function nextSshChannelId(): string {
 }
 
 // ─── Mock agent-launcher (connectOrLaunch) ───────────────────────────────────
-vi.mock("./agent-launcher.js", () => {
+vi.mock("./agent-launcher.js", async () => {
 	// eslint-disable-next-line @typescript-eslint/no-require-imports
 	const { EventEmitter } = require("node:events");
+	// The hub's own version: an agent of another one is retired, which waits
+	// for a daemon stop this mock never answers.
+	const { HUB_VERSION } =
+		await vi.importActual<typeof import("../build-version.js")>("../build-version.js");
 
 	class MockLocalAgent extends EventEmitter {
 		private _connected = true;
+		helloMessage: unknown;
 		constructor() {
 			super();
 			mockLocalAgents.push(this);
+			this.helloMessage =
+				nextLocalAgentCapabilities === null
+					? undefined
+					: {
+							type: "HELLO",
+							version: 1,
+							agentVersion: HUB_VERSION,
+							capabilities: nextLocalAgentCapabilities,
+						};
 		}
 		start = vi.fn().mockResolvedValue(undefined);
 		waitForChannelState = vi.fn(() => {
@@ -352,6 +371,7 @@ describe("SessionManager", () => {
 		localSpawnCount = 0;
 		sshSpawnCount = 0;
 		localChannelStateWaitCount = 0;
+		nextLocalAgentCapabilities = null;
 		mockLocalAgents.length = 0;
 		mockSshAgentInstance = null;
 		nextSshStartCallsAgentUpdated = false;
@@ -945,6 +965,65 @@ describe("SessionManager", () => {
 		expect(client.attachedChannels.size).toBe(1);
 		sm.removeClient("c1");
 		expect(client.attachedChannels.size).toBe(0);
+	});
+
+	// #955: a detached session is the host's session; a terminal opened on it,
+	// or one attached again, makes it active (SPEC.md § 4.2).
+	it("a terminal opened while the host's session is detached joins that session", async () => {
+		sm.addClient(makeClient("c1", []));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbManager.meta);
+		const [first] = dal.listSessions();
+		sm.removeClient("c1");
+		expect(dal.getSession(first?.id ?? "")?.status).toBe("detached");
+
+		const c2: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c2", c2));
+		await sm.handleSpawn("c2", { type: "SPAWN", hostId: "local" });
+
+		expect(dal.listSessions().map((s) => [s.id, s.status])).toEqual([[first?.id, "active"]]);
+		expect(c2.find((m) => m.type === "SPAWN_OK")).toMatchObject({ sessionId: first?.id });
+		expect(c2).toContainEqual(
+			expect.objectContaining({ type: "SESSION_STATE", sessionId: first?.id, status: "active" }),
+		);
+	});
+
+	it("a terminal attached again while the host's session is detached makes it active", async () => {
+		sm.addClient(makeClient("c1", []));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbManager.meta);
+		const [first] = dal.listSessions();
+		sm.removeClient("c1");
+
+		const c2: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c2", c2));
+		await sm.handleAttach("c2", "local-ch-1");
+
+		expect(dal.getSession(first?.id ?? "")?.status).toBe("active");
+		expect(c2).toContainEqual(
+			expect.objectContaining({ type: "SESSION_STATE", sessionId: first?.id, status: "active" }),
+		);
+	});
+
+	it("a terminal restarted while the host's session is detached makes it active", async () => {
+		sm.addClient(makeClient("c1", []));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbManager.meta);
+		const [first] = dal.listSessions();
+		sm.removeClient("c1");
+		expect(dal.getSession(first?.id ?? "")?.status).toBe("detached");
+
+		const c2: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c2", c2));
+		expect(await sm.restartChannel("local-ch-1")).toBe(true);
+
+		expect(dal.getSession(first?.id ?? "")?.status).toBe("active");
+		expect(c2).toContainEqual(
+			expect.objectContaining({ type: "SESSION_STATE", sessionId: first?.id, status: "active" }),
+		);
 	});
 
 	// ─── DB persistence ─────────────────────────────────────────────────────
@@ -2742,6 +2821,918 @@ describe("SessionManager", () => {
 		expect(errMsg.code).toBe("CHANNEL_DEAD");
 	});
 
+	// ─── Spool rows and the reads of them, for the #956 and #927 describes ────
+
+	function store(id: string, seq: number, kind: "output" | "snapshot", data: string | Buffer) {
+		const dataBlob = typeof data === "string" ? Buffer.from(data) : data;
+		new SpoolDAL(dbManager.spool).insertChunk({
+			channelId: id,
+			seq,
+			kind,
+			dataBlob,
+			uncompressedLen: dataBlob.length,
+		});
+	}
+
+	const spies: Array<{ mockRestore(): void }> = [];
+
+	/** Spies on every SpoolDAL read that returns a chunk's data. */
+	function dataReads() {
+		const reads = {
+			byChannel: vi.spyOn(SpoolDAL.prototype, "getChunksByChannel"),
+			one: vi.spyOn(SpoolDAL.prototype, "getChunk"),
+			output: vi.spyOn(SpoolDAL.prototype, "readOutput"),
+			latest: vi.spyOn(SpoolDAL.prototype, "getLatestSnapshot"),
+		};
+		spies.push(...Object.values(reads));
+		return reads;
+	}
+
+	afterEach(() => {
+		for (const spy of spies.splice(0)) spy.mockRestore();
+	});
+
+	// ─── An ATTACH answered from the spool (#956) ────────────────────────────
+	//
+	// The hub stores a channel's output a second after it arrives, or once
+	// 256 KiB are waiting, or when it stores a snapshot. A pane that drops the
+	// OUTPUT it hears while its ATTACH waits writes, from a cached ATTACH_OK,
+	// only what that answer holds: so after its snapshot it holds the output
+	// the hub has received, stored yet or not, within the tail's bound.
+	// ─── Pastes relayed to the agent (#1014) ─────────────────────────────────
+	describe("pastes relayed between a window and the agent (#1014)", () => {
+		type Sent = { type: string; pasteId?: number; seq?: number; channelId?: string };
+		type LocalAgent = {
+			send: { mock: { calls: Array<[ProtocolMessage]> } };
+			emit(event: string, msg?: unknown): void;
+			simulateDisconnect(): void;
+		};
+		const CH = "local-ch-1";
+
+		/** A terminal on the local host, its agent saying `capabilities`, client c1 its writer. */
+		async function terminal(capabilities: string[] = ["input-modes", "paste-stream"]) {
+			nextLocalAgentCapabilities = capabilities;
+			let holder: string | null = "c1";
+			sm.setGetWriteLockHolder(() => holder);
+			const c1: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c1", c1));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+			const agent = mockLocalAgents.at(-1) as unknown as LocalAgent;
+			return {
+				c1,
+				agent,
+				setHolder: (id: string | null) => {
+					holder = id;
+				},
+				/** What the agent received of pastes. */
+				toAgent: () =>
+					agent.send.mock.calls
+						.map(([m]) => m as unknown as Sent)
+						.filter((m) => m.type === "PASTE" || m.type === "PASTE_CANCEL"),
+			};
+		}
+		const chunk = (pasteId: number, seq: number, last = false) =>
+			({
+				type: "PASTE",
+				channelId: CH,
+				pasteId,
+				seq,
+				data: new Uint8Array([0x61 + seq]),
+				last,
+			}) as const;
+		const pastes = (received: ProtocolMessage[]) =>
+			received.filter(
+				(m) => m.type === "PASTE_ACK" || m.type === "PASTE_CLOSED",
+			) as unknown as Array<{
+				type: string;
+				pasteId: number;
+				seq?: number;
+				reason?: string;
+				written?: number;
+			}>;
+
+		it("HB1: says streamsPaste on SPAWN_OK and ATTACH_OK when the agent says paste-stream", async () => {
+			const { c1 } = await terminal();
+			await sm.handleAttach("c1", CH);
+			const spawnOk = c1.find((m) => m.type === "SPAWN_OK") as { streamsPaste?: boolean };
+			const attachOk = c1.find((m) => m.type === "ATTACH_OK") as { streamsPaste?: boolean };
+			expect(spawnOk.streamsPaste).toBe(true);
+			expect(attachOk.streamsPaste).toBe(true);
+		});
+
+		it("HB1: says not when the agent does not say paste-stream", async () => {
+			const { c1 } = await terminal(["input-modes"]);
+			await sm.handleAttach("c1", CH);
+			expect(
+				(c1.find((m) => m.type === "SPAWN_OK") as { streamsPaste?: boolean }).streamsPaste,
+			).toBe(false);
+			expect(
+				(c1.find((m) => m.type === "ATTACH_OK") as { streamsPaste?: boolean }).streamsPaste,
+			).toBe(false);
+		});
+
+		it("HB2: relays the holder's chunk with its fields and the hub's own paste id", async () => {
+			const { toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(41, 0));
+			const sent = toAgent()[0] as Sent & { data: Uint8Array; last: boolean };
+			expect(sent).toMatchObject({ type: "PASTE", channelId: CH, seq: 0, last: false });
+			expect([...sent.data]).toEqual([0x61]);
+			expect(sent.pasteId).not.toBe(41);
+		});
+
+		it("HB2: answers unsupported, and sends the agent nothing, when it does not say paste-stream", async () => {
+			const { c1, toAgent } = await terminal(["input-modes"]);
+			sm.handlePaste("c1", chunk(1, 0));
+			expect(toAgent()).toEqual([]);
+			expect(pastes(c1)).toEqual([
+				expect.objectContaining({ type: "PASTE_CLOSED", pasteId: 1, reason: "unsupported" }),
+			]);
+		});
+
+		it("HB3: cancels the paste when its window leaves", async () => {
+			const { toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0));
+			const agentId = toAgent()[0]?.pasteId;
+			sm.removeClient("c1");
+			expect(toAgent().at(-1)).toEqual({ type: "PASTE_CANCEL", channelId: CH, pasteId: agentId });
+		});
+
+		it("HB3: cancels the paste when the write lock moves to another window", async () => {
+			const { toAgent } = await terminal();
+			// The lock manager the WS routes make, wired as they wire it.
+			const locks = new WriteLockManager({
+				sendToClient: () => undefined,
+				broadcastToChannel: () => undefined,
+				onChange: (channelId) => onWriteLockChange(channelId, undefined, sm),
+			});
+			sm.setGetWriteLockHolder((channelId) => locks.getHolder(channelId));
+			locks.attach(CH, "c1");
+			locks.attach(CH, "c2");
+			sm.handlePaste("c1", chunk(1, 0));
+			locks.force(CH, "c2");
+			expect(toAgent().at(-1)?.type).toBe("PASTE_CANCEL");
+		});
+
+		it("HB3: still cancels after the last chunk, until its acknowledgement", async () => {
+			const { toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0, true));
+			sm.removeClient("c1");
+			expect(toAgent().at(-1)?.type).toBe("PASTE_CANCEL");
+		});
+
+		it("HB3: sends nothing once the last chunk is acknowledged", async () => {
+			const { agent, toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0, true));
+			const agentId = toAgent()[0]?.pasteId;
+			agent.emit("message", { type: "PASTE_ACK", channelId: CH, pasteId: agentId, seq: 0 });
+			sm.removeClient("c1");
+			expect(toAgent().map((m) => m.type)).toEqual(["PASTE"]);
+		});
+
+		it("HB3: sends nothing once the agent closed the paste, and takes the window's next one", async () => {
+			const { agent, toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0));
+			const agentId = toAgent()[0]?.pasteId;
+			agent.emit("message", {
+				type: "PASTE_CLOSED",
+				channelId: CH,
+				pasteId: agentId,
+				reason: "overflow",
+				written: 1,
+			});
+			sm.handlePaste("c1", chunk(2, 0));
+			expect(toAgent().map((m) => m.type)).toEqual(["PASTE", "PASTE"]);
+			sm.removeClient("c1");
+			expect(toAgent().at(-1)?.type).toBe("PASTE_CANCEL");
+			expect(toAgent().filter((m) => m.type === "PASTE_CANCEL")).toHaveLength(1);
+		});
+
+		it("HB4: routes acknowledgements and closes to the owning window only", async () => {
+			const { c1, agent, toAgent } = await terminal();
+			const c2: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c2", c2));
+			await sm.handleAttach("c2", CH);
+			sm.handlePaste("c1", chunk(5, 0));
+			const agentId = toAgent()[0]?.pasteId;
+			agent.emit("message", { type: "PASTE_ACK", channelId: CH, pasteId: agentId, seq: 0 });
+			agent.emit("message", {
+				type: "PASTE_CLOSED",
+				channelId: CH,
+				pasteId: agentId,
+				reason: "overflow",
+				written: 1,
+			});
+			expect(pastes(c1)).toEqual([
+				{ type: "PASTE_ACK", channelId: CH, pasteId: 5, seq: 0 },
+				{ type: "PASTE_CLOSED", channelId: CH, pasteId: 5, reason: "overflow", written: 1 },
+			]);
+			expect(pastes(c2)).toEqual([]);
+		});
+
+		it("HB4: relays every acknowledgement still in flight after the last chunk", async () => {
+			const { c1, agent, toAgent } = await terminal();
+			for (let seq = 0; seq < 8; seq++) sm.handlePaste("c1", chunk(5, seq, seq === 7));
+			const agentId = toAgent()[0]?.pasteId;
+			for (let seq = 0; seq < 8; seq++) {
+				agent.emit("message", { type: "PASTE_ACK", channelId: CH, pasteId: agentId, seq });
+			}
+			expect(pastes(c1).map((m) => m.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+		});
+
+		it("HB5: tells the owner agent_lost, with no written, when the agent closes", async () => {
+			const { c1, agent } = await terminal();
+			sm.handlePaste("c1", chunk(3, 0));
+			agent.simulateDisconnect();
+			expect(pastes(c1)).toEqual([
+				{ type: "PASTE_CLOSED", channelId: CH, pasteId: 3, reason: "agent_lost" },
+			]);
+		});
+
+		it("HB5: tells it once when the agent is replaced, and the old agent's late close spares a new paste", async () => {
+			const { c1, agent, toAgent } = await terminal();
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+			const CH2 = "local-ch-2";
+			sm.handlePaste("c1", chunk(3, 0));
+			const agents = (sm as unknown as { ctx: { agents: Map<string, unknown> } }).ctx.agents;
+			const [hostId] = [...agents.keys()];
+			const replacement = Object.create(agent, {
+				send: { value: vi.fn() },
+				helloMessage: {
+					value: {
+						type: "HELLO",
+						version: 1,
+						agentVersion: "0.0.0",
+						capabilities: ["paste-stream"],
+					},
+				},
+			});
+			agents.set(hostId as string, replacement);
+			// A new paste on the other terminal goes to the replacement.
+			sm.handlePaste("c1", { ...chunk(4, 0), channelId: CH2 });
+			expect(
+				(replacement.send as ReturnType<typeof vi.fn>).mock.calls.map(([m]) => [
+					m.type,
+					m.channelId,
+				]),
+			).toEqual([["PASTE", CH2]]);
+			// Then the replaced agent's late close: only the paste it took is lost, once.
+			agent.simulateDisconnect();
+			expect(pastes(c1)).toEqual([
+				{ type: "PASTE_CLOSED", channelId: CH, pasteId: 3, reason: "agent_lost" },
+			]);
+			expect(toAgent().filter((m) => m.type === "PASTE")).toHaveLength(1);
+		});
+
+		it("HB5: tells it agent_lost when a chunk finds another agent than the one that took the paste", async () => {
+			const { c1, agent } = await terminal();
+			sm.handlePaste("c1", chunk(3, 0));
+			const agents = (sm as unknown as { ctx: { agents: Map<string, unknown> } }).ctx.agents;
+			const [hostId] = [...agents.keys()];
+			agents.set(hostId as string, Object.create(agent, { send: { value: vi.fn() } }));
+			sm.handlePaste("c1", chunk(3, 1));
+			expect(pastes(c1)).toEqual([
+				{ type: "PASTE_CLOSED", channelId: CH, pasteId: 3, reason: "agent_lost" },
+			]);
+		});
+
+		it("HB6: gives two windows' pastes with the same id different ids toward the agent", async () => {
+			const { toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0, true));
+			sm.addClient(makeClient("c2", []));
+			sm.handlePaste("c2", chunk(1, 0, true));
+			const ids = toAgent()
+				.filter((m) => m.type === "PASTE")
+				.map((m) => m.pasteId);
+			expect(new Set(ids).size).toBe(2);
+		});
+
+		it("HB6: never hands a cancelled paste's close to another window's paste", async () => {
+			const { agent, toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0));
+			const first = toAgent()[0]?.pasteId;
+			sm.removeClient("c1");
+			const c2: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c2", c2));
+			sm.handlePaste("c2", chunk(1, 0));
+			agent.emit("message", {
+				type: "PASTE_CLOSED",
+				channelId: CH,
+				pasteId: first,
+				reason: "cancelled",
+				written: 0,
+			});
+			expect(pastes(c2)).toEqual([]);
+			sm.handlePaste("c2", chunk(1, 1));
+			expect(toAgent().at(-1)).toMatchObject({ type: "PASTE", seq: 1 });
+		});
+
+		it("HB6: refuses the owner's own second paste, which would supersede its first", async () => {
+			const { c1, toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(1, 0));
+			sm.handlePaste("c1", chunk(2, 0));
+			expect(toAgent()).toHaveLength(1);
+			expect(c1.at(-1)).toMatchObject({ type: "ERROR", code: "INVALID_INPUT" });
+		});
+
+		it("HB6: drops a chunk of no registered paste, without an answer", async () => {
+			const { c1, toAgent } = await terminal();
+			const before = c1.length;
+			sm.handlePaste("c1", chunk(9, 3));
+			expect(toAgent()).toEqual([]);
+			expect(c1.length).toBe(before);
+		});
+
+		it("HB7: relays the owner's cancel under the agent's id, and not the close that follows", async () => {
+			const { c1, agent, toAgent } = await terminal();
+			sm.handlePaste("c1", chunk(6, 0));
+			const agentId = toAgent()[0]?.pasteId;
+			sm.handlePasteCancel("c1", { type: "PASTE_CANCEL", channelId: CH, pasteId: 6 });
+			expect(toAgent().at(-1)).toEqual({ type: "PASTE_CANCEL", channelId: CH, pasteId: agentId });
+			agent.emit("message", {
+				type: "PASTE_CLOSED",
+				channelId: CH,
+				pasteId: agentId,
+				reason: "cancelled",
+				written: 1,
+			});
+			expect(pastes(c1)).toEqual([]);
+		});
+	});
+
+	describe("whether the terminal's agent adapts input (#1012)", () => {
+		type Answer = {
+			type: string;
+			adaptsInput?: boolean;
+			streamsPaste?: boolean;
+			cached?: boolean;
+			snapshot?: Record<string, unknown> | null;
+		};
+		const answers = (received: ProtocolMessage[], type: string) =>
+			received.filter((m) => m.type === type) as unknown as Answer[];
+
+		it("says so on SPAWN_OK and a live ATTACH_OK when the host's agent says input-modes", async () => {
+			nextLocalAgentCapabilities = ["multiplex", "snapshot", "input-modes"];
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c1", received));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+			await sm.handleAttach("c1", "local-ch-1");
+
+			expect(answers(received, "SPAWN_OK")[0]?.adaptsInput).toBe(true);
+			const live = answers(received, "ATTACH_OK")[0];
+			expect(live?.cached).toBe(false);
+			expect(live?.adaptsInput).toBe(true);
+		});
+
+		for (const [capabilities, adapts] of [
+			[["input-modes", "paste-stream"], true],
+			[[], false],
+		] as const) {
+			it(`says ${adapts} on an ATTACH_OK answered from memory while the host's agent says ${capabilities.length > 0 ? "input-modes" : "nothing of it"}, whatever agent stored the snapshot`, async () => {
+				const { MetaDAL } = await import("../storage/meta.js");
+				const dal = new MetaDAL(dbManager.meta);
+				const host = dal.createHost({
+					type: "ssh",
+					label: "test-ssh-adapting",
+					sshHost: "user@localhost",
+					sshAuth: "key",
+					sshKeyPath: "/nonexistent/key",
+				});
+				sm.addClient(makeClient("c1", []));
+				await sm.handleSpawn("c1", { type: "SPAWN", hostId: host.id });
+				const agent = mockSshAgentInstance as unknown as {
+					helloMessage: unknown;
+					send: (msg: ProtocolMessage) => void;
+					_emit(event: string, msg: unknown): void;
+				};
+				agent.helloMessage = {
+					type: "HELLO",
+					version: 1,
+					agentVersion: "0.0.0",
+					capabilities: [...capabilities],
+				};
+				// Stored by an agent that adapted input.
+				const stored = {
+					serialized: "<cached-snap>",
+					cols: 80,
+					rows: 24,
+					cursorX: 0,
+					cursorY: 0,
+					alternateScreen: true,
+					inputModes: "\u001b[?2004h",
+				};
+				new SpoolDAL(dbManager.spool).insertChunk({
+					channelId: "ssh-ch-1",
+					seq: 10,
+					kind: "snapshot",
+					dataBlob: Buffer.from(JSON.stringify(stored)),
+					uncompressedLen: JSON.stringify(stored).length,
+				});
+				// Its ATTACH fails for another reason than a gone terminal: the hub
+				// answers from memory, the agent still connected.
+				const send = agent.send;
+				agent.send = (msg: ProtocolMessage) => {
+					if (msg.type !== "ATTACH") return send(msg);
+					const ask = msg as unknown as { channelId: string; requestId: string };
+					setImmediate(() =>
+						agent._emit("message", {
+							type: "ERROR",
+							code: "INTERNAL_ERROR",
+							message: "busy",
+							channelId: ask.channelId,
+							requestId: ask.requestId,
+						}),
+					);
+				};
+
+				const received: ProtocolMessage[] = [];
+				sm.addClient(makeClient("c2", received));
+				await sm.handleAttach("c2", "ssh-ch-1");
+
+				const cached = answers(received, "ATTACH_OK")[0];
+				expect(cached?.cached).toBe(true);
+				expect(cached?.snapshot?.inputModes).toBe("\u001b[?2004h");
+				expect(cached?.adaptsInput).toBe(adapts);
+				// As the agent says paste-stream (#1014).
+				expect(cached?.streamsPaste).toBe(adapts);
+			});
+		}
+
+		it("says not when the host's agent does not say input-modes", async () => {
+			nextLocalAgentCapabilities = ["multiplex", "snapshot"];
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c1", received));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+			await sm.handleAttach("c1", "local-ch-1");
+
+			expect(answers(received, "SPAWN_OK")[0]?.adaptsInput).toBe(false);
+			expect(answers(received, "ATTACH_OK")[0]?.adaptsInput).toBe(false);
+		});
+
+		it("says what the agent the hub has when it answers says, not the one it asked", async () => {
+			nextLocalAgentCapabilities = ["input-modes"];
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c1", received));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+			const agents = (sm as unknown as { ctx: { agents: Map<string, unknown> } }).ctx.agents;
+			const [hostId, entry] = [...agents.entries()][0] ?? [];
+			const asked = entry as { send: (msg: ProtocolMessage) => void };
+			// An agent that does not adapt takes the host's place while the
+			// asked one is answering the ATTACH.
+			const replacement = Object.create(asked, {
+				helloMessage: {
+					value: { type: "HELLO", version: 1, agentVersion: "0.0.0", capabilities: [] },
+				},
+			});
+			const send = asked.send;
+			asked.send = (msg: ProtocolMessage) => {
+				if (msg.type === "ATTACH") agents.set(hostId as string, replacement);
+				send(msg);
+			};
+
+			await sm.handleAttach("c1", "local-ch-1");
+
+			expect(answers(received, "ATTACH_OK")[0]?.adaptsInput).toBe(false);
+		});
+
+		it("answers from memory with the snapshot's state, and says not when the host has no agent, whatever agent stored it", async () => {
+			const { MetaDAL } = await import("../storage/meta.js");
+			const dal = new MetaDAL(dbManager.meta);
+			const host = dal.createHost({
+				type: "ssh",
+				label: "test-ssh-modes",
+				sshHost: "user@localhost",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+			});
+			sm.addClient(makeClient("c1", []));
+			await sm.handleSpawn("c1", { type: "SPAWN", hostId: host.id });
+			sm.handleDetach("c1", "ssh-ch-1");
+			// Stored by an agent that adapted input.
+			const stored = {
+				serialized: "<cached-snap>",
+				cols: 80,
+				rows: 24,
+				cursorX: 0,
+				cursorY: 0,
+				alternateScreen: true,
+				inputModes: "\u001b[?2004h",
+			};
+			new SpoolDAL(dbManager.spool).insertChunk({
+				channelId: "ssh-ch-1",
+				seq: 10,
+				kind: "snapshot",
+				dataBlob: Buffer.from(JSON.stringify(stored)),
+				uncompressedLen: JSON.stringify(stored).length,
+			});
+			const agent = mockSshAgentInstance as unknown as {
+				helloMessage: unknown;
+				simulateClose(): void;
+			};
+			agent.helloMessage = {
+				type: "HELLO",
+				version: 1,
+				agentVersion: "0.0.0",
+				capabilities: ["input-modes", "paste-stream"],
+			};
+			agent.simulateClose();
+			await new Promise((r) => setImmediate(r));
+
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c2", received));
+			await sm.handleAttach("c2", "ssh-ch-1");
+
+			const cached = answers(received, "ATTACH_OK")[0];
+			expect(cached?.cached).toBe(true);
+			expect(cached?.snapshot?.alternateScreen).toBe(true);
+			expect(cached?.snapshot?.inputModes).toBe("\u001b[?2004h");
+			expect(cached?.adaptsInput).toBe(false);
+			// No agent: no streaming (#1014).
+			expect(cached?.streamsPaste).toBe(false);
+		});
+	});
+
+	describe("an ATTACH answered from the spool (#956)", () => {
+		const SCREEN = { serialized: "<screen>", cols: 80, rows: 24, cursorX: 0, cursorY: 0 };
+
+		function snapshotRes(channelId: string): ProtocolMessage {
+			return { type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 };
+		}
+
+		function output(channelId: string, value: string): ProtocolMessage {
+			return {
+				type: "OUTPUT",
+				channelId,
+				seq: 1,
+				ts: "2026-11-15T12:00:00.000Z",
+				data: new Uint8Array(Buffer.from(value)),
+			};
+		}
+
+		function cachedAnswer(received: ProtocolMessage[]): { snapshot: unknown; tail: string[] } {
+			const ok = received.find((m) => m.type === "ATTACH_OK") as
+				| (UiAttachOkMessage & { cached: boolean })
+				| undefined;
+			expect(ok?.cached).toBe(true);
+			return {
+				snapshot: ok?.snapshot,
+				tail: (ok?.tail ?? []).map((part) => Buffer.from(part).toString()),
+			};
+		}
+
+		/**
+		 * A terminal whose SSH agent goes away just after printing, then a pane's
+		 * ATTACH, answered from the spool. `beforeAttach` runs just before it.
+		 */
+		async function attachAfterAgentLeft(beforeAttach?: () => void) {
+			const host = new MetaDAL(dbManager.meta).createHost({
+				type: "ssh",
+				label: "test-ssh-956",
+				sshHost: "user@localhost",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+			});
+			sm.addClient(makeClient("writer", []));
+			const channelId = await sm.handleSpawn("writer", { type: "SPAWN", hostId: host.id });
+			if (channelId === null) throw new Error("expected an SSH channel");
+			const agent = mockSshAgentInstance;
+			if (agent === null) throw new Error("expected the SSH agent");
+
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const received: ProtocolMessage[] = [];
+			try {
+				agent._emit("message", snapshotRes(channelId));
+				agent._emit("message", output(channelId, "last words"));
+				agent.simulateClose();
+				await vi.advanceTimersByTimeAsync(0);
+
+				sm.addClient(makeClient("reader", received));
+				beforeAttach?.();
+				const attaching = sm.handleAttach("reader", channelId);
+				// Under the chunker's second: what it holds is not stored yet.
+				await vi.advanceTimersByTimeAsync(500);
+				expect(await attaching).toBe(true);
+			} finally {
+				vi.useRealTimers();
+			}
+			return cachedAnswer(received);
+		}
+
+		it("holds what the terminal printed just before its agent went away", async () => {
+			const answer = await attachAfterAgentLeft();
+
+			expect(answer.snapshot).toEqual(SCREEN);
+			expect(answer.tail.join("")).toBe("last words");
+		});
+
+		// Before #956 the answer only read the spool; a write failing now must not
+		// cost the pane the answer it got then.
+		it("still answers from what is stored when that output cannot be stored", async () => {
+			const failure = vi.spyOn(SpoolDAL.prototype, "insertChunk");
+			try {
+				const answer = await attachAfterAgentLeft(() => {
+					failure.mockImplementationOnce(() => {
+						throw Object.assign(new Error("disk full"), { code: "ERR_SQLITE_FULL" });
+					});
+				});
+
+				expect(answer.snapshot).toEqual(SCREEN);
+				expect(answer.tail).toEqual([]);
+			} finally {
+				failure.mockRestore();
+			}
+		});
+
+		it("holds what the terminal printed while its agent did not answer", async () => {
+			sm.addClient(makeClient("writer", []));
+			const channelId = await sm.handleSpawn("writer", { type: "SPAWN", hostId: "local" });
+			if (channelId === null) throw new Error("expected a local channel");
+			const agent = mockLocalAgents.at(-1);
+			if (agent === undefined) throw new Error("expected the local agent");
+			const emit = (msg: ProtocolMessage) =>
+				(agent as unknown as { emit: (event: string, m: ProtocolMessage) => void }).emit(
+					"message",
+					msg,
+				);
+			const answer = agent.send.getMockImplementation() as
+				| ((msg: ProtocolMessage) => void)
+				| undefined;
+			// An agent that never answers the ATTACH.
+			agent.send.mockImplementation((msg: ProtocolMessage) => {
+				if (msg.type !== "ATTACH") answer?.(msg);
+			});
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const received: ProtocolMessage[] = [];
+			try {
+				emit(snapshotRes(channelId));
+				// Stored by the chunker's second, before the ATTACH times out.
+				emit(output(channelId, "before "));
+				sm.addClient(makeClient("reader", received));
+				const attaching = sm.handleAttach("reader", channelId);
+				// The ATTACH times out at 5 s; this output arrives 0.5 s before, and
+				// the chunker's next second would store it 0.5 s after.
+				await vi.advanceTimersByTimeAsync(4_500);
+				emit(output(channelId, "while waiting"));
+				await vi.advanceTimersByTimeAsync(600);
+				expect(await attaching).toBe(true);
+			} finally {
+				vi.useRealTimers();
+			}
+
+			expect(cachedAnswer(received).tail.join("")).toBe("before while waiting");
+		});
+
+		// ─── The rules of #927's ended output, for a cached answer too (#1004) ──
+		//
+		// The newest snapshot and the output stored after it, without a gap and
+		// within the bounds, or the snapshot alone said `truncated`; a snapshot
+		// over 256 KiB is not sent; one that cannot be read sends nothing; and the
+		// reads follow what may be sent, not what the channel stores.
+
+		const KIB = 1024;
+
+		let terminals = 0;
+
+		/** An SSH terminal whose agent went away, with nothing in its spool yet. */
+		async function terminalWhoseAgentLeft(): Promise<string> {
+			const host = new MetaDAL(dbManager.meta).createHost({
+				type: "ssh",
+				label: `test-ssh-1004-${++terminals}`,
+				sshHost: "user@localhost",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+			});
+			sm.addClient(makeClient("writer", []));
+			const channelId = await sm.handleSpawn("writer", { type: "SPAWN", hostId: host.id });
+			if (channelId === null) throw new Error("expected an SSH channel");
+			const agent = mockSshAgentInstance;
+			if (agent === null) throw new Error("expected the SSH agent");
+			agent.simulateClose();
+			await new Promise((r) => setImmediate(r));
+			return channelId;
+		}
+
+		/** The whole cached ATTACH_OK a fresh pane gets. */
+		async function attachCached(channelId: string): Promise<UiAttachOkMessage> {
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("reader", received));
+			expect(await sm.handleAttach("reader", channelId)).toBe(true);
+			const ok = received.find((m) => m.type === "ATTACH_OK") as UiAttachOkMessage | undefined;
+			if (ok === undefined) throw new Error("expected an ATTACH_OK");
+			expect(ok.cached).toBe(true);
+			return ok;
+		}
+
+		/** The screen part of an answer: what decides what the pane draws. */
+		function screenOf(ok: UiAttachOkMessage) {
+			return {
+				snapshot: ok.snapshot,
+				tail: (ok.tail ?? []).map((part) => Buffer.from(part).toString()),
+				truncated: "truncated" in ok ? ok.truncated : "absent",
+			};
+		}
+
+		/** A snapshot whose stored JSON is exactly `bytes` long. */
+		function snapshotOfSize(bytes: number) {
+			const frame = { serialized: "", cols: 80, rows: 24, cursorX: 0, cursorY: 0 };
+			const room = bytes - JSON.stringify(frame).length;
+			return { ...frame, serialized: "x".repeat(room) };
+		}
+
+		it.each([
+			["inside the output", [11, 13]],
+			["at its start", [12]],
+		] as const)(
+			"sends the snapshot alone when the output after it has a gap %s",
+			async (_, seqs) => {
+				const channelId = await terminalWhoseAgentLeft();
+				store(channelId, 10, "snapshot", JSON.stringify(SCREEN));
+				for (const seq of seqs) store(channelId, seq, "output", `row-${seq}`);
+
+				expect(screenOf(await attachCached(channelId))).toEqual({
+					snapshot: SCREEN,
+					tail: [],
+					truncated: true,
+				});
+			},
+		);
+
+		it("drops a snapshot over 256 KiB, and says so", async () => {
+			const at = await terminalWhoseAgentLeft();
+			const fits = snapshotOfSize(256 * KIB);
+			expect(JSON.stringify(fits).length).toBe(262_144);
+			store(at, 10, "snapshot", JSON.stringify(fits));
+			expect(screenOf(await attachCached(at))).toEqual({
+				snapshot: fits,
+				tail: [],
+				truncated: "absent",
+			});
+
+			const over = await terminalWhoseAgentLeft();
+			store(over, 10, "snapshot", JSON.stringify(snapshotOfSize(256 * KIB + 1)));
+			store(over, 11, "output", "after");
+			expect(screenOf(await attachCached(over))).toEqual({
+				snapshot: null,
+				tail: [],
+				truncated: true,
+			});
+		});
+
+		it("sends the output after the snapshot up to 128 KiB, as one element", async () => {
+			const small = await terminalWhoseAgentLeft();
+			store(small, 10, "snapshot", JSON.stringify(SCREEN));
+			store(small, 11, "output", "ab");
+			store(small, 12, "output", "cd");
+			expect(screenOf(await attachCached(small))).toEqual({
+				snapshot: SCREEN,
+				tail: ["abcd"],
+				truncated: "absent",
+			});
+
+			const full = await terminalWhoseAgentLeft();
+			store(full, 10, "snapshot", JSON.stringify(SCREEN));
+			store(full, 11, "output", Buffer.alloc(64 * KIB, 0x61));
+			store(full, 12, "output", Buffer.alloc(64 * KIB, 0x62));
+			const whole = await attachCached(full);
+			expect(whole.tail.map((part) => part.length)).toEqual([131_072]);
+			expect("truncated" in whole).toBe(false);
+
+			const over = await terminalWhoseAgentLeft();
+			store(over, 10, "snapshot", JSON.stringify(SCREEN));
+			store(over, 11, "output", Buffer.alloc(64 * KIB, 0x61));
+			store(over, 12, "output", Buffer.alloc(64 * KIB, 0x62));
+			store(over, 13, "output", "c");
+			expect(screenOf(await attachCached(over))).toEqual({
+				snapshot: SCREEN,
+				tail: [],
+				truncated: true,
+			});
+		});
+
+		it("sends a snapshot with nothing after it as it is", async () => {
+			const channelId = await terminalWhoseAgentLeft();
+			store(channelId, 10, "snapshot", JSON.stringify(SCREEN));
+
+			expect(screenOf(await attachCached(channelId))).toEqual({
+				snapshot: SCREEN,
+				tail: [],
+				truncated: "absent",
+			});
+		});
+
+		it("sends nothing after a snapshot it cannot read", async () => {
+			const channelId = await terminalWhoseAgentLeft();
+			store(channelId, 10, "snapshot", "not json");
+			store(channelId, 11, "output", "after");
+
+			expect(screenOf(await attachCached(channelId))).toEqual({
+				snapshot: null,
+				tail: [],
+				truncated: "absent",
+			});
+		});
+
+		it("sends nothing without a snapshot, and reads no output", async () => {
+			const channelId = await terminalWhoseAgentLeft();
+			store(channelId, 1, "output", "first");
+			store(channelId, 2, "output", "second");
+			const reads = dataReads();
+
+			expect(screenOf(await attachCached(channelId))).toEqual({
+				snapshot: null,
+				tail: [],
+				truncated: "absent",
+			});
+			expect(reads.output).not.toHaveBeenCalled();
+			expect(reads.one).not.toHaveBeenCalled();
+			expect(reads.byChannel).not.toHaveBeenCalled();
+		});
+
+		describe("reads no output it does not send", () => {
+			function sizeReads() {
+				const spy = vi.spyOn(SpoolDAL.prototype, "listOutputSizesAfter");
+				spies.push(spy);
+				return spy;
+			}
+
+			/** A terminal with a snapshot at seq 10 and `rows` outputs after it, `skip` left out. */
+			async function withRows(rows: number, bytes: number, skip?: number): Promise<string> {
+				const channelId = await terminalWhoseAgentLeft();
+				store(channelId, 10, "snapshot", JSON.stringify(SCREEN));
+				for (let i = 1; i <= rows; i++) {
+					if (i !== skip) store(channelId, 10 + i, "output", Buffer.alloc(bytes, 0x61));
+				}
+				return channelId;
+			}
+
+			it("stops at the first batch's row past 128 KiB, with the snapshot its only data read", async () => {
+				const channelId = await withRows(600, KIB);
+				const reads = dataReads();
+				const sizes = sizeReads();
+
+				expect(screenOf(await attachCached(channelId))).toEqual({
+					snapshot: SCREEN,
+					tail: [],
+					truncated: true,
+				});
+				expect(reads.byChannel).not.toHaveBeenCalled();
+				expect(reads.output).not.toHaveBeenCalled();
+				expect(reads.latest).not.toHaveBeenCalled();
+				expect(reads.one).toHaveBeenCalledTimes(1);
+				expect(sizes).toHaveBeenCalledTimes(1);
+				expect(sizes.mock.calls[0]?.[2]).toBe(512);
+			});
+
+			it("reads no snapshot data over 256 KiB", async () => {
+				const channelId = await terminalWhoseAgentLeft();
+				store(channelId, 10, "snapshot", JSON.stringify(snapshotOfSize(300 * KIB)));
+				const reads = dataReads();
+
+				await attachCached(channelId);
+
+				expect(reads.one).not.toHaveBeenCalled();
+				expect(reads.latest).not.toHaveBeenCalled();
+			});
+
+			it("reads no output on a gap", async () => {
+				const channelId = await terminalWhoseAgentLeft();
+				store(channelId, 10, "snapshot", JSON.stringify(SCREEN));
+				store(channelId, 11, "output", "row-11");
+				store(channelId, 13, "output", "row-13");
+				const reads = dataReads();
+
+				await attachCached(channelId);
+
+				expect(reads.output).not.toHaveBeenCalled();
+				expect(reads.byChannel).not.toHaveBeenCalled();
+			});
+
+			it("walks on past a full batch, and sends what fits as one element", async () => {
+				const channelId = await withRows(600, 100);
+				const sizes = sizeReads();
+
+				const ok = await attachCached(channelId);
+
+				expect(ok.snapshot).toEqual(SCREEN);
+				expect(ok.tail.map((part) => part.length)).toEqual([60_000]);
+				expect("truncated" in ok).toBe(false);
+				expect(sizes).toHaveBeenCalledTimes(2);
+			});
+
+			it.each([
+				["the bound is passed in the second batch", 256, undefined],
+				["the second batch starts after a gap", 100, 513],
+			] as const)("refuses the output when %s", async (_, bytes, skip) => {
+				const channelId = await withRows(600, bytes, skip);
+
+				expect(screenOf(await attachCached(channelId))).toEqual({
+					snapshot: SCREEN,
+					tail: [],
+					truncated: true,
+				});
+			});
+		});
+	});
+
 	// ─── An ended terminal's last output (#927) ──────────────────────────────
 	//
 	// The refusal of an ATTACH on an ended terminal carries what it last
@@ -2769,17 +3760,6 @@ describe("SessionManager", () => {
 			return dal;
 		}
 
-		function store(id: string, seq: number, kind: "output" | "snapshot", data: string | Buffer) {
-			const dataBlob = typeof data === "string" ? Buffer.from(data) : data;
-			new SpoolDAL(dbManager.spool).insertChunk({
-				channelId: id,
-				seq,
-				kind,
-				dataBlob,
-				uncompressedLen: dataBlob.length,
-			});
-		}
-
 		async function attachFresh(id: string, clientId = `pane-${id}`) {
 			const received: ProtocolMessage[] = [];
 			const client = makeClient(clientId, received);
@@ -2798,24 +3778,6 @@ describe("SessionManager", () => {
 		}
 
 		const text = (tail: Uint8Array[]) => tail.map((part) => Buffer.from(part).toString());
-
-		const spies: Array<{ mockRestore(): void }> = [];
-
-		/** Spies on every SpoolDAL read that returns a chunk's data. */
-		function dataReads() {
-			const reads = {
-				byChannel: vi.spyOn(SpoolDAL.prototype, "getChunksByChannel"),
-				one: vi.spyOn(SpoolDAL.prototype, "getChunk"),
-				output: vi.spyOn(SpoolDAL.prototype, "readOutput"),
-				latest: vi.spyOn(SpoolDAL.prototype, "getLatestSnapshot"),
-			};
-			spies.push(...Object.values(reads));
-			return reads;
-		}
-
-		afterEach(() => {
-			for (const spy of spies.splice(0)) spy.mockRestore();
-		});
 
 		it("answers an ended terminal with what it last printed, and starts nothing", async () => {
 			const dal = endedTerminal("ended-h1", 120, 40);
@@ -3953,7 +4915,7 @@ describe("SessionManager", () => {
 			expect(dal.listChannels()).toHaveLength(0);
 		});
 
-		it("warm restarts local agent with same channel IDs", async () => {
+		it("attaches the local agent at startup and ends the terminals the daemon does not hold", async () => {
 			const { MetaDAL } = await import("../storage/meta.js");
 			const dal = new MetaDAL(dbManager.meta);
 
@@ -4004,6 +4966,78 @@ describe("SessionManager", () => {
 			// Agent should have been spawned for this host
 			const agentsMap = (sm as unknown as { agents: Map<string, unknown> }).agents;
 			expect(agentsMap.has(host.id)).toBe(true);
+		});
+
+		it("keeps a terminal the daemon holds live when the first startup connection fails (#981)", async () => {
+			const { MetaDAL } = await import("../storage/meta.js");
+			const dal = new MetaDAL(dbManager.meta);
+
+			const host = dal.createHost({ type: "local", label: "held-local" });
+			const sessionId = "HELDSESS0000000000000000000001";
+			dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+			dal.createChannel({ id: "held-ch-1", sessionId, status: "live", shell: "/bin/sh" });
+			dal.createChannel({ id: "lost-ch-1", sessionId, status: "live", shell: "/bin/sh" });
+
+			// The first connection fails; the second reaches a daemon that still
+			// runs one of the two terminals. Like the real agent, it refuses a
+			// SPAWN under an id it holds.
+			const launch = vi.mocked(_connectOrLaunchForMock);
+			const fresh = launch.getMockImplementation()!;
+			launch
+				.mockRejectedValueOnce(new Error("pipe busy"))
+				.mockImplementationOnce(async (...args) => {
+					const agent = (await fresh(...args)) as unknown as Record<string, unknown>;
+					agent.waitForChannelState = vi.fn().mockResolvedValue([
+						{
+							type: "AGENT_CHANNEL_STATE",
+							channelId: "held-ch-1",
+							title: "sh",
+							pid: 4242,
+							alive: true,
+						},
+					]);
+					return agent as never;
+				});
+			nextLocalSpawnError = { code: "CHANNEL_EXISTS", message: "channel already exists" };
+
+			await sm.startup();
+			await new Promise((r) => setImmediate(r));
+			await new Promise((r) => setImmediate(r));
+
+			expect(launch).toHaveBeenCalledTimes(2);
+			const sent = mockLocalAgents.flatMap((a) =>
+				(a as unknown as { send: { mock: { calls: [ProtocolMessage][] } } }).send.mock.calls.map(
+					([m]) => m,
+				),
+			);
+			expect(sent.filter((m) => m.type === "SPAWN")).toEqual([]);
+			const channels = (sm as unknown as { channels: Map<string, { status: string }> }).channels;
+			expect(channels.get("held-ch-1")?.status).toBe("live");
+			expect(dal.getChannel("held-ch-1")?.status).toBe("live");
+			// The one it does not hold has ended, and is not started again.
+			expect(channels.has("lost-ch-1")).toBe(false);
+			expect(dal.getChannel("lost-ch-1")?.status).toBe("dead");
+		});
+
+		it("closes the session when the daemon cannot be reached at startup, twice (#981)", async () => {
+			const { MetaDAL } = await import("../storage/meta.js");
+			const dal = new MetaDAL(dbManager.meta);
+
+			const host = dal.createHost({ type: "local", label: "unreachable-local" });
+			const sessionId = "UNREACHSESS0000000000000000001";
+			dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+			dal.createChannel({ id: "unreach-ch-1", sessionId, status: "live", shell: "/bin/sh" });
+
+			const launch = vi.mocked(_connectOrLaunchForMock);
+			launch
+				.mockRejectedValueOnce(new Error("pipe busy"))
+				.mockRejectedValueOnce(new Error("pipe busy"));
+
+			await sm.startup();
+
+			expect(launch).toHaveBeenCalledTimes(2);
+			expect(dal.getSession(sessionId)?.status).toBe("closed");
+			expect(dal.getChannel("unreach-ch-1")?.status).toBe("dead");
 		});
 
 		it("marks channels dead when no non-closed session exists for a host", async () => {
@@ -4194,7 +5228,6 @@ describe("SessionManager", () => {
 				});
 
 				// startup() triggers 1st warm restart (count=1)
-				// _warmRestartLocal now awaits _spawnChannelsForHost — start, flush, await.
 				let p: Promise<void> = sm.startup();
 				await vi.advanceTimersByTimeAsync(0);
 				await p;
@@ -5977,6 +7010,7 @@ describe("SessionManager — elevation support", () => {
 //   - moving getOrCreateSession BEFORE the .set() call → two sessions in ctx.sessions
 
 // Re-import the mocked SshAgent so vi.mocked() can read call counts.
+import { AgentBinaryDecisionNeeded } from "./agent-deployer.js";
 import { SshAgent as _SshAgentForMock } from "./ssh-agent.js";
 
 describe("SessionManager — concurrent SSH connect coalescing", () => {
@@ -6017,6 +7051,189 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 	// SshAgent is constructed twice, and channels reference different sessionIds.
 	// Post-fix: exactly one session entry, one SshAgent construction, both
 	// channel states carry the same sessionId.
+	// ── #1034: the pane is told the hub is connecting its host ──────────────────
+	//
+	// Each wait of a connection has its own bound, and a host's may be longer
+	// than the pane's 15 s: the hub says it is connecting, once per SPAWN, and
+	// answers every SPAWN it said it to.
+
+	/** The next SshAgent: its start runs `start`, given the abort signal. */
+	function nextSshAgent(
+		start: (signal: AbortSignal | undefined) => Promise<void>,
+		tofu = false,
+	): void {
+		// biome-ignore lint/complexity/useArrowFunction: vitest 4 needs a constructable function for new-ed mocks
+		vi.mocked(_SshAgentForMock).mockImplementationOnce(function (
+			host: { id: string },
+			_promptAuth: unknown,
+			deployOptions?: MockSshAgentDeployOptions,
+		) {
+			const agent = new MockSshAgent(host, deployOptions);
+			if (tofu) {
+				agent.lastKeyVerification = {
+					capturedFingerprint: "SHA256:mockfp",
+					mismatch: false,
+					tofu: true,
+				} as typeof agent.lastKeyVerification;
+			}
+			agent.start = vi.fn((_fp: unknown, _trusted: unknown, signal?: AbortSignal) =>
+				start(signal),
+			) as unknown as typeof agent.start;
+			mockSshAgentInstance = agent;
+			return agent;
+		} as unknown as typeof _SshAgentForMock);
+	}
+
+	const connecting = (received: ProtocolMessage[]) =>
+		received.filter((m) => m.type === "HOST_CONNECTING");
+
+	it("tells each spawning client its host is being connected (#1034)", async () => {
+		const hostId = await createSshHost();
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		nextSshAgent(() => gate);
+		const r1: ProtocolMessage[] = [];
+		const r2: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1034-a", r1));
+		sm.addClient(makeClient("c-1034-b", r2));
+
+		const spawnA = sm.handleSpawn("c-1034-a", { type: "SPAWN", hostId, requestId: "r1" });
+		const spawnB = sm.handleSpawn("c-1034-b", { type: "SPAWN", hostId, requestId: "r2" });
+		await flushImmediate();
+		await flushImmediate();
+
+		// Still connecting: the start above has not returned.
+		expect(connecting(r1)).toEqual([{ type: "HOST_CONNECTING", hostId, requestId: "r1" }]);
+		expect(connecting(r2)).toEqual([{ type: "HOST_CONNECTING", hostId, requestId: "r2" }]);
+		expect(r1.some((m) => m.type === "SPAWN_OK")).toBe(false);
+
+		release();
+		expect(await spawnA).not.toBeNull();
+		expect(await spawnB).not.toBeNull();
+		expect(
+			r1.map((m) => m.type).filter((t) => t === "HOST_CONNECTING" || t === "SPAWN_OK"),
+		).toEqual(["HOST_CONNECTING", "SPAWN_OK"]);
+		expect(
+			r2.map((m) => m.type).filter((t) => t === "HOST_CONNECTING" || t === "SPAWN_OK"),
+		).toEqual(["HOST_CONNECTING", "SPAWN_OK"]);
+	});
+
+	it("sends one HOST_CONNECTING per spawn however many dials (#1034)", async () => {
+		const hostId = await createSshHost();
+		nextSshAgent(() => Promise.reject(new Error("SSH_TOFU")), true);
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1034-once", received));
+
+		const spawn = sm.handleSpawn("c-1034-once", { type: "SPAWN", hostId, requestId: "r-once" });
+		const prompt = await vi.waitFor(() => {
+			const asked = received.find((m) => m.type === "HOST_VERIFY") as
+				| { promptId: string }
+				| undefined;
+			if (asked === undefined) throw new Error("not asked yet");
+			return asked;
+		});
+		sm.handleHostVerifyResponse(prompt.promptId, "trust_once", "c-1034-once");
+
+		expect(await spawn).not.toBeNull();
+		// Two dials: the first refused for its unknown key, the second trusted.
+		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(2);
+		expect(connecting(received)).toEqual([
+			{ type: "HOST_CONNECTING", hostId, requestId: "r-once" },
+		]);
+	});
+
+	it("sends one HOST_CONNECTING when an approved agent binary dials again (#1034)", async () => {
+		const hostId = await createSshHost();
+		// The first dial finds a binary nobody approved; once trusted,
+		// _connectSshAgent is entered again and dials anew.
+		nextSshAgent(() =>
+			Promise.reject(
+				new AgentBinaryDecisionNeeded({
+					hostId,
+					hostname: "concurrent-test",
+					remotePath: "/home/user/.local/bin/lasterm-agent",
+					remoteSha256: "ab".repeat(32),
+					os: "linux",
+					arch: "x64",
+					mismatch: false,
+				}),
+			),
+		);
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1034-binary", received));
+
+		const spawn = sm.handleSpawn("c-1034-binary", { type: "SPAWN", hostId, requestId: "r-bin" });
+		const prompt = await vi.waitFor(() => {
+			const asked = received.find((m) => m.type === "AGENT_BINARY_VERIFY") as
+				| { promptId: string }
+				| undefined;
+			if (asked === undefined) throw new Error("not asked yet");
+			return asked;
+		});
+		sm.handleAgentVerifyResponse(prompt.promptId, "trust_once", "c-1034-binary");
+
+		expect(await spawn).not.toBeNull();
+		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(2);
+		expect(connecting(received)).toEqual([{ type: "HOST_CONNECTING", hostId, requestId: "r-bin" }]);
+	});
+
+	it("answers a spawn disconnected during its host-key question as disconnected (#1034)", async () => {
+		const hostId = await createSshHost();
+		nextSshAgent(() => Promise.reject(new Error("SSH_TOFU")), true);
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1034-ask", received));
+
+		const spawn = sm.handleSpawn("c-1034-ask", { type: "SPAWN", hostId, requestId: "r-ask" });
+		await vi.waitFor(() => {
+			if (!received.some((m) => m.type === "HOST_VERIFY")) throw new Error("not asked yet");
+		});
+		sm.disconnectHost(hostId);
+
+		expect(await spawn).toBeNull();
+		expect(received.filter((m) => m.type === "ERROR")).toEqual([
+			expect.objectContaining({
+				type: "ERROR",
+				hostId,
+				requestId: "r-ask",
+				message: "concurrent-ssh is disconnected. Connect it to start its terminals.",
+			}),
+		]);
+	});
+
+	it("answers a spawn whose connection its user cancelled (#1034)", async () => {
+		const hostId = await createSshHost();
+		nextSshAgent(
+			(signal) =>
+				new Promise<void>((_resolve, reject) => {
+					signal?.addEventListener("abort", () =>
+						reject(Object.assign(new Error("SSH connect aborted"), { name: "AbortError" })),
+					);
+				}),
+		);
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1034-cancel", received));
+
+		const spawn = sm.handleSpawn("c-1034-cancel", {
+			type: "SPAWN",
+			hostId,
+			requestId: "r-cancel",
+		});
+		await vi.waitFor(() => expect(connecting(received)).toHaveLength(1));
+		sm.disconnectHost(hostId);
+
+		expect(await spawn).toBeNull();
+		expect(received.filter((m) => m.type === "ERROR")).toEqual([
+			expect.objectContaining({
+				type: "ERROR",
+				hostId,
+				requestId: "r-cancel",
+				message: "concurrent-ssh is disconnected. Connect it to start its terminals.",
+			}),
+		]);
+	});
+
 	it("two concurrent SPAWNs share exactly one session and one SshAgent", async () => {
 		const hostId = await createSshHost();
 

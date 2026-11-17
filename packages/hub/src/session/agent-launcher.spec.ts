@@ -505,6 +505,10 @@ describe("connectOrLaunch refuses a socket directory that is not this user's own
 	});
 });
 
+/** An endpoint the platform accepts: a named pipe on Windows, where a path is refused (#733). */
+const AGENT_ENDPOINT =
+	process.platform === "win32" ? "\\\\.\\pipe\\lasterm-agent-spec" : "/tmp/lasterm-agent.sock";
+
 describe("stopLocalAgent", () => {
 	it("runs the resolved executable with explicit stop arguments and no shell", async () => {
 		const child = new (
@@ -520,7 +524,7 @@ describe("stopLocalAgent", () => {
 			return child;
 		});
 
-		const result = await stopLocalAgent("/tmp/lasterm-agent.sock", {
+		const result = await stopLocalAgent(AGENT_ENDPOINT, {
 			agentPath: "/opt/lasterm-agent",
 			spawn: run as unknown as typeof import("node:child_process").spawn,
 		});
@@ -528,7 +532,7 @@ describe("stopLocalAgent", () => {
 		expect(result).toMatchObject({ stopped: true, diagnostic: "Local agent stopped" });
 		expect(run).toHaveBeenCalledWith(
 			"/opt/lasterm-agent",
-			["--stop", "--socket", "/tmp/lasterm-agent.sock"],
+			["--stop", "--socket", AGENT_ENDPOINT],
 			expect.objectContaining({ shell: false }),
 		);
 	});
@@ -560,13 +564,29 @@ describe("stopLocalAgent", () => {
 			return child;
 		});
 
-		const result = await stopLocalAgent("/tmp/lasterm-agent.sock", {
+		const result = await stopLocalAgent(AGENT_ENDPOINT, {
 			agentPath: "/opt/lasterm-agent",
 			spawn: run as unknown as typeof import("node:child_process").spawn,
 		});
 
 		expect(result).toEqual({ ...expected, stdout: said, stderr: "" });
 	});
+
+	it.skipIf(process.platform !== "win32")(
+		"reports a non-pipe [agent] socket_path on Windows instead of throwing or stopping another pipe (#733)",
+		async () => {
+			const run = vi.fn();
+
+			const result = await stopLocalAgent("/run/user/1000/lasterm/agent.sock", {
+				agentPath: "/opt/lasterm-agent",
+				spawn: run as unknown as typeof import("node:child_process").spawn,
+			});
+
+			expect(result.stopped).toBe(false);
+			expect(result.diagnostic).toMatch(/\[agent\] socket_path .* is not a named pipe/);
+			expect(run).not.toHaveBeenCalled();
+		},
+	);
 });
 
 /**

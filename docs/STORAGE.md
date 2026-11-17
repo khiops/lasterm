@@ -164,6 +164,7 @@ CREATE TABLE hosts (
   ssh_proxy_spec TEXT,                                   -- or a jump as user@host:port
   ssh_proxy_fingerprint TEXT,                            -- that spec jump's pinned key
   ssh_remote_daemon INTEGER,                             -- NULL follows [ssh] remote_daemon (#79)
+  connect_timeout_seconds INTEGER,                       -- 20-120 s per connection wait; NULL: ssh_config ConnectTimeout >= 20 s, else the hub's limits (#1034)
   discovered_default_shell TEXT                          -- the default shell its agent reported (023)
 );
 ```
@@ -455,15 +456,19 @@ previous one goes there; a backlog an earlier version left is cleared by GC (§ 
 **Snapshot chunk data:**
 ```json
 {
-  "serialized": "<the agent's vt100 screen, as the escape sequences that draw it>",
+  "serialized": "<the agent's vt100 screen, as the escape sequences that draw it, then the character-set designations and shift the program holds>",
   "cols": 120,
   "rows": 40,
-  "cursor_x": 5,
-  "cursor_y": 38
+  "cursorX": 5,
+  "cursorY": 38,
+  "alternateScreen": false,
+  "inputModes": "<the program's input modes, as escape sequences>"
 }
 ```
 
-Stored as JSON in data_blob (kind=snapshot). Codec=raw for MVP.
+Stored as JSON in data_blob (kind=snapshot), codec=raw: the snapshot as the hub decoded it, with its
+keys in camelCase, whatever fields the agent sent. `alternateScreen` and `inputModes` come from an
+agent that says `"input-modes"` (PROTOCOL.md § 3.3, #1012); an older agent's snapshot has neither.
 
 ### 5.3 Resize Chunks
 
@@ -491,8 +496,9 @@ channel_id → {
 ```
 
 It is written each time a snapshot is stored (`storeSnapshot`), and deleted with its channel.
-Nothing reads it: an ATTACH, cached or not, finds the latest snapshot in spool.db itself
-(`getLatestSnapshot`) and reads the tail after it, and GC goes by chunk age, size, the
+Nothing reads it: an ATTACH answered from the spool finds the newest snapshot in spool.db itself
+and reads the output after it (`buildAttachPayload`), one answered by the agent relays the agent's
+snapshot, and GC goes by chunk age, size, the
 channel's status and whether meta.db still has the channel (§ 7), never by this table.
 
 ## 7. Garbage Collection
@@ -661,6 +667,8 @@ packages/hub/src/storage/migrations/
 │   ├── 024-launch-profile-set-by-user.sql
 │   ├── 025-launch-profile-report-directory.sql
 │   ├── 026-transfers.sql
+│   ├── 027-ssh-auth-for-every-ssh-host.sql
+│   ├── 028-host-connect-timeout.sql
 │   └── ...
 └── spool/
     ├── 001-initial.sql
@@ -699,6 +707,8 @@ them. `spool.db` was not squashed: it still has its one migration.
 | `024-launch-profile-set-by-user.sql` | Adds `host_launch_profiles.set_by_user`: 1 for an override the user set through the hosts' profile routes, 0 for one the hub made from what an agent reported (#800). The hub marks the profile of the default shell a host's agent reports as the host's default only where the host has none, or where the one it has is its own earlier mark, which so follows the agent's default; it never replaces a default the user set, and never marks a profile the user hid. A hub before it marked the agent's at every connection, over the user's, so every row already there is left at 0, the column's default, and none is rewritten. A hub before #800, run again on the database, ignores the column and marks its agent's default at every connection again; a row it adds reads 0. |
 | `025-launch-profile-report-directory.sql` | Adds `launch_profiles.report_directory`: 1 for a profile whose PowerShell reports its directory (#839). The hub then says so in the SPAWN of each of its terminals, restarts included, and a Windows agent starts a `pwsh` or `powershell` whose arguments run nothing of their own with a prompt that reports its directory (PROTOCOL.md § 3.2). Every profile already there reads 0, the column's default: the switch changes the command line a shell starts with, and only its user turns it on. No row is rewritten. A hub before #839, run again on the database, ignores the column and starts every profile as it always did; a profile it adds reads 0. |
 | `026-transfers.sql` | Adds `transfers` and `transfer_items` (§ 3.9), where uploads are kept so that a restart, a crash or an update loses none (#860). Nothing else is touched. A hub before #860, run again on the database, opens it as one ahead of its migrations (§ 9.1), never names the two tables, and keeps its uploads in memory as it did; a host it deletes takes its uploads' rows with it, through the cascades. Back on a hub with #860, what it left there is read as before. |
+| `027-ssh-auth-for-every-ssh-host.sql` | Gives every SSH host stored without `ssh_auth` a method, by the rule `POST /api/hosts` now applies to one sent without it (#917): `key` when its `ssh_key_path` holds something other than ASCII whitespace, `agent` otherwise. Before, such a host was read as key auth when connected to and as the agent when gone through. No other column or row is touched, `updated_at` included; a local host keeps its NULL. A hub before #917, run again on the database, reads each method as stored, and can store an SSH host without one again: back on a hub with #917, connecting to it or through it is refused. |
+| `028-host-connect-timeout.sql` | Adds `hosts.connect_timeout_seconds`, NULL for every host already stored (#1034): how long each wait of a connection to the host may last, 20-120 s. NULL keeps the limits as before, or takes `ConnectTimeout` from `~/.ssh/config` when it is 20 s or more. A hub before #1034 ignores the column. |
 
 ## 10. Backup & Restore
 

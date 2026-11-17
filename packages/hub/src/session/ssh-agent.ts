@@ -1,10 +1,18 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import type { AgentConfig, HelloMessage, Host, HostArch, HostOs } from "@lasterm/shared";
+import type {
+	AgentConfig,
+	HelloMessage,
+	Host,
+	HostArch,
+	HostOs,
+	SshAuthMethod,
+} from "@lasterm/shared";
 import { DEFAULT_AGENT_CONFIG, encodeFrame, type ProtocolMessage } from "@lasterm/shared";
 import ssh2, { Client, type ClientChannel, type ConnectConfig, type SyncHostVerifier } from "ssh2";
 import { fingerprintOf } from "../ssh/fingerprint.js";
 import { findHostKeyRevocation } from "../ssh/known-hosts.js";
+import { identityAgentIsNone } from "../ssh/ssh-config-parser.js";
 import { parseSshHost } from "../ssh-route.js";
 import { AgentConnection } from "./agent-connection.js";
 import {
@@ -19,6 +27,7 @@ import {
 } from "./agent-deployer.js";
 import { AskAgainError } from "./ask-again.js";
 import { AuthCancelledError } from "./auth-cancelled.js";
+import { connectTimeoutMsFor } from "./connect-timeout.js";
 import { HelloSeeker } from "./hello-seeker.js";
 import { openJumpRoute } from "./jump-connection.js";
 import {
@@ -254,6 +263,13 @@ export async function buildSshConnectConfig(
 			}),
 		);
 	} else if (auth.method === "agent") {
+		// The agent is kept out of an alias whose `IdentityAgent` is none, as ssh
+		// keeps it out of `ssh <alias>`; nothing is dialled (#1038).
+		if (auth.sshConfigHost && identityAgentIsNone(auth.sshConfigHost)) {
+			throw new Error(
+				`IdentityAgent none in ~/.ssh/config keeps the SSH agent out of ${auth.sshConfigHost}, and this host signs in with the agent. Choose a key or a password for it.`,
+			);
+		}
 		const address = sshAgentAddress({
 			env: process.env,
 			platform: process.platform,
@@ -424,6 +440,15 @@ export class SshAgent extends AgentConnection {
 	 */
 	keySigner: KeySigner | null = null;
 
+	/**
+	 * The method this connection signs in with: the host's, as it was when the
+	 * agent was built, not as the host reads after an edit made while it
+	 * connects. The security log says it.
+	 */
+	get authMethod(): SshAuthMethod | undefined {
+		return this.host.sshAuth;
+	}
+
 	lastKeyVerification: HostKeyVerification = {
 		capturedFingerprint: "",
 		mismatch: false,
@@ -500,8 +525,18 @@ export class SshAgent extends AgentConnection {
 		const username = this.host.sshUser || parsed.username;
 		const hostname = parsed.hostname;
 		const port = this.host.sshPort ?? 22;
-		const authMethod = this.host.sshAuth ?? "key";
+		// An SSH host created by POST /api/hosts or the import, or turned from local
+		// into SSH by a PUT, has a method (#917). One stored without, as an internal
+		// writer can leave it, is not given either, which would sign in one way here
+		// and another as a jump.
+		const authMethod = this.host.sshAuth;
+		if (authMethod === undefined) {
+			throw new Error("Host has no sign-in method configured");
+		}
 		console.error(`[lasterm-ssh] resolved: ${username}@${hostname}:${port} auth=${authMethod}`);
+		// Each wait of every dial below gets this long, when the host or its
+		// ~/.ssh/config sets it (#1034); otherwise the limits as they were.
+		const connectTimeoutMs = connectTimeoutMsFor(this.host, hostname);
 
 		// If aborted while building the connect config (which may prompt for auth),
 		// reject before proceeding.
@@ -540,6 +575,7 @@ export class SshAgent extends AgentConnection {
 					{ storedFingerprint, sessionTrustedFingerprint },
 					signal,
 					jump === undefined || jumpAuth === undefined ? undefined : { jump, auth: jumpAuth },
+					connectTimeoutMs,
 				);
 			} catch (err) {
 				if (!(err instanceof AskAgainError)) throw err;
@@ -565,6 +601,8 @@ export class SshAgent extends AgentConnection {
 		},
 		signal: AbortSignal | undefined,
 		via: { jump: ResolvedJump; auth: ConnectConfig } | undefined,
+		/** The host's connection timeout (#1034), or undefined for the hub's own limits. */
+		connectTimeoutMs: number | undefined,
 	): Promise<{ hello: HelloMessage; keyVerification: HostKeyVerification }> {
 		const { hostname, port, username } = target;
 		const { storedFingerprint, sessionTrustedFingerprint } = trust;
@@ -592,6 +630,8 @@ export class SshAgent extends AgentConnection {
 				pinnedFingerprint: jump.pinnedFingerprint,
 				trustKnownHosts: jump.trustKnownHosts,
 				destination: { host: hostname, port },
+				...(connectTimeoutMs !== undefined && { waitTimeoutMs: connectTimeoutMs }),
+				...(signal !== undefined && { signal }),
 			});
 			this.jumpRoute = route;
 			this.lastJumpFingerprint = jump.pinnedFingerprint ? null : route.fingerprint;
@@ -630,6 +670,9 @@ export class SshAgent extends AgentConnection {
 		// any other: the daemon (#79) is reached over this same connection (#607).
 		connectConfig.keepaliveInterval = SSH_KEEPALIVE.keepaliveInterval;
 		connectConfig.keepaliveCountMax = SSH_KEEPALIVE.keepaliveCountMax;
+		// Reaching the SSH server, up to authentication: ssh2's own 20 s unless the
+		// host gives itself longer (#1034).
+		if (connectTimeoutMs !== undefined) connectConfig.readyTimeout = connectTimeoutMs;
 
 		console.error(`[lasterm-ssh] connecting...`);
 		return new Promise<{ hello: HelloMessage; keyVerification: HostKeyVerification }>(
@@ -637,6 +680,8 @@ export class SshAgent extends AgentConnection {
 				let resolved = false;
 				/** The agent answered: from here on, an error is how the connection ends. */
 				let established = false;
+				/** Authentication succeeded: from here on, a close also fails what is pending. */
+				let authenticated = false;
 				const rejectOnce = (err: Error): void => {
 					if (resolved) return;
 					resolved = true;
@@ -724,6 +769,15 @@ export class SshAgent extends AgentConnection {
 				});
 
 				client.on("close", () => {
+					// Closed before the agent answered (#1034). Before authentication,
+					// after its banner, ssh2 says nothing else and the attempt would wait
+					// for ever. After it, ssh2 fails the requests and channels still
+					// pending just after this event, with errors that say more: those
+					// settle it first, and this only if none did.
+					const closedEarly = (): void =>
+						rejectOnce(new Error("The SSH server closed the connection before it was ready"));
+					if (authenticated) setImmediate(closedEarly);
+					else closedEarly();
 					// A connection whose password was refused, closed after the next
 					// one began: its end is not that one's (#815).
 					if (this.client !== null && this.client !== client) return;
@@ -739,6 +793,7 @@ export class SshAgent extends AgentConnection {
 				});
 
 				client.on("ready", () => {
+					authenticated = true;
 					console.error("[lasterm-ssh] SSH ready");
 					this.keySigner = keySignerOf(connectConfig);
 					// SEC-014: zero credentials immediately after successful auth
@@ -781,7 +836,8 @@ export class SshAgent extends AgentConnection {
 					const runAgent = (agentPath: string, os: HostOs | null, daemonPath?: string): void => {
 						const hostOs = os ?? this.host.os;
 						const helloTimeoutMs =
-							(hostOs === "windows" ? WINDOWS_HELLO_TIMEOUT_MS : HELLO_TIMEOUT_MS) +
+							(connectTimeoutMs ??
+								(hostOs === "windows" ? WINDOWS_HELLO_TIMEOUT_MS : HELLO_TIMEOUT_MS)) +
 							(shellStartAllowance(client) ?? 0);
 						// A stdio agent is the command of the account's shell, which may
 						// print before it starts (#749): its frames start at HELLO, and
@@ -806,7 +862,7 @@ export class SshAgent extends AgentConnection {
 							// daemon's own deadline so that its diagnosis comes first.
 							this.cleanup();
 							rejectOnce(new Error("The remote agent could not be reached"));
-						}, TRANSPORT_TIMEOUT_MS);
+						}, connectTimeoutMs ?? TRANSPORT_TIMEOUT_MS);
 						const startHelloClock = (): void => {
 							clearTimeout(helloTimeout);
 							helloTimeout = setTimeout(() => {
@@ -840,6 +896,7 @@ export class SshAgent extends AgentConnection {
 								conn: client,
 								agentPath: daemonPath,
 								logLevel: this.loggingConfig.logLevel,
+								...(connectTimeoutMs !== undefined && { connectTimeoutMs }),
 								logFormat: this.loggingConfig.logFormat,
 								...(this.loggingConfig.logFilesKept !== undefined && {
 									logFilesKept: this.loggingConfig.logFilesKept,

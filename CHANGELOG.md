@@ -1,5 +1,81 @@
 # Changelog
 
+## [0.18.0](https://github.com/khiops/lasterm/compare/v0.17.2...v0.18.0) (2026-11-16)
+
+
+### Features
+
+* **hub:** per-host connection timeout ([#1034](https://github.com/khiops/lasterm/issues/1034)) ([#1051](https://github.com/khiops/lasterm/issues/1051)) ([04e5475](https://github.com/khiops/lasterm/commit/04e54755afdd91111869588008208f512647f962))
+* paste more than 64 KiB, with end-to-end flow control ([#1014](https://github.com/khiops/lasterm/issues/1014)) ([#1020](https://github.com/khiops/lasterm/issues/1020)) ([fe2d319](https://github.com/khiops/lasterm/commit/fe2d3198cb3cadb40aad8e1cc5acb4445e1cabcc))
+
+
+### Bug Fixes
+
+* **agent:** never cut an escape sequence between output and a snapshot ([#954](https://github.com/khiops/lasterm/issues/954)) ([#1061](https://github.com/khiops/lasterm/issues/1061)) ([c0541ff](https://github.com/khiops/lasterm/commit/c0541ffccb37528265fc1282551569288dd89d09))
+* **agent:** wake conhost after a lone paste end marker on Windows 26100 ([#1058](https://github.com/khiops/lasterm/issues/1058)) ([c959d83](https://github.com/khiops/lasterm/commit/c959d838fa0de5d0d1a20f8c95c9d83686a10ce2)), closes [#1030](https://github.com/khiops/lasterm/issues/1030)
+* **hub:** keep the terminals a daemon holds after the first startup connection fails ([#1060](https://github.com/khiops/lasterm/issues/1060)) ([9760a75](https://github.com/khiops/lasterm/commit/9760a75b1e8bfdc4d7208b2fde6c5c6f4cd4036e)), closes [#981](https://github.com/khiops/lasterm/issues/981)
+* **hub:** link a ProxyJump only when it reaches the bastion as written, and test the jump the host stores ([#1053](https://github.com/khiops/lasterm/issues/1053)) ([f3c27fb](https://github.com/khiops/lasterm/commit/f3c27fb6892fd2a62813799951e56c1677739d1b)), closes [#1040](https://github.com/khiops/lasterm/issues/1040) [#1042](https://github.com/khiops/lasterm/issues/1042)
+* **hub:** resolve ~/.ssh/config entries as OpenSSH does ([#1038](https://github.com/khiops/lasterm/issues/1038)) ([#1048](https://github.com/khiops/lasterm/issues/1048)) ([dcf1ab5](https://github.com/khiops/lasterm/commit/dcf1ab5520430121dec1ba10da019df28fecda63)), closes [#1039](https://github.com/khiops/lasterm/issues/1039)
+* **hub:** take a detached session back when a terminal starts or attaches on its host ([#955](https://github.com/khiops/lasterm/issues/955)) ([#1059](https://github.com/khiops/lasterm/issues/1059)) ([059c2b4](https://github.com/khiops/lasterm/commit/059c2b4f1ed72489d5632b8fa19f836896baa4c8))
+* **web:** keep a tab's rename, menu and drag on that tab when another closes ([#1024](https://github.com/khiops/lasterm/issues/1024)) ([63cb5fb](https://github.com/khiops/lasterm/commit/63cb5fbef7c43a4e3fe0f27e6d474526f339e653)), closes [#990](https://github.com/khiops/lasterm/issues/990)
+* **web:** offer to start a new terminal again after a reload, not show it gone ([#1041](https://github.com/khiops/lasterm/issues/1041)) ([1c53df0](https://github.com/khiops/lasterm/commit/1c53df041be0bb3e963da5badb4d56a2b658a0ad)), closes [#992](https://github.com/khiops/lasterm/issues/992)
+* **web:** pick a ~/.ssh/config entry with the method the import stores ([#1021](https://github.com/khiops/lasterm/issues/1021)) ([3f54b4e](https://github.com/khiops/lasterm/commit/3f54b4e15efefa9a5332bdb7cb53de52219189e3)), closes [#1009](https://github.com/khiops/lasterm/issues/1009)
+* **web:** preserve picked SSH config fields ([#1036](https://github.com/khiops/lasterm/issues/1036)) ([a1f9679](https://github.com/khiops/lasterm/commit/a1f967955b09d3cdf11426325c69885582fa2f64)), closes [#1022](https://github.com/khiops/lasterm/issues/1022)
+* **web:** re-apply a pane's host theme and cursor blink when they change ([#1025](https://github.com/khiops/lasterm/issues/1025)) ([331fb68](https://github.com/khiops/lasterm/commit/331fb68d4ad4bd2cb0e0f73ada09a3fc89d5061d)), closes [#997](https://github.com/khiops/lasterm/issues/997) [#998](https://github.com/khiops/lasterm/issues/998)
+* **web:** state the real deadline in the SPAWN timeout message ([#1035](https://github.com/khiops/lasterm/issues/1035)) ([d9047b5](https://github.com/khiops/lasterm/commit/d9047b519fb241f92ce130c671a984f5c1c52ede)), closes [#1033](https://github.com/khiops/lasterm/issues/1033)
+* **web:** test and store a picked ssh_config entry under its alias ([#1037](https://github.com/khiops/lasterm/issues/1037)) ([#1043](https://github.com/khiops/lasterm/issues/1043)) ([5b11574](https://github.com/khiops/lasterm/commit/5b115744490b4fe5d5e85f236e9af3be6e965aaa))
+
+
+### Tests
+
+* **agent:** type a second byte a moment after a closed paste, past conhost's held input ([#1031](https://github.com/khiops/lasterm/issues/1031)) ([2a323a9](https://github.com/khiops/lasterm/commit/2a323a97139bc7e2a147e5bb6a2968a774ea3368))
+* **hub:** close the files the mock SFTP server was still opening when it closes ([#1046](https://github.com/khiops/lasterm/issues/1046)) ([#1050](https://github.com/khiops/lasterm/issues/1050)) ([50358d4](https://github.com/khiops/lasterm/commit/50358d41f5c43f5d3271c8d407aa72801de6e1b6))
+* **web:** end a window's pending SPAWNs when App.spec unmounts it ([#1052](https://github.com/khiops/lasterm/issues/1052)) ([#1055](https://github.com/khiops/lasterm/issues/1055)) ([2593b2b](https://github.com/khiops/lasterm/commit/2593b2b7a9579a06137e015d32327bc9e545bf36))
+
+
+### Documentation
+
+* **root:** add Store news for a rename or menu kept on its tab ([#990](https://github.com/khiops/lasterm/issues/990)) ([#1026](https://github.com/khiops/lasterm/issues/1026)) ([2e53499](https://github.com/khiops/lasterm/commit/2e534995a4335eb5d3ed213292b3ea960e94213b))
+* **root:** Store news for a per-host connection timeout ([#1034](https://github.com/khiops/lasterm/issues/1034)) ([#1056](https://github.com/khiops/lasterm/issues/1056)) ([1596e0b](https://github.com/khiops/lasterm/commit/1596e0b0b4c74bc2672a0ccf9ec69be24f38661c))
+* **root:** Store news for a ProxyJump kept with its own user or port ([#1040](https://github.com/khiops/lasterm/issues/1040), [#1042](https://github.com/khiops/lasterm/issues/1042)) ([#1057](https://github.com/khiops/lasterm/issues/1057)) ([a0872ee](https://github.com/khiops/lasterm/commit/a0872ee7604cfde58fcf3faac98038c4d4aee865))
+* **root:** Store news for an attach while a terminal prints ([#954](https://github.com/khiops/lasterm/issues/954)) ([#1062](https://github.com/khiops/lasterm/issues/1062)) ([2f83876](https://github.com/khiops/lasterm/commit/2f8387644f8c297f6300489d30c49eff9f4402fb))
+* **root:** Store news for hosts from ~/.ssh/config getting ssh's settings ([#1038](https://github.com/khiops/lasterm/issues/1038)) ([#1049](https://github.com/khiops/lasterm/issues/1049)) ([ff7a67a](https://github.com/khiops/lasterm/commit/ff7a67a02dcfed06c4c3ff46ffdee1a6fc743216))
+* **root:** Store news for pastes up to 16 MiB ([#1014](https://github.com/khiops/lasterm/issues/1014)) ([#1029](https://github.com/khiops/lasterm/issues/1029)) ([640d7ce](https://github.com/khiops/lasterm/commit/640d7ce4cdf86d726577db524da3c0711b153a8e))
+* **root:** Store news for terminal theme and cursor applied live ([#997](https://github.com/khiops/lasterm/issues/997), [#998](https://github.com/khiops/lasterm/issues/998)) ([#1028](https://github.com/khiops/lasterm/issues/1028)) ([21c6283](https://github.com/khiops/lasterm/commit/21c6283becc580c7bcec0a644186568055d406fc))
+* **root:** Store news for Test Connection using a picked entry's alias ([#1037](https://github.com/khiops/lasterm/issues/1037)) ([#1044](https://github.com/khiops/lasterm/issues/1044)) ([c0cc4ac](https://github.com/khiops/lasterm/commit/c0cc4ac0079b2c46ec15c841a93731012d32d80c))
+* **root:** Store news for the ~/.ssh/config picker selecting the agent ([#1023](https://github.com/khiops/lasterm/issues/1023)) ([6736daf](https://github.com/khiops/lasterm/commit/6736daf5c5c01c12ba3ef5e55ce961579adfa333))
+* **store:** news for a new terminal's pane after a reload ([#1045](https://github.com/khiops/lasterm/issues/1045)) ([c231588](https://github.com/khiops/lasterm/commit/c2315886c1fad9d96f10fbc4e3809de5c46e80fa))
+
+## [0.17.2](https://github.com/khiops/lasterm/compare/v0.17.1...v0.17.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* **hub:** flush the chunker before answering an ATTACH from the spool ([#956](https://github.com/khiops/lasterm/issues/956)) ([#1003](https://github.com/khiops/lasterm/issues/1003)) ([b9b1e58](https://github.com/khiops/lasterm/commit/b9b1e586fe6104c7f2fbd648c67043b7432a392c))
+* **hub:** read a cached ATTACH's screen under the ended output's rules ([#1004](https://github.com/khiops/lasterm/issues/1004)) ([#1007](https://github.com/khiops/lasterm/issues/1007)) ([c389a78](https://github.com/khiops/lasterm/commit/c389a789ce64395487ae4eab98ff75f0361e4d21))
+* **hub:** refuse launch profile bodies the routes cannot store or read back ([#1006](https://github.com/khiops/lasterm/issues/1006)) ([f9ecc64](https://github.com/khiops/lasterm/commit/f9ecc646140ebce59a1f4156e43b97fb33136881)), closes [#916](https://github.com/khiops/lasterm/issues/916)
+* **hub:** store a sign-in method for every SSH host and read it one way ([#1005](https://github.com/khiops/lasterm/issues/1005)) ([7961430](https://github.com/khiops/lasterm/commit/7961430df1b2e3c09d5db874b124cffa41c6c3e2)), closes [#917](https://github.com/khiops/lasterm/issues/917)
+* restore a terminal's input modes at attach and adapt input to its program ([#1012](https://github.com/khiops/lasterm/issues/1012)) ([4aa9988](https://github.com/khiops/lasterm/commit/4aa9988a44da1efaed319bd2db73bcffac1b84ae))
+* **web:** a new terminal keeps its spawn when its pane is split or moved ([#993](https://github.com/khiops/lasterm/issues/993)) ([ceece9a](https://github.com/khiops/lasterm/commit/ceece9a058297521dd461a7b253547a022a30211)), closes [#980](https://github.com/khiops/lasterm/issues/980)
+* **web:** give each terminal a pane shows an xterm of its own ([#966](https://github.com/khiops/lasterm/issues/966)) ([#999](https://github.com/khiops/lasterm/issues/999)) ([cb294e5](https://github.com/khiops/lasterm/commit/cb294e5a1d78bfe931734a8116a2e24e6618ee71))
+* **web:** give the keyboard back to the pane when Settings closes during its leave ([#986](https://github.com/khiops/lasterm/issues/986)) ([5b9070e](https://github.com/khiops/lasterm/commit/5b9070eacafe6ce15931e8dca2c99458959d0288)), closes [#940](https://github.com/khiops/lasterm/issues/940)
+* **web:** replace a screen that missed output with the live answer ([#1010](https://github.com/khiops/lasterm/issues/1010)) ([4d66259](https://github.com/khiops/lasterm/commit/4d662590acdbaefaef6758f4f7e5d0451f94c1e4))
+* **web:** select the whole name when renaming a tab ([#988](https://github.com/khiops/lasterm/issues/988)) ([4ffdcb1](https://github.com/khiops/lasterm/commit/4ffdcb1d898b3340b598b1750a44298b4990769f)), closes [#941](https://github.com/khiops/lasterm/issues/941)
+
+
+### Tests
+
+* **agent:** make the stale socket one that never listened ([#913](https://github.com/khiops/lasterm/issues/913)) ([#1001](https://github.com/khiops/lasterm/issues/1001)) ([c8364ba](https://github.com/khiops/lasterm/commit/c8364ba525b934d1f1d23c5b39046f247f51dd62))
+
+
+### Documentation
+
+* **root:** Store news for a new terminal split or moved while it starts ([#980](https://github.com/khiops/lasterm/issues/980)) ([#995](https://github.com/khiops/lasterm/issues/995)) ([e5215a9](https://github.com/khiops/lasterm/commit/e5215a9bf213b48b758d4d8fabff38c791e63129))
+* **root:** Store news for a pane switched to another terminal ([#966](https://github.com/khiops/lasterm/issues/966)) ([#1000](https://github.com/khiops/lasterm/issues/1000)) ([e784f1d](https://github.com/khiops/lasterm/commit/e784f1d7a2bb828a26f4a92cdb7966de7280fd61))
+* **root:** Store news for a tab rename that selects the name ([#941](https://github.com/khiops/lasterm/issues/941)) ([#989](https://github.com/khiops/lasterm/issues/989)) ([3444d4d](https://github.com/khiops/lasterm/commit/3444d4d2d859e1dd7f0e35ea140070a73b4778e8))
+* **root:** Store news for Settings giving the keyboard back to its pane ([#987](https://github.com/khiops/lasterm/issues/987)) ([d6914b0](https://github.com/khiops/lasterm/commit/d6914b05462b8ad019b42d274137fddad93d1de6))
+* **root:** Store news for the reattach modes and the current screen after a reconnect ([#1012](https://github.com/khiops/lasterm/issues/1012), [#1010](https://github.com/khiops/lasterm/issues/1010)) ([896b277](https://github.com/khiops/lasterm/commit/896b277ad388f5431752eb31cf34b11dad18177e))
+
 ## [0.17.1](https://github.com/khiops/lasterm/compare/v0.17.0...v0.17.1) (2026-11-14)
 
 

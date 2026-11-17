@@ -7,10 +7,12 @@
  *
  *   - **a host this hub knows**, which brings its own authentication and its
  *     own pinned host key — nothing about it is described twice;
- *   - **a spec**, `user@host:port`, the form `~/.ssh/config` uses, for a
- *     bastion that is not a host here. It authenticates through the SSH agent,
- *     because that is what a bastion is reached with, and it has no row of its
- *     own to pin a key on, so the host that jumps through it pins it instead.
+ *   - **a spec**, `user@host:port`, the form `~/.ssh/config` uses, for a jump
+ *     not linked to a host here (a bastion that is none, or one the spec
+ *     reaches with another user or port, #1040). It authenticates through the
+ *     SSH agent, because that is what a bastion is reached with, and no host
+ *     row is linked to it to pin a key on, so the host that jumps through it
+ *     pins it.
  *
  * A chain (`ProxyJump a,b`) is refused rather than half-honoured: two hops is
  * not one hop twice as far, and silently taking only the first would connect
@@ -86,6 +88,17 @@ export function resolveJump(
 						"The host this one is reached through is no longer an SSH host here. Point it at another, or give its address instead.",
 				};
 			}
+			// An SSH host created by POST /api/hosts or the import, or turned from
+			// local into SSH by a PUT, has a method (#917). A jump through one stored
+			// without, as an internal writer can leave it, is refused rather than
+			// signing in another way than the host itself would.
+			if (jumpHost.sshAuth === undefined) {
+				return {
+					kind: "refused",
+					message:
+						"The host this one is reached through has no sign-in method. Edit it and choose one.",
+				};
+			}
 			const jumpParsed = parseSshHost(jumpHost.sshHost);
 			const expectedRoute = targetRoute(
 				{ ...jumpHost, sshProxyHostId: null, sshProxySpec: null },
@@ -103,7 +116,7 @@ export function resolveJump(
 						(name): name is string => !!name,
 					),
 					auth: {
-						method: jumpHost.sshAuth ?? "agent",
+						method: jumpHost.sshAuth,
 						keyPath: jumpHost.sshKeyPath ?? undefined,
 						// Its `IdentityAgent none` keeps the agent from signing its key (#876).
 						...(jumpHost.sshConfigHost ? { sshConfigHost: jumpHost.sshConfigHost } : {}),
@@ -132,7 +145,9 @@ export function resolveJump(
 						username: plan.spec.user ?? host.sshUser ?? parseSshHost(host.sshHost ?? "").username,
 					},
 					knownHostsNames: [plan.spec.host],
-					auth: { method: "agent" },
+					// The name the ssh OpenSSH starts for the jump reads its
+					// configuration by: its `IdentityAgent none` holds here too (#1038).
+					auth: { method: "agent", sshConfigHost: plan.spec.host },
 					promptHostId: host.id,
 					pinnedFingerprint: host.sshProxyFingerprint ?? null,
 					trustKnownHosts,

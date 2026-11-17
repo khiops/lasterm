@@ -88,11 +88,21 @@ export class FakeHub {
 	readonly answers = new Map<string, Answer>();
 	/** Whether it answers a SPAWN at once; when not, the window waits on it. */
 	answersSpawns = true;
+	/** Called with each SPAWN as the hub receives it, before it answers. */
+	onSpawn: ((msg: Frame) => void) | null = null;
+	/**
+	 * What dialling the socket waits on before it opens: a test holds it, or makes it
+	 * refuse. Null opens at once.
+	 */
+	dialing: (() => Promise<void>) | null = null;
 	private readonly listeners = new Map<string, Listener[]>();
+	private readonly reconnectListeners: Array<() => void | Promise<void>> = [];
+	private readonly disconnectListeners: Array<() => void> = [];
 	private connected = false;
 
 	readonly socket = {
 		connect: async (): Promise<void> => {
+			if (this.dialing !== null) await this.dialing();
 			this.connected = true;
 		},
 		send: (msg: Frame): void => {
@@ -107,8 +117,20 @@ export class FakeHub {
 					(this.listeners.get(type) ?? []).filter((c) => c !== cb),
 				);
 		},
-		onReconnect: (): (() => void) => () => {},
-		onDisconnect: (): (() => void) => () => {},
+		onReconnect: (cb: () => void | Promise<void>): (() => void) => {
+			this.reconnectListeners.push(cb);
+			return () => {
+				const at = this.reconnectListeners.indexOf(cb);
+				if (at !== -1) this.reconnectListeners.splice(at, 1);
+			};
+		},
+		onDisconnect: (cb: () => void): (() => void) => {
+			this.disconnectListeners.push(cb);
+			return () => {
+				const at = this.disconnectListeners.indexOf(cb);
+				if (at !== -1) this.disconnectListeners.splice(at, 1);
+			};
+		},
 		close: (): void => {
 			this.connected = false;
 		},
@@ -116,6 +138,18 @@ export class FakeHub {
 			return hub().connected;
 		},
 	};
+
+	/** The socket drops, as when the hub goes away. */
+	drop(): void {
+		this.connected = false;
+		for (const cb of [...this.disconnectListeners]) cb();
+	}
+
+	/** The socket comes back by itself, as the client's auto-reconnect brings it. */
+	async reconnect(): Promise<void> {
+		this.connected = true;
+		for (const cb of [...this.reconnectListeners]) await cb();
+	}
 
 	/** A frame from the hub. */
 	hear(msg: Frame): void {
@@ -145,6 +179,7 @@ export class FakeHub {
 			return;
 		}
 		if (msg.type === "SPAWN") {
+			this.onSpawn?.(msg);
 			if (!this.answersSpawns) return;
 			// A new terminal, live on the host asked, as the hub makes one.
 			const channelId = (msg.reuseChannelId as string | undefined) ?? `NEW${this.sent.length}`;
@@ -385,6 +420,8 @@ export function xtermInput(event: KeyboardEvent): string | null {
 export const xtermModule = {
 	Terminal: class {
 		options: Record<string, unknown>;
+		/** As xterm's parser: handlers for sequences, which this double never calls (#1012). */
+		parser = { registerCsiHandler: () => ({ dispose() {} }) };
 		cols = 80;
 		rows = 24;
 		unicode = { activeVersion: "" };
@@ -422,6 +459,9 @@ export const xtermModule = {
 					this.dataListeners = this.dataListeners.filter((l) => l !== listener);
 				},
 			};
+		}
+		onBinary() {
+			return { dispose() {} };
 		}
 		onResize() {
 			return { dispose() {} };

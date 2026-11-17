@@ -147,10 +147,11 @@ mod unix {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::os::fd::AsFd;
+        use std::os::fd::{AsFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::DirBuilderExt;
         use std::os::unix::net::UnixListener;
-        use std::path::PathBuf;
+        use std::path::{Path, PathBuf};
 
         /// A private directory this test made, removed however the test ends.
         struct TestDir(PathBuf);
@@ -220,9 +221,51 @@ mod unix {
         fn a_socket_nobody_listens_on_is_econnrefused() {
             let dir = TestDir::new("stale");
             let path = dir.0.join("agent.sock");
-            drop(UnixListener::bind(&path).expect("bind a test socket"));
+            bind_without_listening(&path);
             let error = connect(path.to_str().unwrap()).expect_err("nobody listens");
             assert_eq!(error.code, "ECONNREFUSED", "{}", error.message);
+        }
+
+        /// Bind a stream socket at `path`, then close it without it ever
+        /// listening. A listener would not do: a child that a sibling test
+        /// spawns holds a copy of every descriptor until its exec, and a
+        /// listening copy accepts the connection. A copy of this socket,
+        /// held anywhere, refuses it.
+        fn bind_without_listening(path: &Path) {
+            // SAFETY: socket has no preconditions.
+            let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+            assert!(raw >= 0, "socket: {}", io::Error::last_os_error());
+            // SAFETY: socket returned a descriptor nothing else owns.
+            let socket = unsafe { OwnedFd::from_raw_fd(raw) };
+            // SAFETY: sockaddr_un is plain data, and all zeroes is a valid value.
+            let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+            address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            let bytes = path.as_os_str().as_bytes();
+            // Shorter than sun_path, so the zeroed tail terminates it.
+            assert!(
+                bytes.len() < address.sun_path.len(),
+                "{} is too long for a socket",
+                path.display()
+            );
+            for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+                *slot = *byte as libc::c_char;
+            }
+            // SAFETY: the pointer and length describe `address`, which this
+            // frame owns for the duration of the call.
+            let result = unsafe {
+                libc::bind(
+                    socket.as_raw_fd(),
+                    (&address as *const libc::sockaddr_un).cast(),
+                    std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+                )
+            };
+            assert_eq!(
+                result,
+                0,
+                "bind {}: {}",
+                path.display(),
+                io::Error::last_os_error()
+            );
         }
 
         #[test]

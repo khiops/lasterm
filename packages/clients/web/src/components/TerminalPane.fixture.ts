@@ -38,6 +38,8 @@ export interface StandInTerminal {
 	/** The key handler xterm was last given: xterm keeps one. */
 	keyHandler: ((ev: KeyboardEvent) => boolean) | null;
 	dataListeners: Array<(data: string) => void>;
+	/** As xterm's `onBinary`: where it puts mouse reports in its default encoding. */
+	binaryListeners: Array<(data: string) => void>;
 	/** What it parsed since it was made or last reset: its screen. */
 	parsed: string[];
 	/** Disposed: out of the page, telling nothing to anyone. */
@@ -164,6 +166,7 @@ vi.mock("@xterm/xterm", () => ({
 		_core = { _renderService: { dimensions: { css: { cell: { width: 9, height: 17 } } } } };
 		keyHandler: ((ev: KeyboardEvent) => boolean) | null = null;
 		dataListeners: Array<(data: string) => void> = [];
+		binaryListeners: Array<(data: string) => void> = [];
 		/** What it parsed since it was made or last reset: its screen. */
 		parsed: string[] = [];
 		disposed = false;
@@ -206,6 +209,14 @@ vi.mock("@xterm/xterm", () => ({
 			return {
 				dispose: () => {
 					this.dataListeners = this.dataListeners.filter((l) => l !== listener);
+				},
+			};
+		}
+		onBinary(listener: (data: string) => void) {
+			this.binaryListeners.push(listener);
+			return {
+				dispose: () => {
+					this.binaryListeners = this.binaryListeners.filter((l) => l !== listener);
 				},
 			};
 		}
@@ -294,6 +305,7 @@ vi.mock("@xterm/xterm", () => ({
 		dispose(): void {
 			this.disposed = true;
 			this.dataListeners = [];
+			this.binaryListeners = [];
 			this.bellListeners = [];
 			this.titleListeners = [];
 			this.scrollListeners = [];
@@ -665,6 +677,11 @@ export function press(
 /** Text typed into the terminal, as xterm hands it on. */
 export function type(data: string): void {
 	for (const listener of [...terminal().dataListeners]) listener(data);
+}
+
+/** A mouse report in xterm's default encoding, as it hands it on: one character per byte. */
+export function typeBinary(data: string): void {
+	for (const listener of [...terminal().binaryListeners]) listener(data);
 }
 
 beforeEach(() => {

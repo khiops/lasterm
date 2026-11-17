@@ -460,6 +460,9 @@ export const xtermModule = {
 				},
 			};
 		}
+		onBinary() {
+			return { dispose() {} };
+		}
 		onResize() {
 			return { dispose() {} };
 		}

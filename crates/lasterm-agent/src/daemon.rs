@@ -4055,6 +4055,40 @@ mod tests {
                 (own, others)
             }
 
+            /// Wait for a file a shell creates once it has done what the test
+            /// waits for.
+            async fn until_created(path: &std::path::Path) {
+                let deadline = tokio::time::Instant::now() + DEADLINE;
+                while !path.exists() {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "{} was not created within {DEADLINE:?}",
+                        path.display()
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+
+            /// Wait until the daemon holds no terminal for a hub other than
+            /// KEY_B, as KEY_B's CHANNEL_STATE_END counts them: a terminal that
+            /// ended is no longer held once the daemon has seen it end.
+            async fn until_other_hubs_hold_none(daemon: &TestDaemon) {
+                let deadline = tokio::time::Instant::now() + DEADLINE;
+                loop {
+                    let (probe, frames) = daemon.connect_as(KEY_B).await;
+                    drop(probe);
+                    let (_, others) = state(&frames);
+                    if others == 0 {
+                        return;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "other hubs still held {others} terminals after {DEADLINE:?}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+
             /// Each hub gets its own terminals' output and state, and nothing
             /// of another hub's. All output used to go to whichever hub had
             /// connected last, and the state listed every channel.
@@ -4133,17 +4167,23 @@ mod tests {
                 let daemon = TestDaemon::start("back").await;
                 let (mut a, _) = daemon.connect_as(KEY_A).await;
                 let (mut b, mut seen_by_b) = daemon.connect_as(KEY_B).await;
-                // Waits for a line, prints a second later, then waits again.
+                // Waits for a line, prints a second later, marks that it has in
+                // its working directory, then waits again.
                 let command = if cfg!(windows) {
-                    "set /p line=& ping -n 2 127.0.0.1 >nul & echo printed-while-^away& set /p done="
+                    "set /p line=& ping -n 2 127.0.0.1 >nul & echo printed-while-^away& type nul > printed & set /p done="
                 } else {
-                    r#"read line; sleep 1; echo "printed-while-""away"; read done"#
+                    r#"read line; sleep 1; echo "printed-while-""away"; : > printed; read done"#
                 };
-                spawned(&mut a, spawn("back-ch-a", command)).await;
+                let mut spawn_in_state_dir = spawn("back-ch-a", command);
+                if let HubToAgent::Spawn { cwd, .. } = &mut spawn_in_state_dir {
+                    *cwd = Some(daemon.state_dir.to_string_lossy().into_owned());
+                }
+                spawned(&mut a, spawn_in_state_dir).await;
                 let go: &[u8] = if cfg!(windows) { b"go\r" } else { b"go\n" };
                 a.send(&input("back-ch-a", go.to_vec())).await;
                 drop(a);
-                tokio::time::sleep(Duration::from_millis(2500)).await;
+                // A fixed wait lost to a slow shell under load (#570).
+                until_created(&daemon.state_dir.join("printed")).await;
 
                 let (mut a2, mut seen_by_a2) = daemon.connect_as(KEY_A).await;
                 assert_eq!(state(&seen_by_a2), (vec!["back-ch-a".to_string()], 0));
@@ -4161,11 +4201,19 @@ mod tests {
                     .and_then(|attached| attached["snapshot"]["serialized"].as_str())
                     .unwrap_or("")
                     .to_string();
-                assert!(
-                    output_of(&seen_by_a2, "back-ch-a").contains("printed-while-away")
-                        || snapshot.contains("printed-while-away"),
-                    "what the terminal printed while its hub was away is lost"
-                );
+                // The shell had printed when it made its mark, but the daemon may
+                // read that from the terminal only after the snapshot: it then
+                // arrives as OUTPUT.
+                if !snapshot.contains("printed-while-away") {
+                    let deadline = tokio::time::Instant::now() + DEADLINE;
+                    while !output_of(&seen_by_a2, "back-ch-a").contains("printed-while-away") {
+                        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                        let Some(frame) = a2.frame_within(left).await else {
+                            panic!("what the terminal printed while its hub was away is lost");
+                        };
+                        seen_by_a2.push(frame);
+                    }
+                }
 
                 seen_by_b.extend(b.frames_until_quiet(Duration::from_millis(300)).await);
                 assert_eq!(mentions(&seen_by_b, "back-ch-a"), Vec::<String>::new());
@@ -4349,7 +4397,9 @@ mod tests {
                 let go: &[u8] = if cfg!(windows) { b"go\r" } else { b"go\n" };
                 a.send(&input("flush-restarted", go.to_vec())).await;
                 drop(a);
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                // A fixed wait lost to a slow shell under load: the restart
+                // then met the old shell still running (#570).
+                until_other_hubs_hold_none(&daemon).await;
 
                 let (mut a2, mut seen) = daemon.connect_as(KEY_A).await;
                 seen.extend(spawned(&mut a2, interactive("flush-restarted")).await);

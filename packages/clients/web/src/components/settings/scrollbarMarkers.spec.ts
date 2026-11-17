@@ -54,6 +54,9 @@ vi.mock("@xterm/xterm", () => ({
 		onResize() {
 			return { dispose() {} };
 		}
+		onBinary() {
+			return { dispose() {} };
+		}
 		onTitleChange() {
 			return { dispose() {} };
 		}

@@ -150,9 +150,14 @@ describe("useWallpaper", () => {
 
 			// Act
 			const { wallpaperStyle } = useWallpaper(profile);
-			await vi.waitFor(() => {
-				expect(wallpaperStyle.value?.backgroundImage).toBe("url(blob:lasterm-wallpaper)");
-			});
+			// Bounded against a relay that never answers, not to measure it: this
+			// wait failed at the default second once under a full run's load (#571).
+			await vi.waitFor(
+				() => {
+					expect(wallpaperStyle.value?.backgroundImage).toBe("url(blob:lasterm-wallpaper)");
+				},
+				{ timeout: 10_000 },
+			);
 
 			// Assert
 			expect(wallpaperStyle.value?.backgroundImage).toBe("url(blob:lasterm-wallpaper)");

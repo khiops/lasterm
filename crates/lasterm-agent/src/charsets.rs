@@ -35,11 +35,11 @@ const NATIONAL: &[u8] = b"A4C5RQKYE6ZH7=";
 
 /// DEC Special Graphics, from `` ` `` (0x60) to `~` (0x7E), as xterm draws it
 /// (`Charsets.ts`, `CHARSETS['0']`).
-const DEC_SPECIAL_GRAPHICS: [char; 31] = [
-    '\u{25c6}', '\u{2592}', '\u{2409}', '\u{240c}', '\u{240d}', '\u{240a}', '\u{00b0}', '\u{00b1}',
-    '\u{2424}', '\u{240b}', '\u{2518}', '\u{2510}', '\u{250c}', '\u{2514}', '\u{253c}', '\u{23ba}',
-    '\u{23bb}', '\u{2500}', '\u{23bc}', '\u{23bd}', '\u{251c}', '\u{2524}', '\u{2534}', '\u{252c}',
-    '\u{2502}', '\u{2264}', '\u{2265}', '\u{03c0}', '\u{2260}', '\u{00a3}', '\u{00b7}',
+const DEC_SPECIAL_GRAPHICS: [&str; 31] = [
+    "\u{25c6}", "\u{2592}", "\u{2409}", "\u{240c}", "\u{240d}", "\u{240a}", "\u{00b0}", "\u{00b1}",
+    "\u{2424}", "\u{240b}", "\u{2518}", "\u{2510}", "\u{250c}", "\u{2514}", "\u{253c}", "\u{23ba}",
+    "\u{23bb}", "\u{2500}", "\u{23bc}", "\u{23bd}", "\u{251c}", "\u{2524}", "\u{2534}", "\u{252c}",
+    "\u{2502}", "\u{2264}", "\u{2265}", "\u{03c0}", "\u{2260}", "\u{00a3}", "\u{00b7}",
 ];
 
 /// A character set a G register holds.
@@ -121,18 +121,12 @@ impl Charsets {
                     .position(|&b| b >= 0x80 || b == ESC || b == SO || b == SI)
                     .unwrap_or(data.len() - at);
                 let bytes = &data[at..at + run];
-                if self.active == Set::Dec {
-                    for (offset, &b) in bytes.iter().enumerate() {
+                if self.active == Set::Dec && bytes.iter().any(|&b| dec_char(b).is_some()) {
+                    let out = out.get_or_insert_with(|| copy_of(data, at));
+                    for &b in bytes {
                         match dec_char(b) {
-                            Some(c) => {
-                                let out = out.get_or_insert_with(|| data[..at + offset].to_vec());
-                                push_char(out, c);
-                            }
-                            None => {
-                                if let Some(out) = out.as_mut() {
-                                    out.push(b);
-                                }
-                            }
+                            Some(c) => out.extend_from_slice(c.as_bytes()),
+                            None => out.push(b),
                         }
                     }
                 } else if let Some(out) = out.as_mut() {
@@ -160,8 +154,8 @@ impl Charsets {
                 .and_then(|b| (self.active == Set::Dec).then(|| dec_char(b)).flatten())
             {
                 Some(c) => {
-                    let out = out.get_or_insert_with(|| data[..at].to_vec());
-                    push_char(out, c);
+                    out.get_or_insert_with(|| copy_of(data, at))
+                        .extend_from_slice(c.as_bytes());
                 }
                 None => {
                     if let Some(out) = out.as_mut() {
@@ -201,30 +195,24 @@ impl Charsets {
     }
 
     /// Read a CSI made only of an optional prefix, digits and `;`, and a
-    /// final byte, at the start of `bytes`, from ground: its length. `None`,
-    /// with nothing changed, for anything else.
+    /// final byte, at the start of `bytes`, from ground: its length. `None`
+    /// for anything else, which the table then reads from the ESC, collecting
+    /// afresh.
     fn whole_csi(&mut self, bytes: &[u8]) -> Option<usize> {
         let rest = bytes.strip_prefix(b"\x1b[")?;
-        let (prefix, rest_at) = match rest.first() {
-            Some(&p @ 0x3C..=0x3F) => (p, 1),
-            _ => (0, 0),
+        self.clear();
+        let rest_at = match rest.first() {
+            Some(&p @ 0x3C..=0x3F) => {
+                self.prefix = p;
+                1
+            }
+            _ => 0,
         };
-        let mut params = [0u32; MAX_PARAMS];
-        let mut param = 0;
         for (offset, &b) in rest[rest_at..].iter().enumerate() {
             match b {
-                b'0'..=b'9' => params[param] = add_digit(params[param], b),
-                b';' => {
-                    if param + 1 < MAX_PARAMS {
-                        param += 1;
-                    }
-                }
+                b'0'..=b'9' => self.digit(b),
+                b';' => self.next_param(),
                 0x40..=0x7E => {
-                    self.prefix = prefix;
-                    self.params = params;
-                    self.param = param;
-                    self.intermediate = 0;
-                    self.intermediates = 0;
                     self.csi_dispatch(b);
                     return Some(2 + rest_at + offset + 1);
                 }
@@ -277,13 +265,11 @@ impl Charsets {
                 }
                 (State::CsiEntry, 0x3C..=0x3F) => self.prefix = b,
                 (State::CsiEntry | State::CsiParam, b'0'..=b'9') if !self.sub_param => {
-                    self.params[self.param] = add_digit(self.params[self.param], b);
+                    self.digit(b);
                 }
                 (State::CsiEntry | State::CsiParam, b';') => {
                     self.sub_param = false;
-                    if self.param + 1 < MAX_PARAMS {
-                        self.param += 1;
-                    }
+                    self.next_param();
                 }
                 (State::CsiEntry | State::CsiParam, b':') => self.sub_param = true,
                 _ => {}
@@ -310,9 +296,21 @@ impl Charsets {
         self.intermediate = 0;
         self.intermediates = 0;
         self.prefix = 0;
-        self.params = [0; MAX_PARAMS];
+        self.params[0] = 0;
         self.param = 0;
         self.sub_param = false;
+    }
+
+    fn digit(&mut self, digit: u8) {
+        self.params[self.param] = add_digit(self.params[self.param], digit);
+    }
+
+    /// A `;`: the next parameter starts; past xterm's limit the last goes on.
+    fn next_param(&mut self) {
+        if self.param + 1 < MAX_PARAMS {
+            self.param += 1;
+            self.params[self.param] = 0;
+        }
     }
 
     fn execute(&mut self, byte: u8) {
@@ -352,8 +350,7 @@ impl Charsets {
     }
 
     fn csi_dispatch(&mut self, last: u8) {
-        let params = self.params;
-        let params = &params[..=self.param];
+        let modes = self.param + 1;
         match (self.prefix, self.intermediates, self.intermediate, last) {
             (0, 0, _, b's') => self.save(),
             (0, 0, _, b'u') => self.restore(),
@@ -363,7 +360,8 @@ impl Charsets {
                 self.saved[usize::from(self.alternate)] = Set::Us;
             }
             (b'?', 0, _, b'h') => {
-                for &mode in params {
+                for index in 0..modes {
+                    let mode = self.params[index];
                     match mode {
                         2 => (0..4).for_each(|g| self.designate(g, Set::Us)),
                         47 | 1047 => self.alternate = true,
@@ -377,7 +375,8 @@ impl Charsets {
                 }
             }
             (b'?', 0, _, b'l') => {
-                for &mode in params {
+                for index in 0..modes {
+                    let mode = self.params[index];
                     match mode {
                         47 | 1047 => self.alternate = false,
                         1048 => self.restore(),
@@ -415,15 +414,18 @@ impl Charsets {
 }
 
 /// The character DEC Special Graphics draws for `byte`, if it maps it.
-fn dec_char(byte: u8) -> Option<char> {
+fn dec_char(byte: u8) -> Option<&'static str> {
     (0x60..=0x7E)
         .contains(&byte)
         .then(|| DEC_SPECIAL_GRAPHICS[usize::from(byte - 0x60)])
 }
 
-fn push_char(out: &mut Vec<u8>, c: char) {
-    let mut buf = [0; 4];
-    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+/// The translated copy of `data`, begun with its first `at` bytes, with room
+/// for the rest to grow.
+fn copy_of(data: &[u8], at: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() + data.len() / 2);
+    out.extend_from_slice(&data[..at]);
+    out
 }
 
 /// `value` with the decimal digit `digit` appended, saturating as xterm's

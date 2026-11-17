@@ -10,7 +10,7 @@ export const AGENT_SOCKET_POLL_MS = 100;
 
 /** Whether `value` is a Windows named pipe path, `\\.\pipe\<name>` (any case, as Windows reads it). */
 export function isWindowsPipePath(value: string): boolean {
-	return /^\\\\\.\\pipe\\./i.test(value);
+	return /^\\\\\.\\pipe\\[\s\S]/i.test(value);
 }
 
 /**

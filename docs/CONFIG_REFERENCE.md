@@ -238,7 +238,7 @@ The chords themselves are not configurable yet (#632); Ctrl+/ lists them all.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| socket_path | string | auto-detect | UDS path (Linux), or named pipe `\\.\pipe\<name>` (Windows) for daemon IPC. On Windows a value that is not a pipe is refused: the hub fails to reach the local agent with an error naming the key, and `lasterm-agent --socket` exits (#733) |
+| socket_path | string | auto-detect | UDS path (Linux), or named pipe `\\.\pipe\<name>` (Windows) for daemon IPC. On Windows a non-empty value that is not a pipe is refused (an empty one keeps the default): the hub fails to reach the local agent with an error naming the key, and `lasterm-agent --socket` exits (#733) |
 
 The agent's log level and format come from `[logging]` (SPEC.md § 6.2); a `log_level` under `[agent]` is not read. Neither are `buffer_per_channel` and `buffer_global`: nothing applies them, and the output a daemon keeps for an away hub is bounded by constants (SPEC.md § 3.2). A file that still sets them loads as before.
 

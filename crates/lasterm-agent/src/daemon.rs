@@ -1516,14 +1516,19 @@ mod tests {
     async fn daemon_refuses_a_non_pipe_socket_without_listening() {
         let dir = std::env::temp_dir().join(format!("lasterm-733-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let error = run_daemon_impl(
-            r"C:\not\a\pipe.sock".into(),
-            dir.to_string_lossy().into_owned(),
-            dir.clone(),
-            no_shutdown_request(),
-            None,
+        // Bounded: a daemon that listens instead of refusing would never return.
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_daemon_impl(
+                r"C:\not\a\pipe.sock".into(),
+                dir.to_string_lossy().into_owned(),
+                dir.clone(),
+                no_shutdown_request(),
+                None,
+            ),
         )
         .await
+        .expect("a non-pipe socket must be refused, not listened on")
         .expect_err("a non-pipe socket must not start a daemon");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         std::fs::remove_dir_all(&dir).ok();

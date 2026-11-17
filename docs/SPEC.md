@@ -1456,7 +1456,7 @@ The `[agent]` section configures the local daemon agent. These settings are defi
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `socket_path` | string | Platform-dependent (see SECURITY.md) | UDS path (Linux) or named pipe `\\.\pipe\<name>` (Windows) for daemon communication. A Windows value that is not a pipe is refused by the hub (`getSocketPath`) and by the agent (`--socket`, `--stop`), never swapped for the default (#733) |
+| `socket_path` | string | Platform-dependent (see SECURITY.md) | UDS path (Linux) or named pipe `\\.\pipe\<name>` (Windows) for daemon communication. A non-empty Windows value that is not a pipe is refused by the hub (`getSocketPath`) and by the agent (`--socket`, `--stop`), never swapped for the default (#733) |
 
 `buffer_per_channel` and `buffer_global` are not read: nothing applies them, and the away queue's bounds are constants (§ 3.2). A config.toml that still sets them loads as before.
 

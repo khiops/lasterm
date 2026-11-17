@@ -597,11 +597,14 @@ function launchIn(
 		const agent = path.join(root, "lasterm-agent");
 		const argv = path.join(root, "argv");
 		const starts = path.join(root, "starts");
+		// The shell creates `argv` before it writes it: `written` says it is whole (#750).
+		const written = path.join(root, "argv-written");
 		writeFileSync(
 			agent,
 			`#!/bin/sh
 printf 'started\\n' >> ${quotePosix(starts)}
 printf '%s\\n' "$@" > ${quotePosix(argv)}
+: > ${quotePosix(written)}
 `,
 		);
 		chmodSync(agent, 0o755);
@@ -619,6 +622,7 @@ printf '%s\\n' "$@" > ${quotePosix(argv)}
 		});
 		for (let i = 0; i < 50; i++) {
 			try {
+				if (!existsSync(written)) throw new Error("not written yet");
 				const started = readFileSync(argv, "utf8").trim().split("\n");
 				// A second start, if the fallback ever made one, has had its chance.
 				execFileSync("sleep", ["0.2"]);

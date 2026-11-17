@@ -3982,6 +3982,40 @@ mod tests {
                 (own, others)
             }
 
+            /// Wait for a file a shell creates once it has done what the test
+            /// waits for.
+            async fn until_created(path: &std::path::Path) {
+                let deadline = tokio::time::Instant::now() + DEADLINE;
+                while !path.exists() {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "{} was not created within {DEADLINE:?}",
+                        path.display()
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+
+            /// Wait until the daemon holds no terminal for a hub other than
+            /// KEY_B, as KEY_B's CHANNEL_STATE_END counts them: a terminal that
+            /// ended is no longer held once the daemon has seen it end.
+            async fn until_other_hubs_hold_none(daemon: &TestDaemon) {
+                let deadline = tokio::time::Instant::now() + DEADLINE;
+                loop {
+                    let (probe, frames) = daemon.connect_as(KEY_B).await;
+                    drop(probe);
+                    let (_, others) = state(&frames);
+                    if others == 0 {
+                        return;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "other hubs still held {others} terminals after {DEADLINE:?}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+
             /// Each hub gets its own terminals' output and state, and nothing
             /// of another hub's. All output used to go to whichever hub had
             /// connected last, and the state listed every channel.
@@ -4060,17 +4094,33 @@ mod tests {
                 let daemon = TestDaemon::start("back").await;
                 let (mut a, _) = daemon.connect_as(KEY_A).await;
                 let (mut b, mut seen_by_b) = daemon.connect_as(KEY_B).await;
-                // Waits for a line, prints a second later, then waits again.
+                // Waits for a line, prints a second later, marks that it has,
+                // then waits again.
+                let printed = daemon.state_dir.join("printed");
+                // Unquoted for cmd.exe, which takes the `\"` its argument is
+                // escaped with literally.
+                assert!(
+                    !printed.to_string_lossy().contains(' '),
+                    "the mark's path has a space: {}",
+                    printed.display()
+                );
                 let command = if cfg!(windows) {
-                    "set /p line=& ping -n 2 127.0.0.1 >nul & echo printed-while-^away& set /p done="
+                    format!(
+                        "set /p line=& ping -n 2 127.0.0.1 >nul & echo printed-while-^away& type nul > {} & set /p done=",
+                        printed.display()
+                    )
                 } else {
-                    r#"read line; sleep 1; echo "printed-while-""away"; read done"#
+                    format!(
+                        r#"read line; sleep 1; echo "printed-while-""away"; : > '{}'; read done"#,
+                        printed.display()
+                    )
                 };
-                spawned(&mut a, spawn("back-ch-a", command)).await;
+                spawned(&mut a, spawn("back-ch-a", &command)).await;
                 let go: &[u8] = if cfg!(windows) { b"go\r" } else { b"go\n" };
                 a.send(&input("back-ch-a", go.to_vec())).await;
                 drop(a);
-                tokio::time::sleep(Duration::from_millis(2500)).await;
+                // A fixed wait lost to a slow shell under load (#570).
+                until_created(&printed).await;
 
                 let (mut a2, mut seen_by_a2) = daemon.connect_as(KEY_A).await;
                 assert_eq!(state(&seen_by_a2), (vec!["back-ch-a".to_string()], 0));
@@ -4276,7 +4326,9 @@ mod tests {
                 let go: &[u8] = if cfg!(windows) { b"go\r" } else { b"go\n" };
                 a.send(&input("flush-restarted", go.to_vec())).await;
                 drop(a);
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                // A fixed wait lost to a slow shell under load: the restart
+                // then met the old shell still running (#570).
+                until_other_hubs_hold_none(&daemon).await;
 
                 let (mut a2, mut seen) = daemon.connect_as(KEY_A).await;
                 seen.extend(spawned(&mut a2, interactive("flush-restarted")).await);

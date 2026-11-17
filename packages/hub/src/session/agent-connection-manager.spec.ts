@@ -396,6 +396,23 @@ describe("quit-protected revival capabilities", () => {
 	});
 });
 
+describe("AgentConnectionManager local daemon socket", () => {
+	it.skipIf(process.platform !== "win32")(
+		"fails an attach, naming [agent] socket_path, when it is not a pipe on Windows (#733)",
+		async () => {
+			const { ctx, manager } = makeHarness();
+			ctx.agentConfig = {
+				...DEFAULT_AGENT_CONFIG,
+				socketPath: "/run/user/1000/lasterm/agent.sock",
+			};
+
+			await expect(manager.connectDaemonAgent(HOST_ID, SESSION_ID)).rejects.toThrow(
+				/\[agent\] socket_path .* is not a named pipe/,
+			);
+		},
+	);
+});
+
 describe("AgentConnectionManager quit refusal", () => {
 	it("keeps an SSH close listener synchronous and non-throwing after the quit latch", () => {
 		const { ctx, broadcaster, lifecycle, manager } = makeHarness();

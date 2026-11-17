@@ -440,6 +440,25 @@ async fn contradictory_stop_modes_are_rejected() {
     // ignores the selected daemon configuration.
 }
 
+/// #733: on Windows the binary refuses a `--socket` that is not a named pipe, for
+/// `--stop` as for `--daemon`, before it derives any identity or state from it.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_non_pipe_socket_is_refused_on_windows() {
+    for mode in ["--stop", "--daemon"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
+            .args([mode, "--socket", r"C:\not\a\pipe.sock"])
+            .output()
+            .await
+            .expect("run the agent with a non-pipe socket");
+        assert!(!output.status.success(), "{mode} must fail");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("not a named pipe"), "{mode}: {stderr}");
+    }
+    // Mutation caught: dropping the check in main.rs lets `--stop` report "not
+    // running" for a path no daemon could ever have listened on.
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn planted_record_in_world_writable_directory_does_not_signal_a_process() {

@@ -101,6 +101,8 @@ pub(crate) struct Charsets {
     param: usize,
     /// A sub-parameter (after `:`) is being read: its digits are skipped.
     sub_param: bool,
+    /// Past xterm's 32 parameters: the digits of the rest are dropped.
+    reject_digits: bool,
 }
 
 impl Charsets {
@@ -299,17 +301,23 @@ impl Charsets {
         self.params[0] = 0;
         self.param = 0;
         self.sub_param = false;
+        self.reject_digits = false;
     }
 
     fn digit(&mut self, digit: u8) {
-        self.params[self.param] = add_digit(self.params[self.param], digit);
+        if !self.reject_digits {
+            self.params[self.param] = add_digit(self.params[self.param], digit);
+        }
     }
 
-    /// A `;`: the next parameter starts; past xterm's limit the last goes on.
+    /// A `;`: the next parameter starts; past xterm's 32 the rest are
+    /// dropped, as xterm's `Params.addParam` does.
     fn next_param(&mut self) {
         if self.param + 1 < MAX_PARAMS {
             self.param += 1;
             self.params[self.param] = 0;
+        } else {
+            self.reject_digits = true;
         }
     }
 

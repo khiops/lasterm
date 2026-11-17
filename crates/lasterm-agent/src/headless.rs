@@ -770,6 +770,13 @@ mod tests {
             (b"\x1b)0\x1bc\x0eq", "q"),
             (b"\x1b)0\x0e\x1b[?1;2hq\x1b)0q", "q\u{2500}"),
         ]);
+        // Past 32 parameters xterm drops the rest: a 33rd `2` is no DECANM,
+        // and a 32nd `2` is one whatever follows.
+        let zeros = "0;".repeat(31);
+        let past = format!("\x1b(0\x1b[?{zeros}0;2hq");
+        assert_eq!(shown(&[past.as_bytes()]), line);
+        let last = format!("\x1b(0\x1b[?{zeros}2;0hq");
+        assert_eq!(shown(&[last.as_bytes()]), "q");
         // The translated copy is longer than the read: vt100's own DECSTR
         // reset still runs at the DECSTR.
         let mirror = read(&[b"\x1b[?2004h\x1b(0q\x1b[!pq"]);

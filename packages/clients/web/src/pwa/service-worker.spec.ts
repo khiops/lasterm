@@ -231,12 +231,16 @@ describe("applying the update", () => {
 		container.controlledBy(PAGE_BUILD);
 		container.withWaiting(NEWER_BUILD).takesOver = false;
 		await serviceWorker.register(signalUpdate);
+		// The page's clock, not the machine's: a loaded machine took over the
+		// second the real one was given past the 300 ms (#571).
+		vi.useFakeTimers();
 
 		serviceWorker.reload();
-		await settle();
+		await vi.advanceTimersByTimeAsync(299);
 		expect(reloadPage).not.toHaveBeenCalled();
 
-		await vi.waitFor(() => expect(reloadPage).toHaveBeenCalledTimes(1));
+		await vi.advanceTimersByTimeAsync(1);
+		expect(reloadPage).toHaveBeenCalledTimes(1);
 	});
 
 	it("reloads once, however many times it is asked", async () => {

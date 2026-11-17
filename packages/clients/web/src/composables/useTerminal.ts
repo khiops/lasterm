@@ -199,12 +199,12 @@ export function useTerminal(
 
 	/** Send typed input as INPUT, while the pane may: socket up, write lock held. */
 	function sendInput(data: string): void {
+		sendInputBytes(new TextEncoder().encode(data));
+	}
+
+	function sendInputBytes(data: Uint8Array): void {
 		if (channelId && wsClient.isConnected && canWrite.value) {
-			wsClient.send({
-				type: "INPUT",
-				channelId,
-				data: new TextEncoder().encode(data),
-			});
+			wsClient.send({ type: "INPUT", channelId, data });
 		}
 	}
 
@@ -607,6 +607,15 @@ export function useTerminal(
 			// another showing it, or its Ctrl+C (#1014).
 			if (pasteInProgress(channelId)?.takeInput(data)) return;
 			sendInput(data);
+		});
+
+		// Mouse reports in xterm's default encoding (no SGR) come as binary: each
+		// character is one byte, 0-255, which TextEncoder would turn into two
+		// above 127 (#1016).
+		term.onBinary((data: string) => {
+			const bytes = new Uint8Array(data.length);
+			for (let at = 0; at < data.length; at++) bytes[at] = data.charCodeAt(at) & 0xff;
+			sendInputBytes(bytes);
 		});
 
 		// Terminal resize → send RESIZE to hub (debounced to coalesce rapid

@@ -67,6 +67,7 @@ import {
 	T,
 	terminal,
 	type,
+	typeBinary,
 	xterm,
 } from "./TerminalPane.fixture.js";
 import TerminalPane from "./TerminalPane.vue";
@@ -4670,6 +4671,25 @@ describe("TerminalPane pasting through an agent that adapts input (#1012)", () =
 		const event = paste("a");
 
 		expect(event.defaultPrevented).toBe(true);
+		expect(inputs()).toEqual([]);
+	});
+
+	it("sends a mouse report in xterm's default encoding as one byte per character (#1016)", async () => {
+		await attachedSaying(true);
+
+		// ESC [ M, then button, column and row each plus 32: 0xC8 is above 127.
+		typeBinary("\u001b[M !È");
+
+		const input = sent.filter((m) => m.type === "INPUT").at(-1);
+		expect(Array.from((input?.data ?? []) as Uint8Array)).toEqual([27, 91, 77, 32, 33, 200]);
+	});
+
+	it("sends no mouse report while the socket is down (#1016)", async () => {
+		await attachedSaying(true);
+		(useSessionStore().wsClient as unknown as { isConnected: boolean }).isConnected = false;
+
+		typeBinary("\u001b[M !!");
+
 		expect(inputs()).toEqual([]);
 	});
 

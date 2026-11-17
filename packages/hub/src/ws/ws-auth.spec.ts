@@ -148,30 +148,38 @@ describe("WebSocket authentication against the token store", () => {
 			expect(failures()).toEqual([]);
 		});
 
-		// A socket the hub refused is done with: its AUTH deadline passing later,
-		// before its close handshake ends or after the hub stopped, is not a
-		// second failure. It used to log `auth_timeout` for it (#571).
+		// A socket the hub refused is done with. A valid AUTH it sends while it
+		// closes is not acted on, and its AUTH deadline passing later, before its
+		// close handshake ends or after the hub stopped, is not a second failure.
+		// It used to log `auth_timeout` for it (#571).
 		it.each([
-			["the store cannot be read", TEST_TOKEN, []],
+			["the store cannot be read", { type: "AUTH", token: TEST_TOKEN }, []],
 			[
 				"the token is unknown",
-				"b".repeat(64),
+				{ type: "AUTH", token: "b".repeat(64) },
 				[expect.objectContaining({ reason: "invalid_token", tokenStatus: "unknown" })],
 			],
+			[
+				"its first frame is not AUTH",
+				{ type: "PING" },
+				[expect.objectContaining({ reason: "not_auth_first" })],
+			],
 		] as const)(
-			"logs no AUTH timeout for a socket it refused because %s",
-			async (_why, token, logged) => {
+			"acts on nothing more, and logs no AUTH timeout, for a socket it refused because %s",
+			async (why, refused, logged) => {
 				vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-				if (token === TEST_TOKEN) failTokenStore(dbs);
+				if (why === "the store cannot be read") failTokenStore(dbs);
 				const ws = await server.injectWS("/ws");
 				const observed = observe(ws);
-				ws.send(encodeMessage({ type: "AUTH", token }));
+				ws.send(encodeMessage(refused as ProtocolMessage));
+				ws.send(encodeMessage({ type: "AUTH", token: TEST_TOKEN }));
 				await vi.waitFor(() => expect(ws.readyState).not.toBe(ws.OPEN));
 
 				// Past the hub's 10 s AUTH deadline.
 				vi.advanceTimersByTime(10_000);
 
 				expect(observed.types()).not.toContain("AUTH_OK");
+				expect(security.filter((fields) => fields.event === "auth.success")).toEqual([]);
 				expect(failures()).toEqual(logged);
 			},
 		);

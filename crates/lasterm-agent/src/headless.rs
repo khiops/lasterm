@@ -2,6 +2,7 @@ use std::num::NonZeroU16;
 use std::ops::RangeInclusive;
 use std::time::Instant;
 
+use crate::charsets::Charsets;
 use crate::cwd::{self, ShellReport};
 use crate::input_modes::InputModes;
 
@@ -96,6 +97,9 @@ pub struct HeadlessMirror {
     /// An `ESC` was seen with only C0 controls or DEL since, across reads: a
     /// `c` now ends a RIS. CAN and SUB cancel it, as they cancel any sequence.
     escape: bool,
+    /// The character sets the program selected, which vt100 does not follow
+    /// (#1013).
+    charsets: Charsets,
 }
 
 const BELL_THROTTLE_MS: u128 = 100;
@@ -141,6 +145,7 @@ impl HeadlessMirror {
             pending_shell_cwd: None,
             last_significant: None,
             escape: false,
+            charsets: Charsets::default(),
         }
     }
 
@@ -148,6 +153,16 @@ impl HeadlessMirror {
     /// Call this with every chunk of data from the PTY.
     /// After calling, check pending_* fields for events.
     pub fn process(&mut self, data: &[u8]) {
+        // What vt100 parses: each character xterm draws through DEC Special
+        // Graphics stored as the one it draws (#1013). The bell is read from
+        // the program's own bytes below.
+        let output = self.charsets.translate(data);
+        self.feed(&output);
+        self.after_output(data);
+    }
+
+    /// Feed `data` to vt100, a DECSTR's or RIS's resets at their place.
+    fn feed(&mut self, data: &[u8]) {
         // Each byte that may end a DECSTR (`p` after `!`) or a RIS (`c` after
         // `ESC`), C0 controls and DEL between them aside, ends a slice, so that what
         // they reset is reset at their place in the stream, before the bytes
@@ -186,7 +201,10 @@ impl HeadlessMirror {
         // taken at the cut above; none outlives the read, to meet an unrelated
         // `!p` later.
         self.parser.callbacks_mut().decstr = false;
+    }
 
+    /// The events a read of the program's output `data` raised.
+    fn after_output(&mut self, data: &[u8]) {
         // Check for title change (OSC 0/2)
         let new_title = &self.parser.callbacks().title;
         if *new_title != self.current_title {
@@ -250,8 +268,9 @@ impl HeadlessMirror {
             "\x1b[?1004l"
         };
         SnapshotInfo {
-            // The screen content with ANSI formatting.
-            serialized: screen.contents_formatted(),
+            // The screen content with ANSI formatting, then the character
+            // sets that what follows is drawn in (#1013).
+            serialized: screen.contents_formatted() + &self.charsets.suffix(),
             cols: cols.get(),
             rows: rows.get(),
             cursor_x: screen.cursor_position().1,
@@ -624,6 +643,205 @@ mod tests {
                 application_cursor: true
             }
         );
+    }
+
+    /// A mirror that read `chunks`, one `process` call each.
+    fn read(chunks: &[&[u8]]) -> HeadlessMirror {
+        let mut mirror = HeadlessMirror::new(20, 5, 100);
+        for chunk in chunks {
+            mirror.process(chunk);
+        }
+        mirror
+    }
+
+    /// What the mirror's screen shows after `chunks`.
+    fn shown(chunks: &[&[u8]]) -> String {
+        read(chunks).parser.screen().contents()
+    }
+
+    /// Each `(output, screen)` pair: the screen the mirror shows after it.
+    fn assert_shown(cases: &[(&[u8], &str)]) {
+        for (output, screen) in cases {
+            assert_eq!(
+                shown(&[output]),
+                *screen,
+                "after {:?}",
+                String::from_utf8_lossy(output)
+            );
+        }
+    }
+
+    /// DEC Special Graphics is stored as the characters xterm draws for it
+    /// (#1013).
+    #[test]
+    fn dec_line_drawing_is_stored_as_drawn() {
+        assert_shown(&[(
+            b"\x1b(0lqqk\x1b(B ok",
+            "\u{250c}\u{2500}\u{2500}\u{2510} ok",
+        )]);
+    }
+
+    #[test]
+    fn the_whole_dec_special_graphics_map() {
+        let mut output = b"\x1b(0".to_vec();
+        output.extend(0x5F..=0x7E);
+        assert_eq!(
+            read(&[&output]).parser.screen().contents(),
+            "_\u{25c6}\u{2592}\u{2409}\u{240c}\u{240d}\u{240a}\u{b0}\u{b1}\u{2424}\
+             \u{240b}\u{2518}\u{2510}\u{250c}\u{2514}\u{253c}\u{23ba}\u{23bb}\u{2500}\u{23bc}\u{23bd}\
+             \u{251c}\u{2524}\u{2534}\u{252c}\u{2502}\u{2264}\u{2265}\u{3c0}\u{2260}\
+             \u{a3}\u{b7}"
+        );
+    }
+
+    #[test]
+    fn shifts_and_where_controls_count() {
+        let line = "\u{2500}";
+        assert_shown(&[
+            (b"\x1b)0\x0emqqj\x0f!", "\u{2514}\u{2500}\u{2500}\u{2518}!"),
+            (b"\x1b*0\x1bnq\x1b~q", "\u{2500}q"),
+            (b"\x1b+0\x1boq", line),
+            (b"\x1b+0\x1b|q", line),
+            (b"\x1b*0\x1b}q", line),
+            (b"\x1b.0\x1bnq", line),
+            (b"\x1b-0\x0eq", line),
+            (b"\x1b/0\x1boq", "q"),
+            // SO inside an escape or CSI sequence is executed, as xterm does.
+            (b"\x1b)0\x1b[3\x0e1mq", line),
+            (b"\x1b)0\x1b\x0e(Bq", line),
+            (b"\x1b)0\x1b(\x0eBq", line),
+            (b"\x1b)0\x1b[1 \x0eqq", line),
+            (b"\x1b)0\x1b[?1?\x0e2hq", line),
+            // Inside a string it is not.
+            (b"\x1b)0\x1b]2;a\x0eb\x07q", "q"),
+            (b"\x1b)0\x1bPq\x0e\x1b\\q", "q"),
+            // xterm keeps the DCS across `C3 9C`, where vte would end it.
+            (b"\x1b)0\x1bPq\xc3\x9c\x0e\x1b\\q", "q"),
+            // A C0 or DEL inside a designation.
+            (b"\x1b\x0f(0q", line),
+            (b"\x1b\x7f(0q", line),
+        ]);
+    }
+
+    #[test]
+    fn designations_as_xterm_knows_them() {
+        let line = "\u{2500}";
+        assert_shown(&[
+            (b"\x1b(0\x1b(A#q", "#q"),
+            (b"\x1b(0\x1b(1q", line),
+            (b"\x1b(0q\x1b%Gq", "\u{2500}q"),
+            (b"\x1b(0q\x1b%@q", "\u{2500}q"),
+            (b"\x1b(0\xc3\xa9q\xc3\xbc", "\u{e9}\u{2500}\u{fc}"),
+        ]);
+        for &last in b"G@" {
+            let default = |before: &[u8], after: &[u8]| [before, b"\x1b%", &[last], after].concat();
+            assert_eq!(shown(&[&default(b"\x1b(0", b"\x0fq")]), "q");
+            assert_eq!(shown(&[&default(b"\x1b)0\x0e", b"\x1b)0q")]), "q");
+            assert_eq!(shown(&[&default(b"\x1b)0\x0e", b"\x0eq")]), line);
+        }
+    }
+
+    #[test]
+    fn bytes_inside_sequences_are_not_translated() {
+        let mirror = read(&[b"\x1b(0\x1b[31mq"]);
+        assert_eq!(mirror.parser.screen().contents(), "\u{2500}");
+        assert_eq!(
+            mirror.parser.screen().cell(0, 0).map(vt100::Cell::fgcolor),
+            Some(vt100::Color::Idx(1))
+        );
+        let mut mirror = read(&[b"\x1b(0\x1b]2;quiet\x07"]);
+        assert_eq!(mirror.take_title_change().as_deref(), Some("quiet"));
+        let mirror = read(&[b"\x1b(0\x1b[?2004hq"]);
+        assert!(mirror.parser.screen().bracketed_paste());
+        assert_eq!(mirror.parser.screen().contents(), "\u{2500}");
+    }
+
+    #[test]
+    fn resets_and_parameters() {
+        let line = "\u{2500}";
+        assert_shown(&[
+            (b"\x1b(0\x1bcq", "q"),
+            (b"\x1b(0\x1b[!pq", "q"),
+            (b"\x1b(0\x1b[?2hq", "q"),
+            (b"\x1b(0\x1b[?1:2hq", line),
+            (b"\x1b(0\x1b[?4294967298hq", line),
+            (b"\x1b(0\x1b[?1049;2h\x1b[?1049lq", line),
+            (b"\x1b)0\x1b[!p\x0eq", "q"),
+            (b"\x1b)0\x1bc\x0eq", "q"),
+            (b"\x1b)0\x0e\x1b[?1;2hq\x1b)0q", "q\u{2500}"),
+        ]);
+        // Past 32 parameters xterm drops the rest: a 33rd `2` is no DECANM,
+        // and a 32nd `2` is one whatever follows.
+        let zeros = "0;".repeat(31);
+        let past = format!("\x1b(0\x1b[?{zeros}0;2hq");
+        assert_eq!(shown(&[past.as_bytes()]), line);
+        let last = format!("\x1b(0\x1b[?{zeros}2;0hq");
+        assert_eq!(shown(&[last.as_bytes()]), "q");
+        // The translated copy is longer than the read: vt100's own DECSTR
+        // reset still runs at the DECSTR.
+        let mirror = read(&[b"\x1b[?2004h\x1b(0q\x1b[!pq"]);
+        assert_eq!(mirror.parser.screen().contents(), "\u{2500}q");
+        assert!(!mirror.parser.screen().bracketed_paste());
+    }
+
+    #[test]
+    fn saved_sets_per_buffer() {
+        let line = "\u{2500}";
+        assert_shown(&[
+            (b"\x1b7\x1b(0q\x1b8\x1b[2Gq", "\u{2500}q"),
+            (b"\x1b(0\x1b7\x1b(Bq\x1b8\x1b[2Gq", "q\u{2500}"),
+            (b"\x1b[s\x1b(0q\x1b[u\x1b[2Gq", "\u{2500}q"),
+            (b"\x1b(0\x1b[s\x1b(Bq\x1b[u\x1b[2Gq", "q\u{2500}"),
+            (b"\x1b(0\x1b7\x1b(B\x1b8\x1b7\x0e\x1b8q", line),
+            (b"\x1b(0\x1b8q", "q"),
+            (b"\x1b(0\x1b7\x1b[!p\x1b8q", "q"),
+            (b"\x1b[?1049h\x1b(0\x1b7\x1b[!p\x1b8q", "q"),
+            (b"\x1b(0\x1b7\x1bc\x1b8q", "q"),
+            (b"\x1b[?1049h\x1b(0\x1b7\x1bc\x1b[?1049h\x1b8q", "q"),
+            (b"\x1b(0\x1b[?1049h\x1b[!p\x1b[?1049lq", line),
+            (b"\x1b(0\x1b[?1049h\x1b(Bq\x1b[?1049lq", line),
+            (b"\x1b(0\x1b[?47h\x1b7\x1b(B\x1b[?47l\x1b8q", "q"),
+            (b"\x1b(0\x1b[?1047h\x1b7\x1b(B\x1b[?1047l\x1b8q", "q"),
+            (b"\x1b(0\x1b7\x1b(B\x1b[?s\x1b8q", line),
+            (b"\x1b(0\x1b[?1048h\x1b(B\x1b[?1048lq", line),
+        ]);
+        assert_eq!(
+            shown(&[b"\x1b[?1049h", b"\x1b(0\x1b7\x1b(B\x1b[?1049lq"]),
+            "q"
+        );
+    }
+
+    #[test]
+    fn the_state_carries_across_reads() {
+        assert_eq!(shown(&[b"\x1b(0", b"qq"]), "\u{2500}\u{2500}");
+        assert_eq!(shown(&[b"\x1b)0\x1b]2;a\x0e", b"b\x07q"]), "q");
+        assert_eq!(shown(&[b"\x1b(", b"0q"]), "\u{2500}");
+        assert_eq!(shown(&[b"\x1b(0\xc3", b"\xa9q"]), "\u{e9}\u{2500}");
+    }
+
+    /// The snapshot ends with the sets that what follows it is drawn in.
+    #[test]
+    fn the_snapshot_carries_the_character_sets() {
+        for (output, suffix) in [
+            (&b"ab"[..], ""),
+            (b"\x1b(0", "\x1b(0"),
+            (b"\x1b)0\x0e", "\x1b)0\x0e"),
+            (b"\x1b*0\x1bn", "\x1b*0\x1bn"),
+            (b"\x1b(A", "\x1b(A"),
+            (b"\x1b+0\x1bo", "\x1b+0\x1bo"),
+            (b"\x0e", "\x0e"),
+            (b"\x1b)0q", "\x1b)0"),
+            (b"\x1b7\x1b(0\x1b8", ""),
+            (b"\x1b(0\x1b7\x1b(B\x1b8", "\x1b(0"),
+        ] {
+            let mirror = read(&[output]);
+            assert_eq!(
+                mirror.snapshot().serialized,
+                format!("{}{suffix}", mirror.parser.screen().contents_formatted()),
+                "after {:?}",
+                String::from_utf8_lossy(output)
+            );
+        }
     }
 
     #[test]

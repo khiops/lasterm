@@ -115,13 +115,11 @@ impl Charsets {
         while at < data.len() {
             let byte = data[at];
             let ground = self.state == State::Ground && self.decoder.idle();
-            if ground && byte < 0x80 && byte != ESC && byte != SO && byte != SI {
-                // A run of ASCII in ground: printed or executed in place,
+            let run = if ground { ground_run(&data[at..]) } else { 0 };
+            if run > 0 {
+                // A run in ground of ASCII other than ESC, SO and SI, and of
+                // whole characters from U+00A0: printed or executed in place,
                 // none of it changes a set.
-                let run = data[at..]
-                    .iter()
-                    .position(|&b| b >= 0x80 || b == ESC || b == SO || b == SI)
-                    .unwrap_or(data.len() - at);
                 let bytes = &data[at..at + run];
                 if self.active == Set::Dec && bytes.iter().any(|&b| dec_char(b).is_some()) {
                     let out = out.get_or_insert_with(|| copy_of(data, at));
@@ -418,6 +416,35 @@ impl Charsets {
 
     fn restore(&mut self) {
         self.active = self.saved[usize::from(self.alternate)];
+    }
+}
+
+/// The length of the run at the start of `bytes` that xterm, in ground,
+/// prints or executes without changing a set: ASCII but ESC, SO and SI, and
+/// whole UTF-8 characters from U+00A0 (below it, U+0080 to U+009F are C1
+/// controls, which the table must see). Malformed UTF-8 ends the run and
+/// goes through the decoder.
+fn ground_run(bytes: &[u8]) -> usize {
+    let mut at = 0;
+    loop {
+        // ASCII first, in one scan.
+        at += bytes[at..]
+            .iter()
+            .position(|&b| b >= 0x80 || b == ESC || b == SO || b == SI)
+            .unwrap_or(bytes.len() - at);
+        let Some(&lead) = bytes.get(at) else {
+            return at;
+        };
+        let width = match lead {
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            _ => return at,
+        };
+        match bytes.get(at..at + width).map(std::str::from_utf8) {
+            Some(Ok(text)) if text >= "\u{a0}" => at += width,
+            _ => return at,
+        }
     }
 }
 

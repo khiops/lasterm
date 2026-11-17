@@ -344,7 +344,13 @@ Re-attach to existing channel (after reconnect).
 }
 ```
 
-`serialized` draws the visible screen (vt100's `contents_formatted`). An agent that says
+`serialized` draws the visible screen (vt100's `contents_formatted`), then sets the character sets
+the program holds (#1013): the designations of G0–G3 that differ from US (`ESC ( f`, `ESC ) f`,
+`ESC * f`, `ESC + f`), then the shift into GL when it is not G0 (SO, `ESC n`, `ESC o`). Where a
+restore of the cursor (DECRC, `?1049l`) left the active set different from the shifted G's, the
+shifted G is designated as the active set. vt100 does not follow character sets, so the agent
+follows them as xterm 6.0.0 does and stores each character drawn through DEC Special Graphics as
+the one xterm draws (`┌` for `l`); the bytes it sends as OUTPUT are the program's own. An agent that says
 `"input-modes"` also sends `alternate_screen` and `input_modes`; an older one sends neither.
 `input_modes` sets each mode whatever a terminal held before: a reset of the mouse modes, the mouse
 encodings and the cursor style (`ESC[?9l ESC[?1000l ESC[?1002l ESC[?1003l ESC[?1005l ESC[?1006l
@@ -354,8 +360,8 @@ state, then the mouse mode, encoding and cursor style when not the default), the
 (`CSI … ! p`, any parameters), which resets cursor keys, the keypad, bracketed paste, focus, the
 cursor style, cursor visibility and the attributes as xterm does, and RIS (`ESC c`), at their place
 in the stream. Not carried: the scroll region, origin mode, the saved cursor, autowrap, insert mode,
-the character sets, the normal screen behind an alternate one, and the mode forms vt100 does not
-follow (`?66`, `?1047`, `?1016`).
+the character sets saved with the cursor, the normal screen behind an alternate one, and the mode
+forms vt100 does not follow (`?66`, `?1047`, `?1016`).
 
 An ATTACH the agent cannot answer, for a channel it does not have or cannot see (§ 3.1b), gets
 `ERROR { code: "CHANNEL_NOT_FOUND", channel_id, request_id }`. The hub names every ATTACH with a

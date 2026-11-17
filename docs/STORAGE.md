@@ -456,7 +456,7 @@ previous one goes there; a backlog an earlier version left is cleared by GC (§ 
 **Snapshot chunk data:**
 ```json
 {
-  "serialized": "<the agent's vt100 screen, as the escape sequences that draw it>",
+  "serialized": "<the agent's vt100 screen, as the escape sequences that draw it, then the character-set designations and shift the program holds>",
   "cols": 120,
   "rows": 40,
   "cursorX": 5,

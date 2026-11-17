@@ -1,5 +1,6 @@
 mod away;
 mod batch;
+mod charsets;
 mod color_veto;
 mod cwd;
 mod daemon;

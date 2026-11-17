@@ -263,3 +263,59 @@ describe("a paste through an agent that adapts input (#1012)", () => {
 		expect(inputs()).toEqual([`${START}${"xx\r".repeat(16_384)}${END}`]);
 	});
 });
+
+// The agent stores DEC line drawing as the characters xterm draws for it and
+// ends `serialized` with the program's character sets (#1013). These check
+// the pane's side of that: xterm, writing `serialized` before the tail, draws
+// what follows it in those sets.
+describe("the character sets a snapshot carries (#1013)", () => {
+	const bytes = (text: string) => new TextEncoder().encode(text);
+	/** A border, then G1 designated DEC Special Graphics and shifted in. */
+	const BORDER = `${CLEAR}┌──┐${ESC})0\u000e`;
+
+	for (const cached of [false, true]) {
+		it(`draws the tail and live output in the program's sets, ${cached ? "cached" : "live"}`, async () => {
+			await attachedWith({ cached, snapshot: { serialized: BORDER }, tail: [bytes("q\u000fq")] });
+
+			expect(row(0)).toBe("┌──┐─q");
+			print("\u000eq");
+			await parsed();
+			expect(row(0)).toBe("┌──┐─q─");
+		});
+	}
+
+	it("restores the normal screen's set when the program leaves the alternate screen", async () => {
+		await attachedWith({
+			snapshot: { serialized: `${CLEAR}┌──┐${ESC}(0`, alternateScreen: true },
+			tail: [bytes("q")],
+		});
+		// xterm clears the alternate screen when it leaves it: read it first.
+		expect(xterm().buffer.active.type).toBe("alternate");
+		expect(row(0)).toBe("┌──┐─");
+
+		print(`${ESC}[?1049lq`);
+		await parsed();
+		expect(xterm().buffer.active.type).toBe("normal");
+		expect(row(0)).toBe("q");
+	});
+
+	it("draws an ended terminal's tail in its sets", async () => {
+		const ended = pane.reattachChannel(T).catch((error: unknown) => error);
+		hear({
+			type: "ERROR",
+			code: "CHANNEL_DEAD",
+			message: "This terminal has ended.",
+			channelId: T,
+			lastOutput: {
+				snapshot: { serialized: BORDER, cols: 80, rows: 10, cursorX: 0, cursorY: 0 },
+				tail: [bytes("q\u000fq")],
+				cols: 80,
+				rows: 10,
+			},
+		} as unknown as ProtocolMessage);
+		await ended;
+		await parsed();
+
+		expect(row(0)).toBe("┌──┐─q");
+	});
+});

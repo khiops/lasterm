@@ -2634,6 +2634,77 @@ mod stdio_tests {
         assert!(pane.screen().bracketed_paste());
     }
 
+    /// An ATTACH draws DEC line drawing as the program drew it, and leaves
+    /// the pane with the program's character sets (#1013); the hub still gets
+    /// the program's own bytes. Unix only: ConPTY translates the set itself
+    /// and passes no designation or shift on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_attach_draws_dec_line_drawing_as_drawn() {
+        use crate::protocol::HubToAgent;
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let mut events = start_shell_in(
+            "dec",
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                "printf '\\033(0lqqk\\033(B READY\\033)0\\016'; sleep 20".into(),
+            ],
+            None,
+            false,
+            &manager,
+            &senders,
+        )
+        .await;
+        let mut sent = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !sent.ends_with(b"\x1b)0\x0e") {
+                if let Some(ChannelEvent::Output(output)) = events.recv().await {
+                    sent.extend_from_slice(&output.data);
+                }
+            }
+        })
+        .await
+        .expect("the program draws its border");
+
+        answers(
+            HubToAgent::Attach {
+                channel_id: "dec".into(),
+                request_id: Some("attach-dec".into()),
+            },
+            &manager,
+            &senders,
+        )
+        .await;
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match events.recv().await {
+                    Some(ChannelEvent::Reply(reply)) => break reply,
+                    Some(_) => continue,
+                    None => panic!("the terminal's pipeline closed without a reply"),
+                }
+            }
+        })
+        .await
+        .expect("the reader replies");
+        if let Some(process) = manager.lock().await.remove("dec") {
+            let _ = process.kill_tree();
+        }
+
+        assert!(
+            sent.windows(9).any(|w| w == b"\x1b(0lqqk\x1b("),
+            "the hub gets the program's bytes: {sent:?}"
+        );
+        let attached: serde_json::Value = rmp_serde::from_slice(&reply.frame[4..]).unwrap();
+        let serialized = attached["snapshot"]["serialized"].as_str().unwrap();
+        assert!(
+            serialized.contains("\u{250c}\u{2500}\u{2500}\u{2510} READY"),
+            "{serialized:?}"
+        );
+        assert!(serialized.ends_with("\x1b)0\x0e"), "{serialized:?}");
+    }
+
     /// The agent says it writes input in the program's form (#1012).
     #[test]
     fn every_agent_says_input_modes() {

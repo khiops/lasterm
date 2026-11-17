@@ -126,10 +126,11 @@ fn may_hold_dsr(read: &[u8]) -> bool {
     false
 }
 
-/// xterm's parser states (`ParserState`).
+/// xterm's parser states (`ParserState`). The character-set tracker reads
+/// the same states (`charsets.rs`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
-enum State {
+pub(crate) enum State {
     #[default]
     Ground,
     Escape,
@@ -151,6 +152,12 @@ enum State {
 #[derive(Default)]
 struct Tracker {
     state: State,
+    decoder: Decoder,
+}
+
+/// xterm's UTF-8 decoder (`Utf8ToUtf32`): the partial character it holds.
+#[derive(Default)]
+pub(crate) struct Decoder {
     /// The partial character's length in bytes, 0 when there is none.
     length: u8,
     /// How many of its bytes were seen.
@@ -168,7 +175,7 @@ impl Tracker {
         let mut at = 0;
         while at < bytes.len() {
             let byte = bytes[at];
-            if self.length == 0 && byte < 0x80 {
+            if self.decoder.idle() && byte < 0x80 {
                 if state == State::Ground && byte != 0x1B {
                     // In ground, ASCII but ESC leaves it in ground.
                     let run = bytes[at..]
@@ -191,7 +198,7 @@ impl Tracker {
                 }
                 // ASCII outside a character: a code point of its own.
                 state = TABLE[state as usize][usize::from(byte)];
-            } else if let Some(code) = self.decode(byte) {
+            } else if let Some(code) = self.decoder.decode(byte) {
                 state = step(state, code);
             }
             at += 1;
@@ -205,11 +212,18 @@ impl Tracker {
 
     /// In `state`, ground, with no partial character.
     fn idle_at(&self, state: State) -> bool {
-        state == State::Ground && self.length == 0
+        state == State::Ground && self.decoder.idle()
+    }
+}
+
+impl Decoder {
+    /// No partial character is held.
+    pub(crate) fn idle(&self) -> bool {
+        self.length == 0
     }
 
     /// The code point `byte` completes, if any.
-    fn decode(&mut self, byte: u8) -> Option<u32> {
+    pub(crate) fn decode(&mut self, byte: u8) -> Option<u32> {
         if self.length != 0 {
             if byte & 0xC0 != 0x80 {
                 // A wrong continuation: the partial character is dropped and
@@ -292,7 +306,7 @@ const TABLE: [[State; 0xA1]; 14] = {
 };
 
 /// The state `state` moves to on `code`, from `TABLE`.
-fn step(state: State, code: u32) -> State {
+pub(crate) fn step(state: State, code: u32) -> State {
     TABLE[state as usize][code.min(0xA0) as usize]
 }
 

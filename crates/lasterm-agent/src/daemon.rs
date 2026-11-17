@@ -494,6 +494,30 @@ fn get_pipe_name() -> String {
     format!(r"\\.\pipe\lasterm-agent-{}", username)
 }
 
+/// Refuses a `--socket` that is not a named pipe (`\\.\pipe\<name>`).
+///
+/// A filesystem path cannot be listened on here, and the daemon used to listen
+/// on the default pipe instead, leaving the hub to connect to the path it was
+/// given (#733). The prefix is matched without regard to case, as Windows does.
+#[cfg(windows)]
+pub(crate) fn require_pipe_name(socket: &str) -> std::io::Result<()> {
+    const PREFIX: &str = r"\\.\pipe\";
+    let is_pipe = socket.len() > PREFIX.len()
+        && socket.is_char_boundary(PREFIX.len())
+        && socket[..PREFIX.len()].eq_ignore_ascii_case(PREFIX);
+    if is_pipe {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "--socket {socket:?} is not a named pipe: on Windows it must look like {PREFIX}<name> \
+             (leave it out for the default {})",
+            get_pipe_name()
+        ),
+    ))
+}
+
 /// Run the agent in daemon mode (Windows named pipe).
 ///
 /// Listens on a Windows named pipe. Serves several hubs at once, one
@@ -528,12 +552,10 @@ async fn run_daemon_impl(
     mut shutdown: ShutdownReceiver,
     bound: Option<oneshot::Sender<()>>,
 ) -> std::io::Result<DestroyAllSummary> {
-    let pipe_name = if socket_path.starts_with(r"\\.\pipe\") {
-        socket_path.clone()
-    } else {
-        // Caller passed a non-pipe path (e.g. legacy XDG path on wrong OS) — use canonical name
-        get_pipe_name()
-    };
+    // Never another pipe than the one asked for: a hub that looks at the path it
+    // was given would otherwise reach nothing (#733).
+    require_pipe_name(&socket_path)?;
+    let pipe_name = socket_path.clone();
 
     tracing::info!("daemon listening on {}", pipe_name);
 
@@ -1459,6 +1481,52 @@ mod tests {
     fn test_socket_path_validation_too_long() {
         let long_path = format!("/tmp/{}/agent.sock", "a".repeat(200));
         assert!(PathBuf::from(&long_path).as_os_str().len() > 100);
+    }
+
+    /// #733: only `\\.\pipe\<name>` is a Windows endpoint; anything else is refused.
+    #[cfg(windows)]
+    #[test]
+    fn require_pipe_name_accepts_pipes_and_refuses_the_rest() {
+        for good in [
+            r"\\.\pipe\lasterm-agent-x",
+            r"\\.\PIPE\lasterm-agent-x",
+            r"\\.\pipe\a",
+        ] {
+            assert!(require_pipe_name(good).is_ok(), "{good} is a pipe");
+        }
+        for bad in [
+            "",
+            "/run/user/1000/lasterm/agent.sock",
+            r"C:\Users\x\agent.sock",
+            r"\\.\pipe\",
+            r"\\server\share\agent",
+            "agent.sock",
+            "é\u{301}é\u{301}é\u{301}é\u{301}é\u{301}é\u{301}é\u{301}é",
+        ] {
+            let error = require_pipe_name(bad).expect_err(bad);
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{bad}");
+            assert!(error.to_string().contains("not a named pipe"), "{error}");
+        }
+    }
+
+    /// #733: a daemon given a filesystem path fails, rather than listening on
+    /// the default pipe where the hub, looking at that path, would never come.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn daemon_refuses_a_non_pipe_socket_without_listening() {
+        let dir = std::env::temp_dir().join(format!("lasterm-733-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = run_daemon_impl(
+            r"C:\not\a\pipe.sock".into(),
+            dir.to_string_lossy().into_owned(),
+            dir.clone(),
+            no_shutdown_request(),
+            None,
+        )
+        .await
+        .expect_err("a non-pipe socket must not start a daemon");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Verify the Windows pipe name follows the canonical format.

@@ -8,6 +8,11 @@ export const AGENT_SOCKET_TIMEOUT = 5000;
 /** Poll interval when waiting for agent socket (ms) */
 export const AGENT_SOCKET_POLL_MS = 100;
 
+/** Whether `value` is a Windows named pipe path, `\\.\pipe\<name>` (any case, as Windows reads it). */
+export function isWindowsPipePath(value: string): boolean {
+	return /^\\\\\.\\pipe\\./i.test(value);
+}
+
 /**
  * Get the platform-appropriate socket path for the agent daemon.
  *
@@ -17,7 +22,15 @@ export const AGENT_SOCKET_POLL_MS = 100;
  * @param override Optional override path from config.toml [agent].socket_path
  */
 export function getSocketPath(override?: string): string {
-	if (override) return override;
+	if (override) {
+		// A filesystem path names nothing a Windows agent can listen on (#733).
+		if (process.platform === "win32" && !isWindowsPipePath(override)) {
+			throw new Error(
+				`[agent] socket_path ${JSON.stringify(override)} is not a named pipe: on Windows it must look like \\\\.\\pipe\\<name>; remove it to use the default`,
+			);
+		}
+		return override;
+	}
 
 	if (process.platform === "win32") {
 		const username = os.userInfo().username;

@@ -419,16 +419,30 @@ describe("a host that answers keeps its connection", { timeout: 20_000 }, () => 
 			},
 		});
 		const agent = await connectedAgent(link.port);
-		let received = 0;
+		const arrivals: number[] = [];
 		agent.on("message", (message: ProtocolMessage) => {
-			if (message.type === "OUTPUT") received++;
+			if (message.type === "OUTPUT") arrivals.push(Date.now());
 		});
 
+		const watchedFrom = Date.now();
 		await expect(closes(agent, WATCH_MS)).rejects.toThrow("still up");
 
 		expect(agent.connected).toBe(true);
-		// Busy for real: output kept arriving the whole time.
-		expect(received).toBeGreaterThan(100);
+		// Busy for real: output kept arriving the whole time, in every stretch
+		// as long as a keepalive takes to give up. How many frames arrive is the
+		// machine's timer rate, not the link's behaviour (#622).
+		const givesUpAfter = SSH_KEEPALIVE.keepaliveInterval * (SSH_KEEPALIVE.keepaliveCountMax + 1);
+		const quietStretches: number[] = [];
+		for (
+			let from = watchedFrom;
+			from + givesUpAfter <= watchedFrom + WATCH_MS;
+			from += givesUpAfter
+		) {
+			if (!arrivals.some((at) => at >= from && at < from + givesUpAfter)) {
+				quietStretches.push(from - watchedFrom);
+			}
+		}
+		expect(quietStretches).toEqual([]);
 	});
 });
 

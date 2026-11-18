@@ -103,17 +103,21 @@ afterEach(() => {
 });
 
 describe("wallpaper thumbnails on the desktop (#194)", () => {
-	it("loads each listed file once, however often the grid renders", async () => {
+	it("loads each listed file once, however often the grid renders or the list reloads", async () => {
+		listed = ["dunes.jpg", "forest.png", "extra.png"];
 		await mount();
 		root.querySelector<HTMLButtonElement>(".wallpaper-thumb")?.click();
+		await settle();
+		// Deleting one reloads the list: the others must not load again.
+		root.querySelector<HTMLButtonElement>('[aria-label="Delete wallpaper extra.png"]')?.click();
 		await settle();
 
 		expect(fileLoads().sort()).toEqual([
 			"/public/wallpapers/dunes.jpg",
+			"/public/wallpapers/extra.png",
 			"/public/wallpapers/forest.png",
 		]);
-		expect([...shown()].sort()).toEqual([...created].sort());
-		expect(created).toHaveLength(2);
+		expect(shown()).toHaveLength(2);
 	});
 
 	it("gives back a deleted file's thumbnail, and every thumbnail when Settings closes", async () => {

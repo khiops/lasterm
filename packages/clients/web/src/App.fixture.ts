@@ -10,6 +10,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { expect, vi } from "vitest";
 import { createApp, h, nextTick, type App as VueApp } from "vue";
 import {
+	type Answer,
 	type ChannelRow,
 	type FakeHub,
 	type HostGroupRow,
@@ -66,6 +67,8 @@ export interface WindowSetup {
 	layout?: LayoutSetup;
 	/** What this browser kept from before, in `localStorage`. */
 	storage?: Record<string, string>;
+	/** Answers the hub gives from the start, by "METHOD /path" (`FakeHub.answers`). */
+	answers?: Record<string, Answer>;
 }
 
 export interface MountedWindow {
@@ -98,6 +101,7 @@ export async function mountWindow(setup: WindowSetup = {}): Promise<MountedWindo
 	hub.hostGroups = setup.hostGroups ?? [];
 	hub.channels = setup.channels ?? [];
 	hub.ui = { onChannelDead: "readonly", ...(setup.ui ?? {}) };
+	for (const [request, answer] of Object.entries(setup.answers ?? {})) hub.answers.set(request, answer);
 	vi.spyOn(globalThis, "fetch").mockImplementation(hub.fetch);
 	if (setup.layout !== undefined) {
 		const { tabs, active = 0 } = setup.layout;

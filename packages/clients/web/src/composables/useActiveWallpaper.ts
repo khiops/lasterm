@@ -214,7 +214,7 @@ export function useActiveWallpaper(options: UseActiveWallpaperOptions) {
 		windowEffect: displayedBackground.value.windowEffect,
 	}));
 
-	const { wallpaperStyle, dimStyle, refreshCache } = useWallpaper(wallpaperProfile);
+	const { wallpaperStyle, dimStyle } = useWallpaper(wallpaperProfile);
 
 	return {
 		activeChannelId,
@@ -228,6 +228,5 @@ export function useActiveWallpaper(options: UseActiveWallpaperOptions) {
 		wallpaperStyle,
 		dimStyle,
 		reload,
-		refreshCache,
 	};
 }

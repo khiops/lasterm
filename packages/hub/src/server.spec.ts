@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createToken, revokeToken } from "./auth.js";
 import { type SecurityFields, SecurityLog } from "./logging/security-log.js";
 import { createServer, startServer } from "./server.fixture.js";
 import { addCorsOrigins, addStartupCorsOrigins } from "./server.js";
@@ -476,7 +477,7 @@ describe("Hub Server — security headers", () => {
 	}
 
 	it.each(PUBLIC_ASSET_CASES)(
-		"GET /public/$kind/:file serves signed public assets with cross-origin CORP",
+		"GET /public/$kind/:file serves signed public assets with same-origin CORP (#194)",
 		async ({ kind, filename, body }) => {
 			const assetToken = await createProtectedAssetServer(kind, filename, body);
 
@@ -487,7 +488,7 @@ describe("Hub Server — security headers", () => {
 			});
 
 			expect(response?.statusCode).toBe(200);
-			expect(response?.headers["cross-origin-resource-policy"]).toBe("cross-origin");
+			expect(response?.headers["cross-origin-resource-policy"]).toBe("same-origin");
 		},
 	);
 
@@ -541,6 +542,144 @@ describe("Hub Server — security headers", () => {
 		expect(signed?.statusCode).toBe(404);
 		expect(signed?.json<{ error: { code: string } }>().error.code).toBe("FONT_NOT_FOUND");
 	});
+
+	/**
+	 * A hub as production starts it: a bearer and a token store (#194). Returns
+	 * the asset token the browser would use, and a paired token besides the
+	 * primary one.
+	 */
+	async function createAuthenticatedAssetServer(
+		kind: (typeof PUBLIC_ASSET_CASES)[number]["kind"],
+		filename: string,
+		body: Buffer | string,
+	): Promise<{ assetToken: string; paired: { id: string; token: string } }> {
+		configDir = makeTempDir("lasterm-public-bearer-");
+		mkdirSync(join(configDir, kind), { recursive: true });
+		writeFileSync(join(configDir, kind, filename), body);
+		dbs = openTestDatabases();
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			configDir,
+			authToken: TEST_TOKEN,
+		});
+		const paired = createToken(dbs.meta, { label: "paired", expiresAt: null });
+		const tokenRes = await server.inject({
+			method: "GET",
+			url: "/api/assets/token",
+			headers: { authorization: `Bearer ${TEST_TOKEN}` },
+		});
+		return { assetToken: tokenRes.json<{ assetToken: string }>().assetToken, paired };
+	}
+
+	it.each(PUBLIC_ASSET_CASES)(
+		"GET /public/$kind/:file serves the file to the bearer alone (#194)",
+		async ({ kind, filename, body }) => {
+			await createAuthenticatedAssetServer(kind, filename, body);
+
+			const response = await server?.inject({
+				method: "GET",
+				url: `/public/${kind}/${filename}`,
+				headers: { authorization: `Bearer ${TEST_TOKEN}` },
+			});
+
+			expect(response?.statusCode).toBe(200);
+			expect(response?.rawPayload.equals(Buffer.from(body))).toBe(true);
+		},
+	);
+
+	it("GET /public/system-fonts/:file reaches its route with the bearer alone (#194)", async () => {
+		await createAuthenticatedAssetServer("fonts", "unused.woff2", "x");
+
+		const response = await server?.inject({
+			method: "GET",
+			url: "/public/system-fonts/unknown.ttf",
+			headers: { authorization: `Bearer ${TEST_TOKEN}` },
+		});
+
+		expect(response?.statusCode).toBe(404);
+		expect(response?.json<{ error: { code: string } }>().error.code).toBe("FONT_NOT_FOUND");
+	});
+
+	it("GET /public/wallpapers/:file serves a paired bearer, not only the primary one (#194)", async () => {
+		const { paired } = await createAuthenticatedAssetServer("wallpapers", "w.png", "png-bytes");
+
+		const response = await server?.inject({
+			method: "GET",
+			url: "/public/wallpapers/w.png",
+			headers: { authorization: `Bearer ${paired.token}` },
+		});
+
+		expect(response?.statusCode).toBe(200);
+		expect(response?.body).toBe("png-bytes");
+	});
+
+	it("an asset token alone still opens /public on a hub with a bearer, with same-origin CORP (#194)", async () => {
+		const { assetToken } = await createAuthenticatedAssetServer("wallpapers", "w.png", "png-bytes");
+
+		const response = await server?.inject({
+			method: "GET",
+			url: `/public/wallpapers/w.png?asset_token=${assetToken}`,
+			headers: { origin: "https://evil.example" },
+		});
+
+		expect(response?.statusCode).toBe(200);
+		expect(response?.headers["cross-origin-resource-policy"]).toBe("same-origin");
+	});
+
+	it.each([
+		["a wrong bearer", () => "Bearer wrong"],
+		["another scheme", () => "Basic eDp5"],
+	])("GET /public refuses %s with 401 (#194)", async (_case, header) => {
+		await createAuthenticatedAssetServer("wallpapers", "w.png", "png-bytes");
+
+		const response = await server?.inject({
+			method: "GET",
+			url: "/public/wallpapers/w.png",
+			headers: { authorization: header() },
+		});
+
+		expect(response?.statusCode).toBe(401);
+	});
+
+	it("GET /public refuses a revoked paired bearer with 401 (#194)", async () => {
+		const { paired } = await createAuthenticatedAssetServer("wallpapers", "w.png", "png-bytes");
+		revokeToken(dbs?.meta as NonNullable<typeof dbs>["meta"], paired.id);
+
+		const response = await server?.inject({
+			method: "GET",
+			url: "/public/wallpapers/w.png",
+			headers: { authorization: `Bearer ${paired.token}` },
+		});
+
+		expect(response?.statusCode).toBe(401);
+	});
+
+	it("a bearer opens nothing on /public when the hub has no bearer configured (#194)", async () => {
+		await createProtectedAssetServer("wallpapers", "w.png", "png-bytes");
+
+		const response = await server?.inject({
+			method: "GET",
+			url: "/public/wallpapers/w.png",
+			headers: { authorization: "Bearer anything" },
+		});
+
+		expect(response?.statusCode).toBe(403);
+		expect(response?.json<{ error: { code: string } }>().error.code).toBe("ASSET_TOKEN_REQUIRED");
+	});
+
+	it.each(["/unknown", "/public/other/x"])(
+		"%s keeps answering without credentials on a hub with a bearer (#194)",
+		async (path) => {
+			await createAuthenticatedAssetServer("wallpapers", "w.png", "png-bytes");
+
+			const response = await server?.inject({ method: "GET", url: path });
+
+			expect(response?.statusCode).toBe(404);
+		},
+	);
 
 	it("GET /api/health keeps Helmet's same-origin CORP", async () => {
 		server = await createServer({ tls: getTestTls(), logger: false });

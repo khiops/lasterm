@@ -228,7 +228,7 @@ describe("scanSystemFonts (#100)", () => {
 		]);
 		expect(scan.files.size).toBe(3);
 		const regular = scan.families[0]?.files[0];
-		expect(regular?.url).toMatch(/^\/public\/system-fonts\/[0-9a-f]{32}\.ttf\?asset_token=/);
+		expect(regular?.url).toMatch(/^\/public\/system-fonts\/[0-9a-f]{32}\.ttf$/);
 		expect(regular?.localNames).toEqual(["Test Mono Regular", "TestMono-Regular"]);
 	});
 

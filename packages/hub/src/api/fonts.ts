@@ -4,7 +4,7 @@ import { basename, extname, join, resolve } from "node:path";
 import type { FontFamily, FontFile } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { fileTypeFromBuffer } from "file-type";
-import { buildSignedPublicAssetUrl } from "../asset-token.js";
+import { publicAssetPath } from "../asset-token.js";
 import { registerSystemFontRoutes } from "./system-fonts.js";
 import { sanitizeFilename } from "./upload-utils.js";
 
@@ -193,7 +193,7 @@ export function scanFonts(fontsDir: string): FontFamily[] {
 		files.push({
 			style: parsed.style,
 			weight: parsed.weight,
-			url: buildSignedPublicAssetUrl("fonts", entry),
+			url: publicAssetPath("fonts", entry),
 		});
 		familyMap.set(parsed.family, files);
 	}

@@ -239,18 +239,15 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		crossOriginEmbedderPolicy: false,
 	});
 
-	server.addHook("onSend", async (request, reply, payload) => {
-		const pathname = new URL(request.url, "http://localhost").pathname;
-		if (pathname.startsWith("/public/") && requestHasValidAssetToken(request)) {
-			reply.header("Cross-Origin-Resource-Policy", "cross-origin");
-		}
-		return payload;
-	});
-
+	// A served asset opens to the asset token, which a browser page puts in the
+	// URL because it has no other way to sign an <img> or @font-face request, or
+	// to the bearer, which the desktop relays in a header (#194). The bearer is
+	// checked by the auth hook below, the same check as every /api route.
 	server.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
 		const pathname = new URL(request.url, "http://localhost").pathname;
 		if (!isProtectedPublicAssetPath(pathname)) return;
 		if (requestHasValidAssetToken(request)) return;
+		if (options?.authToken && request.headers.authorization !== undefined) return;
 
 		return reply.code(403).send({
 			error: {
@@ -368,8 +365,11 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			if (pathname === "/ws" || pathname.startsWith("/ws/")) return;
 
 			// Static assets (index.html, JS bundles, etc.) do not require auth —
-			// the UI itself handles the pairing/auth flow on first load.
-			if (!pathname.startsWith("/api/")) return;
+			// the UI itself handles the pairing/auth flow on first load. A served
+			// asset the asset gate passed on without its token carries a bearer,
+			// which is checked here like any /api request (#194).
+			const bearerAsset = isProtectedPublicAssetPath(pathname) && !requestHasValidAssetToken(request);
+			if (!pathname.startsWith("/api/") && !bearerAsset) return;
 
 			const authHeader = request.headers.authorization;
 			if (!authHeader) {

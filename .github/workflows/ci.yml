@@ -45,15 +45,16 @@ jobs:
       # These are the upstream Tauri v2 Linux build dependencies. Keep the
       # WebKit driver and Xvfb alongside them: the next step requires both to
       # launch a real renderer rather than silently falling back to a unit test.
-      # The package is webkit2gtk-driver on this runner; other distributions
-      # call it webkitgtk-webdriver. Both provide the WebKitWebDriver executable.
+      # The package is webkitgtk-webdriver on this runner (Ubuntu 26.04);
+      # older releases call it webkit2gtk-driver. Both provide the
+      # WebKitWebDriver executable.
       # The action installs them from cached .deb files; only a cache miss
       # downloads, and a slow mirror then fails within minutes (#728).
       - name: Install Tauri and WebDriver dependencies
         timeout-minutes: 8
         uses: ./.github/actions/apt-install
         with:
-          packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf webkit2gtk-driver xvfb
+          packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf webkitgtk-webdriver xvfb
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @lasterm/shared build
       - run: ./scripts/build-web.sh

@@ -230,8 +230,13 @@ watch(
 		wallpapers.value.map((filename) => thumbnailVersion(filename)),
 	] as const,
 	([listed, ready]) => {
+		const stillListed = new Set(listed);
 		for (const filename of new Set([...loadingVersion.keys(), ...thumbnails.keys()])) {
-			if (!listed.includes(filename)) dropThumbnail(filename);
+			// Gone from the list, or replaced by a same-name upload: its thumbnail
+			// is given back now, whether or not the new one can load yet.
+			const replaced =
+				loadingVersion.has(filename) && loadingVersion.get(filename) !== thumbnailVersion(filename);
+			if (!stillListed.has(filename) || replaced) dropThumbnail(filename);
 		}
 		if (!ready) return;
 		for (const filename of listed) {

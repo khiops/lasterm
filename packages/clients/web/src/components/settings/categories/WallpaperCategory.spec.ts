@@ -164,6 +164,21 @@ describe("wallpaper thumbnails on the desktop (#194)", () => {
 		expect(shown()).toHaveLength(1);
 	});
 
+	it("gives the old thumbnail back as soon as a same-name upload replaces it", async () => {
+		await mount();
+		const before = shown();
+		holdNext.add("forest.png");
+
+		invalidateAsset("wallpapers", "forest.png");
+		await settle();
+
+		expect(revoked).toEqual([before[1]]);
+		expect(shown()[1]).toBe("");
+		held.get("forest.png")?.();
+		await settle();
+		expect(shown()[1]).toMatch(/^blob:thumb\//);
+	});
+
 	it("shows no thumbnail when a same-name upload cannot be loaded", async () => {
 		await mount();
 		const before = shown();

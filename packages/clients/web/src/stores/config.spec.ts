@@ -109,6 +109,16 @@ describe("injectFontFaces, on the desktop (#194)", () => {
 		expect(revoked).toEqual([dropped]);
 	});
 
+	it("quotes a family name as a CSS string, so its own quotes cannot end the rule", async () => {
+		relayFonts();
+
+		await injectFontFaces([face('x";}body{display:none}x{font-family:"y', "evil.woff2")]);
+
+		const sheet = document.getElementById("lasterm-fonts") as HTMLStyleElement;
+		expect(sheet.textContent).toContain('font-family: "x\\";}body{display:none}x{font-family:\\"y";');
+		expect(sheet.textContent?.match(/@font-face/g)).toHaveLength(1);
+	});
+
 	it("keeps the working set when every file of a refresh fails", async () => {
 		relayFonts();
 		await injectFontFaces([face("Hack", "old.woff2")]);

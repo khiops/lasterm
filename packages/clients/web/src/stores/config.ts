@@ -27,7 +27,7 @@ import { type AssetHandle, acquireAsset, parseAssetPath } from "../utils/asset-h
 import type { AlwaysChoice } from "../utils/exit-action.js";
 import { hubFetch } from "../utils/hub-fetch.js";
 import { hubBaseUrl, publicAssetUrl } from "../utils/hub-url.js";
-import { systemFontFaceRules } from "../utils/system-fonts.js";
+import { cssString, systemFontFaceRules } from "../utils/system-fonts.js";
 import { isTauriRuntime } from "../utils/tauri-runtime.js";
 import { useAuthStore } from "./auth.js";
 
@@ -76,7 +76,7 @@ export async function injectFontFaces(families: FontFamily[]): Promise<void> {
 				handles.push(handle);
 				rules.push(
 					`@font-face {
-	font-family: "${family.family}";
+	font-family: ${cssString(family.family)};
 	src: url("${handle.url}") format("${fontFormat(pathname)}");
 	font-weight: ${file.weight};
 	font-style: ${file.style};

@@ -780,8 +780,7 @@ const proxyHint = computed(() => {
 	if (
 		parsed.kind === 'spec' &&
 		hostsStore.hosts.some(
-			(candidate) => candidate.type === 'ssh' &&
-				candidate.sshConfigHost?.toLowerCase() === parsed.spec.host.toLowerCase(),
+			(candidate) => candidate.type === 'ssh' && candidate.sshConfigHost === parsed.spec.host,
 		)
 	) {
 		return `Through ${value}, using your SSH agent, not a saved host's sign-in.`;

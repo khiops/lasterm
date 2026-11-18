@@ -80,8 +80,8 @@ export interface JumpLink {
  * `ssh` reads the jump's name as a `Host` alias and applies the user and port
  * the jump writes over that alias's block (`relay@gw:2200` is
  * `ssh -l relay -p 2200 gw`). So the jump is linked when its name is a saved
- * host's alias — compared without regard to case, as `ssh` matches `Host` —
- * and reached with that host's address and sign-in, the jump's user and port
+ * host's alias — compared exactly: `ssh` matches `Host` names case-sensitively
+ * (OpenSSH_10.6p1: `ssh -G GW` does not read the block of `Host gw`) — and reached with that host's address and sign-in, the jump's user and port
  * winning. They are kept only where they differ from the host's, so a link
  * that agrees with its bastion keeps following it. A host matched only by its
  * address (`sshHost`) is never linked: that literal name may have a `Host`
@@ -99,13 +99,12 @@ export function jumpLinkFor(
 	const parsed = parseJumpSpec(spec);
 	if (parsed.kind !== "spec") return undefined;
 	const { user, host, port, portGiven } = parsed.spec;
-	const name = host.toLowerCase();
 	const named = candidates.filter(
 		(candidate) =>
 			candidate.id !== selfId &&
 			candidate.type === "ssh" &&
 			!!candidate.sshHost &&
-			candidate.sshConfigHost?.toLowerCase() === name,
+			candidate.sshConfigHost === host,
 	);
 	const bastion = named.length === 1 ? named[0] : undefined;
 	if (bastion === undefined) return undefined;

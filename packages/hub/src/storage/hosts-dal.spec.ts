@@ -157,6 +157,25 @@ describe("HostsDAL — route-bound pins", () => {
 			expect(dal.getHost(h.id)?.sshProxyFingerprint).toBeUndefined();
 		}
 	});
+	// A saved bastion reached on a port of its own is pinned on the host that
+	// jumps through it, as a spec is (#1047).
+	it("clears a saved bastion's pin on the jumped host when the bastion's address changes", () => {
+		const b = create("b");
+		const h = create("target", { sshProxyHostId: b.id, sshProxyPort: 2200 });
+		pin(h.id);
+		dal.updateHost(b.id, { sshHost: "moved" });
+		expect(dal.getHost(h.id)?.sshFingerprint).toBeNull();
+		expect(dal.getHost(h.id)?.sshProxyFingerprint).toBeUndefined();
+	});
+	it("clears the pin when the jump's port changes, and keeps it when only its user does", () => {
+		const b = create("b");
+		const h = create("target", { sshProxyHostId: b.id, sshProxyPort: 2200 });
+		pin(h.id);
+		dal.updateHost(h.id, { sshProxyUser: "relay" });
+		expect(dal.getHost(h.id)?.sshProxyFingerprint).toBe("jump-pin");
+		dal.updateHost(h.id, { sshProxyPort: 2201 });
+		expect(dal.getHost(h.id)?.sshProxyFingerprint).toBeUndefined();
+	});
 	it("preserves trust across label, user, normalized port and spec user edits", () => {
 		const h = create("target", { sshProxySpec: "alice@b" });
 		pin(h.id);

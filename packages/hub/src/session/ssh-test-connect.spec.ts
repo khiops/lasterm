@@ -1072,6 +1072,27 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		expect(f.targetAuth.usernames).toContain("parsed-user");
 		await ended(f);
 	});
+	// `relay@gw:2200` is `ssh -l relay -p 2200 gw`: the saved bastion's address,
+	// the jump's own user and port (#1047).
+	it("tests through a saved bastion as the jump's own user, on the jump's own port", async () => {
+		const f = await fixture({ known: true, unsaved: true });
+		const jump = f.hosts.get("jump");
+		if (!jump) throw new Error("no saved bastion");
+		// Saved on a port nothing listens on: only the jump's port reaches the server.
+		jump.sshPort = 1;
+		const done = f.mgr.handleTestConnect("c1", {
+			...f.msg,
+			sshProxyUser: "relay",
+			sshProxyPort: f.port,
+		});
+		const prompt = await hostVerifyPrompt(f.client);
+		f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
+		await done;
+		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
+		expect(f.bastionUsernames).toContain("relay");
+		expect(f.bastionUsernames).not.toContain("tester");
+		await ended(f);
+	});
 	it("rejecting the target key closes the bastion and pins nothing", async () => {
 		const f = await fixture({ known: true, unpinned: true });
 		f.ctx.trustedOnceFingerprints.clear();

@@ -124,6 +124,24 @@ describe("POST /api/hosts stores the jump it is sent (#1042)", () => {
 		expect(meta.getHost(id)?.sshProxyPort).toBeUndefined();
 	});
 
+	it("drops a jump's own user and port when a PUT names another jump without them", async () => {
+		const a = await createHost({ type: "ssh", ssh_auth: "agent", ssh_host: "a.example" });
+		const b = await createHost({ type: "ssh", ssh_auth: "agent", ssh_host: "b.example" });
+		const id = await createHost({
+			type: "ssh",
+			ssh_auth: "agent",
+			ssh_host: "target.example",
+			ssh_proxy_host_id: a,
+			ssh_proxy_user: "relay",
+			ssh_proxy_port: 2200,
+		});
+		const res = await send("PUT", `/api/hosts/${id}`, { value: { ssh_proxy_host_id: b } });
+		expect(res.statusCode, res.body).toBe(200);
+		expect(meta.getHost(id)?.sshProxyHostId).toBe(b);
+		expect(meta.getHost(id)?.sshProxyUser).toBeUndefined();
+		expect(meta.getHost(id)?.sshProxyPort).toBeUndefined();
+	});
+
 	it.each([0, 70000, 22.5, "2200"])("refuses %j as a linked jump's port", async (port) => {
 		const res = await send("POST", "/api/hosts", {
 			value: {

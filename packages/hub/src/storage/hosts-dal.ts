@@ -339,7 +339,7 @@ export class HostsDAL {
 			if (JSON.stringify(oldAddress) !== JSON.stringify(sshAddress(updated))) {
 				this.db
 					.prepare(
-						"UPDATE hosts SET ssh_fingerprint = NULL, updated_at = ? WHERE ssh_proxy_host_id = ?",
+						"UPDATE hosts SET ssh_fingerprint = NULL, ssh_proxy_fingerprint = CASE WHEN ssh_proxy_port IS NULL THEN ssh_proxy_fingerprint END, updated_at = ? WHERE ssh_proxy_host_id = ?",
 					)
 					.run(new Date().toISOString(), id);
 			}

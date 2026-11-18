@@ -1196,12 +1196,29 @@ describe("HostModal reading the hub's SSH config (#734, #757)", () => {
 			expect(hint()).toBe("Through gw-label, which brings its own key and sign-in.");
 		});
 
-		it("names the user and port a picked ProxyJump reaches the saved bastion with (#1047)", async () => {
-			await pickTarget("relay@gw:2200");
-
-			expect(proxyInput().value).toBe(GW.id);
-			expect(hint()).toBe(
+		it.each([
+			["relay@gw", "Through gw-label as relay, which brings its own key and sign-in."],
+			["gw:2200", "Through gw-label on port 2200, which brings its own key and sign-in."],
+			[
+				"relay@gw:2200",
 				"Through gw-label as relay on port 2200, which brings its own key and sign-in.",
+			],
+		])(
+			"names the user and port a picked ProxyJump %s reaches the saved bastion with (#1047)",
+			async (proxyJump, expected) => {
+				await pickTarget(proxyJump);
+
+				expect(proxyInput().value).toBe(GW.id);
+				expect(hint()).toBe(expected);
+			},
+		);
+
+		it("does not take a saved host's alias in another case for it, as ssh does not", async () => {
+			await pickTarget("GW");
+
+			expect(proxyInput().value).toBe("GW");
+			expect(hint()).toBe(
+				"Through GW, using your SSH agent. Add it as a host to give it a key of its own.",
 			);
 		});
 

@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.18.1](https://github.com/khiops/lasterm/compare/v0.18.0...v0.18.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* **agent:** keep DEC line drawing as drawn in an attach's snapshot ([#1013](https://github.com/khiops/lasterm/issues/1013)) ([#1069](https://github.com/khiops/lasterm/issues/1069)) ([ad4824d](https://github.com/khiops/lasterm/commit/ad4824decb533711961cd9a83a52835f38de3d32))
+* **agent:** refuse a non-pipe socket path on Windows ([#733](https://github.com/khiops/lasterm/issues/733)) ([#1064](https://github.com/khiops/lasterm/issues/1064)) ([b18c56a](https://github.com/khiops/lasterm/commit/b18c56a6e2fd2e082d15d6fdfac4538fb5e66c39))
+* **web:** send xterm's binary mouse reports to the program ([#1016](https://github.com/khiops/lasterm/issues/1016)) ([#1063](https://github.com/khiops/lasterm/issues/1063)) ([e891e16](https://github.com/khiops/lasterm/commit/e891e16453a7f009614017e78f8ae6c04da681fc))
+
+
+### Tests
+
+* wait on the condition in five flaky tests, and clear a refused socket's AUTH deadline ([#1066](https://github.com/khiops/lasterm/issues/1066)) ([8b18bb7](https://github.com/khiops/lasterm/commit/8b18bb7c95313dc81f15e7c2691048069fc81d78))
+
+
+### Documentation
+
+* **root:** Store news for DEC line drawing after an attach ([#1013](https://github.com/khiops/lasterm/issues/1013)) ([#1071](https://github.com/khiops/lasterm/issues/1071)) ([55a6c04](https://github.com/khiops/lasterm/commit/55a6c0489cd11c9cdea9b519deca226ed412ae56))
+
+
+### CI/CD
+
+* **root:** install webkitgtk-webdriver on the Ubuntu 26.04 runner ([#1073](https://github.com/khiops/lasterm/issues/1073)) ([501aa20](https://github.com/khiops/lasterm/commit/501aa208a1c17ea7407d4497146f2db78aa478cd))
+
 ## [0.18.0](https://github.com/khiops/lasterm/compare/v0.17.2...v0.18.0) (2026-11-16)
 
 

@@ -3,7 +3,7 @@
  * cannot answer: it refuses a quoted url() holding parentheses, which CSS allows.
  */
 import { createPinia, setActivePinia } from "pinia";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, onTestFinished } from "vitest";
 import { effectScope, ref } from "vue";
 import { resetAssetHolderForTests } from "../utils/asset-holder.js";
 import { setAssetTokenForTests } from "../utils/hub-url.js";
@@ -19,6 +19,7 @@ it("keeps a wallpaper whose name holds parentheses and spaces valid CSS", async 
 	setActivePinia(createPinia());
 	setAssetTokenForTests("t");
 	const scope = effectScope();
+	onTestFinished(() => scope.stop());
 	const profile = ref({
 		fontFamily: "monospace",
 		fontSize: 14,
@@ -40,5 +41,4 @@ it("keeps a wallpaper whose name holds parentheses and spaces valid CSS", async 
 	const element = document.createElement("div");
 	element.style.backgroundImage = wallpaperStyle.value?.backgroundImage ?? "";
 	expect(element.style.backgroundImage).toContain("my%20image%20(1).jpg");
-	scope.stop();
 });

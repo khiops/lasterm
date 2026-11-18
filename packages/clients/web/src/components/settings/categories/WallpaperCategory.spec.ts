@@ -133,16 +133,47 @@ describe("wallpaper thumbnails on the desktop (#194)", () => {
 		expect([...revoked].sort()).toEqual([...created].sort());
 	});
 
-	it("never shows a thumbnail that arrives after its file left or Settings closed", async () => {
+	it("never shows a thumbnail that arrives after Settings closed", async () => {
 		holdNext.add("dunes.jpg");
 		await mount();
+		expect(held.has("dunes.jpg")).toBe(true);
 		app?.unmount();
 		app = null;
 
 		held.get("dunes.jpg")?.();
 		await settle();
 
+		expect(created).toHaveLength(2);
 		expect([...revoked].sort()).toEqual([...created].sort());
+	});
+
+	it("never shows a thumbnail that arrives after its file left the list", async () => {
+		holdNext.add("dunes.jpg");
+		await mount();
+		expect(held.has("dunes.jpg")).toBe(true);
+		root.querySelector<HTMLButtonElement>('[aria-label="Delete wallpaper dunes.jpg"]')?.click();
+		await settle();
+
+		held.get("dunes.jpg")?.();
+		await settle();
+
+		const dunesUrl = created.find((url) => !shown().includes(url));
+		expect(created).toHaveLength(2);
+		expect(dunesUrl).toBeDefined();
+		expect(revoked).toEqual([dunesUrl]);
+		expect(shown()).toHaveLength(1);
+	});
+
+	it("shows no thumbnail when a same-name upload cannot be loaded", async () => {
+		await mount();
+		const before = shown();
+		mocks.hubFetch.mockImplementationOnce(async () => new Response("gone", { status: 404 }));
+
+		invalidateAsset("wallpapers", "dunes.jpg");
+		await settle();
+
+		expect(shown()[0]).toBe("");
+		expect(revoked).toEqual([before[0]]);
 	});
 
 	it("loads a listed file again after a same-name upload, and gives back the old blob", async () => {

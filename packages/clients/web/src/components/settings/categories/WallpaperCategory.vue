@@ -250,8 +250,12 @@ watch(
 					previous?.release();
 				},
 				() => {
-					// Let a later change of the list try again.
-					if (loadingVersion.get(filename) === version) loadingVersion.delete(filename);
+					// The wanted load failed: no thumbnail, as for any failure, and a
+					// later change of the list tries again.
+					if (loadingVersion.get(filename) !== version) return;
+					loadingVersion.delete(filename);
+					thumbnails.get(filename)?.release();
+					thumbnails.delete(filename);
 				},
 			);
 		}

@@ -246,9 +246,14 @@ describe("useWallpaper", () => {
 			next.reject(new Error("relay closed"));
 			await flush();
 			expect(wallpaperStyle.value).toBeNull();
+			// The layer showing a fades out over the same rule as a replacement.
+			vi.advanceTimersByTime(60_000);
+			expect(revoked).toEqual([]);
 			frames.runFrame();
 			frames.runFrame();
-			vi.advanceTimersByTime(WALLPAPER_RELEASE_DELAY_MS);
+			vi.advanceTimersByTime(WALLPAPER_RELEASE_DELAY_MS - 1);
+			expect(revoked).toEqual([]);
+			vi.advanceTimersByTime(1);
 			expect(revoked).toEqual(["blob:test/1"]);
 		});
 
@@ -295,9 +300,13 @@ describe("useWallpaper", () => {
 
 			expect(mocks.hubFetch).toHaveBeenCalledTimes(2);
 			expect(wallpaperStyle.value?.backgroundImage).toBe('url("blob:test/2")');
+			// Same name, new file: the old layer still fades out over the old blob.
+			expect(revoked).toEqual([]);
 			frames.runFrame();
 			frames.runFrame();
-			vi.advanceTimersByTime(WALLPAPER_RELEASE_DELAY_MS);
+			vi.advanceTimersByTime(WALLPAPER_RELEASE_DELAY_MS - 1);
+			expect(revoked).toEqual([]);
+			vi.advanceTimersByTime(1);
 			expect(revoked).toEqual(["blob:test/1"]);
 		});
 
@@ -315,6 +324,21 @@ describe("useWallpaper", () => {
 
 			expect(wallpaperStyle.value?.backgroundImage).toBe('url("blob:test/1")');
 			expect(revoked).toEqual(["blob:test/2"]);
+		});
+
+		it("never shows a wallpaper chosen away from while access was lost", async () => {
+			const first = deferredFetch();
+			const profile = ref(makeProfile({ wallpaper: "a.png" }));
+			const { wallpaperStyle } = run(() => useWallpaper(profile));
+			await flush();
+
+			useAuthStore().clearToken();
+			profile.value = makeProfile({ wallpaper: "b.png" });
+			first.resolve();
+			await flush();
+
+			expect(wallpaperStyle.value).toBeNull();
+			expect(revoked).toEqual(["blob:test/1"]);
 		});
 
 		it("loads nothing before the bearer is known", async () => {

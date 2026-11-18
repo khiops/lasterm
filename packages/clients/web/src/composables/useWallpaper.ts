@@ -77,9 +77,10 @@ export function useWallpaper(profile: Ref<TerminalProfile>) {
 				expose(null);
 				return;
 			}
+			// Any change makes a load still in flight stale, with or without access.
+			const current = ++attempt;
 			// Without access the current wallpaper stays; nothing new can load.
 			if (!ready) return;
-			const current = ++attempt;
 			acquireAsset("wallpapers", wallpaper).then(
 				(handle) => {
 					// A wallpaper or version chosen since then wins; this one never shows.

@@ -764,7 +764,14 @@ const proxyHint = computed(() => {
 	if (value === '') return 'Connected to directly.';
 	if (proxyIsHostId.value) {
 		const known = hostsStore.hosts.find((candidate) => candidate.id === value);
-		if (known) return `Through ${known.label}, which brings its own key and sign-in.`;
+		if (known) {
+			// The user and port the jump's own ProxyJump wrote, over the host's (#1047).
+			const as = [
+				form.value.sshProxyUser !== '' ? ` as ${form.value.sshProxyUser}` : '',
+				form.value.sshProxyPort !== null ? ` on port ${form.value.sshProxyPort}` : '',
+			].join('');
+			return `Through ${known.label}${as}, which brings its own key and sign-in.`;
+		}
 		return 'The host chosen as the jump is no longer saved.';
 	}
 	// A spec naming a saved host's alias was kept as written (#1040): the agent
@@ -773,7 +780,8 @@ const proxyHint = computed(() => {
 	if (
 		parsed.kind === 'spec' &&
 		hostsStore.hosts.some(
-			(candidate) => candidate.type === 'ssh' && candidate.sshConfigHost === parsed.spec.host,
+			(candidate) => candidate.type === 'ssh' &&
+				candidate.sshConfigHost?.toLowerCase() === parsed.spec.host.toLowerCase(),
 		)
 	) {
 		return `Through ${value}, using your SSH agent, not a saved host's sign-in.`;

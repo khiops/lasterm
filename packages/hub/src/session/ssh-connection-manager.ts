@@ -754,6 +754,8 @@ export class SshConnectionManager {
 			sshPort: msg.port,
 			sshProxyHostId: msg.sshProxyHostId ?? null,
 			sshProxySpec: msg.sshProxySpec ?? null,
+			sshProxyUser: msg.sshProxyUser ?? null,
+			sshProxyPort: msg.sshProxyPort ?? null,
 		};
 		const lookup = (id: string) => sshAddress(this.ctx.metaDal.getHost(id));
 		const hostKey = targetRoute(declaration, lookup);
@@ -766,6 +768,8 @@ export class SshConnectionManager {
 				sshUser: msg.sshUser || null,
 				sshProxyHostId: msg.sshProxyHostId ?? null,
 				sshProxySpec: msg.sshProxySpec ?? null,
+				sshProxyUser: msg.sshProxyUser ?? null,
+				sshProxyPort: msg.sshProxyPort ?? null,
 				sshProxyFingerprint: savedRoute ? (saved.sshProxyFingerprint ?? null) : null,
 			},
 			this.ctx.metaDal,

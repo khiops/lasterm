@@ -42,6 +42,8 @@ interface HostRow {
 	ssh_fingerprint: string | null;
 	ssh_proxy_host_id: string | null;
 	ssh_proxy_spec: string | null;
+	ssh_proxy_user: string | null;
+	ssh_proxy_port: number | null;
 	ssh_remote_daemon: number | null;
 	connect_timeout_seconds: number | null;
 	ssh_proxy_fingerprint: string | null;
@@ -102,6 +104,8 @@ function rowToHost(row: HostRow): Host {
 	host.sshFingerprint = row.ssh_fingerprint;
 	if (row.ssh_proxy_host_id != null) host.sshProxyHostId = row.ssh_proxy_host_id;
 	if (row.ssh_proxy_spec != null) host.sshProxySpec = row.ssh_proxy_spec;
+	if (row.ssh_proxy_user != null) host.sshProxyUser = row.ssh_proxy_user;
+	if (row.ssh_proxy_port != null) host.sshProxyPort = row.ssh_proxy_port;
 	if (row.ssh_proxy_fingerprint != null) host.sshProxyFingerprint = row.ssh_proxy_fingerprint;
 	if (row.ssh_remote_daemon != null) host.sshRemoteDaemon = row.ssh_remote_daemon === 1;
 	host.connectTimeoutSeconds = row.connect_timeout_seconds;
@@ -156,7 +160,8 @@ export class HostsDAL {
 				icon_type, icon_value, color, profile_json, trust_remote_hints,
 				default_cwd,
 				host_group_id, sort_order, ssh_config_host, ssh_user,
-				ssh_proxy_host_id, ssh_proxy_spec, ssh_remote_daemon, connect_timeout_seconds,
+				ssh_proxy_host_id, ssh_proxy_spec, ssh_proxy_user, ssh_proxy_port,
+				ssh_remote_daemon, connect_timeout_seconds,
 				elevation_method, custom_command,
 				os, arch,
 				created_at, updated_at
@@ -165,7 +170,7 @@ export class HostsDAL {
 				?, ?, ?, ?, ?,
 				?,
 				?, ?, ?, ?,
-				?, ?, ?, ?,
+				?, ?, ?, ?, ?, ?,
 				?, ?,
 				?, ?,
 				?, ?
@@ -191,6 +196,8 @@ export class HostsDAL {
 				input.sshUser ?? null,
 				input.sshProxyHostId ?? null,
 				input.sshProxySpec ?? null,
+				input.sshProxyUser ?? null,
+				input.sshProxyPort ?? null,
 				input.sshRemoteDaemon == null ? null : input.sshRemoteDaemon ? 1 : 0,
 				input.connectTimeoutSeconds ?? null,
 				input.elevationMethod ?? null,
@@ -288,6 +295,8 @@ export class HostsDAL {
 				sshUser: "ssh_user",
 				sshProxyHostId: "ssh_proxy_host_id",
 				sshProxySpec: "ssh_proxy_spec",
+				sshProxyUser: "ssh_proxy_user",
+				sshProxyPort: "ssh_proxy_port",
 				sshProxyFingerprint: "ssh_proxy_fingerprint",
 				sshRemoteDaemon: "ssh_remote_daemon",
 				connectTimeoutSeconds: "connect_timeout_seconds",
@@ -516,6 +525,8 @@ export class HostsDAL {
 				// same address directly, which can be another machine.
 				...(original.sshProxyHostId != null && { sshProxyHostId: original.sshProxyHostId }),
 				...(original.sshProxySpec != null && { sshProxySpec: original.sshProxySpec }),
+				...(original.sshProxyUser != null && { sshProxyUser: original.sshProxyUser }),
+				...(original.sshProxyPort != null && { sshProxyPort: original.sshProxyPort }),
 				...(original.elevationMethod != null && { elevationMethod: original.elevationMethod }),
 				...(original.customCommand != null && { customCommand: original.customCommand }),
 				// The machine is the same one: null still means auto-detect.

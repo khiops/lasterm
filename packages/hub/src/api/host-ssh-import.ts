@@ -57,7 +57,8 @@ export function validateSshConfigImportEntries(body: unknown): SshConfigImportVa
 
 /**
  * Link a host's `ProxyJump` to the saved bastion it names, when
- * `jumpLinkFor` finds one; otherwise the host keeps it as written (#1040).
+ * `jumpLinkFor` finds one, with the user and port it writes of its own (#1047);
+ * otherwise the host keeps it as written (#1040).
  * `candidates` is the hub's hosts, read once by the caller for a whole import.
  */
 export function linkHostToProxyJump(
@@ -66,11 +67,13 @@ export function linkHostToProxyJump(
 	candidates: readonly Host[],
 ): Host {
 	if (!host.sshProxySpec) return host;
-	const bastion = jumpLinkFor(host.sshProxySpec, candidates, host.id);
-	if (!bastion) return host;
+	const link = jumpLinkFor(host.sshProxySpec, candidates, host.id);
+	if (!link) return host;
 	return metaDal.updateHost(host.id, {
-		sshProxyHostId: bastion.id,
+		sshProxyHostId: link.bastion.id,
 		sshProxySpec: null,
+		sshProxyUser: link.user,
+		sshProxyPort: link.port,
 	});
 }
 

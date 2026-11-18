@@ -1466,6 +1466,8 @@ The optional `platform` reports `system`, optional `os` and `arch`, `agent` (`re
   ssh_user?: string,
   ssh_proxy_host_id?: string, // saved jump host; mutually exclusive with spec
   ssh_proxy_spec?: string,   // ProxyJump address
+  ssh_proxy_user?: string,   // with ssh_proxy_host_id: the user the jump is reached as, over its host's (#1047)
+  ssh_proxy_port?: number,   // with ssh_proxy_host_id: the port, 1-65535, over its host's (#1047)
   ssh_config_host?: string,  // ~/.ssh/config alias of the picked entry, 1-256 characters
   connect_timeout_seconds?: number // the form's connection timeout (#1034)
 }
@@ -2684,6 +2686,8 @@ hub drops its record; an interrupted one stays across restarts until it is resum
   ssh_config_host?: string,           // Host alias from ~/.ssh/config
   ssh_proxy_host_id?: string | null,  // jump host this hub knows (SPEC.md § 4.5b)
   ssh_proxy_spec?: string | null,     // or a jump as user@host:port; never both
+  ssh_proxy_user?: string | null,     // with ssh_proxy_host_id: the user the jump is reached as, over its host's (#1047); null follows the host
+  ssh_proxy_port?: number | null,     // with ssh_proxy_host_id: the port it is reached on, over its host's (#1047); 1-65535; null follows the host
   ssh_remote_daemon?: boolean | null, // keep an agent running there (#79); null follows [ssh] remote_daemon
   connect_timeout_seconds?: number | null, // 20-120 whole seconds per connection wait (#1034); null: the default
   icon_type?: 'auto' | 'emoji' | 'image',   // default 'auto'

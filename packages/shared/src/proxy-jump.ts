@@ -64,18 +64,29 @@ export function parseJumpSpec(raw: string): JumpSpecResult {
 	return { kind: "spec", spec: { user, host, port, portGiven: portText !== null } };
 }
 
+/** A `ProxyJump` linked to a saved host, with the user and port it writes of its own. */
+export interface JumpLink {
+	bastion: Host;
+	/** The user the jump writes when it differs from the bastion's own; null follows the bastion. */
+	user: string | null;
+	/** The port the jump writes when it differs from the bastion's own; null follows the bastion. */
+	port: number | null;
+}
+
 /**
  * The saved host a `ProxyJump` from `~/.ssh/config` is linked to, if any
- * (#1040, #1042).
+ * (#1040, #1042, #1047), and what the jump writes of its own.
  *
- * Linked, the jump is reached with that host's address, user, port, sign-in
- * and pinned key; kept as written, through the SSH agent at the spec. So it is
- * linked only when that reaches what `ssh` would: the spec names the host's
- * alias — the saved row stands for that alias's block, whose user and port
- * apply when the spec writes none — and any user or port it writes is the
- * host's. A host matched only by its address (`sshHost`) is never linked: that
- * literal name may have a `Host` block of its own, which no saved host records. Two saved hosts
- * with the alias are no answer either, rather than a pick by list order.
+ * `ssh` reads the jump's name as a `Host` alias and applies the user and port
+ * the jump writes over that alias's block (`relay@gw:2200` is
+ * `ssh -l relay -p 2200 gw`). So the jump is linked when its name is a saved
+ * host's alias — compared without regard to case, as `ssh` matches `Host` —
+ * and reached with that host's address and sign-in, the jump's user and port
+ * winning. They are kept only where they differ from the host's, so a link
+ * that agrees with its bastion keeps following it. A host matched only by its
+ * address (`sshHost`) is never linked: that literal name may have a `Host`
+ * block of its own, which no saved host records. Two saved hosts with the
+ * alias are no answer either, rather than a pick by list order.
  *
  * The import and the New Host dialog's pick both decide with this, so a picked
  * entry is tested and stored through the jump an import would give it.
@@ -84,22 +95,25 @@ export function jumpLinkFor(
 	spec: string,
 	candidates: readonly Host[],
 	selfId?: string,
-): Host | undefined {
+): JumpLink | undefined {
 	const parsed = parseJumpSpec(spec);
 	if (parsed.kind !== "spec") return undefined;
 	const { user, host, port, portGiven } = parsed.spec;
+	const name = host.toLowerCase();
 	const named = candidates.filter(
 		(candidate) =>
 			candidate.id !== selfId &&
 			candidate.type === "ssh" &&
 			!!candidate.sshHost &&
-			candidate.sshConfigHost === host,
+			candidate.sshConfigHost?.toLowerCase() === name,
 	);
 	const bastion = named.length === 1 ? named[0] : undefined;
 	if (bastion === undefined) return undefined;
-	if (user !== null && user !== explicitUserOf(bastion)) return undefined;
-	if (portGiven && port !== (bastion.sshPort ?? 22)) return undefined;
-	return bastion;
+	return {
+		bastion,
+		user: user !== null && user !== explicitUserOf(bastion) ? user : null,
+		port: portGiven && port !== (bastion.sshPort ?? 22) ? port : null,
+	};
 }
 
 /** The user a saved host names itself: its user field, else `user@` in its address. */

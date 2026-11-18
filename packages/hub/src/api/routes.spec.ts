@@ -2679,6 +2679,8 @@ describe("POST /api/hosts/import — linking a ProxyJump to a saved bastion (#10
 		label: string;
 		ssh_proxy_host_id?: string;
 		ssh_proxy_spec?: string;
+		ssh_proxy_user?: string;
+		ssh_proxy_port?: number;
 	};
 
 	async function importEntries(entries: Entry[], names = entries.map((e) => e.name)) {
@@ -2715,21 +2717,45 @@ describe("POST /api/hosts/import — linking a ProxyJump to a saved bastion (#10
 		return { gw: bastion, target };
 	}
 
+	// `relay@gw:2200` is `ssh -l relay -p 2200 gw`: the saved host's address and
+	// sign-in apply, the jump's user and port win (#1047).
 	it.each([
-		{ variant: "user", proxyJump: "relay@gw", gw: {} },
-		{ variant: "port", proxyJump: "gw:2200", gw: {} },
-		{ variant: "no-bastion-user", proxyJump: "relay@gw", gw: { user: null } },
+		{ variant: "user", proxyJump: "relay@gw", gw: {}, user: "relay", port: undefined },
+		{ variant: "port", proxyJump: "gw:2200", gw: {}, user: undefined, port: 2200 },
+		{
+			variant: "user-and-port",
+			proxyJump: "relay@gw:2200",
+			gw: {},
+			user: "relay",
+			port: 2200,
+		},
+		{
+			variant: "no-bastion-user",
+			proxyJump: "relay@gw",
+			gw: { user: null },
+			user: "relay",
+			port: undefined,
+		},
+		{
+			variant: "case",
+			proxyJump: "RELAY@GW",
+			gw: {},
+			user: "RELAY",
+			port: undefined,
+		},
 	])(
-		"keeps an imported ProxyJump whose user or port differs from the bastion's as written ($variant)",
-		async ({ proxyJump, gw }) => {
-			const { target } = await importWithGw(proxyJump, gw);
-			expect(target?.ssh_proxy_spec).toBe(proxyJump);
-			expect(target?.ssh_proxy_host_id).toBeUndefined();
+		"links an imported ProxyJump to the saved bastion with the user and port it writes ($variant)",
+		async ({ proxyJump, gw, user, port }) => {
+			const { gw: bastion, target } = await importWithGw(proxyJump, gw);
+			expect(target?.ssh_proxy_host_id).toBe(bastion?.id);
+			expect(target?.ssh_proxy_spec).toBeUndefined();
+			expect(target?.ssh_proxy_user).toBe(user);
+			expect(target?.ssh_proxy_port).toBe(port);
 		},
 	);
 
-	it("keeps an imported ProxyJump whose user differs from the one in the bastion's address as written (sshhost-user)", async () => {
-		await saveHost({
+	it("links an imported ProxyJump naming a user other than the one in the bastion's address (sshhost-user)", async () => {
+		const gwId = await saveHost({
 			label: "gw-saved",
 			ssh_host: "base@gateway.example",
 			ssh_config_host: "gw",
@@ -2738,8 +2764,14 @@ describe("POST /api/hosts/import — linking a ProxyJump to a saved bastion (#10
 		const [target] = await importEntries([
 			entry("target", { hostname: "target.example", proxyJump: "relay@gw" }),
 		]);
-		expect(target?.ssh_proxy_spec).toBe("relay@gw");
-		expect(target?.ssh_proxy_host_id).toBeUndefined();
+		expect(target?.ssh_proxy_host_id).toBe(gwId);
+		expect(target?.ssh_proxy_user).toBe("relay");
+	});
+
+	it("keeps no user or port on a link that agrees with its bastion", async () => {
+		const { target } = await importWithGw("base@gw:2222");
+		expect(target?.ssh_proxy_user).toBeUndefined();
+		expect(target?.ssh_proxy_port).toBeUndefined();
 	});
 
 	it.each([

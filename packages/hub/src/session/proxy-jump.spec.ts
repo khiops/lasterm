@@ -72,7 +72,12 @@ describe("planJump", () => {
 	});
 
 	it("goes through a host this hub knows", () => {
-		expect(planJump({ sshProxyHostId: "host-1" })).toEqual({ kind: "host", hostId: "host-1" });
+		expect(planJump({ sshProxyHostId: "host-1" })).toEqual({
+			kind: "host",
+			hostId: "host-1",
+			user: null,
+			port: null,
+		});
 	});
 
 	// A jump this hub knows is the one with the authentication and the pinned
@@ -81,7 +86,15 @@ describe("planJump", () => {
 		expect(planJump({ sshProxyHostId: "host-1", sshProxySpec: "bastion" })).toEqual({
 			kind: "host",
 			hostId: "host-1",
+			user: null,
+			port: null,
 		});
+	});
+
+	it("goes through a known host as another user and port than its own (#1047)", () => {
+		expect(
+			planJump({ sshProxyHostId: "host-1", sshProxyUser: "relay", sshProxyPort: 2200 }),
+		).toEqual({ kind: "host", hostId: "host-1", user: "relay", port: 2200 });
 	});
 
 	it("goes through a bastion named as a spec", () => {
@@ -194,6 +207,76 @@ describe("resolveJump", () => {
 			});
 		},
 	);
+
+	// `relay@gw:2200` is `ssh -l relay -p 2200 gw`: the saved host's address and
+	// sign-in apply, the jump's user and port win (#1047).
+	describe("a linked jump with a user and port of its own", () => {
+		const gw = sshHost("gw", {
+			sshHost: "base@gateway.example",
+			sshPort: 2222,
+			sshUser: "base",
+			sshConfigHost: "gw",
+			sshAuth: "key",
+			sshKeyPath: "/keys/gw",
+		});
+
+		it("signs in as the jump's user, with the saved host's key, address and own pin", () => {
+			const target = sshHost("target", { sshProxyHostId: "gw", sshProxyUser: "relay" });
+			const resolution = resolveJump(target, known([gw], { gw: "SHA256:gw" }), false);
+			expect(resolution.kind).toBe("jump");
+			if (resolution.kind !== "jump") return;
+			expect(resolution.jump.jump).toEqual({
+				host: "gateway.example",
+				port: 2222,
+				username: "relay",
+			});
+			expect(resolution.jump.auth).toEqual({
+				method: "key",
+				keyPath: "/keys/gw",
+				sshConfigHost: "gw",
+			});
+			// Same server: the saved host's own pin still speaks, and revocation under
+			// its alias keeps applying.
+			expect(resolution.jump.pinnedFingerprint).toBe("SHA256:gw");
+			expect(resolution.jump.pinTo.kind).toBe("host");
+			expect(resolution.jump.knownHostsNames).toEqual(["gateway.example", "gw"]);
+		});
+
+		it("dials the jump's port, and pins its key on the jumped host: another port is another server", () => {
+			const target = sshHost("target", {
+				sshProxyHostId: "gw",
+				sshProxyPort: 2200,
+				sshProxyFingerprint: "SHA256:target-side",
+			});
+			const resolution = resolveJump(target, known([gw], { gw: "SHA256:gw-own" }), false);
+			expect(resolution.kind).toBe("jump");
+			if (resolution.kind !== "jump") return;
+			expect(resolution.jump.jump).toEqual({
+				host: "gateway.example",
+				port: 2200,
+				username: "base",
+			});
+			expect(resolution.jump.pinnedFingerprint).toBe("SHA256:target-side");
+			expect(resolution.jump.pinTo).toEqual({ kind: "spec", hostId: "target" });
+		});
+
+		it("keeps the saved host's pin for a port that is its own", () => {
+			const target = sshHost("target", { sshProxyHostId: "gw", sshProxyPort: 2222 });
+			const resolution = resolveJump(target, known([gw], { gw: "SHA256:gw-own" }), false);
+			expect(resolution.kind === "jump" && resolution.jump.pinnedFingerprint).toBe("SHA256:gw-own");
+		});
+
+		it("tells the jump's port apart in the route a pin is tied to", () => {
+			const lookup = (id: string) => sshAddress(id === "gw" ? gw : undefined);
+			const via = (port?: number) =>
+				targetRoute(
+					sshHost("target", { sshProxyHostId: "gw", ...(port && { sshProxyPort: port }) }),
+					lookup,
+				);
+			expect(via(2200)).not.toBe(via());
+			expect(via(2222)).toBe(via());
+		});
+	});
 
 	it("goes through a bastion named as a spec, with the agent, as the host's user by default", () => {
 		const target = sshHost("target", {

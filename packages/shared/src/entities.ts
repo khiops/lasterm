@@ -164,8 +164,7 @@ export interface Host {
 	/**
 	 * The bastion this one is reached through, written as `~/.ssh/config` writes
 	 * it: `user@host:port`. For a jump not linked to a host here — a bastion
-	 * that is none, one nobody wants in the list, or one the spec reaches with
-	 * another user or port than its saved host's (#1040).
+	 * that is none, or one nobody wants in the list.
 	 */
 	sshProxySpec?: string | null;
 	/**
@@ -173,6 +172,15 @@ export interface Host {
 	 * Unused when the jump is a host: that host pins its own.
 	 */
 	sshProxyFingerprint?: string | null;
+	/**
+	 * The user and port a jump linked to a saved host (`sshProxyHostId`) is
+	 * reached with when its `ProxyJump` writes its own (`relay@gw:2200`), as
+	 * `ssh -l relay -p 2200 gw` would: the saved host's address and sign-in
+	 * apply, these two win (#1047). Null follows the saved host. Unused without
+	 * `sshProxyHostId`.
+	 */
+	sshProxyUser?: string | null;
+	sshProxyPort?: number | null;
 	/**
 	 * Whether this host may keep an agent running of its own (#79).
 	 *

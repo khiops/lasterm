@@ -368,7 +368,8 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			// the UI itself handles the pairing/auth flow on first load. A served
 			// asset the asset gate passed on without its token carries a bearer,
 			// which is checked here like any /api request (#194).
-			const bearerAsset = isProtectedPublicAssetPath(pathname) && !requestHasValidAssetToken(request);
+			const bearerAsset =
+				isProtectedPublicAssetPath(pathname) && !requestHasValidAssetToken(request);
 			if (!pathname.startsWith("/api/") && !bearerAsset) return;
 
 			const authHeader = request.headers.authorization;

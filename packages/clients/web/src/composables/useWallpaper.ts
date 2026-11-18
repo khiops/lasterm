@@ -66,7 +66,11 @@ export function useWallpaper(profile: Ref<TerminalProfile>) {
 	}
 
 	watch(
-		[() => profile.value.wallpaper, assetAccessReady, () => versionOf(profile.value.wallpaper ?? "")],
+		[
+			() => profile.value.wallpaper,
+			assetAccessReady,
+			() => versionOf(profile.value.wallpaper ?? ""),
+		],
 		([wallpaper, ready]) => {
 			if (!wallpaper) {
 				attempt++;

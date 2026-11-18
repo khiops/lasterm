@@ -145,7 +145,10 @@ describe("the desktop's asset holder (#194)", () => {
 	});
 
 	it.each([
-		["an HTTP error", () => mocks.hubFetch.mockResolvedValueOnce(new Response("no", { status: 404 }))],
+		[
+			"an HTTP error",
+			() => mocks.hubFetch.mockResolvedValueOnce(new Response("no", { status: 404 })),
+		],
 		["a relay failure", () => mocks.hubFetch.mockRejectedValueOnce(new Error("relay closed"))],
 		[
 			"a body that fails midway",
@@ -161,16 +164,19 @@ describe("the desktop's asset holder (#194)", () => {
 					),
 				),
 		],
-	])("after %s, rejects, creates nothing, and the next acquire fetches again", async (_case, fail) => {
-		fail();
+	])(
+		"after %s, rejects, creates nothing, and the next acquire fetches again",
+		async (_case, fail) => {
+			fail();
 
-		await expect(acquireAsset("sounds", "bell.mp3")).rejects.toThrow();
-		expect(created).toEqual([]);
-		const handle = await acquireAsset("sounds", "bell.mp3");
+			await expect(acquireAsset("sounds", "bell.mp3")).rejects.toThrow();
+			expect(created).toEqual([]);
+			const handle = await acquireAsset("sounds", "bell.mp3");
 
-		expect(mocks.hubFetch).toHaveBeenCalledTimes(2);
-		expect(handle.url).toBe(created[0]);
-	});
+			expect(mocks.hubFetch).toHaveBeenCalledTimes(2);
+			expect(handle.url).toBe(created[0]);
+		},
+	);
 
 	it("rejects every acquire waiting on a failed fetch", async () => {
 		const fetch = deferredFetch();

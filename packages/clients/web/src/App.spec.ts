@@ -2472,7 +2472,9 @@ describe("the window wallpaper's fade (#194)", () => {
 				"GET /api/config/cascade": () =>
 					json({
 						appearance: DEFAULT_APPEARANCE,
-						terminal: { resolved: { ...DEFAULT_PROFILE, backgroundMode: "image", wallpaper: "a.png" } },
+						terminal: {
+							resolved: { ...DEFAULT_PROFILE, backgroundMode: "image", wallpaper: "a.png" },
+						},
 					}),
 			},
 		});

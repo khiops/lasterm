@@ -101,7 +101,8 @@ export async function mountWindow(setup: WindowSetup = {}): Promise<MountedWindo
 	hub.hostGroups = setup.hostGroups ?? [];
 	hub.channels = setup.channels ?? [];
 	hub.ui = { onChannelDead: "readonly", ...(setup.ui ?? {}) };
-	for (const [request, answer] of Object.entries(setup.answers ?? {})) hub.answers.set(request, answer);
+	for (const [request, answer] of Object.entries(setup.answers ?? {}))
+		hub.answers.set(request, answer);
 	vi.spyOn(globalThis, "fetch").mockImplementation(hub.fetch);
 	if (setup.layout !== undefined) {
 		const { tabs, active = 0 } = setup.layout;

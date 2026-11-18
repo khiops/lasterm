@@ -4,73 +4,143 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AlwaysChoice } from "../utils/exit-action.js";
 
 const mocks = vi.hoisted(() => ({
-	domPublicAssetUrl: vi.fn<(path: string) => Promise<string>>(),
 	hubFetch: vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(),
-}));
-
-vi.mock("../utils/hub-url.js", () => ({
-	domPublicAssetUrl: mocks.domPublicAssetUrl,
-	hubBaseUrl: () => "",
 }));
 
 vi.mock("../utils/hub-fetch.js", () => ({ hubFetch: mocks.hubFetch }));
 
+import { resetAssetHolderForTests } from "../utils/asset-holder.js";
+import { setHubPortForTests } from "../utils/hub-url.js";
+import { useAuthStore } from "./auth.js";
 import { injectFontFaces, useConfigStore } from "./config.js";
 
-const oldFace: FontFamily[] = [
-	{
-		family: "Old Working Font",
-		files: [{ url: "/public/fonts/old.woff2", weight: 400, style: "normal" }],
-	},
-];
+/** Relayed font fetches by path, each answered when the test says so, or at once. */
+function relayFonts(answers: Record<string, "ok" | "fail" | "hold"> = {}): {
+	release: (path: string) => void;
+} {
+	const held = new Map<string, () => void>();
+	mocks.hubFetch.mockImplementation((url) => {
+		const path = new URL(url).pathname;
+		const answer = answers[path] ?? "ok";
+		if (answer === "fail") return Promise.reject(new Error("font file is unavailable"));
+		const response = () => new Response("font-bytes", { status: 200 });
+		if (answer === "ok") return Promise.resolve(response());
+		return new Promise((resolve) => held.set(path, () => resolve(response())));
+	});
+	return { release: (path) => held.get(path)?.() };
+}
 
-const partiallyResolvableFaces: FontFamily[] = [
-	{
-		family: "Replacement Font",
-		files: [
-			{ url: "/public/fonts/working.woff2", weight: 400, style: "normal" },
-			{ url: "/public/fonts/broken.woff2", weight: 700, style: "normal" },
-		],
-	},
-];
+const face = (family: string, ...files: string[]): FontFamily => ({
+	family,
+	files: files.map((file, index) => ({
+		url: `/public/fonts/${encodeURIComponent(file)}`,
+		weight: 400 + 300 * index,
+		style: "normal",
+	})),
+});
 
-describe("injectFontFaces", () => {
-	beforeEach(() => {
+describe("injectFontFaces, on the desktop (#194)", () => {
+	let created: string[];
+	let revoked: string[];
+
+	beforeEach(async () => {
 		document.head.innerHTML = "";
-		mocks.domPublicAssetUrl.mockReset();
-		vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+		setActivePinia(createPinia());
+		useAuthStore().setToken("bearer-1");
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: () => undefined },
+			configurable: true,
+		});
+		setHubPortForTests(4100);
+		mocks.hubFetch.mockReset();
+		created = [];
+		revoked = [];
+		let next = 0;
+		vi.spyOn(URL, "createObjectURL").mockImplementation(() => {
+			const url = `blob:font/${++next}`;
+			created.push(url);
+			return url;
+		});
+		vi.spyOn(URL, "revokeObjectURL").mockImplementation((url) => {
+			revoked.push(url);
+		});
 		vi.spyOn(console, "error").mockImplementation(() => {});
+		// Leave nothing held by an earlier test's stylesheet.
+		relayFonts();
+		await injectFontFaces([]);
+		created.length = 0;
+		revoked.length = 0;
 	});
 
 	afterEach(() => {
+		resetAssetHolderForTests();
+		setHubPortForTests(null);
+		Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 		vi.restoreAllMocks();
 	});
 
-	it("keeps a working face applied when another face cannot be resolved", async () => {
-		mocks.domPublicAssetUrl.mockResolvedValueOnce("blob:old-working-font");
-		await injectFontFaces(oldFace);
-		const previousStyle = document.getElementById("lasterm-fonts");
-		if (!previousStyle) throw new Error("expected the existing font style");
-		const removePreviousStyle = vi.spyOn(previousStyle, "remove");
+	it("relays each font path with the bearer and no asset token", async () => {
+		relayFonts();
 
-		mocks.domPublicAssetUrl.mockImplementation(async (path) => {
-			if (path.endsWith("working.woff2")) return "blob:replacement-working-font";
-			throw new Error("font file is unavailable");
+		await injectFontFaces([face("Hack", "a b%.woff2")]);
+
+		const [url, init] = mocks.hubFetch.mock.calls[0] ?? [];
+		expect(url).toBe("https://127.0.0.1:4100/public/fonts/a%20b%25.woff2");
+		expect(new Headers(init?.headers).get("authorization")).toBe("Bearer bearer-1");
+		expect(document.getElementById("lasterm-fonts")?.textContent).toContain('url("blob:font/1")');
+	});
+
+	it("gives back a dropped file once the new stylesheet is in, and keeps a file both sets use", async () => {
+		relayFonts();
+		await injectFontFaces([face("Hack", "kept.woff2", "dropped.woff2")]);
+		const [kept, dropped] = created;
+		// Whether the stylesheet still named a URL at the moment it was revoked.
+		const stillUsed: boolean[] = [];
+		vi.mocked(URL.revokeObjectURL).mockImplementation((url) => {
+			revoked.push(url);
+			stillUsed.push(document.getElementById("lasterm-fonts")?.textContent?.includes(url) ?? false);
 		});
-		await injectFontFaces(partiallyResolvableFaces);
 
-		const style = document.getElementById("lasterm-fonts");
-		expect(style).not.toBeNull();
-		expect(style).not.toBe(previousStyle);
-		expect(style?.textContent).toContain('url("blob:replacement-working-font")');
-		expect(style?.textContent).not.toContain("broken.woff2");
-		expect(document.head.contains(previousStyle)).toBe(false);
-		expect(removePreviousStyle).not.toHaveBeenCalled();
-		expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:old-working-font");
+		await injectFontFaces([face("Hack", "kept.woff2")]);
+
+		expect(stillUsed).toEqual([false]);
+		expect(mocks.hubFetch).toHaveBeenCalledTimes(2);
+		expect(document.getElementById("lasterm-fonts")?.textContent).toContain(`url("${kept}")`);
+		expect(revoked).toEqual([dropped]);
+	});
+
+	it("keeps the working set when every file of a refresh fails", async () => {
+		relayFonts();
+		await injectFontFaces([face("Hack", "old.woff2")]);
+		const previous = document.getElementById("lasterm-fonts");
+
+		relayFonts({ "/public/fonts/new.woff2": "fail" });
+		await injectFontFaces([face("Other", "new.woff2")]);
+
+		expect(document.getElementById("lasterm-fonts")).toBe(previous);
+		expect(revoked).toEqual([]);
 		expect(console.error).toHaveBeenCalledWith(
-			expect.stringContaining("failed to resolve custom font Replacement Font"),
+			expect.stringContaining("failed to resolve custom font Other"),
 			expect.any(Error),
 		);
+	});
+
+	it("applies only the later of two overlapping calls, and every URL is revoked exactly once in the end", async () => {
+		const relay = relayFonts({ "/public/fonts/slow.woff2": "hold" });
+
+		const earlier = injectFontFaces([face("Earlier", "shared.woff2", "slow.woff2")]);
+		await injectFontFaces([face("Later", "shared.woff2", "later.woff2")]);
+		relay.release("/public/fonts/slow.woff2");
+		await earlier;
+
+		const rules = document.getElementById("lasterm-fonts")?.textContent ?? "";
+		expect(rules).toContain('"Later"');
+		expect(rules).not.toContain('"Earlier"');
+		await injectFontFaces([]);
+
+		expect(document.getElementById("lasterm-fonts")?.textContent).toBe("");
+		expect([...revoked].sort()).toEqual([...created].sort());
+		expect(new Set(revoked).size).toBe(revoked.length);
 	});
 });
 

@@ -60,7 +60,7 @@
 						@click="selectWallpaper(wp)"
 						>
 						<img
-							:src="wallpaperThumbnailSrc(wp)"
+							:src="thumbnails.get(wp)?.url ?? ''"
 							:alt="wp"
 							loading="lazy"
 						/>
@@ -158,19 +158,14 @@
 
 <script setup lang="ts">
 import type { BackgroundMode, WindowEffect } from "@lasterm/shared";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, shallowReactive, watch } from "vue";
 import { useFileDrop } from "../../../composables/useFileDrop.js";
 import {
 	isTauriRuntime,
 	usePlatformInfo,
 } from "../../../composables/useWindowEffects.js";
-import {
-	assetTokenReady,
-	domNamedPublicAssetUrl,
-	hubBaseUrl,
-	isTauriRuntime as isTauriHubRuntime,
-	namedPublicAssetUrl,
-} from "../../../utils/hub-url.js";
+import { type AssetHandle, acquireAsset, assetVersion } from "../../../utils/asset-holder.js";
+import { assetAccessReady, hubBaseUrl } from "../../../utils/hub-url.js";
 import { hubFetch } from "../../../utils/hub-fetch.js";
 import { useAuthStore } from "../../../stores/auth.js";
 import { useSettingsStore } from "../../../stores/settings.js";
@@ -203,28 +198,73 @@ const uploadError = ref("");
 const fileInput = ref<HTMLInputElement | null>(null);
 const platformInfo = usePlatformInfo();
 const runsInTauri = computed(() => isTauriRuntime());
-const wallpaperThumbnails = ref<Record<string, string>>({});
-
 /**
- * Builds a signed thumbnail src for a wallpaper filename.
- * Reads `assetTokenReady` so Vue re-renders thumbnails when the asset token
- * arrives (pairing path: token is null at first render, set after pairing).
+ * One held thumbnail per listed wallpaper (#194), acquired in a watcher rather
+ * than from render so a re-render never starts a second load. A thumbnail is
+ * given back when its file leaves the list, when a same-name upload replaces
+ * it, and when Settings closes.
  */
-function wallpaperThumbnailSrc(filename: string): string {
-	// Establish reactive dependency on the token — forces re-render when it flips.
-	void assetTokenReady.value;
-	if (isTauriHubRuntime()) {
-		if (!(filename in wallpaperThumbnails.value)) {
-			void domNamedPublicAssetUrl("wallpapers", filename)
-				.then((url) => {
-					wallpaperThumbnails.value = { ...wallpaperThumbnails.value, [filename]: url };
-				})
-				.catch(() => undefined);
-		}
-		return wallpaperThumbnails.value[filename] ?? "";
+const thumbnails = shallowReactive(new Map<string, AssetHandle>());
+/** The version each listed file is loaded at, or being loaded at. */
+const loadingVersion = new Map<string, number>();
+let unmounted = false;
+
+function thumbnailVersion(filename: string): number {
+	try {
+		return assetVersion("wallpapers", filename);
+	} catch {
+		return 0;
 	}
-	return namedPublicAssetUrl("wallpapers", filename);
 }
+
+function dropThumbnail(filename: string): void {
+	loadingVersion.delete(filename);
+	thumbnails.get(filename)?.release();
+	thumbnails.delete(filename);
+}
+
+watch(
+	() => [
+		[...wallpapers.value],
+		assetAccessReady.value,
+		wallpapers.value.map((filename) => thumbnailVersion(filename)),
+	] as const,
+	([listed, ready]) => {
+		for (const filename of new Set([...loadingVersion.keys(), ...thumbnails.keys()])) {
+			if (!listed.includes(filename)) dropThumbnail(filename);
+		}
+		if (!ready) return;
+		for (const filename of listed) {
+			const version = thumbnailVersion(filename);
+			if (loadingVersion.get(filename) === version) continue;
+			loadingVersion.set(filename, version);
+			acquireAsset("wallpapers", filename).then(
+				(handle) => {
+					// Removed, replaced or closed meanwhile: this one is never shown.
+					if (unmounted || loadingVersion.get(filename) !== version) {
+						handle.release();
+						return;
+					}
+					const previous = thumbnails.get(filename);
+					thumbnails.set(filename, handle);
+					previous?.release();
+				},
+				() => {
+					// Let a later change of the list try again.
+					if (loadingVersion.get(filename) === version) loadingVersion.delete(filename);
+				},
+			);
+		}
+	},
+	{ immediate: true },
+);
+
+onUnmounted(() => {
+	unmounted = true;
+	for (const filename of new Set([...loadingVersion.keys(), ...thumbnails.keys()])) {
+		dropThumbnail(filename);
+	}
+});
 
 // ─── Computed ──────────────────────────────────────────────────────────
 

@@ -157,8 +157,8 @@ export interface Host {
 	 * The host this one is reached through, when it is one this hub knows.
 	 *
 	 * A jump named this way brings its own authentication and its own pinned
-	 * host key: it is a host like any other, and nothing about it is described
-	 * twice.
+	 * host key (on its own port: see `sshProxyPort`): it is a host like any
+	 * other, and nothing about it is described twice.
 	 */
 	sshProxyHostId?: string | null;
 	/**
@@ -168,8 +168,10 @@ export interface Host {
 	 */
 	sshProxySpec?: string | null;
 	/**
-	 * The key trusted for a jump given as a spec, which has no row to pin it on.
-	 * Unused when the jump is a host: that host pins its own.
+	 * The key trusted for a jump given as a spec, which has no row to pin it on,
+	 * or for a saved host reached on a port of its own (`sshProxyPort`, #1047),
+	 * another server than the one that host pins. Unused otherwise: the saved
+	 * host pins its own.
 	 */
 	sshProxyFingerprint?: string | null;
 	/**

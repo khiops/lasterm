@@ -125,6 +125,23 @@ describe("useHostForm", () => {
 		};
 	}
 
+	// A test describes the connection it tested, the jump's own port included (#1047).
+	it("forgets what a test found when the jump's own user or port changes after it", async () => {
+		const { form, sshRemoteDaemonUnavailable, testConnectionInline } = useHostForm();
+		form.value.sshHost = "10.0.0.1";
+		form.value.sshAuth = "password";
+		form.value.sshProxy = "01GWBASTION";
+		form.value.sshProxyPort = 2200;
+		const harness = testConnectionHarness();
+		const windows = testConnectionInline();
+		await harness.respondOk(0, "windows");
+		await windows;
+		expect(sshRemoteDaemonUnavailable.value).toBe(true);
+
+		form.value.sshProxyPort = 2201;
+		expect(sshRemoteDaemonUnavailable.value).toBe(false);
+	});
+
 	// The person cancelled the password or passphrase the test asked for:
 	// nothing failed, and nothing was learned (#815).
 	it("ends a test whose prompt was cancelled quietly, with no failure shown", async () => {

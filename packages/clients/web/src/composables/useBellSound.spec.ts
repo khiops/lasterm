@@ -106,32 +106,48 @@ describe("playBellSound", () => {
 		});
 
 		afterEach(() => {
+			vi.unstubAllGlobals();
 			resetAssetHolderForTests();
 			setHubPortForTests(null);
 			Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 			vi.restoreAllMocks();
 		});
 
+		/** Replaces the global Audio with one that records what it was made with. */
+		function stubAudio(play: () => Promise<void>): Array<EventTarget & { src: string }> {
+			const made: Array<EventTarget & { src: string }> = [];
+			vi.stubGlobal(
+				"Audio",
+				class FakeAudio extends EventTarget {
+					volume = 0;
+					src: string;
+					constructor(src: string) {
+						super();
+						this.src = src;
+						made.push(this);
+					}
+					play(): Promise<void> {
+						return play();
+					}
+				},
+			);
+			return made;
+		}
+
 		it.each(["ended", "error"])("revokes it once after the %s event", async (event) => {
-			const audio = fakeAudio(async () => undefined);
-			// biome-ignore lint/suspicious/noExplicitAny: the global Audio constructor, replaced by a partial double
-			const AudioSpy = vi.spyOn(globalThis, "Audio" as any).mockImplementation(() => audio);
+			const made = stubAudio(async () => undefined);
 
 			playBellSound({ sound: "custom", customSoundFile: "bell.mp3" });
-			await vi.waitFor(() => expect(AudioSpy).toHaveBeenCalledWith("blob:bell"));
+			await vi.waitFor(() => expect(made[0]?.src).toBe("blob:bell"));
 			expect(revoked).toEqual([]);
-			audio.dispatchEvent(new Event(event));
-			audio.dispatchEvent(new Event(event));
+			made[0]?.dispatchEvent(new Event(event));
+			made[0]?.dispatchEvent(new Event(event));
 
 			expect(revoked).toEqual(["blob:bell"]);
 		});
 
 		it("revokes it once when playing is refused", async () => {
-			const audio = fakeAudio(() =>
-				Promise.reject(new DOMException("autoplay", "NotAllowedError")),
-			);
-			// biome-ignore lint/suspicious/noExplicitAny: the global Audio constructor, replaced by a partial double
-			vi.spyOn(globalThis, "Audio" as any).mockImplementation(() => audio);
+			stubAudio(() => Promise.reject(new DOMException("autoplay", "NotAllowedError")));
 
 			playBellSound({ sound: "custom", customSoundFile: "bell.mp3" });
 

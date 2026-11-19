@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useFileDrop } from "../../../composables/useFileDrop.js";
+import { assetVersion, resetAssetHolderForTests } from "../../../utils/asset-holder.js";
 import { uploadWallpaperFiles, WALLPAPER_ACCEPTED_EXTENSIONS } from "./wallpaperUpload.js";
 
 function makeFile(name: string): File {
@@ -64,5 +65,55 @@ describe("wallpaper upload drag and drop", () => {
 
 		expect(uploadFiles).not.toHaveBeenCalled();
 		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
+
+describe("a wallpaper upload makes its name load again (#194)", () => {
+	afterEach(() => {
+		resetAssetHolderForTests();
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
+	});
+
+	function uploadWith(answers: Response[]): Promise<void> {
+		const queue = [...answers];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => queue.shift() ?? Response.json({}, { status: 500 })),
+		);
+		return uploadWallpaperFiles(
+			[makeFile("one.png"), makeFile("two.png"), makeFile("three.png")].slice(0, answers.length),
+			{
+				token: "test-token",
+				loadWallpapers: async () => {},
+				selectWallpaper: async () => {},
+				setUploadError: () => {},
+			},
+		);
+	}
+
+	it("bumps the version of the name the hub returned", async () => {
+		await uploadWith([Response.json({ filename: "a b%#.png" })]);
+
+		expect(assetVersion("wallpapers", "a b%#.png")).toBe(1);
+		expect(assetVersion("wallpapers", "one.png")).toBe(0);
+	});
+
+	it("bumps nothing for a refused upload", async () => {
+		await uploadWith([Response.json({ message: "no" }, { status: 400 })]);
+
+		expect(assetVersion("wallpapers", "one.png")).toBe(0);
+	});
+
+	it("bumps each name a batch uploaded before a refusal, and not the refused one", async () => {
+		await uploadWith([
+			Response.json({ filename: "first.png" }),
+			Response.json({ filename: "second.png" }),
+			Response.json({ message: "no" }, { status: 400 }),
+		]);
+
+		expect(assetVersion("wallpapers", "first.png")).toBe(1);
+		expect(assetVersion("wallpapers", "second.png")).toBe(1);
+		expect(assetVersion("wallpapers", "three.png")).toBe(0);
 	});
 });

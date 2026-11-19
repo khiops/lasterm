@@ -170,6 +170,7 @@ import { useFileDrop } from "../../composables/useFileDrop.js";
 import { useModalFocus } from "../../composables/useModalFocus.js";
 import { listMove } from "../../utils/focus-zones.js";
 import { useConfigStore } from "../../stores/config.js";
+import { invalidateAsset, parseAssetPath } from "../../utils/asset-holder.js";
 import { useAuthStore } from "../../stores/auth.js";
 import { hubBaseUrl } from "../../utils/hub-url.js";
 import { hubFetch } from "../../utils/hub-fetch.js";
@@ -333,6 +334,9 @@ const { isDragging, onDragEnter, onDragOver, onDragLeave, onDrop } = useFileDrop
 
 async function onDelete(family: string): Promise<void> {
 	error.value = null;
+	// Its files as listed before the delete: a font imported again under the same
+	// name must load anew, not reuse the bytes still held for these (#194).
+	const files = fonts.value.find((listed) => listed.family === family)?.files ?? [];
 	try {
 		const resp = await hubFetch(`${hubBaseUrl()}/api/fonts/${encodeURIComponent(family)}`, {
 			method: "DELETE",
@@ -348,6 +352,14 @@ async function onDelete(family: string): Promise<void> {
 		return;
 	}
 
+	for (const file of files) {
+		try {
+			const { kind, name } = parseAssetPath(file.url);
+			invalidateAsset(kind, name);
+		} catch {
+			// Not a path the hub serves: nothing is held for it.
+		}
+	}
 	await configStore.loadFonts();
 
 	if (props.modelValue === family) {

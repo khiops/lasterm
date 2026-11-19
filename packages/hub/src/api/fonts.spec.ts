@@ -111,9 +111,19 @@ describe("Font endpoints", () => {
 			const families = res.json<{ family: string; files: Array<{ url: string }> }[]>();
 			expect(Array.isArray(families)).toBe(true);
 			expect(families.length).toBeGreaterThan(0);
-			expect(families[0]?.files[0]?.url).toMatch(
-				/^\/public\/fonts\/Hack-Regular\.ttf\?asset_token=/,
-			);
+			// The client signs (browser) or relays (desktop) this path itself: a
+			// listing never carries the asset token (#194).
+			expect(families[0]?.files[0]?.url).toBe("/public/fonts/Hack-Regular.ttf");
+		});
+
+		it("encodes a stored name once, so a client can decode it back (#194)", async () => {
+			writeFileSync(join(configDir, "fonts", "a b%.ttf"), TTF_MAGIC);
+
+			const res = await server.inject({ method: "GET", url: "/api/fonts", headers: authHeader() });
+			const families = res.json<{ family: string; files: Array<{ url: string }> }[]>();
+			expect(families.flatMap((family) => family.files.map((file) => file.url))).toEqual([
+				"/public/fonts/a%20b%25.ttf",
+			]);
 		});
 	});
 

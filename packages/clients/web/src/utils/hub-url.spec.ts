@@ -1,9 +1,16 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { createPinia, setActivePinia } from "pinia";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const fetchSpy = vi.hoisted(() => vi.fn<(url: string, init?: RequestInit) => Promise<Response>>());
+vi.mock("./hub-fetch.js", () => ({ hubFetch: fetchSpy }));
+
+import { useAuthStore } from "../stores/auth.js";
 import {
+	assetAccessReady,
 	assetTokenReady,
 	hubBaseUrl,
 	hubWsUrl,
-	namedPublicAssetUrl,
+	initAssetAccess,
 	publicAssetUrl,
 	setAssetTokenForTests,
 	setHubPortForTests,
@@ -60,7 +67,7 @@ describe("public asset URL helpers", () => {
 	it("appends the boot asset token and preserves extra query parameters", () => {
 		setAssetTokenForTests("asset-token");
 
-		expect(namedPublicAssetUrl("wallpapers", "desktop image.jpg", { t: 123 })).toBe(
+		expect(publicAssetUrl("/public/wallpapers/desktop%20image.jpg", { t: 123 })).toBe(
 			"/public/wallpapers/desktop%20image.jpg?asset_token=asset-token&t=123",
 		);
 	});
@@ -73,7 +80,7 @@ describe("public asset URL helpers", () => {
 		);
 	});
 
-	it("prefixes signed public assets with the hub base URL in Tauri runtime", () => {
+	it("never puts the asset token in a desktop URL, even when one is set (#194)", () => {
 		Object.defineProperty(window, "__TAURI_INTERNALS__", {
 			value: {},
 			configurable: true,
@@ -81,11 +88,10 @@ describe("public asset URL helpers", () => {
 		setAssetTokenForTests("asset-token");
 		setHubPortForTests(4100);
 
-		// The literal loopback address, not `localhost`: the hub binds `127.0.0.1`, and
-		// a name that resolves to `::1` first would let another local process holding
-		// `::1:4100` receive this URL's asset token.
-		expect(namedPublicAssetUrl("sounds", "bell.mp3")).toBe(
-			"https://127.0.0.1:4100/public/sounds/bell.mp3?asset_token=asset-token",
+		// The desktop relays this path with its bearer. The literal loopback
+		// address, not `localhost`: the hub binds `127.0.0.1`.
+		expect(publicAssetUrl("/public/sounds/b.mp3")).toBe(
+			"https://127.0.0.1:4100/public/sounds/b.mp3",
 		);
 	});
 
@@ -96,14 +102,14 @@ describe("public asset URL helpers", () => {
 		});
 		setHubPortForTests(4100);
 
-		expect(namedPublicAssetUrl("wallpapers", "desktop.png")).toMatch(
+		expect(publicAssetUrl("/public/wallpapers/desktop.png")).toMatch(
 			/^https:\/\/127\.0\.0\.1:4100\//,
 		);
 	});
 
 	it("omits asset_token from URL when no token is set", () => {
 		// Token not set (default state after afterEach reset)
-		const url = namedPublicAssetUrl("wallpapers", "bg.png");
+		const url = publicAssetUrl("/public/wallpapers/bg.png");
 		expect(url).not.toContain("asset_token");
 	});
 
@@ -113,5 +119,45 @@ describe("public asset URL helpers", () => {
 		expect(assetTokenReady.value).toBe(true);
 		setAssetTokenForTests(null);
 		expect(assetTokenReady.value).toBe(false);
+	});
+});
+
+describe("asset access at startup (#194)", () => {
+	beforeEach(() => {
+		setActivePinia(createPinia());
+		fetchSpy.mockReset();
+		fetchSpy.mockResolvedValue(Response.json({ assetToken: "browser-token" }));
+	});
+
+	afterEach(() => {
+		setAssetTokenForTests(null);
+		setHubPortForTests(null);
+		Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+	});
+
+	it("the desktop asks for no asset token, and is ready once its port and bearer are known", async () => {
+		Object.defineProperty(window, "__TAURI_INTERNALS__", {
+			value: { invoke: () => undefined },
+			configurable: true,
+		});
+		setHubPortForTests(4100);
+		useAuthStore().setToken("bearer-1");
+
+		await initAssetAccess("bearer-1");
+
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(assetAccessReady.value).toBe(true);
+	});
+
+	it("a browser loads the asset token with its bearer, then is ready", async () => {
+		expect(assetAccessReady.value).toBe(false);
+
+		await initAssetAccess("bearer-1");
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		const [url, init] = fetchSpy.mock.calls[0] ?? [];
+		expect(url).toBe("/api/assets/token");
+		expect(new Headers(init?.headers).get("authorization")).toBe("Bearer bearer-1");
+		expect(assetAccessReady.value).toBe(true);
 	});
 });

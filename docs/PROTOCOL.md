@@ -2602,7 +2602,7 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/fonts` | ● | `FontFamily[]` — the imported fonts in the config dir's `fonts/`; returned public font URLs carry the per-boot asset token |
+| GET | `/api/fonts` | ● | `FontFamily[]` — the imported fonts in the config dir's `fonts/`; each file's `url` is its plain `/public/fonts/<name>` path, with no credential (#194) |
 | POST | `/api/fonts` | ● | multipart, one font file → `FontFamily[]`. 400 `NO_FILE`, `INVALID_FILENAME`, `UNSUPPORTED_TYPE` or `INVALID_FILE_TYPE`; 413 `FILE_TOO_LARGE` over 10 MB; 409 `DUPLICATE` for a file name in use |
 | DELETE | `/api/fonts/:family` | ● | 204: removes every file of that family. 404 `FONT_FAMILY_NOT_FOUND` |
 | GET | `/api/fonts/system` | ● | `SystemFontFamily[]` — `.ttf`/`.otf` fonts installed where the hub runs (#100), with `monospace` and each face's `localNames` for `local()`. Scanned from the OS font directories at most every five minutes |
@@ -2621,7 +2621,7 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/wallpapers` | ● | `{ wallpapers: string[] }` — user wallpaper filenames; clients build signed public URLs |
+| GET | `/api/wallpapers` | ● | `{ wallpapers: string[] }` — user wallpaper filenames; a browser signs `/public/wallpapers/<name>` with the asset token, the desktop relays it with its bearer (#194) |
 | POST | `/api/wallpapers` | ● | multipart upload → `{ filename }` |
 | DELETE | `/api/wallpapers/:filename` | ● | `{ ok: true }`. 404 `NOT_FOUND` |
 
@@ -2629,7 +2629,7 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/assets/token` | ● | `{ assetToken, token }` — per-boot token appended to `/public/*` URLs as `asset_token` |
+| GET | `/api/assets/token` | ● | `{ assetToken, token }` — per-boot token a browser page appends to `/public/*` URLs as `asset_token`, since an `<img>` or `@font-face` request carries no header; the desktop never asks for it (#194) |
 
 #### Agent Manager
 
@@ -2665,11 +2665,17 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 
 | Prefix | Source | Notes |
 |--------|--------|-------|
-| `/public/fonts/` | `~/.config/lasterm/fonts/` | User custom fonts; `Cross-Origin-Resource-Policy: cross-origin` only when `asset_token` is valid |
-| `/public/system-fonts/<id>.ttf\|.otf` | OS font directories | A font the last `/api/fonts/system` scan found, by an opaque id (never a path); asset token required |
-| `/public/sounds/` | `~/.config/lasterm/sounds/` | User custom bell sounds; `Cross-Origin-Resource-Policy: cross-origin` only when `asset_token` is valid |
-| `/public/wallpapers/` | `~/.config/lasterm/wallpapers/` | User wallpapers; `Cross-Origin-Resource-Policy: cross-origin` only when `asset_token` is valid |
+| `/public/fonts/` | `~/.config/lasterm/fonts/` | User custom fonts |
+| `/public/system-fonts/<id>.ttf\|.otf` | OS font directories | A font the last `/api/fonts/system` scan found, by an opaque id (never a path) |
+| `/public/sounds/` | `~/.config/lasterm/sounds/` | User custom bell sounds |
+| `/public/wallpapers/` | `~/.config/lasterm/wallpapers/` | User wallpapers |
 | `/` (fallback) | `static/` dir or SEA blob | Web UI bundle (unauthenticated) |
+
+The four `/public/` prefixes above open to a valid `asset_token` query parameter, or, on a hub with a
+bearer, to `Authorization: Bearer <token>` checked exactly as on `/api/*` (401 when it does not
+validate); anything else answers 403 `ASSET_TOKEN_REQUIRED`. A browser page signs the URL with the
+asset token; the desktop relays the request with its bearer and hands the DOM a blob URL, so it never
+holds the asset token (#194). Their `Cross-Origin-Resource-Policy` is `same-origin`.
 
 ### Request/Response Body Schemas
 

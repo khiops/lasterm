@@ -1,4 +1,5 @@
 import { MAX_WALLPAPER_SIZE, WALLPAPER_EXTENSIONS } from "@lasterm/shared";
+import { invalidateAsset } from "../../../utils/asset-holder.js";
 import { hubFetch } from "../../../utils/hub-fetch.js";
 import { hubBaseUrl } from "../../../utils/hub-url.js";
 
@@ -56,6 +57,8 @@ export async function uploadWallpaperFiles(
 			}
 
 			const { filename } = (await resp.json()) as { filename: string };
+			// The hub overwrites a same-name file: whatever shows that name loads it again (#194).
+			invalidateAsset("wallpapers", filename);
 			latestFilename = filename;
 		} catch {
 			options.setUploadError("Upload failed");

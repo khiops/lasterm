@@ -1,5 +1,6 @@
 import type { BellSound } from "@lasterm/shared";
-import { domNamedPublicAssetUrl } from "../utils/hub-url.js";
+import { acquireAsset } from "../utils/asset-holder.js";
+import { assetAccessReady } from "../utils/hub-url.js";
 
 let audioContext: AudioContext | null = null;
 let userInteracted = false;
@@ -93,17 +94,26 @@ function _playCustomSound(filename: string): void {
 		return;
 	}
 
-	try {
-		void domNamedPublicAssetUrl("sounds", filename)
-			.then((url) => {
-				const audio = new Audio(url);
-				audio.volume = 0.5;
-				return audio.play();
-			})
-			.catch(() => {
-				// Loading through the relay or autoplay may fail.
+	if (!assetAccessReady.value) return;
+	void acquireAsset("sounds", filename)
+		.then((handle) => {
+			// The sound's URL is given back once it has played, or once it cannot (#194).
+			let audio: HTMLAudioElement;
+			try {
+				audio = new Audio(handle.url);
+			} catch {
+				handle.release();
+				return;
+			}
+			audio.addEventListener("ended", () => handle.release(), { once: true });
+			audio.addEventListener("error", () => handle.release(), { once: true });
+			audio.volume = 0.5;
+			return audio.play().catch(() => {
+				// Autoplay refused, or the file cannot play.
+				handle.release();
 			});
-	} catch {
-		// Audio creation may fail
-	}
+		})
+		.catch(() => {
+			// Loading through the relay failed: nothing was acquired.
+		});
 }

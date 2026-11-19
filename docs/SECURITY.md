@@ -91,7 +91,11 @@
 ```
 
 **Token validation:**
-- REST: `Authorization: Bearer <token>` header on every browser API request.
+- REST: `Authorization: Bearer <token>` header on every browser API request, and on the served
+  assets (`/public/fonts`, `system-fonts`, `sounds`, `wallpapers`) the desktop fetches through its
+  relay and hands the page as blob URLs. A browser page cannot put a header on an `<img>` or
+  `@font-face` request, so it signs those URLs with the per-boot asset token
+  (`GET /api/assets/token`) instead; the desktop never requests or receives that token (#194).
 - WSS: First message must be `AUTH { token }`. Connection closed if invalid. The token is checked
   again before each later frame is acted on, and the socket is closed once the token no longer
   validates. Revoking a token closes the sockets it opened at once (PROTOCOL.md § 4.1).

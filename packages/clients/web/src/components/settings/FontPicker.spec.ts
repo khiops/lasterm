@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, ref } from "vue";
 import { useConfigStore } from "../../stores/config.js";
 import { useThemeStore } from "../../stores/theme.js";
+import { assetVersion, resetAssetHolderForTests } from "../../utils/asset-holder.js";
 import FontPicker from "./FontPicker.vue";
 
 const SYSTEM: SystemFontFamily[] = [
@@ -184,5 +185,52 @@ describe("FontPicker", () => {
 			".font-card-select",
 			".font-picker-add-btn",
 		]);
+	});
+});
+
+describe("deleting an imported font (#194)", () => {
+	const HACK: FontFamily = {
+		family: "Hack",
+		files: [
+			{ url: "/public/fonts/Hack-Regular.ttf", weight: 400, style: "normal" },
+			{ url: "/public/fonts/Hack%20Bold.ttf", weight: 700, style: "normal" },
+		],
+	};
+
+	afterEach(() => {
+		resetAssetHolderForTests();
+		vi.unstubAllGlobals();
+	});
+
+	async function deleteHack(answer: Response): Promise<void> {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => answer),
+		);
+		mountPicker();
+		useConfigStore().fonts = [HACK];
+		show.value = true;
+		await settle();
+		el('[data-tab="imported"]').click();
+		await settle();
+		el(".font-card-delete").click();
+		await settle();
+		el(".font-card-confirm-btn--danger").click();
+		await vi.waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
+		await settle();
+	}
+
+	it("makes each of its files load anew if a same-name font comes back", async () => {
+		await deleteHack(new Response(null, { status: 204 }));
+
+		expect(assetVersion("fonts", "Hack-Regular.ttf")).toBe(1);
+		expect(assetVersion("fonts", "Hack Bold.ttf")).toBe(1);
+	});
+
+	it("changes nothing when the hub refuses the delete", async () => {
+		await deleteHack(new Response("no", { status: 500 }));
+
+		expect(assetVersion("fonts", "Hack-Regular.ttf")).toBe(0);
+		expect(assetVersion("fonts", "Hack Bold.ttf")).toBe(0);
 	});
 });

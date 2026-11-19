@@ -4,6 +4,7 @@
  * decides on its own is tested beside it (utils/*.spec.ts, components/*.spec.ts); here, that the
  * window wires them together (#936).
  */
+import { DEFAULT_APPEARANCE, DEFAULT_PROFILE } from "@lasterm/shared";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 vi.mock("./services/ws-client.js", () =>
@@ -47,6 +48,7 @@ import {
 	vacant,
 	type WindowSetup,
 } from "./App.fixture.js";
+import { WALLPAPER_FADE_MS } from "./composables/useWallpaper.js";
 import { APP_SHORTCUTS, type AppActionId } from "./utils/app-shortcuts.js";
 import { CONFIRMATIONS } from "./utils/confirmations.js";
 
@@ -2458,5 +2460,30 @@ describe("a new terminal's pane after a reload", () => {
 		});
 
 		expect(localStorage.getItem(PENDING_KEY)).toBe(entries);
+	});
+});
+
+describe("the window wallpaper's fade (#194)", () => {
+	// A replaced wallpaper's blob is released once the layer fading it out has
+	// gone, timed by the same constant; the layer must fade by it too.
+	it("fades each layer by the constant the wallpaper's release is timed by", async () => {
+		await mountWindow({
+			answers: {
+				"GET /api/config/cascade": () =>
+					json({
+						appearance: DEFAULT_APPEARANCE,
+						terminal: {
+							resolved: { ...DEFAULT_PROFILE, backgroundMode: "image", wallpaper: "a.png" },
+						},
+					}),
+			},
+		});
+
+		const layer = await vi.waitFor(() => {
+			const found = document.querySelector<HTMLElement>(".window-wallpaper__bg");
+			if (found === null) throw new Error("no wallpaper layer yet");
+			return found;
+		});
+		expect(layer.style.transitionDuration).toBe(`${WALLPAPER_FADE_MS}ms`);
 	});
 });

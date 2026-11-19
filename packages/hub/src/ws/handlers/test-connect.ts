@@ -12,6 +12,7 @@ export function handleTestConnect(msg: TestConnectMessage, ctx: WsHandlerContext
 	for (const [field, limit] of [
 		["sshProxyHostId", 128],
 		["sshProxySpec", 4096],
+		["sshProxyUser", 256],
 		["sshConfigHost", 256],
 	] as const) {
 		const value = msg[field];
@@ -29,6 +30,13 @@ export function handleTestConnect(msg: TestConnectMessage, ctx: WsHandlerContext
 			hostId: msg.hostId,
 			message: "Cannot specify both sshProxyHostId and sshProxySpec",
 		});
+		return;
+	}
+	if (
+		msg.sshProxyPort !== undefined &&
+		(!Number.isInteger(msg.sshProxyPort) || msg.sshProxyPort < 1 || msg.sshProxyPort > 65535)
+	) {
+		client.send({ type: "ERROR", code: "INVALID_INPUT", message: "Invalid sshProxyPort" });
 		return;
 	}
 	if (typeof msg.hostname !== "string" || msg.hostname.length === 0 || msg.hostname.length > 4096) {

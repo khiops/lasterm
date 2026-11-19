@@ -1197,20 +1197,40 @@ describe("HostModal reading the hub's SSH config (#734, #757)", () => {
 		});
 
 		it.each([
-			{ variant: "one", hosts: [GW] },
-			{
-				variant: "ambiguous",
-				hosts: [GW, { ...GW, id: "01GWSECOND0000000000000000", label: "gw-second" }],
-			},
+			["relay@gw", "Through gw-label as relay, which brings its own key and sign-in."],
+			["gw:2200", "Through gw-label on port 2200, which brings its own key and sign-in."],
+			[
+				"relay@gw:2200",
+				"Through gw-label as relay on port 2200, which brings its own key and sign-in.",
+			],
 		])(
-			"says a kept ProxyJump does not use the saved bastion's sign-in ($variant)",
-			async ({ hosts }) => {
-				await pickTarget("relay@gw", hosts);
+			"names the user and port a picked ProxyJump %s reaches the saved bastion with (#1047)",
+			async (proxyJump, expected) => {
+				await pickTarget(proxyJump);
 
-				expect(proxyInput().value).toBe("relay@gw");
-				expect(hint()).toBe("Through relay@gw, using your SSH agent, not a saved host's sign-in.");
+				expect(proxyInput().value).toBe(GW.id);
+				expect(hint()).toBe(expected);
 			},
 		);
+
+		it("does not take a saved host's alias in another case for it, as ssh does not", async () => {
+			await pickTarget("GW");
+
+			expect(proxyInput().value).toBe("GW");
+			expect(hint()).toBe(
+				"Through GW, using your SSH agent. Add it as a host to give it a key of its own.",
+			);
+		});
+
+		it("says a kept ProxyJump does not use the saved bastion's sign-in when two hosts carry the alias", async () => {
+			await pickTarget("relay@gw", [
+				GW,
+				{ ...GW, id: "01GWSECOND0000000000000000", label: "gw-second" },
+			]);
+
+			expect(proxyInput().value).toBe("relay@gw");
+			expect(hint()).toBe("Through relay@gw, using your SSH agent, not a saved host's sign-in.");
+		});
 
 		it("says a chosen jump host is no longer saved", async () => {
 			await pickTarget("gw");

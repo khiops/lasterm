@@ -97,6 +97,7 @@ describe("validateCreateHost", () => {
 			"ssh_config_host",
 			"ssh_proxy_host_id",
 			"ssh_proxy_spec",
+			"ssh_proxy_user",
 			"icon_value",
 			"default_cwd",
 			"host_group_id",

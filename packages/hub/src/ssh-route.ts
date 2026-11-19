@@ -22,13 +22,16 @@ export { parseJumpSpec } from "@lasterm/shared";
 export interface JumpDeclaration {
 	sshProxyHostId?: string | null;
 	sshProxySpec?: string | null;
+	/** With `sshProxyHostId`: the user and port the jump is reached with over its host's (#1047). */
+	sshProxyUser?: string | null;
+	sshProxyPort?: number | null;
 }
 
 export type JumpPlan =
 	/** No jump: the host is reached directly. */
 	| { kind: "direct" }
 	/** Through a host this hub knows, by its id. */
-	| { kind: "host"; hostId: string }
+	| { kind: "host"; hostId: string; user: string | null; port: number | null }
 	/** Through a bastion named as a spec. */
 	| { kind: "spec"; spec: ParsedJumpSpec }
 	/** Declared, and unusable — the message says why. */
@@ -43,7 +46,14 @@ export type JumpPlan =
  */
 export function planJump(declaration: JumpDeclaration): JumpPlan {
 	const hostId = declaration.sshProxyHostId?.trim();
-	if (hostId) return { kind: "host", hostId };
+	if (hostId) {
+		return {
+			kind: "host",
+			hostId,
+			user: declaration.sshProxyUser?.trim() || null,
+			port: declaration.sshProxyPort ?? null,
+		};
+	}
 
 	const raw = declaration.sshProxySpec?.trim();
 	if (!raw) return { kind: "direct" };
@@ -64,7 +74,14 @@ export function planJump(declaration: JumpDeclaration): JumpPlan {
 
 export type RouteHost = Pick<
 	Host,
-	"id" | "type" | "sshHost" | "sshPort" | "sshProxyHostId" | "sshProxySpec"
+	| "id"
+	| "type"
+	| "sshHost"
+	| "sshPort"
+	| "sshProxyHostId"
+	| "sshProxySpec"
+	| "sshProxyUser"
+	| "sshProxyPort"
 >;
 export function sshAddress(
 	host: RouteHost | undefined,
@@ -87,7 +104,7 @@ export function targetRoute(
 		case "host": {
 			const bastion = lookup(plan.hostId);
 			jump = bastion
-				? ["host", plan.hostId, bastion.hostname, bastion.port]
+				? ["host", plan.hostId, bastion.hostname, plan.port ?? bastion.port]
 				: ["host", plan.hostId, null];
 			break;
 		}

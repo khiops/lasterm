@@ -79,6 +79,8 @@ export function socketForwardingRoute(host: Host): string {
 		host.sshConfigHost ?? null,
 		host.sshProxyHostId ?? null,
 		host.sshProxySpec ?? null,
+		host.sshProxyUser ?? null,
+		host.sshProxyPort ?? null,
 		host.sshRemoteDaemon ?? null,
 	]);
 }

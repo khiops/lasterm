@@ -69,7 +69,14 @@ export interface JumpHosts {
 export function resolveJump(
 	host: Pick<
 		Host,
-		"id" | "sshHost" | "sshUser" | "sshProxyHostId" | "sshProxySpec" | "sshProxyFingerprint"
+		| "id"
+		| "sshHost"
+		| "sshUser"
+		| "sshProxyHostId"
+		| "sshProxySpec"
+		| "sshProxyUser"
+		| "sshProxyPort"
+		| "sshProxyFingerprint"
 	>,
 	hosts: JumpHosts,
 	trustKnownHosts: boolean,
@@ -104,13 +111,20 @@ export function resolveJump(
 				{ ...jumpHost, sshProxyHostId: null, sshProxySpec: null },
 				() => undefined,
 			);
+			// The jump's own user and port win over the saved host's, as
+			// `ssh -l user -p port alias` has them (#1047).
+			const port = plan.port ?? jumpHost.sshPort ?? 22;
+			// The saved host's pin is for the saved host's own route: a jump on
+			// another port is another server's key, pinned on the host that
+			// jumps through it, as a spec's is.
+			const ownRoute = port === (jumpHost.sshPort ?? 22);
 			return {
 				kind: "jump",
 				jump: {
 					jump: {
 						host: jumpParsed.hostname,
-						port: jumpHost.sshPort ?? 22,
-						username: jumpHost.sshUser || jumpParsed.username,
+						port,
+						username: plan.user ?? (jumpHost.sshUser || jumpParsed.username),
 					},
 					knownHostsNames: [jumpParsed.hostname, jumpHost.sshConfigHost].filter(
 						(name): name is string => !!name,
@@ -122,13 +136,13 @@ export function resolveJump(
 						...(jumpHost.sshConfigHost ? { sshConfigHost: jumpHost.sshConfigHost } : {}),
 					},
 					promptHostId: jumpHost.id,
-					pinnedFingerprint: hosts.getHostFingerprint(jumpHost.id, expectedRoute),
+					pinnedFingerprint: ownRoute
+						? hosts.getHostFingerprint(jumpHost.id, expectedRoute)
+						: (host.sshProxyFingerprint ?? null),
 					trustKnownHosts,
-					pinTo: {
-						kind: "host",
-						hostId: jumpHost.id,
-						expectedRoute,
-					},
+					pinTo: ownRoute
+						? { kind: "host", hostId: jumpHost.id, expectedRoute }
+						: { kind: "spec", hostId: host.id },
 				},
 			};
 		}

@@ -225,13 +225,13 @@
 					v-if="windowWallpaperStyle"
 					:key="`bg:${windowWallpaperLayerKey}`"
 					class="window-wallpaper__bg"
-					:style="windowWallpaperStyle"
+					:style="[windowWallpaperStyle, wallpaperFade]"
 				/>
 				<div
 					v-if="windowWallpaperDimStyle"
 					:key="`dim:${windowWallpaperLayerKey}`"
 					class="window-wallpaper__dim"
-					:style="windowWallpaperDimStyle"
+					:style="[windowWallpaperDimStyle, wallpaperFade]"
 				/>
 			</TransitionGroup>
 
@@ -492,7 +492,8 @@ import {
 	hostConnectionFailure,
 } from './utils/host-connection.js';
 import { hubUnreachable, whyRefused } from './utils/hub-answer.js';
-import { hubBaseUrl, initAssetToken, initHubPort } from './utils/hub-url.js';
+import { hubBaseUrl, initAssetAccess, initHubPort } from './utils/hub-url.js';
+import { WALLPAPER_FADE_MS } from './composables/useWallpaper.js';
 import { hubFetch } from './utils/hub-fetch.js';
 import {
 	type AppActionId,
@@ -626,6 +627,16 @@ useWindowEffects({
 const windowUsesTransparentBackground = computed(() =>
 	shouldUseTransparentBackground(windowBackgroundMode.value, isTauriRuntime()),
 );
+/**
+ * The layers' fade, from the constant `useWallpaper` times its releases by: a
+ * replaced wallpaper's blob is released only once the layer fading it out has
+ * gone (#194), so the two must not drift apart.
+ */
+const wallpaperFade = {
+	transitionProperty: 'opacity',
+	transitionDuration: `${WALLPAPER_FADE_MS}ms`,
+	transitionTimingFunction: 'ease',
+};
 const windowWallpaperLayerKey = computed(() => {
 	const style = windowWallpaperStyle.value;
 	if (!style) return 'none';
@@ -1322,7 +1333,7 @@ onMounted(async () => {
 	if (authStore.token !== null) {
 		try {
 			await sessionStore.connect();
-			await initAssetToken(authStore.token);
+			await initAssetAccess(authStore.token);
 			await configStore.loadFonts();
 			// Load resolved profile + UI behaviour config now that auth is established
 			await configStore.loadProfile();
@@ -2191,7 +2202,7 @@ async function onCreateChannelGroupConfirmed(name?: string): Promise<void> {
 async function onAuthenticated(): Promise<void> {
 	postAuthLoading.value = true;
 	try {
-		await initAssetToken(authStore.token);
+		await initAssetAccess(authStore.token);
 		await configStore.loadFonts();
 		await configStore.loadProfile();
 		await configStore.loadUiConfig();
@@ -2586,11 +2597,6 @@ body,
 
 .window-wallpaper__dim {
 	z-index: 1;
-}
-
-.window-wallpaper-fade-enter-active,
-.window-wallpaper-fade-leave-active {
-	transition: opacity 160ms ease;
 }
 
 .window-wallpaper-fade-enter-from,

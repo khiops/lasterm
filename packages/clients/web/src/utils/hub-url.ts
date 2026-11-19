@@ -6,7 +6,8 @@
  * In web mode (dev or hub-served), relative URLs work via proxy or same-origin.
  */
 
-import { readonly, ref } from "vue";
+import { computed, readonly, ref } from "vue";
+import { useAuthStore } from "../stores/auth.js";
 import { hubFetch } from "./hub-fetch.js";
 
 export { isTauriRuntime } from "./tauri-runtime.js";
@@ -21,6 +22,15 @@ const ASSET_TOKEN_QUERY_PARAM = "asset_token";
 
 export const hubPortReady = readonly(_hubPortReady);
 export const assetTokenReady = readonly(_assetTokenReady);
+
+/**
+ * Whether a consumer may acquire an asset now (#194). The desktop relays an
+ * asset with its bearer once the hub port is known; a browser signs its URL
+ * with the asset token, so it waits for that token.
+ */
+export const assetAccessReady = computed(() =>
+	isTauriRuntime() ? _hubPortReady.value && useAuthStore().token !== null : _assetTokenReady.value,
+);
 
 /**
  * The hub's port, resolved once by the desktop shell and cached here.
@@ -93,7 +103,13 @@ export async function initHubPort(): Promise<void> {
 	_hubPortReady.value = true;
 }
 
-export async function initAssetToken(authToken: string | null): Promise<void> {
+/**
+ * Called once authenticated. A browser page loads the asset token it signs its
+ * asset URLs with; the desktop never asks for it, since it relays every asset
+ * with its bearer (#194).
+ */
+export async function initAssetAccess(authToken: string | null): Promise<void> {
+	if (isTauriRuntime()) return;
 	const response = await hubFetch(`${hubBaseUrl()}/api/assets/token`, {
 		...(authToken ? { headers: { Authorization: `Bearer ${authToken}` } } : {}),
 	});
@@ -143,7 +159,8 @@ export function publicAssetUrl(
 	const base = isAbsolute ? undefined : hubBase || localOrigin();
 	const url = new URL(pathOrUrl, base);
 
-	if (_assetToken) {
+	// The desktop relays the path with its bearer and never holds the token.
+	if (_assetToken && !isTauriRuntime()) {
 		url.searchParams.set(ASSET_TOKEN_QUERY_PARAM, _assetToken);
 	}
 	if (extraParams) {
@@ -155,33 +172,4 @@ export function publicAssetUrl(
 
 	if (isAbsolute) return url.toString();
 	return `${hubBase}${url.pathname}${url.search}${url.hash}`;
-}
-
-export function namedPublicAssetUrl(
-	kind: "fonts" | "sounds" | "wallpapers",
-	filename: string,
-	extraParams?: Record<string, number | string | null | undefined>,
-): string {
-	return publicAssetUrl(`/public/${kind}/${encodeURIComponent(filename)}`, extraParams);
-}
-
-/** Resolve an asset to a URL the DOM may load. */
-export async function domPublicAssetUrl(
-	pathOrUrl: string,
-	extraParams?: Record<string, number | string | null | undefined>,
-): Promise<string> {
-	const url = publicAssetUrl(pathOrUrl, extraParams);
-	if (!isTauriRuntime()) return url;
-
-	const response = await hubFetch(url);
-	if (!response.ok) throw new Error(`Failed to load asset: ${response.status}`);
-	return URL.createObjectURL(await response.blob());
-}
-
-export function domNamedPublicAssetUrl(
-	kind: "fonts" | "sounds" | "wallpapers",
-	filename: string,
-	extraParams?: Record<string, number | string | null | undefined>,
-): Promise<string> {
-	return domPublicAssetUrl(`/public/${kind}/${encodeURIComponent(filename)}`, extraParams);
 }

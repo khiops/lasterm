@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import type { SystemFontFamily, SystemFontFile } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { buildSignedPublicAssetUrl } from "../asset-token.js";
+import { publicAssetPath } from "../asset-token.js";
 
 /**
  * Fonts installed on the hub's machine, listed and served without an upload (#100).
@@ -210,7 +210,7 @@ export async function scanSystemFonts(directories: readonly string[]): Promise<S
 		family.files.push({
 			weight: info.weight,
 			style: info.style,
-			url: buildSignedPublicAssetUrl("system-fonts", `${id}${extension}`),
+			url: publicAssetPath("system-fonts", `${id}${extension}`),
 			localNames: [
 				...new Set([info.fullName, info.postscriptName].filter((name) => name !== null)),
 			],

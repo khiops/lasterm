@@ -23,10 +23,11 @@ import {
 } from "@lasterm/shared";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
+import { type AssetHandle, acquireAsset, parseAssetPath } from "../utils/asset-holder.js";
 import type { AlwaysChoice } from "../utils/exit-action.js";
 import { hubFetch } from "../utils/hub-fetch.js";
-import { domPublicAssetUrl, hubBaseUrl, publicAssetUrl } from "../utils/hub-url.js";
-import { systemFontFaceRules } from "../utils/system-fonts.js";
+import { hubBaseUrl, publicAssetUrl } from "../utils/hub-url.js";
+import { cssString, systemFontFaceRules } from "../utils/system-fonts.js";
 import { isTauriRuntime } from "../utils/tauri-runtime.js";
 import { useAuthStore } from "./auth.js";
 
@@ -43,38 +44,46 @@ type ProfileChangeListener = (event: ProfileChangeEvent) => void;
 /**
  * Inject @font-face rules into the document head so the browser
  * can resolve custom font families referenced in the terminal profile.
+ *
+ * Each rule's source is a held asset (#194): the stylesheet holds one handle per
+ * file, and a set is given back only once the stylesheet that used it has been
+ * replaced. Calls can overlap (a refresh during a load); only the latest one
+ * applies its rules, and every other gives back what it took.
  */
-let injectedFontObjectUrls = new Set<string>();
+let injectedFontHandles: AssetHandle[] = [];
+let fontGeneration = 0;
+
+function fontFormat(pathname: string): string {
+	return pathname.endsWith(".woff2")
+		? "woff2"
+		: pathname.endsWith(".woff")
+			? "woff"
+			: pathname.endsWith(".ttf")
+				? "truetype"
+				: "opentype";
+}
 
 export async function injectFontFaces(families: FontFamily[]): Promise<void> {
+	const generation = ++fontGeneration;
 	const rules: string[] = [];
-	const nextObjectUrls = new Set<string>();
+	const handles: AssetHandle[] = [];
 	for (const family of families) {
 		for (const file of family.files) {
-			let objectUrl: string | null = null;
 			try {
 				const pathname = new URL(file.url, "http://localhost").pathname;
-				const format = pathname.endsWith(".woff2")
-					? "woff2"
-					: pathname.endsWith(".woff")
-						? "woff"
-						: pathname.endsWith(".ttf")
-							? "truetype"
-							: "opentype";
-				const src = file.url.startsWith("/") ? await domPublicAssetUrl(file.url) : file.url;
-				if (file.url.startsWith("/") && src.startsWith("blob:")) objectUrl = src;
+				const { kind, name } = parseAssetPath(file.url);
+				const handle = await acquireAsset(kind, name);
+				handles.push(handle);
 				rules.push(
 					`@font-face {
-	font-family: "${family.family}";
-	src: url("${src}") format("${format}");
+	font-family: ${cssString(family.family)};
+	src: url("${handle.url}") format("${fontFormat(pathname)}");
 	font-weight: ${file.weight};
 	font-style: ${file.style};
 	font-display: swap;
 }`,
 				);
-				if (objectUrl) nextObjectUrls.add(objectUrl);
 			} catch (err) {
-				if (objectUrl) URL.revokeObjectURL(objectUrl);
 				console.error(
 					`[config] failed to resolve custom font ${family.family} (${file.url}):`,
 					err,
@@ -83,9 +92,20 @@ export async function injectFontFaces(families: FontFamily[]): Promise<void> {
 		}
 	}
 
+	const giveBack = (set: AssetHandle[]) => {
+		for (const handle of set) handle.release();
+	};
+	// A newer call owns the stylesheet now; this one only gives back what it took.
+	if (generation !== fontGeneration) {
+		giveBack(handles);
+		return;
+	}
 	// A failed refresh must not make a working font set disappear. An empty
 	// configured list is intentional and therefore replaces the rules with none.
-	if (families.length > 0 && rules.length === 0) return;
+	if (families.length > 0 && rules.length === 0) {
+		giveBack(handles);
+		return;
+	}
 
 	const style = document.createElement("style");
 	style.id = "lasterm-fonts";
@@ -97,10 +117,9 @@ export async function injectFontFaces(families: FontFamily[]): Promise<void> {
 		document.head.appendChild(style);
 	}
 
-	for (const objectUrl of injectedFontObjectUrls) {
-		if (!nextObjectUrls.has(objectUrl)) URL.revokeObjectURL(objectUrl);
-	}
-	injectedFontObjectUrls = nextObjectUrls;
+	const replaced = injectedFontHandles;
+	injectedFontHandles = handles;
+	giveBack(replaced);
 }
 
 /**

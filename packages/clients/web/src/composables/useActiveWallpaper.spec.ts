@@ -66,33 +66,9 @@ vi.mock("../stores/auth.js", () => ({
 vi.mock("../utils/hub-url.js", async () => {
 	const actual = await vi.importActual<typeof import("../utils/hub-url.js")>("../utils/hub-url.js");
 	const vue = await vi.importActual<typeof import("vue")>("vue");
-	return {
-		hubBaseUrl: () => "http://hub",
-		hubPortReady: vue.ref(true),
-		// Expose the real assetTokenReady and setAssetTokenForTests so reactivity
-		// tests can control the token while Vue tracks the dependency correctly.
-		assetTokenReady: actual.assetTokenReady,
-		setAssetTokenForTests: actual.setAssetTokenForTests,
-		namedPublicAssetUrl: (
-			kind: string,
-			filename: string,
-			params?: Record<string, string | number>,
-		) => {
-			// Reading assetTokenReady establishes a Vue reactive dependency so
-			// any computed that calls this function re-runs when the token arrives.
-			const hasToken = actual.assetTokenReady.value;
-			const url = new URL(`http://hub/public/${kind}/${encodeURIComponent(filename)}`);
-			if (hasToken) {
-				url.searchParams.set("asset_token", "mock-token");
-			}
-			if (params) {
-				for (const [key, value] of Object.entries(params)) {
-					url.searchParams.set(key, String(value));
-				}
-			}
-			return url.toString();
-		},
-	};
+	// The profile requests these specs read go to this base; served wallpapers
+	// keep the real signing, through the asset holder (#194).
+	return { ...actual, hubBaseUrl: () => "http://hub", hubPortReady: vue.ref(true) };
 });
 
 describe("useActiveWallpaper", () => {
@@ -107,6 +83,8 @@ describe("useActiveWallpaper", () => {
 
 	beforeEach(async () => {
 		setActivePinia(createPinia());
+		// A browser page that has its asset token, so wallpapers can be shown (#194).
+		setAssetTokenForTests("mock-token");
 		vi.clearAllMocks();
 		const activeWallpaperMod = await import("./useActiveWallpaper.js");
 		const paneTreeMod = await import("./usePaneTree.js");
@@ -216,6 +194,8 @@ describe("useActiveWallpaper", () => {
 		expect(result.dimStyle.value).toBeNull();
 
 		result.setActivePaneId("tab-1", "pane-b");
+		// A cached scope applies at once; its file is acquired before it shows (#194).
+		await flushAsync();
 
 		expect(result.activeChannelId.value).toBe("ch-b");
 		expect(result.wallpaperStyle.value?.backgroundImage).toContain("beta.png");
@@ -522,8 +502,9 @@ describe("useActiveWallpaper", () => {
 		result.activeTab.value = { id: "tab-a" };
 
 		expect(result.activeChannelId.value).toBe("ch-a");
-		expect(result.wallpaperStyle.value?.backgroundImage).toContain("alpha.jpg");
+		// A cached scope applies at once; its file is acquired before it shows (#194).
 		await flushAsync();
+		expect(result.wallpaperStyle.value?.backgroundImage).toContain("alpha.jpg");
 
 		result.activeTab.value = { id: "tab-c" };
 
@@ -536,8 +517,8 @@ describe("useActiveWallpaper", () => {
 		expect(result.wallpaperStyle.value).toBeNull();
 
 		result.activeTab.value = { id: "tab-a" };
-		expect(result.wallpaperStyle.value?.backgroundImage).toContain("alpha.jpg");
 		await flushAsync();
+		expect(result.wallpaperStyle.value?.backgroundImage).toContain("alpha.jpg");
 
 		resolvePending("ch-c", { wallpaper: "charlie.webp", wallpaperBlur: 0, wallpaperDim: 0 });
 		await flushAsync();
@@ -618,8 +599,9 @@ describe("useActiveWallpaper", () => {
 		unmount();
 	});
 
-	it("updates window wallpaper URL when asset token arrives after first render (pairing path)", async () => {
+	it("shows the window wallpaper once the asset token arrives (pairing path)", async () => {
 		// Arrange — no token at boot (pairing path)
+		setAssetTokenForTests(null);
 		const fetchMock = vi.fn().mockResolvedValue({
 			ok: true,
 			json: async () => ({
@@ -648,16 +630,16 @@ describe("useActiveWallpaper", () => {
 
 		await flushAsync();
 
-		// First render: profile resolved but token not yet set — URL has no asset_token
-		expect(result.wallpaperStyle.value?.backgroundImage).toContain("scenic.jpg");
-		expect(result.wallpaperStyle.value?.backgroundImage).not.toContain("asset_token=");
+		// Profile resolved, token not yet set: an unsigned URL would only be refused (#194).
+		expect(result.wallpaperStyle.value).toBeNull();
 
 		// Act — token arrives (e.g. pairing completes)
 		setAssetTokenForTests("arrived-token");
-		await nextTick();
+		await flushAsync();
 
-		// Assert — wallpaper URL must now include the token
-		expect(result.wallpaperStyle.value?.backgroundImage).toContain("asset_token=");
+		// Assert — the wallpaper shows, signed
+		expect(result.wallpaperStyle.value?.backgroundImage).toContain("scenic.jpg");
+		expect(result.wallpaperStyle.value?.backgroundImage).toContain("asset_token=arrived-token");
 
 		unmount();
 	});

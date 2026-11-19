@@ -12,11 +12,13 @@ export function getBootAssetToken(): string {
 	return bootAssetToken;
 }
 
-export function buildSignedPublicAssetUrl(kind: PublicAssetKind, filename: string): string {
-	const search = new URLSearchParams({
-		[ASSET_TOKEN_QUERY_PARAM]: bootAssetToken,
-	});
-	return `/public/${kind}/${encodeURIComponent(filename)}?${search.toString()}`;
+/**
+ * The path a listing hands out for a served file. It carries no credential: a
+ * browser client adds the asset token itself, and the desktop relays the path
+ * with its bearer, so the desktop never receives the asset token (#194).
+ */
+export function publicAssetPath(kind: PublicAssetKind, filename: string): string {
+	return `/public/${kind}/${encodeURIComponent(filename)}`;
 }
 
 export function isValidAssetToken(candidate: string | null | undefined): boolean {

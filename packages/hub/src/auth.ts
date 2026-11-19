@@ -374,7 +374,9 @@ export type InvalidTokenReason = "unknown" | "revoked" | "swept" | "expired";
  * 3. Not expired (expires_at IS NULL OR expires_at > now)
  *
  * Only a record that passes all three is `valid`. A store that cannot be read
- * is `unavailable`, which every caller must still refuse.
+ * is `unavailable`: it has not judged the credential. Callers go through
+ * `judgeCredential`, which refuses every credential then but the primary token
+ * where its caller accepts it.
  */
 export function validateTokenRecord(db: Database, plaintextToken: string): TokenValidation {
 	return validateTokenHash(db, hashToken(plaintextToken));
@@ -410,15 +412,17 @@ export interface TokenStoreLog {
 	warn(details: object, message: string): void;
 }
 
-/** Credentials refused since the store last answered, per database. */
-const tokenStoreOutages = new WeakMap<Database, number>();
+/** An outage of a store that has not answered since, and the credentials it refused meanwhile. */
+const tokenStoreOutages = new WeakMap<Database, { refused: number }>();
 
 /**
  * Report a token store that cannot answer once per outage, not once per
  * request. A client retrying against a locked database would otherwise write
  * the same error on every attempt, and the first one is the one worth reading.
  * The next answer the store does give ends the outage and says how many
- * credentials were refused meanwhile.
+ * credentials were refused meanwhile, none included: the primary token is
+ * accepted without the store where its caller allows it, so an outage can pass
+ * with nothing refused, and it still ends.
  *
  * The count belongs to the database rather than to a caller, so the REST hook,
  * the WebSocket handshake and the agent routes report one outage between them.
@@ -427,22 +431,96 @@ export function reportTokenStore(
 	db: Database,
 	validation: TokenValidation,
 	log: TokenStoreLog,
+	refused = true,
 ): void {
-	const refused = tokenStoreOutages.get(db) ?? 0;
+	const outage = tokenStoreOutages.get(db);
 	if (validation.status === "unavailable") {
-		if (refused === 0) {
+		if (outage === undefined) {
 			log.error(
 				{ err: validation.error },
-				"auth: token store unavailable; refusing credentials until it answers again",
+				"auth: token store unavailable; refusing every credential but the primary token until it answers again",
 			);
 		}
-		tokenStoreOutages.set(db, refused + 1);
+		const open = outage ?? { refused: 0 };
+		if (refused) open.refused += 1;
+		tokenStoreOutages.set(db, open);
 		return;
 	}
-	if (refused > 0) {
+	if (outage !== undefined) {
 		tokenStoreOutages.delete(db);
-		log.warn({ refused }, "auth: token store answering again");
+		log.warn({ refused: outage.refused }, "auth: token store answering again");
 	}
+}
+
+/** What judging a bearer credential concluded, whichever transport presented it. */
+export type CredentialVerdict =
+	| {
+			readonly status: "valid";
+			/** The record's id, or `primary` for auth.json's token judged without the store. */
+			readonly tokenId: string;
+			/** The store's row; null for the primary judged without the store. */
+			readonly record: AuthTokenRecord | null;
+	  }
+	| { readonly status: "invalid"; readonly reason: InvalidTokenReason }
+	| { readonly status: "unavailable" };
+
+/** What a credential is judged against. */
+export interface CredentialAuthority {
+	/** The token store; null on a hub built without one. */
+	readonly store: Database | null;
+	/** auth.json's token; null on a hub built without auth. */
+	readonly primaryToken: string | null;
+	/**
+	 * Whether the caller takes the primary token while the store cannot answer.
+	 * REST does: the store adds nothing to that token, which never expires and
+	 * cannot be revoked. The WebSocket does not: everything a socket serves after
+	 * AUTH reads the same database.
+	 */
+	readonly primaryWithoutStore: "accept" | "refuse";
+	readonly log: TokenStoreLog;
+}
+
+/**
+ * Judge a bearer credential, presented as the token or as the hash a socket
+ * keeps. The one verdict the REST hook, the agent routes and the WebSocket all
+ * act on (SECURITY.md § 2.1):
+ *
+ * 1. the store answers `valid` or `invalid`: that is the verdict;
+ * 2. the store cannot answer: the primary token is valid where the caller
+ *    accepts it, every other credential is `unavailable`;
+ * 3. there is no store: the primary token is valid, anything else is `invalid`,
+ *    since no other credential can exist.
+ *
+ * The primary token is compared in constant time (`tokensEqual`). The store's
+ * own answer is reported to the outage log here, so no caller can forget to.
+ */
+export function judgeCredential(
+	credential: { readonly token: string } | { readonly tokenHash: string },
+	authority: CredentialAuthority,
+): CredentialVerdict {
+	const tokenHash = "tokenHash" in credential ? credential.tokenHash : hashToken(credential.token);
+	const isPrimary = (): boolean => {
+		if (authority.primaryToken === null) return false;
+		return "token" in credential
+			? tokensEqual(credential.token, authority.primaryToken)
+			: tokensEqual(credential.tokenHash, hashToken(authority.primaryToken));
+	};
+	const primary: CredentialVerdict = { status: "valid", tokenId: PRIMARY_TOKEN_ID, record: null };
+
+	const { store } = authority;
+	if (store === null) {
+		return isPrimary() ? primary : { status: "invalid", reason: "unknown" };
+	}
+
+	const validation = validateTokenHash(store, tokenHash);
+	if (validation.status === "unavailable") {
+		const accepted = authority.primaryWithoutStore === "accept" && isPrimary();
+		reportTokenStore(store, validation, authority.log, !accepted);
+		return accepted ? primary : { status: "unavailable" };
+	}
+	reportTokenStore(store, validation, authority.log);
+	if (validation.status === "invalid") return validation;
+	return { status: "valid", tokenId: validation.record.id, record: validation.record };
 }
 
 /** Uses of a credential the store failed to record since it last recorded one, per database. */

@@ -64,9 +64,9 @@ async function closeOf(observed: Observed): Promise<{ code: number; reason: stri
 }
 
 /** Make every read of the token table throw, as a locked or closed database does. */
-function failTokenStore(dbs: DatabaseManager): void {
+function failTokenStore(dbs: DatabaseManager) {
 	const prepare = dbs.meta.prepare.bind(dbs.meta);
-	vi.spyOn(dbs.meta, "prepare").mockImplementation(((sql: string) => {
+	return vi.spyOn(dbs.meta, "prepare").mockImplementation(((sql: string) => {
 		if (sql.includes("FROM auth_tokens")) {
 			throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
 		}
@@ -131,22 +131,37 @@ describe("WebSocket authentication against the token store", () => {
 	}
 
 	describe("AUTH", () => {
-		it("closes with Try Again Later, and no AUTH_FAIL, while the store cannot be read", async () => {
-			failTokenStore(dbs);
-			const ws = await server.injectWS("/ws");
-			const observed = observe(ws);
+		// The primary too: REST takes it without the store, but everything a socket
+		// serves after AUTH_OK reads meta.db, so a socket waits for the store.
+		it.each(["primary", "paired"] as const)(
+			"closes with Try Again Later, and no AUTH_FAIL, while the store cannot be read (%s token)",
+			async (which) => {
+				const token =
+					which === "primary"
+						? TEST_TOKEN
+						: createToken(dbs.meta, { label: "browser", expiresAt: null }).token;
+				const warnings = vi.spyOn(server.log, "warn");
+				const outage = failTokenStore(dbs);
+				const ws = await server.injectWS("/ws");
+				const observed = observe(ws);
 
-			ws.send(encodeMessage({ type: "AUTH", token: TEST_TOKEN }));
+				ws.send(encodeMessage({ type: "AUTH", token }));
 
-			// AUTH_FAIL is how a client learns to discard its token and pair again;
-			// a store that could not answer has said nothing about the token.
-			expect(await closeOf(observed)).toEqual({
-				code: WS_CLOSE_TRY_AGAIN_LATER,
-				reason: "AUTH_UNAVAILABLE",
-			});
-			expect(observed.messages).toEqual([]);
-			expect(failures()).toEqual([]);
-		});
+				// AUTH_FAIL is how a client learns to discard its token and pair again;
+				// a store that could not answer has said nothing about the token.
+				expect(await closeOf(observed)).toEqual({
+					code: WS_CLOSE_TRY_AGAIN_LATER,
+					reason: "AUTH_UNAVAILABLE",
+				});
+				expect(observed.messages).toEqual([]);
+				expect(failures()).toEqual([]);
+
+				// The socket was refused, so the outage counts it when the store answers.
+				outage.mockRestore();
+				await connect(TEST_TOKEN);
+				expect(warnings).toHaveBeenCalledWith({ refused: 1 }, expect.stringContaining("answering"));
+			},
+		);
 
 		// A socket the hub refused is done with. What it sends while it closes is
 		// not acted on, and its AUTH deadline passing later, before its
@@ -298,18 +313,25 @@ describe("WebSocket authentication against the token store", () => {
 			]);
 		});
 
-		it("closes with Try Again Later when the store stops answering mid-session", async () => {
-			const { ws, observed } = await connect(TEST_TOKEN);
+		it.each(["primary", "paired"] as const)(
+			"closes with Try Again Later when the store stops answering mid-session (%s token)",
+			async (which) => {
+				const token =
+					which === "primary"
+						? TEST_TOKEN
+						: createToken(dbs.meta, { label: "browser", expiresAt: null }).token;
+				const { ws, observed } = await connect(token);
 
-			failTokenStore(dbs);
-			ws.send(encodeMessage({ type: "PING" }));
+				failTokenStore(dbs);
+				ws.send(encodeMessage({ type: "PING" }));
 
-			expect(await closeOf(observed)).toEqual({
-				code: WS_CLOSE_TRY_AGAIN_LATER,
-				reason: "AUTH_UNAVAILABLE",
-			});
-			expect(failures()).toEqual([]);
-		});
+				expect(await closeOf(observed)).toEqual({
+					code: WS_CLOSE_TRY_AGAIN_LATER,
+					reason: "AUTH_UNAVAILABLE",
+				});
+				expect(failures()).toEqual([]);
+			},
+		);
 
 		it("closes the sockets of a token revoked through the API at once, and only those", async () => {
 			const paired = createToken(dbs.meta, { label: "browser", expiresAt: null });

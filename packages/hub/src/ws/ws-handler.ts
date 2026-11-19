@@ -22,11 +22,12 @@ import type {
 import { decodeMessage, encodeMessage, generateId, isValidUlid } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import {
+	type AuthTokenRecord,
+	type CredentialAuthority,
+	type CredentialVerdict,
 	type InvalidTokenReason,
-	reportTokenStore,
+	judgeCredential,
 	touchTokenBestEffort,
-	validateTokenHash,
-	validateTokenRecord,
 } from "../auth.js";
 import type { SessionManager, WsClient } from "../session/session-manager.js";
 import { WriteLockManager } from "../session/write-lock.js";
@@ -140,6 +141,11 @@ export function onWriteLockChange(
 	sessionManager.pasteLockChanged(channelId);
 }
 
+/** The shared verdict with the row a valid socket credential always has. */
+type SocketVerdict =
+	| Exclude<CredentialVerdict, { readonly status: "valid" }>
+	| { readonly status: "valid"; readonly record: AuthTokenRecord };
+
 export async function registerWsRoutes(
 	server: FastifyInstance,
 	sessionManager: SessionManager,
@@ -149,6 +155,30 @@ export async function registerWsRoutes(
 	options: WsRouteOptions = {},
 ): Promise<WsRoutes> {
 	const transfers = options.transfers;
+
+	/**
+	 * The hub's one bearer verdict, as a socket takes it. Everything a socket
+	 * serves after AUTH reads meta.db, so a socket does not take the primary
+	 * token while the store cannot answer, as REST does: it closes with Try
+	 * Again Later like every other credential. A valid credential therefore
+	 * always has its row here.
+	 */
+	const judgeSocketCredential = (
+		credential: { readonly token: string } | { readonly tokenHash: string },
+		store: Database,
+	): SocketVerdict => {
+		const authority: CredentialAuthority = {
+			store,
+			primaryToken: authToken ?? null,
+			primaryWithoutStore: "refuse",
+			log: server.log,
+		};
+		const verdict = judgeCredential(credential, authority);
+		if (verdict.status !== "valid") return verdict;
+		return verdict.record === null
+			? { status: "unavailable" }
+			: { status: "valid", record: verdict.record };
+	};
 	// Registry: clientId → send function.
 	// WriteLockManager needs to send to arbitrary clients (not just those on a given
 	// channel) for WRITE_REQUEST / WRITE_DENY / WRITE_REVOKED. The registry is
@@ -273,8 +303,7 @@ export async function registerWsRoutes(
 		// refused the AUTH, and the client reconnects when it can. An outage is
 		// not a refusal of this client, so it is not in the security log.
 		const stillValid = (held: HeldCredential): boolean => {
-			const validation = validateTokenHash(held.store, held.tokenHash);
-			reportTokenStore(held.store, validation, server.log);
+			const validation = judgeSocketCredential({ tokenHash: held.tokenHash }, held.store);
 			if (validation.status === "valid") {
 				const now = Date.now();
 				if (now - held.touchedAt >= SOCKET_TOKEN_TOUCH_INTERVAL_MS) {
@@ -340,14 +369,13 @@ export async function registerWsRoutes(
 					return;
 				}
 				// DB-backed validation: checks expiry and revocation status
-				const validation = validateTokenRecord(db, authMsg.token);
-				reportTokenStore(db, validation, server.log);
+				const validation = judgeSocketCredential({ token: authMsg.token }, db);
 				if (validation.status === "unavailable") {
 					// No AUTH_FAIL: a client treats that as a verdict on its token and
 					// asks to pair again. Closing with Try Again Later lets it keep the
 					// token and reconnect, which succeeds once the store answers. Nor
 					// is it an authentication failure in the security log: the token
-					// was not judged, and reportTokenStore records the outage once.
+					// was not judged, and judgeCredential records the outage once.
 					end(WS_CLOSE_TRY_AGAIN_LATER, "AUTH_UNAVAILABLE");
 					return;
 				}

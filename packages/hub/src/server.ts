@@ -31,15 +31,11 @@ import { registerTransferRoutes } from "./api/transfers.js";
 import { registerWallpaperRoutes } from "./api/wallpapers.js";
 import { getBootAssetToken, requestHasValidAssetToken } from "./asset-token.js";
 import {
-	type AuthTokenRecord,
 	hashToken,
 	listTokens,
 	PRIMARY_TOKEN_ID,
-	reportTokenStore,
 	tokensEqual,
-	touchTokenBestEffort,
 	upsertPrimaryToken,
-	validateTokenRecord,
 } from "./auth.js";
 import { BUILD_HASH, HUB_VERSION } from "./build-version.js";
 import { getConfigDir, getStateDir } from "./cli.js";
@@ -62,6 +58,7 @@ import {
 	serverLoggerOptions,
 } from "./logging/request-log.js";
 import { SecurityLog } from "./logging/security-log.js";
+import { createRestBearerCheck } from "./rest-bearer.js";
 import { registerSeaStaticServing } from "./sea-static-server.js";
 import { SessionManager } from "./session/session-manager.js";
 import { seedShellProfiles } from "./shell-discovery.js";
@@ -83,17 +80,6 @@ declare module "fastify" {
 		 */
 		security: SecurityLog;
 	}
-
-	interface FastifyRequest {
-		/**
-		 * The credential this request authenticated with: its row, as the REST auth
-		 * hook validated it, never the token. A route reads it to say who asked, as
-		 * `token.revoke` does (#537). Null wherever that hook lets a request through
-		 * unauthenticated — health, pairing verification, static files, the
-		 * WebSocket upgrade — and on a server built without auth.
-		 */
-		authTokenRecord: AuthTokenRecord | null;
-	}
 }
 
 /**
@@ -114,6 +100,19 @@ function isProtectedPublicAssetPath(pathname: string): boolean {
 	return PROTECTED_PUBLIC_ASSET_PREFIXES.some(
 		(prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
 	);
+}
+
+/**
+ * The two paths a request is judged on. `routePath` is the pattern of the route
+ * the router matched, the handler that will run (`/api/hosts` for a request
+ * spelled `/%61pi/hosts`: find-my-way decodes the path before matching, and
+ * the WHATWG pathname keeps the escape), or the pathname when no route
+ * matched. `pathname` is the WHATWG pathname, which still decides for a
+ * request a catch-all took (`/*` under the embedded web UI).
+ */
+function requestPaths(request: FastifyRequest): { routePath: string; pathname: string } {
+	const pathname = new URL(request.url, "http://localhost").pathname;
+	return { routePath: request.routeOptions.url ?? pathname, pathname };
 }
 
 /**
@@ -219,7 +218,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		"security",
 		options.securityLog ?? new SecurityLog((msg, fields) => server.log.info(fields, msg)),
 	);
-	server.decorateRequest("authTokenRecord", null);
+	server.decorateRequest("authTokenId", null);
 	endWhatOutlastsTheClose(server);
 
 	// Helmet — sets security-related HTTP response headers
@@ -244,8 +243,10 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 	// to the bearer, which the desktop relays in a header (#194). The bearer is
 	// checked by the auth hook below, the same check as every /api route.
 	server.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
-		const pathname = new URL(request.url, "http://localhost").pathname;
-		if (!isProtectedPublicAssetPath(pathname)) return;
+		// Gated if either path is under a protected prefix: the route that runs, and
+		// the pathname a catch-all would answer.
+		const { routePath, pathname } = requestPaths(request);
+		if (!isProtectedPublicAssetPath(routePath) && !isProtectedPublicAssetPath(pathname)) return;
 		if (requestHasValidAssetToken(request)) return;
 		if (options?.authToken && request.headers.authorization !== undefined) return;
 
@@ -342,115 +343,46 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			}
 		}
 
-		// Every REST request carries the bearer, so a record of each success would
-		// bury everything else in the log. The first one from each credential and
-		// address in a hub run is what says who used a token, and from where.
-		const restCredentialsSeen = new Set<string>();
+		const checkBearer = createRestBearerCheck({
+			store: db,
+			primaryToken,
+			ttlDays,
+			log: server.log,
+			security: server.security,
+		});
 
 		server.addHook("onRequest", async (request: FastifyRequest, reply: FastifyReply) => {
 			// CORS preflight is handled by @fastify/cors — skip auth.
 			if (request.method === "OPTIONS") return;
 
-			// Parse pathname from the raw URL to avoid query-string or path-traversal bypasses.
-			const pathname = new URL(request.url, "http://localhost").pathname;
+			// Exemptions follow the route that will run, never a pathname that only
+			// looks like one: `/api/x/../health` reads /api/health but runs another
+			// route. Protection follows either path.
+			const { routePath, pathname } = requestPaths(request);
 
-			// Unauthenticated endpoints — exact pathname match
-			if (pathname === "/api/health") return;
-			if (pathname === "/api/pair/verify") return;
-			if (request.method === "POST" && (pathname === "/api/shutdown" || pathname === "/api/quit"))
+			// Unauthenticated endpoints — exact route match
+			if (routePath === "/api/health") return;
+			if (routePath === "/api/pair/verify") return;
+			if (request.method === "POST" && (routePath === "/api/shutdown" || routePath === "/api/quit"))
 				return;
 
 			// WebSocket auth is handled at the message level (AUTH → AUTH_OK/AUTH_FAIL),
 			// not at the HTTP upgrade level.
-			if (pathname === "/ws" || pathname.startsWith("/ws/")) return;
+			if (routePath === "/ws" || routePath.startsWith("/ws/")) return;
 
 			// Static assets (index.html, JS bundles, etc.) do not require auth —
 			// the UI itself handles the pairing/auth flow on first load. A served
 			// asset the asset gate passed on without its token carries a bearer,
-			// which is checked here like any /api request (#194).
+			// which is checked here like any /api request (#194). Both judge the
+			// route that runs as well as the path.
 			const bearerAsset =
-				isProtectedPublicAssetPath(pathname) && !requestHasValidAssetToken(request);
-			if (!pathname.startsWith("/api/") && !bearerAsset) return;
+				(isProtectedPublicAssetPath(routePath) || isProtectedPublicAssetPath(pathname)) &&
+				!requestHasValidAssetToken(request);
+			if (!routePath.startsWith("/api/") && !pathname.startsWith("/api/") && !bearerAsset) return;
 
-			const authHeader = request.headers.authorization;
-			if (!authHeader) {
-				server.log.warn({ url: pathname }, "auth: missing Authorization header");
-				server.security.authFailed({ via: "rest", sourceIp: request.ip, reason: "missing_header" });
-				return reply.code(401).send({
-					error: "AUTH_REQUIRED",
-					message: "Authorization header required",
-				});
-			}
-
-			const [scheme, token] = authHeader.split(" ");
-			if (scheme !== "Bearer" || !token) {
-				server.log.warn({ url: pathname }, "auth: malformed Authorization header");
-				server.security.authFailed({
-					via: "rest",
-					sourceIp: request.ip,
-					reason: "malformed_header",
-				});
-				return reply.code(401).send({
-					error: "AUTH_REQUIRED",
-					message: "Authorization header must be: Bearer <token>",
-				});
-			}
-
-			if (db) {
-				// DB-backed validation: checks expiry and revocation status
-				const validation = validateTokenRecord(db, token);
-				reportTokenStore(db, validation, server.log);
-				if (validation.status === "unavailable") {
-					// Still a refusal, but not a verdict on the credential: a 401 here
-					// told a client holding a good token to discard it. The outage is
-					// logged once by reportTokenStore, not on every request it refuses,
-					// and not in the security log: nobody failed to authenticate, and a
-					// failure per refused request would read as an attack from every
-					// client at once.
-					return reply.code(503).send({
-						error: "AUTH_UNAVAILABLE",
-						message: "The hub cannot check credentials right now",
-					});
-				}
-				if (validation.status === "invalid") {
-					server.log.warn(
-						{ url: pathname, reason: validation.reason },
-						"auth: invalid, expired, or revoked token",
-					);
-					server.security.authFailed({
-						via: "rest",
-						sourceIp: request.ip,
-						reason: "invalid_token",
-						tokenStatus: validation.reason,
-					});
-					return reply.code(401).send({
-						error: "AUTH_INVALID",
-						message: "Invalid, expired, or revoked token",
-					});
-				}
-				const { record } = validation;
-				request.authTokenRecord = record;
-				// Sliding-window expiry refresh + last_used_at update (best-effort, non-blocking)
-				touchTokenBestEffort(db, record.id, ttlDays, server.log);
-				server.log.debug({ url: pathname, tokenId: record.id }, "auth: accepted");
-				const credentialAndAddress = `${record.id} ${request.ip}`;
-				if (!restCredentialsSeen.has(credentialAndAddress)) {
-					restCredentialsSeen.add(credentialAndAddress);
-					server.security.authSucceeded({ via: "rest", sourceIp: request.ip, tokenId: record.id });
-				}
-			} else {
-				// DB is required for token validation — fail closed to prevent
-				// skipping expiry/revocation checks.
-				server.log.warn({ url: pathname }, "auth: database unavailable");
-				server.security.authFailed({
-					via: "rest",
-					sourceIp: request.ip,
-					reason: "database_unavailable",
-				});
-				return reply.code(500).send({
-					error: "SERVER_ERROR",
-					message: "Database unavailable",
-				});
+			const outcome = checkBearer(request);
+			if (!outcome.ok) {
+				return reply.code(outcome.status).send({ error: outcome.code, message: outcome.message });
 			}
 		});
 	}

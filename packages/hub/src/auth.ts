@@ -438,7 +438,7 @@ export function reportTokenStore(
 		if (outage === undefined) {
 			log.error(
 				{ err: validation.error },
-				"auth: token store unavailable; refusing every credential but the primary token until it answers again",
+				"auth: token store unavailable; refusing every credential until it answers again, except the primary token on REST and the agent routes",
 			);
 		}
 		const open = outage ?? { refused: 0 };

@@ -110,6 +110,7 @@ describe("Hub Server — Bearer auth", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		if (server) await server.close();
 		dbs.meta.close();
 		dbs.spool.close();

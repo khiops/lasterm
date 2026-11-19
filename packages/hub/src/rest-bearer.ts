@@ -11,7 +11,8 @@ declare module "fastify" {
 		 * route reads it to say who asked, as `token.revoke` does (#537), or to match
 		 * a request with the socket of the same credential. Null wherever no bearer
 		 * was judged — health, pairing verification, static files, the WebSocket
-		 * upgrade — and on a server built without auth.
+		 * upgrade — and on a server built without auth, except on the agent
+		 * routes, which judge their bearer themselves.
 		 */
 		authTokenId: string | null;
 	}

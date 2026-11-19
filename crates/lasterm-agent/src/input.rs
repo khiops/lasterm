@@ -34,8 +34,19 @@
 //! record that no program reads as bytes, a Shift key released
 //! (`wake_record_for`); written at once, conhost holds it with the INPUT. It
 //! writes it only after an INPUT written whole, while no paste is in the
-//! queue, and never after an INPUT that ends with an end marker itself or in
-//! the middle of a character.
+//! queue, and never right after an INPUT that ends with an end marker itself
+//! or in the middle of a character.
+//! conhost can hold the end marker itself too, when nothing is written after
+//! it (#1075): once nothing has been written for 50 ms after an end marker,
+//! an INPUT's own included, and no paste is in the queue, the writer writes
+//! the record once for that marker. The next INPUT is still followed by its
+//! own.
+//! Neither record is a guarantee. The 50 ms were measured only on 26100's
+//! conhost 10.0.26100.9818 and .9949, and they are counted from the write the
+//! agent hands its PTY: a ConPTY taking no input at that moment (its output
+//! held back) takes the input and its record together, and conhost can
+//! still hold both. Both records go once 26100's inbox conhost no longer
+//! holds input (#1054).
 //!
 //! The queue lives as long as its channel is registered: removing the channel
 //! (DESTROY, its exit, the daemon's shutdown) drops it, which ends its writer
@@ -81,9 +92,10 @@ const WAKE_RECORD: &[u8] = b"\x1b[16;42;0;0;0;1_";
 /// marker (Windows 11 24H2, Windows Server 2025).
 const WAKE_FROM_BUILD: u32 = 26100;
 
-/// How long after the INPUT the record goes out. Written at once, it reaches
-/// conhost with the INPUT and is held with it; 20 ms and 50 ms after it, it
-/// released every run measured on 26100 (#1030).
+/// How long after the INPUT, or after a lone end marker, the record goes
+/// out. Written at once, it reaches conhost with the INPUT and is held with
+/// it; 20 ms and 50 ms after it, it released every run measured on 26100
+/// (#1030), and 50 ms after a lone end marker every run (#1075).
 const WAKE_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The record the writer of a terminal on Windows build `build` follows an
@@ -522,23 +534,82 @@ async fn write_input<W>(
 ) where
     W: AsyncWrite + Unpin,
 {
-    // An end marker went out, and no INPUT has been followed by the wake
-    // record since.
-    let mut wake_due = false;
-    while let Some(entry) = queue.recv().await {
-        let written = write_one(&mut pty, &state, entry, wake, &mut wake_due).await;
+    let mut due = WakeDue::default();
+    loop {
+        let entry = match (wake, due.idle) {
+            (Some(record), Some(deadline)) => {
+                // A deadline already past is served first, so entries that
+                // write nothing cannot keep it waiting.
+                let entry = if tokio::time::Instant::now() >= deadline {
+                    None
+                } else {
+                    tokio::select! {
+                        biased;
+                        entry = queue.recv() => Some(entry),
+                        () = tokio::time::sleep_until(deadline) => None,
+                    }
+                };
+                match entry {
+                    Some(entry) => entry,
+                    None => {
+                        // Nothing written since the marker: the record
+                        // follows it once no paste is in the queue. The next
+                        // INPUT still gets its own.
+                        if lock(&state).pastes.is_empty() {
+                            due.idle = None;
+                            if let Err(error) = pty.write_all(record).await {
+                                refused(&channel_id, &state, &error);
+                                return;
+                            }
+                        } else {
+                            due.idle = Some(tokio::time::Instant::now() + WAKE_DELAY);
+                        }
+                        continue;
+                    }
+                }
+            }
+            _ => queue.recv().await,
+        };
+        let Some(entry) = entry else { return };
+        let written = write_one(&mut pty, &state, entry, wake, &mut due).await;
         if let Err(error) = written {
-            // The terminal is gone: the slave side closed, or ConPTY's input
-            // with it. Its exit reaches the hub through its reader.
-            tracing::debug!(
-                channel_id = %channel_id,
-                %error,
-                "terminal input refused; dropping what is queued for it"
-            );
-            let mut state = lock(&state);
-            state.closed = true;
-            state.queued = 0;
+            refused(&channel_id, &state, &error);
             return;
+        }
+    }
+}
+
+/// The terminal is gone: the slave side closed, or ConPTY's input with it.
+/// Its exit reaches the hub through its reader.
+fn refused(channel_id: &str, state: &Mutex<QueueState>, error: &std::io::Error) {
+    tracing::debug!(
+        channel_id = %channel_id,
+        %error,
+        "terminal input refused; dropping what is queued for it"
+    );
+    let mut state = lock(state);
+    state.closed = true;
+    state.queued = 0;
+}
+
+/// Where the writer stands with the wake record.
+#[derive(Default)]
+struct WakeDue {
+    /// An end marker went out, and no INPUT has been followed by the record
+    /// since.
+    input: bool,
+    /// An end marker went out, and nothing has been written after it: when
+    /// the record follows it, `WAKE_DELAY` after it unless something is
+    /// written first. Entries that write nothing leave it as it is.
+    idle: Option<tokio::time::Instant>,
+}
+
+impl WakeDue {
+    /// An end marker was written, when `marker`.
+    fn marked(&mut self, marker: bool) {
+        if marker {
+            self.input = true;
+            self.idle = Some(tokio::time::Instant::now() + WAKE_DELAY);
         }
     }
 }
@@ -550,12 +621,12 @@ async fn write_one<W>(
     state: &Mutex<QueueState>,
     entry: Entry,
     wake: Option<&'static [u8]>,
-    wake_due: &mut bool,
+    due: &mut WakeDue,
 ) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    *wake_due |= finish_closed(pty, state).await?;
+    due.marked(finish_closed(pty, state).await?);
     // For an INPUT: whether it ends with an end marker, and whether it ends
     // with a whole character.
     let input = match &entry {
@@ -564,24 +635,29 @@ where
         }
         _ => None,
     };
-    let due = *wake_due;
-    *wake_due |= write_entry(pty, state, entry).await?;
+    let was_due = due.input;
+    let wrote = write_entry(pty, state, entry).await?;
+    if wrote.bytes {
+        // An end marker is no longer the last write.
+        due.idle = None;
+    }
+    due.marked(wrote.marker);
     // Decided after this: a paste closed while the INPUT was written is
     // taken, or its end marker written.
     let marker_after = finish_closed(pty, state).await?;
     if let (Some(record), Some((ends_with_marker, whole))) = (wake, input) {
-        if due && !marker_after && !ends_with_marker && whole && lock(state).pastes.is_empty() {
+        if was_due && !marker_after && !ends_with_marker && whole && lock(state).pastes.is_empty() {
             // The writer waits itself, holding no lock: what is queued
             // meanwhile is written after the record. Nothing runs between
             // the wait and the write. A queue dropped meanwhile aborts this
             // task, and no record goes out.
             tokio::time::sleep(WAKE_DELAY).await;
             pty.write_all(record).await?;
-            *wake_due = false;
+            due.input = false;
         }
-        *wake_due |= ends_with_marker;
+        due.marked(ends_with_marker);
     }
-    *wake_due |= marker_after;
+    due.marked(marker_after);
     Ok(())
 }
 
@@ -596,20 +672,30 @@ fn ends_with_whole_char(bytes: &[u8]) -> bool {
     }
 }
 
-/// Write `entry`; true when it wrote an end marker.
+/// What `write_entry` wrote.
+#[derive(Default)]
+struct Wrote {
+    /// An end marker, last.
+    marker: bool,
+    /// Anything else, last.
+    bytes: bool,
+}
+
+/// Write `entry`.
 async fn write_entry<W>(
     pty: &mut W,
     state: &Mutex<QueueState>,
     entry: Entry,
-) -> std::io::Result<bool>
+) -> std::io::Result<Wrote>
 where
     W: AsyncWrite + Unpin,
 {
-    let mut marker = false;
+    let mut wrote = Wrote::default();
     match entry {
         Entry::Input(data) => {
             for chunk in data.chunks(WRITE_CHUNK) {
                 pty.write_all(chunk).await?;
+                wrote.bytes = true;
                 let mut state = lock(state);
                 state.queued = state.queued.saturating_sub(chunk.len());
             }
@@ -617,6 +703,7 @@ where
         Entry::Start(key) => {
             if lock(state).is_open(key) {
                 pty.write_all(PASTE_START).await?;
+                wrote.bytes = true;
                 if let Some(paste) = lock(state).paste_mut(key) {
                     paste.start_written = true;
                 }
@@ -631,10 +718,11 @@ where
                         // Closed: none of the rest goes out. A write already
                         // started was finished above.
                         state.queued = state.queued.saturating_sub(bytes.len() - done);
-                        return Ok(false);
+                        return Ok(wrote);
                     }
                 }
                 pty.write_all(chunk).await?;
+                wrote.bytes = true;
                 done += chunk.len();
                 let mut state = lock(state);
                 state.queued = state.queued.saturating_sub(chunk.len());
@@ -668,7 +756,10 @@ where
         Entry::End(key) => {
             if lock(state).is_open(key) {
                 pty.write_all(PASTE_END).await?;
-                marker = true;
+                wrote = Wrote {
+                    marker: true,
+                    bytes: false,
+                };
                 let finished = lock(state).take(key);
                 if let Some(paste) = finished {
                     let event = match paste.closed {
@@ -688,7 +779,7 @@ where
         }
         Entry::Wake => {}
     }
-    Ok(marker)
+    Ok(wrote)
 }
 
 /// Finish every closed paste: its end marker, when its start marker went
@@ -1873,6 +1964,194 @@ mod tests {
             cat(&[&closed(), b"x", REC]),
             "skipped start"
         );
+    }
+
+    // ─── The wake record after a lone end marker (#1075) ───────────────────
+
+    /// A cancelled paste's end marker with nothing after it is followed by
+    /// the record once the queue has stayed empty for 50 ms, in a write of
+    /// its own.
+    #[tokio::test]
+    async fn a_lone_end_marker_is_followed_by_the_wake_record() {
+        let pty = Gate::default();
+        let queue = waking(&pty);
+        let (report, events) = recorder();
+        queue.offer_paste(CONN, 4, 0, b"first".to_vec(), false, || true, report);
+        pty.release(2);
+        event_count(&events, 1).await;
+        assert!(queue.cancel_paste(CONN, 4));
+        pty.release(1);
+        pty.holds(closed().len()).await;
+        let marker_taken = pty.taken_at.lock().unwrap().expect("the marker was taken");
+        pty.blocked().await;
+        let waited = marker_taken.elapsed();
+        assert!(
+            waited >= Duration::from_millis(50) && waited < Duration::from_secs(1),
+            "the record's write was attempted {waited:?} after the marker was taken"
+        );
+        assert_eq!(pty.taken(), closed(), "the marker on its own write");
+        pty.open_all();
+        assert_eq!(settled(&pty).await, cat(&[&closed(), REC]));
+        assert_eq!(queue.queued(), 0, "the record is not counted");
+    }
+
+    /// A paste ended by its last chunk too: its end marker is a write of its
+    /// own.
+    #[tokio::test]
+    async fn a_lone_end_marker_after_a_normal_end_is_followed_by_the_wake_record() {
+        let pty = Gate::opened();
+        let queue = waking(&pty);
+        let (report, events) = recorder();
+        queue.offer_paste(CONN, 1, 0, b"abc".to_vec(), true, || true, report);
+        event_count(&events, 1).await;
+        assert_eq!(
+            settled(&pty).await,
+            cat(&[PASTE_START, b"abc", PASTE_END, REC])
+        );
+    }
+
+    /// Once per marker: an idle queue gets no second record, and the next
+    /// INPUT is still followed by its own.
+    #[tokio::test]
+    async fn a_lone_end_marker_gets_the_record_once_and_the_next_input_its_own() {
+        let pty = Gate::opened();
+        let queue = waking(&pty);
+        close_a_paste(&queue, 1).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(pty.taken(), cat(&[&closed(), REC]), "once");
+        queue.offer(b"x".to_vec());
+        queue.offer(b"y".to_vec());
+        assert_eq!(settled(&pty).await, cat(&[&closed(), REC, b"x", REC, b"y"]));
+    }
+
+    /// An INPUT ending with an end marker, with nothing after it, gets the
+    /// record too.
+    #[tokio::test]
+    async fn an_input_ending_with_the_marker_is_followed_by_the_record_when_idle() {
+        let pty = Gate::opened();
+        let queue = waking(&pty);
+        let pasted = cat(&[PASTE_START, b"b", PASTE_END]);
+        queue.offer(pasted.clone());
+        assert_eq!(settled(&pty).await, cat(&[&pasted, REC]));
+    }
+
+    /// Not while a paste is in the queue: an end marker followed by a paste
+    /// that has written nothing yet.
+    #[tokio::test]
+    async fn a_lone_end_marker_gets_no_record_while_a_paste_is_in_the_queue() {
+        let pty = Gate::opened();
+        let queue = waking(&pty);
+        close_a_paste(&queue, 1).await;
+        let (report, events) = recorder();
+        queue.offer_paste(CONN, 2, 0, Vec::new(), false, || false, Arc::clone(&report));
+        event_count(&events, 1).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(pty.taken(), closed(), "nothing inside the paste");
+        queue.offer_paste(CONN, 2, 1, b"z".to_vec(), true, || false, report);
+        event_count(&events, 2).await;
+        assert_eq!(settled(&pty).await, cat(&[&closed(), b"z"]));
+
+        // The paste then closed without writing anything: the record follows
+        // the marker after all.
+        let pty = Gate::opened();
+        let queue = waking(&pty);
+        close_a_paste(&queue, 1).await;
+        let (report, events) = recorder();
+        queue.offer_paste(CONN, 2, 0, Vec::new(), false, || false, report);
+        event_count(&events, 1).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(pty.taken(), closed(), "nothing inside the paste");
+        assert!(queue.cancel_paste(CONN, 2));
+        event_count(&events, 2).await;
+        assert_eq!(settled(&pty).await, cat(&[&closed(), REC]), "after it");
+    }
+
+    /// A PTY that takes `writes` writes, then refuses every write after.
+    #[derive(Clone)]
+    struct Breaks {
+        writes: Arc<AtomicUsize>,
+        taken: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl AsyncWrite for Breaks {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self
+                .writes
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_err()
+            {
+                return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+            }
+            self.taken.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A terminal gone when the record after a lone end marker is written
+    /// closes the queue, as any refused write does.
+    #[tokio::test]
+    async fn a_refused_record_after_a_lone_end_marker_closes_the_queue() {
+        // The start marker, "first" and the end marker; the record refused.
+        let pty = Breaks {
+            writes: Arc::new(AtomicUsize::new(3)),
+            taken: Arc::default(),
+        };
+        let queue = InputQueue::start_waking("breaks", pty.clone(), 1 << 20, Some(REC));
+        close_a_paste(&queue, 1).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(*pty.taken.lock().unwrap(), closed());
+        assert_eq!(queue.offer(b"x".to_vec()), Offer::Closed);
+        assert_eq!(queue.queued(), 0);
+    }
+
+    /// Entries that write nothing, such as empty INPUTs, do not put the
+    /// record off: it follows 50 ms after the marker.
+    #[tokio::test]
+    async fn entries_that_write_nothing_do_not_put_off_the_record() {
+        let pty = Gate::opened();
+        let queue = waking(&pty);
+        close_a_paste(&queue, 1).await;
+        for _ in 0..10 {
+            queue.offer(Vec::new());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(pty.taken(), cat(&[&closed(), REC]));
+    }
+
+    /// A deadline already past is served before entries queued meanwhile,
+    /// even when they are ready at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_past_deadline_is_served_before_entries_ready_at_once() {
+        let pty = Gate::opened();
+        let queue = waking(&pty);
+        close_a_paste(&queue, 1).await;
+        for _ in 0..10 {
+            queue.offer(Vec::new());
+        }
+        queue.offer(b"x".to_vec());
+        tokio::time::advance(Duration::from_millis(100)).await;
+        assert_eq!(settled(&pty).await, cat(&[&closed(), REC, b"x", REC]));
+    }
+
+    /// Nothing without a record to write.
+    #[tokio::test]
+    async fn a_lone_end_marker_gets_nothing_without_a_record() {
+        let pty = Gate::opened();
+        let queue = InputQueue::start("gate", pty.clone(), 1 << 20);
+        close_a_paste(&queue, 1).await;
+        assert_eq!(settled(&pty).await, closed());
     }
 
     /// AC6: the record, exactly, from build 26100 on; none before or unknown.

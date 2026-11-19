@@ -1052,31 +1052,44 @@ async fn open_paste(hub: &mut TestHub, terminal: &PasteTerminal, paste_id: u32) 
 }
 
 /// PS10 connection ends, next connection: a daemon connection ending closes
-/// its paste; the hub's next connection cannot carry it on.
+/// its paste; the hub's next connection cannot carry it on. The end marker,
+/// with nothing written after it, reaches the program at once.
+///
+/// #1075: on Windows 26100 conhost could hold that end marker until more
+/// input came.
 #[tokio::test]
 async fn a_connection_that_ends_closes_its_paste() {
-    let dir = scratch("paste-conn-end");
-    let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
-    let mut hub = TestHub::connect(&daemon, KEY_A, 1).await;
-    let terminal = PasteTerminal::start(&mut hub, &dir, "paste-conn-end", true, None).await;
-    open_paste(&mut hub, &terminal, 1).await;
-    drop(hub); // EOF: its handler ends
-    let expected = [crate::input::PASTE_START, b"first", crate::input::PASTE_END].concat();
-    assert_eq!(terminal.read(expected.len()).await, expected);
+    for run in 0..50 {
+        let name = format!("paste-conn-end-{run}");
+        let dir = scratch(&name);
+        let daemon = input_daemon(crate::input::INPUT_QUEUE_BYTES);
+        let mut hub = TestHub::connect(&daemon, KEY_A, 1).await;
+        let terminal = PasteTerminal::start(&mut hub, &dir, &name, true, None).await;
+        open_paste(&mut hub, &terminal, 1).await;
+        drop(hub); // EOF: its handler ends
+        let expected = [crate::input::PASTE_START, b"first", crate::input::PASTE_END].concat();
+        let got = terminal
+            .read_within_or_short(expected.len(), TYPED_WITHIN)
+            .await;
+        if got != expected {
+            // Torn down first: a failed run leaves no terminal behind.
+            tear_down(&daemon, &dir).await;
+            panic!("run {run}: {got:?}");
+        }
 
-    let mut next = TestHub::connect(&daemon, KEY_A, 2).await;
-    next.send(&paste_chunk(&terminal.channel_id, 1, 1, b"more", true))
-        .await;
-    let frames = next
-        .read_through(|frame| is_about(frame, "PASTE_CLOSED", &terminal.channel_id))
-        .await;
-    assert_eq!(frames.last().unwrap()["reason"].as_str(), Some("unknown"));
-    assert_eq!(
-        terminal.read(expected.len()).await,
-        expected,
-        "nothing more reached it"
-    );
-    tear_down(&daemon, &dir).await;
+        let mut next = TestHub::connect(&daemon, KEY_A, 2).await;
+        next.send(&paste_chunk(&terminal.channel_id, 1, 1, b"more", true))
+            .await;
+        let frames = next
+            .read_through(|frame| is_about(frame, "PASTE_CLOSED", &terminal.channel_id))
+            .await;
+        let reason = frames.last().unwrap()["reason"].as_str().map(str::to_owned);
+        let after = terminal.read(expected.len()).await;
+        // Torn down first: a failed run leaves no terminal behind.
+        tear_down(&daemon, &dir).await;
+        assert_eq!(reason.as_deref(), Some("unknown"), "run {run}");
+        assert_eq!(after, expected, "run {run}: nothing more reached it");
+    }
 }
 
 /// How soon a key typed after a paste's close reaches the program (#1030).

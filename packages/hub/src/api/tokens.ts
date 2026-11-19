@@ -56,7 +56,7 @@ export function registerTokenRoutes(server: FastifyInstance, opts: TokenRouteOpt
 					// every /api/ route: its id, never the token. The log withholds
 					// anything that is not a credential id, so an absent one would be
 					// written `<withheld>`, never guessed.
-					byTokenId: request.authTokenRecord?.id ?? WITHHELD,
+					byTokenId: request.authTokenId ?? WITHHELD,
 					sourceIp: request.ip,
 					outcome,
 				});

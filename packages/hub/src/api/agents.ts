@@ -7,15 +7,8 @@ import type {
 } from "@lasterm/shared";
 import { generateId } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import {
-	reportTokenStore,
-	type TokenStoreLog,
-	type TokenValidation,
-	tokensEqual,
-	touchTokenBestEffort,
-	validateTokenRecord,
-} from "../auth.js";
 import { HUB_VERSION } from "../build-version.js";
+import { createRestBearerCheck } from "../rest-bearer.js";
 import {
 	AGENT_FETCH_MANIFEST_MAX_BYTES,
 	AGENT_FETCH_MAX_BYTES,
@@ -140,7 +133,7 @@ const AGENT_IMPORT_MAX_PAYLOAD_BYTES =
 const AGENT_IMPORT_ALLOWED_FIELDS = new Set(["os", "arch", "version", "attested", "force"]);
 
 export function registerAgentRoutes(server: FastifyInstance, deps: AgentRoutesDeps = {}): void {
-	const requireBearer = createAgentBearerAuthGuard(deps, server.log);
+	const requireBearer = createAgentBearerAuthGuard(server, deps);
 	const requireMutationOrigin = createAgentMutationOriginGuard(deps);
 	const jobsByTarget = new Map<string, AgentFetchJob>();
 	const queuedJobs: AgentFetchJob[] = [];
@@ -805,65 +798,28 @@ export function createAgentMutationOriginGuard(
 	};
 }
 
-function createAgentBearerAuthGuard(deps: AgentRoutesDeps, log: TokenStoreLog): AgentPreHandler {
-	return async (request: FastifyRequest, reply: FastifyReply) => {
-		const authHeader = request.headers.authorization;
-		if (!authHeader) {
-			return sendError(reply, 401, "AUTH_REQUIRED", "Authorization header required");
-		}
-
-		const [scheme, token, extra] = authHeader.split(" ");
-		if (scheme !== "Bearer" || !token || extra !== undefined) {
-			return sendError(reply, 401, "AUTH_REQUIRED", "Authorization header must be: Bearer <token>");
-		}
-
-		const verdict = checkAgentBearer(token, deps, log);
-		if (verdict === "valid") return;
-		if (verdict === "unavailable") {
-			return sendError(
-				reply,
-				503,
-				"AUTH_UNAVAILABLE",
-				"The hub cannot check credentials right now",
-			);
-		}
-		return sendError(reply, 401, "AUTH_INVALID", "Invalid, expired, or revoked token");
-	};
-}
-
 /**
- * A token the store cannot judge is `unavailable` only if nothing else accepts
- * it: the primary token still matches without the store, as it always has.
+ * The agent routes check the bearer themselves, with the check the hub-wide
+ * hook uses: they install and run binaries, and are registered even on a
+ * server built without that hook. A request the hook already judged carries
+ * its credential id and is not judged twice.
  */
-function checkAgentBearer(
-	token: string,
+function createAgentBearerAuthGuard(
+	server: FastifyInstance,
 	deps: AgentRoutesDeps,
-	log: TokenStoreLog,
-): TokenValidation["status"] {
-	let storeUnavailable = false;
-	if (deps.db) {
-		const validation = validateTokenRecord(deps.db, token);
-		reportTokenStore(deps.db, validation, log);
-		if (validation.status === "valid") {
-			if (deps.tokenTtlDays !== undefined) {
-				// Best effort, as on the global REST hook: the credential has been
-				// checked, and failing to record its use is not a reason to refuse it.
-				touchTokenBestEffort(deps.db, validation.record.id, deps.tokenTtlDays, log);
-			}
-			return "valid";
-		}
-		storeUnavailable = validation.status === "unavailable";
-	}
-	// In constant time, like every token held in memory: a plain === answers
-	// sooner the earlier a guess goes wrong (#514).
-	if (
-		deps.authToken !== undefined &&
-		deps.authToken !== null &&
-		tokensEqual(token, deps.authToken)
-	) {
-		return "valid";
-	}
-	return storeUnavailable ? "unavailable" : "invalid";
+): AgentPreHandler {
+	const checkBearer = createRestBearerCheck({
+		store: deps.db ?? null,
+		primaryToken: deps.authToken ?? null,
+		ttlDays: deps.tokenTtlDays,
+		log: server.log,
+		security: server.hasDecorator("security") ? server.security : null,
+	});
+	return async (request: FastifyRequest, reply: FastifyReply) => {
+		if (request.authTokenId) return;
+		const outcome = checkBearer(request);
+		if (!outcome.ok) return sendError(reply, outcome.status, outcome.code, outcome.message);
+	};
 }
 
 function readAllowList(list: Iterable<string> | (() => Iterable<string>) | undefined): string[] {

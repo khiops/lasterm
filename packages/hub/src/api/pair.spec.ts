@@ -159,6 +159,24 @@ describe("POST /api/pair/verify", () => {
 		expect(res.statusCode).toBe(200);
 	});
 
+	it("requires no auth header whatever its spelling", async () => {
+		const createRes = await server.inject({
+			method: "POST",
+			url: "/api/pair",
+			headers: authHeader(),
+		});
+		const { code } = createRes.json<{ code: string }>();
+
+		// The router decodes %61 to the verify route, whose exemption must follow it.
+		const res = await server.inject({
+			method: "POST",
+			url: "/%61pi/pair/verify",
+			payload: { code },
+		});
+		expect(res.statusCode).toBe(200);
+		expect(res.json<{ token: string }>().token).toMatch(/^[0-9a-f]{64}$/);
+	});
+
 	it("returns 400 for non-string code", async () => {
 		const res = await server.inject({
 			method: "POST",

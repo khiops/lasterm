@@ -531,20 +531,23 @@ async fn write_input<W>(
     let mut due = WakeDue::default();
     loop {
         let entry = match wake {
-            Some(record) if due.idle => {
+            Some(record) if due.idle.is_some() => {
+                let deadline = due.idle.unwrap_or_else(tokio::time::Instant::now);
                 tokio::select! {
                     biased;
                     entry = queue.recv() => entry,
-                    () = tokio::time::sleep(WAKE_DELAY) => {
-                        // Nothing came after the marker: the record follows
-                        // it once no paste is in the queue. The next INPUT
-                        // still gets its own.
+                    () = tokio::time::sleep_until(deadline) => {
+                        // Nothing written since the marker: the record
+                        // follows it once no paste is in the queue. The next
+                        // INPUT still gets its own.
                         if lock(&state).pastes.is_empty() {
-                            due.idle = false;
+                            due.idle = None;
                             if let Err(error) = pty.write_all(record).await {
                                 refused(&channel_id, &state, &error);
                                 return;
                             }
+                        } else {
+                            due.idle = Some(tokio::time::Instant::now() + WAKE_DELAY);
                         }
                         continue;
                     }
@@ -580,9 +583,10 @@ struct WakeDue {
     /// An end marker went out, and no INPUT has been followed by the record
     /// since.
     input: bool,
-    /// An end marker went out, and nothing has been written after it: the
-    /// record follows it if the queue stays empty for `WAKE_DELAY`.
-    idle: bool,
+    /// An end marker went out, and nothing has been written after it: when
+    /// the record follows it, `WAKE_DELAY` after it unless something is
+    /// written first. Entries that write nothing leave it as it is.
+    idle: Option<tokio::time::Instant>,
 }
 
 impl WakeDue {
@@ -590,7 +594,7 @@ impl WakeDue {
     fn marked(&mut self, marker: bool) {
         if marker {
             self.input = true;
-            self.idle = true;
+            self.idle = Some(tokio::time::Instant::now() + WAKE_DELAY);
         }
     }
 }
@@ -620,7 +624,7 @@ where
     let wrote = write_entry(pty, state, entry).await?;
     if wrote.bytes {
         // An end marker is no longer the last write.
-        due.idle = false;
+        due.idle = None;
     }
     due.marked(wrote.marker);
     // Decided after this: a paste closed while the INPUT was written is
@@ -2095,6 +2099,20 @@ mod tests {
         assert_eq!(*pty.taken.lock().unwrap(), closed());
         assert_eq!(queue.offer(b"x".to_vec()), Offer::Closed);
         assert_eq!(queue.queued(), 0);
+    }
+
+    /// Entries that write nothing, such as empty INPUTs, do not put the
+    /// record off: it follows 50 ms after the marker.
+    #[tokio::test]
+    async fn entries_that_write_nothing_do_not_put_off_the_record() {
+        let pty = Gate::opened();
+        let queue = waking(&pty);
+        close_a_paste(&queue, 1).await;
+        for _ in 0..10 {
+            queue.offer(Vec::new());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(pty.taken(), cat(&[&closed(), REC]));
     }
 
     /// Nothing without a record to write.

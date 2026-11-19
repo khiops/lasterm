@@ -530,13 +530,22 @@ async fn write_input<W>(
 {
     let mut due = WakeDue::default();
     loop {
-        let entry = match wake {
-            Some(record) if due.idle.is_some() => {
-                let deadline = due.idle.unwrap_or_else(tokio::time::Instant::now);
-                tokio::select! {
-                    biased;
-                    entry = queue.recv() => entry,
-                    () = tokio::time::sleep_until(deadline) => {
+        let entry = match (wake, due.idle) {
+            (Some(record), Some(deadline)) => {
+                // A deadline already past is served first, so entries that
+                // write nothing cannot keep it waiting.
+                let entry = if tokio::time::Instant::now() >= deadline {
+                    None
+                } else {
+                    tokio::select! {
+                        biased;
+                        entry = queue.recv() => Some(entry),
+                        () = tokio::time::sleep_until(deadline) => None,
+                    }
+                };
+                match entry {
+                    Some(entry) => entry,
+                    None => {
                         // Nothing written since the marker: the record
                         // follows it once no paste is in the queue. The next
                         // INPUT still gets its own.
@@ -2113,6 +2122,21 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(pty.taken(), cat(&[&closed(), REC]));
+    }
+
+    /// A deadline already past is served before entries queued meanwhile,
+    /// even when they are ready at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_past_deadline_is_served_before_entries_ready_at_once() {
+        let pty = Gate::opened();
+        let queue = waking(&pty);
+        close_a_paste(&queue, 1).await;
+        for _ in 0..10 {
+            queue.offer(Vec::new());
+        }
+        queue.offer(b"x".to_vec());
+        tokio::time::advance(Duration::from_millis(100)).await;
+        assert_eq!(settled(&pty).await, cat(&[&closed(), REC, b"x", REC]));
     }
 
     /// Nothing without a record to write.

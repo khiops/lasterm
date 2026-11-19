@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.19.1](https://github.com/khiops/lasterm/compare/v0.19.0...v0.19.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **agent:** follow a lone paste end marker with the wake record on Windows 26100 ([#1080](https://github.com/khiops/lasterm/issues/1080)) ([dac3e33](https://github.com/khiops/lasterm/commit/dac3e3397c6d97c3a45af722a6b958f87ba2b0bd)), closes [#1075](https://github.com/khiops/lasterm/issues/1075)
+
+
+### Documentation
+
+* **root:** Store news for the paste end held on Windows 26100 ([#1082](https://github.com/khiops/lasterm/issues/1082)) ([8731616](https://github.com/khiops/lasterm/commit/8731616ca3c29dcf0d3bc4908cb5d81d9ae1a481))
+
 ## [0.19.0](https://github.com/khiops/lasterm/compare/v0.18.1...v0.19.0) (2026-11-19)
 
 

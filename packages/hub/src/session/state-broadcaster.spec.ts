@@ -280,3 +280,35 @@ describe("StateBroadcaster — renaming a terminal that has ended", () => {
 		);
 	});
 });
+
+// ─── Removing a client whose detach fails ────────────────────────────────────
+//
+// A client left in the context after its socket closed is counted as connected
+// by getOthersCount, and /api/quit then answers 409 for good. A detach that
+// throws (its channel status write, on a failing meta.db) must not keep it there.
+
+describe("StateBroadcaster — removing a client whose detach throws", () => {
+	it("removes the client and detaches its other channels, then reports the failure", () => {
+		const failure = new Error("database is locked");
+		const ctx = {
+			clients: new Map([
+				["c1", { id: "c1", send: () => {}, attachedChannels: new Set(["ch-1", "ch-2"]) }],
+			]),
+		} as unknown as SharedSessionContext;
+		const broadcaster = new StateBroadcaster(ctx);
+		const detach = vi
+			.spyOn(broadcaster, "detachClient")
+			.mockImplementationOnce(() => {
+				throw failure;
+			})
+			.mockImplementation(() => {});
+
+		expect(() => broadcaster.removeClient("c1")).toThrow(failure);
+
+		expect(ctx.clients.has("c1")).toBe(false);
+		expect(detach.mock.calls).toEqual([
+			["c1", "ch-1"],
+			["c1", "ch-2"],
+		]);
+	});
+});

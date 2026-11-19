@@ -4,16 +4,23 @@ import {
 	encodeMessage,
 	type ProtocolMessage,
 } from "@lasterm/shared";
+import { encode } from "@msgpack/msgpack";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createToken, PRIMARY_TOKEN_ID, revokeToken } from "../auth.js";
 import { type SecurityFields, SecurityLog } from "../logging/security-log.js";
 import { createServer } from "../server.fixture.js";
+import { SessionManager } from "../session/session-manager.js";
 import { WriteLockManager } from "../session/write-lock.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
 import { getTestTls } from "../test-tls.fixture.js";
-import { WS_CLOSE_POLICY_VIOLATION, WS_CLOSE_TRY_AGAIN_LATER } from "./ws-handler.js";
+import { TransferService } from "../transfers/transfer-service.js";
+import {
+	WS_CLOSE_INTERNAL_ERROR,
+	WS_CLOSE_POLICY_VIOLATION,
+	WS_CLOSE_TRY_AGAIN_LATER,
+} from "./ws-handler.js";
 
 const TEST_TOKEN = "a".repeat(64);
 const CHANNEL_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -404,6 +411,256 @@ describe("WebSocket authentication against the token store", () => {
 			vi.setSystemTime(start + 61_000);
 			await ping(ws, observed);
 			expect(Date.parse(lastUsedAt(paired.id) ?? "")).toBeGreaterThanOrEqual(start + 61_000);
+		});
+	});
+
+	// A frame is untrusted input from a client that may not have authenticated.
+	// Whatever it holds, it ends at most its own socket: an exception that left
+	// the message listener used to stop the hub process.
+	describe("a frame the hub cannot act on", () => {
+		const boom = new Error("injected failure");
+
+		/** The client id the hub gave a socket, from its AUTH_OK. */
+		function clientIdOf(observed: Observed): string {
+			const ok = observed.messages.find((message) => message.type === "AUTH_OK");
+			return (ok as AuthOkMessage).clientId;
+		}
+
+		it.each([
+			["a number", 123],
+			["missing", undefined],
+			["the primary token's bytes", new Uint8Array(Buffer.from(TEST_TOKEN))],
+		] as const)(
+			"refuses an AUTH whose token is %s, and serves the next socket",
+			async (_what, token) => {
+				const ws = await server.injectWS("/ws");
+				const observed = observe(ws);
+
+				ws.send(encode(token === undefined ? { type: "AUTH" } : { type: "AUTH", token }));
+
+				await closeOf(observed);
+				expect(observed.messages).toEqual([{ type: "AUTH_FAIL", message: "Invalid token" }]);
+				expect(failures()).toEqual([
+					expect.objectContaining({ via: "ws", reason: "invalid_token", tokenStatus: "unknown" }),
+				]);
+				await connect(TEST_TOKEN);
+			},
+		);
+
+		it("leaves a second AUTH on an authenticated socket to the unhandled-type warning", async () => {
+			const { ws, observed } = await connect(TEST_TOKEN);
+			const warnings = vi.spyOn(server.log, "warn");
+
+			ws.send(encodeMessage({ type: "AUTH" } as ProtocolMessage));
+			await ping(ws, observed);
+
+			expect(observed.types()).not.toContain("AUTH_FAIL");
+			expect(warnings).toHaveBeenCalledWith(
+				expect.objectContaining({ msgType: "AUTH" }),
+				"ws: unhandled message type",
+			);
+		});
+
+		const notProtocolFrames = [
+			["null", null],
+			["a number", 7],
+			["an object with no type", {}],
+			["an object whose type is a number", { type: 123 }],
+		] as const;
+
+		it.each(notProtocolFrames)(
+			"answers a first frame that is %s as one that is not AUTH",
+			async (_what, frame) => {
+				const ws = await server.injectWS("/ws");
+				const observed = observe(ws);
+
+				ws.send(encode(frame));
+
+				await closeOf(observed);
+				expect(observed.messages).toEqual([
+					{ type: "AUTH_FAIL", message: "First message must be AUTH" },
+				]);
+				expect(failures()).toEqual([expect.objectContaining({ reason: "not_auth_first" })]);
+				await connect(TEST_TOKEN);
+			},
+		);
+
+		it.each(notProtocolFrames)(
+			"answers a frame that is %s after AUTH as malformed, and keeps the socket",
+			async (_what, frame) => {
+				const { ws, observed } = await connect(TEST_TOKEN);
+				const warnings = vi.spyOn(server.log, "warn");
+				const answered = observed.messages.length;
+
+				ws.send(encode(frame));
+				await ping(ws, observed);
+
+				expect(observed.messages.slice(answered, -1)).toEqual([
+					{ type: "ERROR", code: "MALFORMED_MESSAGE", message: "Not a protocol message" },
+				]);
+				expect(warnings).toHaveBeenCalledWith(
+					{ clientId: clientIdOf(observed), byteLength: encode(frame).byteLength },
+					"ws: not a protocol message",
+				);
+			},
+		);
+
+		it("checks a revoked token before it answers a frame as malformed", async () => {
+			const paired = createToken(dbs.meta, { label: "browser", expiresAt: null });
+			const { ws, observed } = await connect(paired.token);
+			const answered = observed.messages.length;
+
+			revokeToken(dbs.meta, paired.id);
+			ws.send(encode(7));
+
+			expect(await closeOf(observed)).toEqual({
+				code: WS_CLOSE_POLICY_VIOLATION,
+				reason: "AUTH_REVOKED",
+			});
+			expect(observed.messages.slice(answered)).toEqual([]);
+		});
+
+		it("closes only the socket whose AUTH failed past AUTH_OK, and says why in the log", async () => {
+			const witness = await connect(TEST_TOKEN);
+			const errors = vi.spyOn(server.log, "error");
+			vi.spyOn(SessionManager.prototype, "getStateSnapshot").mockImplementationOnce(() => {
+				throw boom;
+			});
+			const ws = await server.injectWS("/ws");
+			const observed = observe(ws);
+
+			ws.send(encodeMessage({ type: "AUTH", token: TEST_TOKEN }));
+
+			expect(await closeOf(observed)).toEqual({
+				code: WS_CLOSE_INTERNAL_ERROR,
+				reason: "INTERNAL_ERROR",
+			});
+			expect(errors).toHaveBeenCalledTimes(1);
+			expect(errors).toHaveBeenCalledWith(
+				{ err: boom, clientId: clientIdOf(observed), msgType: "AUTH" },
+				"ws: frame handling failed; closing socket",
+			);
+			await ping(witness.ws, witness.observed);
+			await connect(TEST_TOKEN);
+		});
+
+		it("closes the socket whose frame a handler failed on", async () => {
+			const { ws, observed } = await connect(TEST_TOKEN);
+			const errors = vi.spyOn(server.log, "error");
+			vi.spyOn(SessionManager.prototype, "handleDetach").mockImplementationOnce(() => {
+				throw boom;
+			});
+
+			ws.send(encodeMessage({ type: "DETACH", channelId: CHANNEL_ID }));
+
+			expect(await closeOf(observed)).toEqual({
+				code: WS_CLOSE_INTERNAL_ERROR,
+				reason: "INTERNAL_ERROR",
+			});
+			expect(errors).toHaveBeenCalledWith(
+				expect.objectContaining({ err: boom, msgType: "DETACH" }),
+				"ws: frame handling failed; closing socket",
+			);
+			await connect(TEST_TOKEN);
+		});
+
+		it("still closes a revoked token's socket when releasing it throws, and releases the rest", async () => {
+			const paired = createToken(dbs.meta, { label: "browser", expiresAt: null });
+			const { ws, observed } = await connect(paired.token);
+			vi.spyOn(SessionManager.prototype, "removeClient").mockImplementationOnce(() => {
+				throw boom;
+			});
+			const gone = vi.spyOn(TransferService.prototype, "clientGone");
+
+			revokeToken(dbs.meta, paired.id);
+			ws.send(encodeMessage({ type: "PING" }));
+
+			expect(await closeOf(observed)).toEqual({
+				code: WS_CLOSE_POLICY_VIOLATION,
+				reason: "AUTH_REVOKED",
+			});
+			expect(gone).toHaveBeenCalledWith(clientIdOf(observed));
+			await connect(TEST_TOKEN);
+		});
+
+		it("closes every socket of a revoked token when releasing one of them throws", async () => {
+			const paired = createToken(dbs.meta, { label: "browser", expiresAt: null });
+			const first = await connect(paired.token);
+			const second = await connect(paired.token);
+			const errors = vi.spyOn(server.log, "error");
+			const info = vi.spyOn(server.log, "info");
+			vi.spyOn(SessionManager.prototype, "removeClient").mockImplementationOnce(() => {
+				throw boom;
+			});
+
+			const response = await server.inject({
+				method: "DELETE",
+				url: `/api/auth/tokens/${paired.id}`,
+				headers: { authorization: `Bearer ${TEST_TOKEN}` },
+			});
+
+			expect(response.statusCode).toBe(200);
+			for (const socket of [first, second]) {
+				expect(await closeOf(socket.observed)).toEqual({
+					code: WS_CLOSE_POLICY_VIOLATION,
+					reason: "AUTH_REVOKED",
+				});
+			}
+			expect(errors).toHaveBeenCalledWith(
+				expect.objectContaining({ err: boom, tokenId: paired.id }),
+				expect.any(String),
+			);
+			expect(info).toHaveBeenCalledWith(
+				{ tokenId: paired.id, closed: 2 },
+				"ws-auth: closed the sockets of a revoked token",
+			);
+		});
+
+		it("leaves no closed socket counted when a release step throws", async () => {
+			const owner = "o".repeat(64);
+			const ownedDbs = openTestDatabases();
+			const owned = await createServer({
+				tls: getTestTls(),
+				logger: false,
+				authToken: TEST_TOKEN,
+				dbManager: ownedDbs,
+				skipShellDiscovery: true,
+				ownerToken: owner,
+				onShutdown: vi.fn(),
+				onQuit: vi.fn(),
+				onQuitDelivered: vi.fn(),
+			});
+			try {
+				await owned.ready();
+				const open = async () => {
+					const ws = await owned.injectWS("/ws");
+					const observed = observe(ws);
+					ws.send(encodeMessage({ type: "AUTH", token: TEST_TOKEN }));
+					await vi.waitFor(() => expect(observed.types()).toContain("AUTH_OK"));
+					return { ws, observed };
+				};
+				const caller = await open();
+				const other = await open();
+				vi.spyOn(WriteLockManager.prototype, "onClientDisconnect").mockImplementationOnce(() => {
+					throw boom;
+				});
+				vi.spyOn(SessionManager.prototype, "handleDetach").mockImplementationOnce(() => {
+					throw boom;
+				});
+
+				other.ws.send(encodeMessage({ type: "DETACH", channelId: CHANNEL_ID }));
+				expect((await closeOf(other.observed)).code).toBe(WS_CLOSE_INTERNAL_ERROR);
+
+				const response = await owned.inject({
+					method: "POST",
+					url: "/api/shutdown",
+					headers: { "x-lasterm-owner": owner, "x-lasterm-client-id": clientIdOf(caller.observed) },
+				});
+				expect(response.statusCode).toBe(200);
+			} finally {
+				await owned.close();
+				ownedDbs.close();
+			}
 		});
 	});
 });

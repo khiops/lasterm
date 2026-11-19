@@ -70,6 +70,37 @@ export const WS_CLOSE_TRY_AGAIN_LATER = 1013;
 export const WS_CLOSE_POLICY_VIOLATION = 1008;
 
 /**
+ * RFC 6455 "Internal Error": handling a frame threw. The hub ends that socket
+ * alone, and the client may reconnect; one client's frame never stops the hub.
+ */
+export const WS_CLOSE_INTERNAL_ERROR = 1011;
+
+/** A decoded frame the hub can dispatch: an object whose `type` is a string. */
+function isProtocolFrame(value: unknown): value is ProtocolMessage {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof (value as { type?: unknown }).type === "string"
+	);
+}
+
+/**
+ * Run every step even when one throws, then rethrow the first failure: a
+ * cleanup that stops halfway leaves a closed client counted as connected.
+ */
+function runAll(steps: ReadonlyArray<() => void>): void {
+	let failure: { error: unknown } | undefined;
+	for (const step of steps) {
+		try {
+			step();
+		} catch (error) {
+			failure ??= { error };
+		}
+	}
+	if (failure) throw failure.error;
+}
+
+/**
  * How often an open socket records that its token is in use. The REST hook
  * touches on every request; a socket is checked on every frame, and a write per
  * keystroke buys nothing a write a minute does not. What matters is that the
@@ -260,9 +291,13 @@ export async function registerWsRoutes(
 			clientSendRegistry.delete(clientId);
 			tokenSockets.delete(clientId);
 			if (authenticated) {
-				writeLockManager.onClientDisconnect(clientId);
-				sessionManager.removeClient(clientId);
-				transfers?.clientGone(clientId);
+				// `released` is already set, so a step skipped here is never retried:
+				// each one runs whatever the others do.
+				runAll([
+					() => writeLockManager.onClientDisconnect(clientId),
+					() => sessionManager.removeClient(clientId),
+					() => transfers?.clientGone(clientId),
+				]);
 			}
 		};
 
@@ -274,8 +309,13 @@ export async function registerWsRoutes(
 		const end = (code?: number, reason?: string) => {
 			if (ending) return;
 			ending = true;
-			release();
-			socket.close(code, reason);
+			try {
+				release();
+			} finally {
+				// Closed even when releasing threw: that error still goes up, but the
+				// socket does not stay open behind it.
+				socket.close(code, reason);
+			}
 		};
 
 		// The token this socket authenticated with no longer validates. The hub
@@ -339,189 +379,238 @@ export async function registerWsRoutes(
 				return;
 			}
 
-			// DEBUG, never INFO: every keystroke is a frame, so a line per frame at the
-			// default level records when, and how fast, the user types.
-			server.log.debug({ msgType: msg.type }, "ws: received message");
+			try {
+				// DEBUG, never INFO: every keystroke is a frame, so a line per frame at the
+				// default level records when, and how fast, the user types.
+				server.log.debug(
+					{ msgType: isProtocolFrame(msg) ? msg.type : undefined },
+					"ws: received message",
+				);
 
-			// AUTH handshake — must be the first message when auth is enabled
-			if (!authenticated) {
-				if (msg.type !== "AUTH") {
-					server.log.warn({ clientId }, "ws-auth: first message must be AUTH");
-					server.security.authFailed({ via: "ws", sourceIp, clientId, reason: "not_auth_first" });
-					client.send({ type: "AUTH_FAIL", message: "First message must be AUTH" });
-					end();
-					return;
-				}
+				// AUTH handshake — must be the first message when auth is enabled
+				if (!authenticated) {
+					if (!isProtocolFrame(msg) || msg.type !== "AUTH") {
+						server.log.warn({ clientId }, "ws-auth: first message must be AUTH");
+						server.security.authFailed({ via: "ws", sourceIp, clientId, reason: "not_auth_first" });
+						client.send({ type: "AUTH_FAIL", message: "First message must be AUTH" });
+						end();
+						return;
+					}
 
-				const authMsg = msg as AuthMessage;
-				if (!db) {
-					// DB is required for token validation — fail closed to prevent
-					// skipping expiry/revocation checks.
-					server.log.warn({ clientId }, "ws-auth: database unavailable");
-					server.security.authFailed({
+					const authMsg = msg as AuthMessage;
+					if (typeof (authMsg as { token?: unknown }).token !== "string") {
+						// Not a string: nothing to judge. Hashing it threw (a number, none)
+						// or hashed bytes as if they were the token (a binary value).
+						server.log.warn(
+							{ clientId, reason: "unknown" },
+							"ws-auth: invalid, expired, or revoked token",
+						);
+						server.security.authFailed({
+							via: "ws",
+							sourceIp,
+							clientId,
+							reason: "invalid_token",
+							tokenStatus: "unknown",
+						});
+						client.send({ type: "AUTH_FAIL", message: "Invalid token" });
+						end();
+						return;
+					}
+					if (!db) {
+						// DB is required for token validation — fail closed to prevent
+						// skipping expiry/revocation checks.
+						server.log.warn({ clientId }, "ws-auth: database unavailable");
+						server.security.authFailed({
+							via: "ws",
+							sourceIp,
+							clientId,
+							reason: "database_unavailable",
+						});
+						client.send({ type: "AUTH_FAIL", message: "Database unavailable" });
+						end();
+						return;
+					}
+					// DB-backed validation: checks expiry and revocation status
+					const validation = judgeSocketCredential({ token: authMsg.token }, db);
+					if (validation.status === "unavailable") {
+						// No AUTH_FAIL: a client treats that as a verdict on its token and
+						// asks to pair again. Closing with Try Again Later lets it keep the
+						// token and reconnect, which succeeds once the store answers. Nor
+						// is it an authentication failure in the security log: the token
+						// was not judged, and judgeCredential records the outage once.
+						end(WS_CLOSE_TRY_AGAIN_LATER, "AUTH_UNAVAILABLE");
+						return;
+					}
+					if (validation.status === "invalid") {
+						server.log.warn(
+							{ clientId, reason: validation.reason },
+							"ws-auth: invalid, expired, or revoked token",
+						);
+						server.security.authFailed({
+							via: "ws",
+							sourceIp,
+							clientId,
+							reason: "invalid_token",
+							tokenStatus: validation.reason,
+						});
+						client.send({ type: "AUTH_FAIL", message: "Invalid token" });
+						end();
+						return;
+					}
+					// Best effort, as on the REST path: the credential has been checked,
+					// and a store that cannot record its use must not throw out of the
+					// socket's message handler.
+					touchTokenBestEffort(db, validation.record.id, ttlDays ?? 90, server.log);
+
+					authenticated = true;
+					credential = {
+						id: validation.record.id,
+						tokenHash: validation.record.tokenHash,
+						store: db,
+						touchedAt: Date.now(),
+					};
+					const tokenId = validation.record.id;
+					tokenSockets.set(clientId, {
+						tokenId,
+						refuse: (status) => refuse(tokenId, status),
+					});
+					clearTimeout(authTimeout ?? undefined);
+					// The window this socket belongs to, under its token: a write lock's
+					// holder coming back from a reload or a drop is recognised by it
+					// (#846). A client that names none, or names it wrongly, is still
+					// accepted; its locks are handed on at once when it leaves.
+					if (isValidUlid(authMsg.windowId)) {
+						writeLockManager.identify(clientId, { tokenId, windowId: authMsg.windowId });
+					}
+					sessionManager.addClient(client);
+					server.log.info({ clientId }, "ws-auth: accepted");
+					server.security.authSucceeded({
 						via: "ws",
 						sourceIp,
 						clientId,
-						reason: "database_unavailable",
+						tokenId: validation.record.id,
 					});
-					client.send({ type: "AUTH_FAIL", message: "Database unavailable" });
-					end();
+					// It echoes a SPAWN's request id in what answers it (handlers/spawn.ts,
+					// SessionManager.handleSpawn): a client that knows it takes an ERROR
+					// without its id as about something else (#777).
+					client.send({ type: "AUTH_OK", clientId, echoesSpawnRequestId: true });
+					client.send(sessionManager.getStateSnapshot(tokenId));
 					return;
 				}
-				// DB-backed validation: checks expiry and revocation status
-				const validation = judgeSocketCredential({ token: authMsg.token }, db);
-				if (validation.status === "unavailable") {
-					// No AUTH_FAIL: a client treats that as a verdict on its token and
-					// asks to pair again. Closing with Try Again Later lets it keep the
-					// token and reconnect, which succeeds once the store answers. Nor
-					// is it an authentication failure in the security log: the token
-					// was not judged, and judgeCredential records the outage once.
-					end(WS_CLOSE_TRY_AGAIN_LATER, "AUTH_UNAVAILABLE");
-					return;
-				}
-				if (validation.status === "invalid") {
-					server.log.warn(
-						{ clientId, reason: validation.reason },
-						"ws-auth: invalid, expired, or revoked token",
-					);
-					server.security.authFailed({
-						via: "ws",
-						sourceIp,
-						clientId,
-						reason: "invalid_token",
-						tokenStatus: validation.reason,
-					});
-					client.send({ type: "AUTH_FAIL", message: "Invalid token" });
-					end();
-					return;
-				}
-				// Best effort, as on the REST path: the credential has been checked,
-				// and a store that cannot record its use must not throw out of the
-				// socket's message handler.
-				touchTokenBestEffort(db, validation.record.id, ttlDays ?? 90, server.log);
 
-				authenticated = true;
-				credential = {
-					id: validation.record.id,
-					tokenHash: validation.record.tokenHash,
-					store: db,
-					touchedAt: Date.now(),
-				};
-				const tokenId = validation.record.id;
-				tokenSockets.set(clientId, {
-					tokenId,
-					refuse: (status) => refuse(tokenId, status),
-				});
-				clearTimeout(authTimeout ?? undefined);
-				// The window this socket belongs to, under its token: a write lock's
-				// holder coming back from a reload or a drop is recognised by it
-				// (#846). A client that names none, or names it wrongly, is still
-				// accepted; its locks are handed on at once when it leaves.
-				if (isValidUlid(authMsg.windowId)) {
-					writeLockManager.identify(clientId, { tokenId, windowId: authMsg.windowId });
+				// Every frame after AUTH is checked, not only those that change state.
+				// The check is one indexed read, INPUT dominates the traffic either way,
+				// and the frames that merely answer a prompt can still trust a host key
+				// or an agent binary. A frame type added later is covered without anyone
+				// having to remember it.
+				if (credential !== null && !stillValid(credential)) return;
+
+				// Checked after the credential, so a revoked token's frame still ends its
+				// socket rather than being answered.
+				if (!isProtocolFrame(msg)) {
+					server.log.warn({ clientId, byteLength: raw.byteLength }, "ws: not a protocol message");
+					client.send({
+						type: "ERROR",
+						code: "MALFORMED_MESSAGE",
+						message: "Not a protocol message",
+					});
+					return;
 				}
-				sessionManager.addClient(client);
-				server.log.info({ clientId }, "ws-auth: accepted");
-				server.security.authSucceeded({
-					via: "ws",
-					sourceIp,
+
+				const ctx: WsHandlerContext = {
 					clientId,
-					tokenId: validation.record.id,
-				});
-				// It echoes a SPAWN's request id in what answers it (handlers/spawn.ts,
-				// SessionManager.handleSpawn): a client that knows it takes an ERROR
-				// without its id as about something else (#777).
-				client.send({ type: "AUTH_OK", clientId, echoesSpawnRequestId: true });
-				client.send(sessionManager.getStateSnapshot(tokenId));
-				return;
-			}
+					tokenId: credential?.id ?? null,
+					client,
+					log: server.log,
+					sessionManager,
+					writeLockManager,
+					...(transfers !== undefined ? { transfers } : {}),
+				};
 
-			// Every frame after AUTH is checked, not only those that change state.
-			// The check is one indexed read, INPUT dominates the traffic either way,
-			// and the frames that merely answer a prompt can still trust a host key
-			// or an agent binary. A frame type added later is covered without anyone
-			// having to remember it.
-			if (credential !== null && !stillValid(credential)) return;
-
-			const ctx: WsHandlerContext = {
-				clientId,
-				tokenId: credential?.id ?? null,
-				client,
-				log: server.log,
-				sessionManager,
-				writeLockManager,
-				...(transfers !== undefined ? { transfers } : {}),
-			};
-
-			switch (msg.type) {
-				case "SPAWN":
-					handleSpawn(msg as UiSpawnMessage, ctx);
-					break;
-				case "ATTACH":
-					handleAttach(msg as UiAttachMessage, ctx);
-					break;
-				case "DETACH":
-					handleDetach(msg as DetachMessage, ctx);
-					break;
-				case "INPUT":
-					handleInput(msg as InputMessage, ctx);
-					break;
-				case "PASTE":
-					handlePaste(msg as PasteMessage, ctx);
-					break;
-				case "PASTE_CANCEL":
-					handlePasteCancel(msg as PasteCancelMessage, ctx);
-					break;
-				case "RESIZE":
-					handleResize(msg as ResizeMessage, ctx);
-					break;
-				case "FILES_PANEL":
-					handleFilesPanel(msg as FilesPanelMessage, ctx);
-					break;
-				case "WRITE_CLAIM":
-					handleWriteClaim(msg as WriteClaimMessage, ctx);
-					break;
-				case "WRITE_RELEASE":
-					handleWriteRelease(msg as WriteReleaseMessage, ctx);
-					break;
-				case "WRITE_FORCE":
-					handleWriteForce(msg as WriteForceMessage, ctx);
-					break;
-				case "WRITE_GRANT":
-					handleWriteGrant(msg as WriteGrantMessage, ctx);
-					break;
-				case "WRITE_DENY":
-					handleWriteDeny(msg as WriteDenyMessage, ctx);
-					break;
-				case "PING":
-					handlePing(msg, ctx);
-					break;
-				case "AUTH_PROMPT_RESPONSE":
-					handleAuthPromptResponse(msg as AuthPromptResponseMessage, ctx);
-					break;
-				case "HOST_VERIFY_RESPONSE":
-					handleHostVerifyResponse(msg as HostVerifyResponseMessage, ctx);
-					break;
-				case "AGENT_BINARY_VERIFY_RESPONSE":
-					handleAgentBinaryVerifyResponse(msg as AgentBinaryVerifyResponseMessage, ctx);
-					break;
-				case "TEST_CONNECT":
-					handleTestConnect(msg as TestConnectMessage, ctx);
-					break;
-				case "TRANSFER_START":
-				case "TRANSFER_RESOLVE":
-				case "TRANSFER_RETRY":
-				case "TRANSFER_CANCEL":
-				case "TRANSFER_RESUME":
-				case "TRANSFER_DISCARD":
-					handleTransfer(msg as TransferMessage, ctx);
-					break;
-				default:
-					server.log.warn(
-						{ msgType: msg.type, keys: Object.keys(msg) },
-						"ws: unhandled message type",
-					);
-					break;
+				switch (msg.type) {
+					case "SPAWN":
+						handleSpawn(msg as UiSpawnMessage, ctx);
+						break;
+					case "ATTACH":
+						handleAttach(msg as UiAttachMessage, ctx);
+						break;
+					case "DETACH":
+						handleDetach(msg as DetachMessage, ctx);
+						break;
+					case "INPUT":
+						handleInput(msg as InputMessage, ctx);
+						break;
+					case "PASTE":
+						handlePaste(msg as PasteMessage, ctx);
+						break;
+					case "PASTE_CANCEL":
+						handlePasteCancel(msg as PasteCancelMessage, ctx);
+						break;
+					case "RESIZE":
+						handleResize(msg as ResizeMessage, ctx);
+						break;
+					case "FILES_PANEL":
+						handleFilesPanel(msg as FilesPanelMessage, ctx);
+						break;
+					case "WRITE_CLAIM":
+						handleWriteClaim(msg as WriteClaimMessage, ctx);
+						break;
+					case "WRITE_RELEASE":
+						handleWriteRelease(msg as WriteReleaseMessage, ctx);
+						break;
+					case "WRITE_FORCE":
+						handleWriteForce(msg as WriteForceMessage, ctx);
+						break;
+					case "WRITE_GRANT":
+						handleWriteGrant(msg as WriteGrantMessage, ctx);
+						break;
+					case "WRITE_DENY":
+						handleWriteDeny(msg as WriteDenyMessage, ctx);
+						break;
+					case "PING":
+						handlePing(msg, ctx);
+						break;
+					case "AUTH_PROMPT_RESPONSE":
+						handleAuthPromptResponse(msg as AuthPromptResponseMessage, ctx);
+						break;
+					case "HOST_VERIFY_RESPONSE":
+						handleHostVerifyResponse(msg as HostVerifyResponseMessage, ctx);
+						break;
+					case "AGENT_BINARY_VERIFY_RESPONSE":
+						handleAgentBinaryVerifyResponse(msg as AgentBinaryVerifyResponseMessage, ctx);
+						break;
+					case "TEST_CONNECT":
+						handleTestConnect(msg as TestConnectMessage, ctx);
+						break;
+					case "TRANSFER_START":
+					case "TRANSFER_RESOLVE":
+					case "TRANSFER_RETRY":
+					case "TRANSFER_CANCEL":
+					case "TRANSFER_RESUME":
+					case "TRANSFER_DISCARD":
+						handleTransfer(msg as TransferMessage, ctx);
+						break;
+					default:
+						server.log.warn(
+							{ msgType: msg.type, keys: Object.keys(msg) },
+							"ws: unhandled message type",
+						);
+						break;
+				}
+			} catch (err) {
+				// An exception that left this listener stopped the hub process. It ends
+				// this socket instead; the log names the error and the frame's type,
+				// never the frame.
+				server.log.error(
+					{ err, clientId, msgType: isProtocolFrame(msg) ? msg.type : undefined },
+					"ws: frame handling failed; closing socket",
+				);
+				try {
+					end(WS_CLOSE_INTERNAL_ERROR, "INTERNAL_ERROR");
+				} catch {
+					// end() closes the socket in its finally; a second release failure adds
+					// nothing to the one just logged.
+				}
 			}
 		});
 
@@ -538,7 +627,13 @@ export async function registerWsRoutes(
 			let closed = 0;
 			for (const entry of tokenSockets.values()) {
 				if (entry.tokenId !== tokenId) continue;
-				entry.refuse("revoked");
+				try {
+					entry.refuse("revoked");
+				} catch (err) {
+					// Its socket is closed all the same (end() closes in a finally); the
+					// token's other sockets must still be closed.
+					server.log.error({ err, tokenId }, "ws-auth: releasing a revoked token's socket failed");
+				}
 				closed++;
 			}
 			if (closed > 0) {

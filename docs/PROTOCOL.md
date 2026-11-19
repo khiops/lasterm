@@ -875,6 +875,11 @@ the sockets it authenticated at once, without waiting for their next frame. Outp
 not re-checked, so an idle socket whose token merely expires keeps receiving it until the client
 sends a frame or disconnects.
 
+A first frame that is not an object with a string `type` is answered as one that is not AUTH, and
+an AUTH whose `token` is not a string as an unknown token: `AUTH_FAIL` and the socket closed. If
+the hub fails while handling a frame, it closes that socket alone with `1011` (Internal Error),
+reason `INTERNAL_ERROR`; the client may reconnect.
+
 ### 4.2 ATTACH / ATTACH_OK / DETACH
 
 ```typescript
@@ -1572,7 +1577,7 @@ An unknown or refused token is not an ERROR: it is `AUTH_FAIL` (§ 4.1).
 
 | Code | Meaning |
 |------|---------|
-| `MALFORMED_MESSAGE` | The frame does not decode as MessagePack |
+| `MALFORMED_MESSAGE` | The frame does not decode as MessagePack, or, after AUTH, decodes to something that is not an object with a string `type` |
 | `INVALID_INPUT` | A field the hub checks is refused: an id that is not a ULID, `cols` or `rows`, `shell`, `cwd`, `env`, INPUT over 64 KiB, a prompt's answer |
 | `CHANNEL_NOT_FOUND` | ATTACH on a terminal the hub has no record of (§ 4.2) |
 | `CHANNEL_DEAD` | ATTACH on a terminal that has ended; carries `channel_id` and `last_output`, what it last printed (§ 4.2, #927) |

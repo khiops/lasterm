@@ -53,14 +53,26 @@ export class StateBroadcaster {
 	removeClient(clientId: string): void {
 		const client = this.ctx.clients.get(clientId);
 		if (!client) return;
-		// Copy set to avoid mutating while iterating
-		for (const channelId of [...client.attachedChannels]) {
-			this.detachClient(clientId, channelId);
-		}
 		// NOTE: auth-prompt cancellation/retargeting is owned by SessionManager.removeClient,
 		// which must run BEFORE this call. Do NOT cancel prompts here — the retarget logic
 		// in session-manager.removeClient needs the pending entries to still be present.
-		this.ctx.clients.delete(clientId);
+		let failure: { error: unknown } | undefined;
+		try {
+			// Copy set to avoid mutating while iterating. A detach that throws (its
+			// status write on a failing meta.db) does not stop the others.
+			for (const channelId of [...client.attachedChannels]) {
+				try {
+					this.detachClient(clientId, channelId);
+				} catch (error) {
+					failure ??= { error };
+				}
+			}
+		} finally {
+			// A client left here is counted as connected by getOthersCount, and quit
+			// would answer 409 for a socket that is gone.
+			this.ctx.clients.delete(clientId);
+		}
+		if (failure) throw failure.error;
 	}
 
 	getClientsForChannel(channelId: string): WsClient[] {

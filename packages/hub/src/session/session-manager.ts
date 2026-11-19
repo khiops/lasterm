@@ -708,16 +708,19 @@ export class SessionManager {
 	}
 
 	removeClient(clientId: string): void {
-		this.ctx.pastes?.clientGone(clientId);
-		promptClientDisconnect(this.ctx, clientId, (newClientId, msg) => {
-			const newClient = this.ctx.clients.get(newClientId);
-			newClient?.send(msg as unknown as ProtocolMessage);
-		});
-
-		// broadcaster.removeClient runs LAST — after all retargeting — so that
-		// ctx.clients still contains the departing client while PromptContext ops
-		// send PROMPT_CANCEL and retarget prompts.
-		this.broadcaster.removeClient(clientId);
+		try {
+			this.ctx.pastes?.clientGone(clientId);
+			promptClientDisconnect(this.ctx, clientId, (newClientId, msg) => {
+				const newClient = this.ctx.clients.get(newClientId);
+				newClient?.send(msg as unknown as ProtocolMessage);
+			});
+		} finally {
+			// broadcaster.removeClient runs LAST — after all retargeting — so that
+			// ctx.clients still contains the departing client while PromptContext ops
+			// send PROMPT_CANCEL and retarget prompts. It runs even when those threw:
+			// a client left in ctx.clients is counted as still connected.
+			this.broadcaster.removeClient(clientId);
+		}
 	}
 
 	getOthersCount(callerClientId?: string): number {

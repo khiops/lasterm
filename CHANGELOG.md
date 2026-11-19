@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.19.0](https://github.com/khiops/lasterm/compare/v0.18.1...v0.19.0) (2026-11-19)
+
+
+### Features
+
+* **hub:** reach a ProxyJump that names a saved bastion with its own user or port ([#1047](https://github.com/khiops/lasterm/issues/1047)) ([#1074](https://github.com/khiops/lasterm/issues/1074)) ([3eb3852](https://github.com/khiops/lasterm/commit/3eb38527e6d2f3c9ba1c4b25b2eae37c7e911bf2))
+
+
+### Bug Fixes
+
+* **hub:** one bearer check for REST, the agent routes and the WebSocket ([#1079](https://github.com/khiops/lasterm/issues/1079)) ([a74f482](https://github.com/khiops/lasterm/commit/a74f482f4bd9759c5bbe57a5c970b276d6984555))
+* the desktop loads served assets through the relay as counted blob URLs, never with the asset token ([#1076](https://github.com/khiops/lasterm/issues/1076)) ([6dac392](https://github.com/khiops/lasterm/commit/6dac3925cf49bffe9949fd24e647c027c1f8390a))
+
+
+### Documentation
+
+* document the winget install of the Store package ([#620](https://github.com/khiops/lasterm/issues/620)) ([#1072](https://github.com/khiops/lasterm/issues/1072)) ([c6cfa9c](https://github.com/khiops/lasterm/commit/c6cfa9cafecdfcb60082e7ea05941184899c1049))
+* **root:** Store news for the wallpaper and asset lifetime fix ([#194](https://github.com/khiops/lasterm/issues/194)) ([#1078](https://github.com/khiops/lasterm/issues/1078)) ([6aa25a5](https://github.com/khiops/lasterm/commit/6aa25a56cb44689f7daf926e7524e455838aa597))
+
 ## [0.18.1](https://github.com/khiops/lasterm/compare/v0.18.0...v0.18.1) (2026-11-18)
 
 

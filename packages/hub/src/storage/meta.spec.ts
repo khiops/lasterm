@@ -1396,6 +1396,26 @@ describe("MetaDAL — Host Group Operations", () => {
 
 	// The override is tri-state: all three stored answers must copy, not fall back
 	// to the current global default while a host is duplicated.
+	it("duplicateHost keeps the jump's own user and port with its host (#1047)", () => {
+		const jump = dal.createHost({ type: "ssh", label: "dup-jump", sshHost: "gw.example" });
+		const original = dal.createHost({
+			type: "ssh",
+			label: "dup-jumped",
+			sshHost: "10.0.0.13",
+			sshProxyHostId: jump.id,
+			sshProxyUser: "relay",
+			sshProxyPort: 2200,
+		});
+
+		const copy = dal.duplicateHost(original.id);
+
+		expect(copy).toMatchObject({
+			sshProxyHostId: jump.id,
+			sshProxyUser: "relay",
+			sshProxyPort: 2200,
+		});
+	});
+
 	it.each([true, false, null])("duplicateHost preserves sshRemoteDaemon %j", (sshRemoteDaemon) => {
 		const original = dal.createHost({
 			type: "ssh",

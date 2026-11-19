@@ -61,6 +61,13 @@ export interface HostFormData {
 	/** The host this one is reached through: "" none, an id, or an address. */
 	sshProxy: string;
 	/**
+	 * The user and port the jump is reached with when it is a saved host and
+	 * the `ProxyJump` wrote its own (#1047): "" and null follow the host. Set by
+	 * picking an entry, cleared when the jump field changes.
+	 */
+	sshProxyUser: string;
+	sshProxyPort: number | null;
+	/**
 	 * Whether this host may keep an agent of its own running, so its terminals
 	 * outlive the connection. "" follows the global setting.
 	 */
@@ -92,6 +99,8 @@ function formOf(host?: Host): HostFormData {
 		sshAuth: host?.sshAuth ?? "key",
 		sshKeyPath: host?.sshKeyPath ?? "",
 		sshProxy: host?.sshProxyHostId ?? host?.sshProxySpec ?? "",
+		sshProxyUser: host?.sshProxyHostId ? (host.sshProxyUser ?? "") : "",
+		sshProxyPort: host?.sshProxyHostId ? (host.sshProxyPort ?? null) : null,
 		sshRemoteDaemon:
 			host === undefined
 				? "yes"
@@ -137,7 +146,7 @@ function setField<K extends keyof HostFormData>(
 /** Sent together or not at all: each pair is one setting to the hub. */
 const LINKED_FIELDS = [
 	["icon_type", "icon_value"],
-	["ssh_proxy_host_id", "ssh_proxy_spec"],
+	["ssh_proxy_host_id", "ssh_proxy_spec", "ssh_proxy_user", "ssh_proxy_port"],
 ] as const;
 
 /**
@@ -184,10 +193,16 @@ export function useHostForm(editHost?: Host) {
 	const proxyIsHostId = ref(false);
 	watch(
 		() => form.value.sshProxy,
-		(value) => {
+		(value, previous) => {
 			const chosen = value.trim();
 			proxyIsHostId.value =
 				chosen !== "" && hostsStore.hosts.some((candidate) => candidate.id === chosen);
+			// The jump's own user and port belong to the jump they were picked
+			// with: another choice starts from its host's (#1047).
+			if (previous !== undefined && previous !== value) {
+				form.value.sshProxyUser = "";
+				form.value.sshProxyPort = null;
+			}
 		},
 		{ immediate: true, flush: "sync" },
 	);
@@ -357,7 +372,14 @@ export function useHostForm(editHost?: Host) {
 	// A completed test only describes the connection details it tested. Clear
 	// it before a synchronous save can use it after any detail changes.
 	watch(
-		() => [form.value.sshHost, form.value.sshPort, form.value.sshUser, form.value.sshProxy],
+		() => [
+			form.value.sshHost,
+			form.value.sshPort,
+			form.value.sshUser,
+			form.value.sshProxy,
+			form.value.sshProxyUser,
+			form.value.sshProxyPort,
+		],
 		() => {
 			lastCompletedTestPlatformOs.value = undefined;
 		},
@@ -447,7 +469,9 @@ export function useHostForm(editHost?: Host) {
 		// link reaches what ssh would, else the ProxyJump as written (#1040, #1042).
 		const bastion =
 			entry.proxyJump == null ? undefined : jumpLinkFor(entry.proxyJump, hostsStore.hosts);
-		form.value.sshProxy = bastion?.id ?? entry.proxyJump ?? "";
+		form.value.sshProxy = bastion?.bastion.id ?? entry.proxyJump ?? "";
+		form.value.sshProxyUser = bastion?.user ?? "";
+		form.value.sshProxyPort = bastion?.port ?? null;
 		// The field may already hold that text, which the watch above does not
 		// see as a change: a linked pick is a host id whatever was there before.
 		if (bastion) proxyIsHostId.value = true;
@@ -458,7 +482,10 @@ export function useHostForm(editHost?: Host) {
 		if (!form.value.label) form.value.label = name;
 	}
 
-	function formProxyFields(chosen = form.value.sshProxy) {
+	function formProxyFields(
+		chosen = form.value.sshProxy,
+		f: HostFormData = form.value,
+	): ReturnType<typeof proxyFields> & { ssh_proxy_user?: string; ssh_proxy_port?: number } {
 		const selectedEntry = sshConfigEntries.value.find(
 			(entry) => entry.name === selectedSshConfigHost.value,
 		);
@@ -469,7 +496,18 @@ export function useHostForm(editHost?: Host) {
 		) {
 			return { ssh_proxy_host_id: null, ssh_proxy_spec: selectedEntry.proxyJump };
 		}
-		return proxyFields(chosen, proxyIsHostId.value ? [chosen.trim()] : []);
+		const fields = proxyFields(chosen, proxyIsHostId.value ? [chosen.trim()] : []);
+		// The jump's own user and port go with a saved host only; unset, they
+		// are left out, which an edit sends as null (`changedFields`).
+		// `f` other than the form is the baseline an edit is compared with, whose
+		// jump was a saved host when it carries these.
+		return fields.ssh_proxy_host_id || (f !== form.value && f.sshProxy.trim() !== "")
+			? {
+					...fields,
+					...(f.sshProxyUser !== "" && { ssh_proxy_user: f.sshProxyUser }),
+					...(f.sshProxyPort !== null && { ssh_proxy_port: f.sshProxyPort }),
+				}
+			: fields;
 	}
 
 	async function testConnectionInline(): Promise<void> {
@@ -496,7 +534,10 @@ export function useHostForm(editHost?: Host) {
 			const sshKeyPath = form.value.sshKeyPath;
 			const sshUser = form.value.sshUser;
 			const sshProxy = form.value.sshProxy;
+			const { sshProxyUser, sshProxyPort } = form.value;
 			const proxy = formProxyFields(sshProxy);
+			const proxyUser = proxy.ssh_proxy_user;
+			const proxyPort = proxy.ssh_proxy_port;
 			const sshConfigHost = pickedSshConfigHost.value;
 			const connectTimeoutSeconds = connectTimeoutFromText(form.value.connectTimeout);
 
@@ -538,6 +579,8 @@ export function useHostForm(editHost?: Host) {
 					...(sshUser && { sshUser }),
 					...(proxy.ssh_proxy_host_id && { sshProxyHostId: proxy.ssh_proxy_host_id }),
 					...(proxy.ssh_proxy_spec && { sshProxySpec: proxy.ssh_proxy_spec }),
+					...(proxyUser && { sshProxyUser: proxyUser }),
+					...(proxyPort && { sshProxyPort: proxyPort }),
 					...(sshConfigHost && { sshConfigHost }),
 					...(connectTimeoutSeconds !== null && { connectTimeoutSeconds }),
 				});
@@ -553,7 +596,9 @@ export function useHostForm(editHost?: Host) {
 					form.value.sshHost === host &&
 					form.value.sshPort === sshPort &&
 					form.value.sshUser === sshUser &&
-					form.value.sshProxy === sshProxy
+					form.value.sshProxy === sshProxy &&
+					form.value.sshProxyUser === sshProxyUser &&
+					form.value.sshProxyPort === sshProxyPort
 						? result.platform?.os
 						: undefined;
 			}
@@ -594,7 +639,7 @@ export function useHostForm(editHost?: Host) {
 				// One of the two, never both: an id names a host this hub knows,
 				// anything else is an address written the way ssh_config writes
 				// it. Empty clears whichever was set.
-				...formProxyFields(f.sshProxy),
+				...formProxyFields(f.sshProxy, f),
 				// An unavailable setting is recorded as null for a new Windows host.
 				// On an existing one, leave the stored answer alone instead.
 				...(!connectedThroughRemoteDaemon.value && (!isEdit || !sshRemoteDaemonUnavailable.value)

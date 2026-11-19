@@ -162,7 +162,9 @@ CREATE TABLE hosts (
   agent_sha256 TEXT DEFAULT NULL,                        -- pinned SHA-256 of its agent binary
   ssh_proxy_host_id TEXT REFERENCES hosts(id) ON DELETE SET NULL,  -- a jump this hub knows
   ssh_proxy_spec TEXT,                                   -- or a jump as user@host:port
-  ssh_proxy_fingerprint TEXT,                            -- that spec jump's pinned key
+  ssh_proxy_fingerprint TEXT,                            -- that spec jump's pinned key, or a saved jump's on another port than its own
+  ssh_proxy_user TEXT,                                   -- with ssh_proxy_host_id: the user the jump is reached as; NULL follows the host (029, #1047)
+  ssh_proxy_port INTEGER,                                -- with ssh_proxy_host_id: the port it is reached on; NULL follows the host (029, #1047)
   ssh_remote_daemon INTEGER,                             -- NULL follows [ssh] remote_daemon (#79)
   connect_timeout_seconds INTEGER,                       -- 20-120 s per connection wait; NULL: ssh_config ConnectTimeout >= 20 s, else the hub's limits (#1034)
   discovered_default_shell TEXT                          -- the default shell its agent reported (023)
@@ -669,6 +671,7 @@ packages/hub/src/storage/migrations/
 │   ├── 026-transfers.sql
 │   ├── 027-ssh-auth-for-every-ssh-host.sql
 │   ├── 028-host-connect-timeout.sql
+│   ├── 029-proxy-jump-user-port.sql
 │   └── ...
 └── spool/
     ├── 001-initial.sql
@@ -709,6 +712,7 @@ them. `spool.db` was not squashed: it still has its one migration.
 | `026-transfers.sql` | Adds `transfers` and `transfer_items` (§ 3.9), where uploads are kept so that a restart, a crash or an update loses none (#860). Nothing else is touched. A hub before #860, run again on the database, opens it as one ahead of its migrations (§ 9.1), never names the two tables, and keeps its uploads in memory as it did; a host it deletes takes its uploads' rows with it, through the cascades. Back on a hub with #860, what it left there is read as before. |
 | `027-ssh-auth-for-every-ssh-host.sql` | Gives every SSH host stored without `ssh_auth` a method, by the rule `POST /api/hosts` now applies to one sent without it (#917): `key` when its `ssh_key_path` holds something other than ASCII whitespace, `agent` otherwise. Before, such a host was read as key auth when connected to and as the agent when gone through. No other column or row is touched, `updated_at` included; a local host keeps its NULL. A hub before #917, run again on the database, reads each method as stored, and can store an SSH host without one again: back on a hub with #917, connecting to it or through it is refused. |
 | `028-host-connect-timeout.sql` | Adds `hosts.connect_timeout_seconds`, NULL for every host already stored (#1034): how long each wait of a connection to the host may last, 20-120 s. NULL keeps the limits as before, or takes `ConnectTimeout` from `~/.ssh/config` when it is 20 s or more. A hub before #1034 ignores the column. |
+| `029-proxy-jump-user-port.sql` | Adds `hosts.ssh_proxy_user` and `hosts.ssh_proxy_port`, NULL for every host already stored (#1047): the user and port a jump linked to a saved host (`ssh_proxy_host_id`) is reached with when its `ProxyJump` wrote its own, over the saved host's. NULL follows the saved host. A hub before #1047 ignores the columns. |
 
 ## 10. Backup & Restore
 

@@ -1148,6 +1148,8 @@ describe("remembering a refused forwarding (#765)", () => {
 		["another port", { sshPort: 2222 }],
 		["another key", { sshKeyPath: "~/.ssh/other" }],
 		["another jump", { sshProxySpec: "bastion.example" }],
+		["another user for the jump", { sshProxyHostId: "gw", sshProxyUser: "relay" }],
+		["another port for the jump", { sshProxyHostId: "gw", sshProxyPort: 2200 }],
 		["its own answer about a daemon changed", { sshRemoteDaemon: null }],
 	] as const)("tries the daemon again through %s", (_what, change) => {
 		const refusals: SocketForwardingRefusals = new Map();

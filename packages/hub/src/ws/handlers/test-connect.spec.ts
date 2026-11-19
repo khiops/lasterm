@@ -40,6 +40,26 @@ describe("TEST_CONNECT proxy validation", () => {
 		});
 		expect(handle).not.toHaveBeenCalled();
 	});
+	it.each([
+		{ sshProxyHostId: "jump", sshProxyPort: 0 },
+		{ sshProxyHostId: "jump", sshProxyPort: 65536 },
+		{ sshProxyHostId: "jump", sshProxyPort: 22.5 },
+		{ sshProxyHostId: "jump", sshProxyPort: "2200" },
+		{ sshProxyHostId: "jump", sshProxyUser: " " },
+		{ sshProxyHostId: "jump", sshProxyUser: 5 },
+	])("answers an invalid jump user or port %j with request-scoped failure or ERROR", (fields) => {
+		const { ctx, send, handle } = setup();
+		handleTestConnect({ ...message, ...fields } as TestConnectMessage, ctx);
+		expect(send).toHaveBeenCalledTimes(1);
+		expect(handle).not.toHaveBeenCalled();
+	});
+	it("forwards a jump's own user and port", () => {
+		const { ctx, send, handle } = setup();
+		const sent = { ...message, sshProxyHostId: "jump", sshProxyUser: "relay", sshProxyPort: 2200 };
+		handleTestConnect(sent, ctx);
+		expect(send).not.toHaveBeenCalled();
+		expect(handle).toHaveBeenCalledWith("client", sent);
+	});
 	it.each([{}, { sshProxyHostId: "jump" }, { sshProxySpec: "user@jump" }])(
 		"forwards valid proxy %j",
 		(fields) => {

@@ -1107,6 +1107,9 @@ export interface TestConnectMessage {
 	sshUser?: string;
 	sshProxyHostId?: string;
 	sshProxySpec?: string;
+	/** With `sshProxyHostId`: the user and port the jump is reached with over its host's (#1047). */
+	sshProxyUser?: string;
+	sshProxyPort?: number;
 	/**
 	 * The `~/.ssh/config` alias of the entry the host was picked from, for the
 	 * settings the hub resolves through it (`IdentityAgent none`, known_hosts

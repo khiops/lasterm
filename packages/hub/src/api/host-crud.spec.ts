@@ -92,6 +92,70 @@ describe("POST /api/hosts stores the jump it is sent (#1042)", () => {
 		expect(stored?.sshProxyHostId).toBeUndefined();
 	});
 
+	// `relay@gw:2200` is `ssh -l relay -p 2200 gw` (#1047).
+	it("stores the user and port a linked jump is reached with, and clears them with null", async () => {
+		const jumpId = await createHost({
+			type: "ssh",
+			label: "bastion",
+			ssh_auth: "agent",
+			ssh_host: "10.0.0.1",
+		});
+		const created = await send("POST", "/api/hosts", {
+			value: {
+				type: "ssh",
+				label: "target",
+				ssh_host: "target.example.org",
+				ssh_auth: "agent",
+				ssh_proxy_host_id: jumpId,
+				ssh_proxy_user: "relay",
+				ssh_proxy_port: 2200,
+			},
+		});
+		expect(created.statusCode, created.body).toBe(201);
+		expect(created.json()).toMatchObject({ ssh_proxy_user: "relay", ssh_proxy_port: 2200 });
+		const id = created.json<{ id: string }>().id;
+		expect(meta.getHost(id)).toMatchObject({ sshProxyUser: "relay", sshProxyPort: 2200 });
+
+		const cleared = await send("PUT", `/api/hosts/${id}`, {
+			value: { ssh_proxy_user: null, ssh_proxy_port: null },
+		});
+		expect(cleared.statusCode, cleared.body).toBe(200);
+		expect(meta.getHost(id)?.sshProxyUser).toBeUndefined();
+		expect(meta.getHost(id)?.sshProxyPort).toBeUndefined();
+	});
+
+	it("drops a jump's own user and port when a PUT names another jump without them", async () => {
+		const a = await createHost({ type: "ssh", ssh_auth: "agent", ssh_host: "a.example" });
+		const b = await createHost({ type: "ssh", ssh_auth: "agent", ssh_host: "b.example" });
+		const id = await createHost({
+			type: "ssh",
+			ssh_auth: "agent",
+			ssh_host: "target.example",
+			ssh_proxy_host_id: a,
+			ssh_proxy_user: "relay",
+			ssh_proxy_port: 2200,
+		});
+		const res = await send("PUT", `/api/hosts/${id}`, { value: { ssh_proxy_host_id: b } });
+		expect(res.statusCode, res.body).toBe(200);
+		expect(meta.getHost(id)?.sshProxyHostId).toBe(b);
+		expect(meta.getHost(id)?.sshProxyUser).toBeUndefined();
+		expect(meta.getHost(id)?.sshProxyPort).toBeUndefined();
+	});
+
+	it.each([0, 70000, 22.5, "2200"])("refuses %j as a linked jump's port", async (port) => {
+		const res = await send("POST", "/api/hosts", {
+			value: {
+				type: "ssh",
+				label: "target",
+				ssh_host: "target.example.org",
+				ssh_auth: "agent",
+				ssh_proxy_port: port,
+			},
+		});
+		expect(res.statusCode).toBe(400);
+		expect(res.json()).toEqual(refusal("ssh_proxy_port must be an integer between 1 and 65535"));
+	});
+
 	it("leaves a manual POST's literal ProxyJump unlinked", async () => {
 		await createHost({
 			type: "ssh",

@@ -125,6 +125,23 @@ describe("useHostForm", () => {
 		};
 	}
 
+	// A test describes the connection it tested, the jump's own port included (#1047).
+	it("forgets what a test found when the jump's own user or port changes after it", async () => {
+		const { form, sshRemoteDaemonUnavailable, testConnectionInline } = useHostForm();
+		form.value.sshHost = "10.0.0.1";
+		form.value.sshAuth = "password";
+		form.value.sshProxy = "01GWBASTION";
+		form.value.sshProxyPort = 2200;
+		const harness = testConnectionHarness();
+		const windows = testConnectionInline();
+		await harness.respondOk(0, "windows");
+		await windows;
+		expect(sshRemoteDaemonUnavailable.value).toBe(true);
+
+		form.value.sshProxyPort = 2201;
+		expect(sshRemoteDaemonUnavailable.value).toBe(false);
+	});
+
 	// The person cancelled the password or passphrase the test asked for:
 	// nothing failed, and nothing was learned (#815).
 	it("ends a test whose prompt was cancelled quietly, with no failure shown", async () => {
@@ -1551,16 +1568,43 @@ describe("the jump a picked entry is tested and stored through (#1040, #1042)", 
 		});
 	});
 
-	it("tests and stores a picked ProxyJump that differs from the bastion as written", async () => {
-		const form = picked("relay@gw");
+	// `relay@gw:2200` is `ssh -l relay -p 2200 gw`: the saved bastion, with the
+	// user and port the jump writes (#1047).
+	it("tests and stores a picked ProxyJump through the saved bastion with the user and port it writes", async () => {
+		const form = picked("relay@gw:2200");
 
 		const sent = await testRequest(form.testConnectionInline);
-		expect(sent.sshProxySpec).toBe("relay@gw");
-		expect(sent).not.toHaveProperty("sshProxyHostId");
-		expect(await addBody(form.save)).toMatchObject({
-			ssh_proxy_host_id: null,
-			ssh_proxy_spec: "relay@gw",
+		expect(sent).toMatchObject({
+			sshProxyHostId: "01GWBASTION",
+			sshProxyUser: "relay",
+			sshProxyPort: 2200,
 		});
+		expect(sent).not.toHaveProperty("sshProxySpec");
+		expect(await addBody(form.save)).toMatchObject({
+			ssh_proxy_host_id: "01GWBASTION",
+			ssh_proxy_spec: null,
+			ssh_proxy_user: "relay",
+			ssh_proxy_port: 2200,
+		});
+	});
+
+	it("sends no user or port for a picked ProxyJump that agrees with its bastion", async () => {
+		const body = await addBody(picked("gw").save);
+		expect(body).not.toHaveProperty("ssh_proxy_user");
+		expect(body).not.toHaveProperty("ssh_proxy_port");
+	});
+
+	it("drops the jump's own user and port once another jump is chosen", async () => {
+		const form = picked("relay@gw:2200");
+		form.form.value.sshProxy = "other.example";
+
+		const sent = await testRequest(form.testConnectionInline);
+		expect(sent.sshProxySpec).toBe("other.example");
+		expect(sent).not.toHaveProperty("sshProxyUser");
+		expect(sent).not.toHaveProperty("sshProxyPort");
+		const body = await addBody(form.save);
+		expect(body).not.toHaveProperty("ssh_proxy_user");
+		expect(body).not.toHaveProperty("ssh_proxy_port");
 	});
 
 	it("sends an edited jump to the test and the add alike", async () => {
@@ -1573,6 +1617,43 @@ describe("the jump a picked entry is tested and stored through (#1040, #1042)", 
 		expect(await addBody(form.save)).toMatchObject({
 			ssh_proxy_host_id: null,
 			ssh_proxy_spec: "base@gw:22",
+		});
+	});
+
+	describe("editing a host linked with the jump's own user and port (#1047)", () => {
+		const linked = {
+			...gw,
+			id: "01TARGET",
+			label: "target",
+			sshHost: "target.example",
+			sshAuth: "agent",
+			sshProxyHostId: "01GWBASTION",
+			sshProxyUser: "relay",
+			sshProxyPort: 2200,
+		} as Host;
+
+		it("leaves them as they are when the jump is not touched", async () => {
+			updateHostSpy.mockClear();
+			const edit = useHostForm(linked);
+			edit.form.value.label = "renamed";
+			await edit.save();
+			const body = updateHostSpy.mock.calls[0]?.[1] as Record<string, unknown>;
+			expect(body).toHaveProperty("label", "renamed");
+			for (const key of ["ssh_proxy_host_id", "ssh_proxy_user", "ssh_proxy_port"]) {
+				expect(body).not.toHaveProperty(key);
+			}
+		});
+
+		it("clears them when the jump is emptied", async () => {
+			updateHostSpy.mockClear();
+			const edit = useHostForm(linked);
+			edit.form.value.sshProxy = "";
+			await edit.save();
+			expect(updateHostSpy.mock.calls[0]?.[1]).toMatchObject({
+				ssh_proxy_host_id: null,
+				ssh_proxy_user: null,
+				ssh_proxy_port: null,
+			});
 		});
 	});
 

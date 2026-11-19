@@ -37,6 +37,10 @@ export interface CreateHostBody {
 	ssh_user?: string | null;
 	ssh_proxy_host_id?: string | null;
 	ssh_proxy_spec?: string | null;
+	/** The user a jump linked to a saved host is reached with, over the host's own (#1047). */
+	ssh_proxy_user?: string | null;
+	/** The port it is reached on, over the host's own (#1047). */
+	ssh_proxy_port?: number | null;
 	ssh_remote_daemon?: boolean | null;
 	/** 20-120 whole seconds; null or absent for the default (#1034). */
 	connect_timeout_seconds?: number | null;
@@ -68,6 +72,10 @@ export interface UpdateHostBody {
 	ssh_user?: string | null;
 	ssh_proxy_host_id?: string | null;
 	ssh_proxy_spec?: string | null;
+	/** The user a jump linked to a saved host is reached with, over the host's own (#1047). */
+	ssh_proxy_user?: string | null;
+	/** The port it is reached on, over the host's own (#1047). */
+	ssh_proxy_port?: number | null;
 	ssh_remote_daemon?: boolean | null;
 	/** null clears it, back to the default (#1034). */
 	connect_timeout_seconds?: number | null;
@@ -95,10 +103,10 @@ export function validateHostColor(color: unknown): string | null {
  * is then reached on 22. Refusing null left a port the user had emptied in
  * Edit Host stored (#792).
  */
-export function validateSshPort(port: unknown): string | null {
+export function validateSshPort(port: unknown, field = "ssh_port"): string | null {
 	if (port === undefined || port === null) return null;
 	if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
-		return "ssh_port must be an integer between 1 and 65535";
+		return `${field} must be an integer between 1 and 65535`;
 	}
 	return null;
 }
@@ -162,6 +170,7 @@ const HOST_TEXT_FIELDS = [
 	"ssh_config_host",
 	"ssh_proxy_host_id",
 	"ssh_proxy_spec",
+	"ssh_proxy_user",
 	"icon_value",
 	"default_cwd",
 	"host_group_id",
@@ -243,7 +252,11 @@ function validateHostFields(fields: Record<string, unknown>): string | null {
 	if (timeout !== undefined && timeout !== null && !isConnectTimeoutSeconds(timeout)) {
 		return `connect_timeout_seconds must be an integer between ${CONNECT_TIMEOUT_MIN_SECONDS} and ${CONNECT_TIMEOUT_MAX_SECONDS}`;
 	}
-	return validateSshPort(fields.ssh_port) ?? validateHostColor(fields.color);
+	return (
+		validateSshPort(fields.ssh_port) ??
+		validateSshPort(fields.ssh_proxy_port, "ssh_proxy_port") ??
+		validateHostColor(fields.color)
+	);
 }
 
 /** How an SSH host is reached and signs in, its fields already checked one by one. */

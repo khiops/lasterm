@@ -134,6 +134,8 @@ export function registerHostCrudRoutes(
 			...(body.ssh_user !== undefined && { sshUser: body.ssh_user }),
 			...(body.ssh_proxy_host_id !== undefined && { sshProxyHostId: body.ssh_proxy_host_id }),
 			...(body.ssh_proxy_spec !== undefined && { sshProxySpec: body.ssh_proxy_spec }),
+			...(body.ssh_proxy_user !== undefined && { sshProxyUser: body.ssh_proxy_user }),
+			...(body.ssh_proxy_port !== undefined && { sshProxyPort: body.ssh_proxy_port }),
 			...(body.ssh_remote_daemon !== undefined && { sshRemoteDaemon: body.ssh_remote_daemon }),
 			...(body.connect_timeout_seconds !== undefined && {
 				connectTimeoutSeconds: body.connect_timeout_seconds,
@@ -287,6 +289,12 @@ export function registerHostCrudRoutes(
 			// it did not choose arrives as null, which clears it.
 			if (body.ssh_proxy_host_id !== undefined) updateInput.sshProxyHostId = body.ssh_proxy_host_id;
 			if (body.ssh_proxy_spec !== undefined) updateInput.sshProxySpec = body.ssh_proxy_spec;
+			// Written for the jump they came with: another jump starts from its host's.
+			const jumpChanged = body.ssh_proxy_host_id !== undefined || body.ssh_proxy_spec !== undefined;
+			if (body.ssh_proxy_user !== undefined) updateInput.sshProxyUser = body.ssh_proxy_user;
+			else if (jumpChanged) updateInput.sshProxyUser = null;
+			if (body.ssh_proxy_port !== undefined) updateInput.sshProxyPort = body.ssh_proxy_port;
+			else if (jumpChanged) updateInput.sshProxyPort = null;
 			if (body.ssh_remote_daemon !== undefined) {
 				updateInput.sshRemoteDaemon = body.ssh_remote_daemon;
 			}

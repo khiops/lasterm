@@ -1083,13 +1083,12 @@ async fn a_connection_that_ends_closes_its_paste() {
         let frames = next
             .read_through(|frame| is_about(frame, "PASTE_CLOSED", &terminal.channel_id))
             .await;
-        assert_eq!(frames.last().unwrap()["reason"].as_str(), Some("unknown"));
-        assert_eq!(
-            terminal.read(expected.len()).await,
-            expected,
-            "nothing more reached it"
-        );
+        let reason = frames.last().unwrap()["reason"].as_str().map(str::to_owned);
+        let after = terminal.read(expected.len()).await;
+        // Torn down first: a failed run leaves no terminal behind.
         tear_down(&daemon, &dir).await;
+        assert_eq!(reason.as_deref(), Some("unknown"), "run {run}");
+        assert_eq!(after, expected, "run {run}: nothing more reached it");
     }
 }
 

@@ -34,12 +34,13 @@
 //! record that no program reads as bytes, a Shift key released
 //! (`wake_record_for`); written at once, conhost holds it with the INPUT. It
 //! writes it only after an INPUT written whole, while no paste is in the
-//! queue, and never after an INPUT that ends with an end marker itself or in
-//! the middle of a character.
+//! queue, and never right after an INPUT that ends with an end marker itself
+//! or in the middle of a character.
 //! conhost can hold the end marker itself too, when nothing is written after
-//! it (#1075): when nothing is written for 50 ms after an end marker and no
-//! paste is in the queue, the writer writes the record once for that marker.
-//! The next INPUT is still followed by its own.
+//! it (#1075): once nothing has been written for 50 ms after an end marker,
+//! an INPUT's own included, and no paste is in the queue, the writer writes
+//! the record once for that marker. The next INPUT is still followed by its
+//! own.
 //!
 //! The queue lives as long as its channel is registered: removing the channel
 //! (DESTROY, its exit, the daemon's shutdown) drops it, which ends its writer
@@ -85,9 +86,10 @@ const WAKE_RECORD: &[u8] = b"\x1b[16;42;0;0;0;1_";
 /// marker (Windows 11 24H2, Windows Server 2025).
 const WAKE_FROM_BUILD: u32 = 26100;
 
-/// How long after the INPUT the record goes out. Written at once, it reaches
-/// conhost with the INPUT and is held with it; 20 ms and 50 ms after it, it
-/// released every run measured on 26100 (#1030).
+/// How long after the INPUT, or after a lone end marker, the record goes
+/// out. Written at once, it reaches conhost with the INPUT and is held with
+/// it; 20 ms and 50 ms after it, it released every run measured on 26100
+/// (#1030), and 50 ms after a lone end marker every run (#1075).
 const WAKE_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The record the writer of a terminal on Windows build `build` follows an
@@ -535,10 +537,10 @@ async fn write_input<W>(
                     entry = queue.recv() => entry,
                     () = tokio::time::sleep(WAKE_DELAY) => {
                         // Nothing came after the marker: the record follows
-                        // it, unless a paste is in the queue. The next INPUT
+                        // it once no paste is in the queue. The next INPUT
                         // still gets its own.
-                        due.idle = false;
                         if lock(&state).pastes.is_empty() {
+                            due.idle = false;
                             if let Err(error) = pty.write_all(record).await {
                                 refused(&channel_id, &state, &error);
                                 return;
@@ -2029,6 +2031,70 @@ mod tests {
         queue.offer_paste(CONN, 2, 1, b"z".to_vec(), true, || false, report);
         event_count(&events, 2).await;
         assert_eq!(settled(&pty).await, cat(&[&closed(), b"z"]));
+
+        // The paste then closed without writing anything: the record follows
+        // the marker after all.
+        let pty = Gate::opened();
+        let queue = waking(&pty);
+        close_a_paste(&queue, 1).await;
+        let (report, events) = recorder();
+        queue.offer_paste(CONN, 2, 0, Vec::new(), false, || false, report);
+        event_count(&events, 1).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(pty.taken(), closed(), "nothing inside the paste");
+        assert!(queue.cancel_paste(CONN, 2));
+        event_count(&events, 2).await;
+        assert_eq!(settled(&pty).await, cat(&[&closed(), REC]), "after it");
+    }
+
+    /// A PTY that takes `writes` writes, then refuses every write after.
+    #[derive(Clone)]
+    struct Breaks {
+        writes: Arc<AtomicUsize>,
+        taken: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl AsyncWrite for Breaks {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self
+                .writes
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_err()
+            {
+                return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+            }
+            self.taken.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A terminal gone when the record after a lone end marker is written
+    /// closes the queue, as any refused write does.
+    #[tokio::test]
+    async fn a_refused_record_after_a_lone_end_marker_closes_the_queue() {
+        // The start marker, "first" and the end marker; the record refused.
+        let pty = Breaks {
+            writes: Arc::new(AtomicUsize::new(3)),
+            taken: Arc::default(),
+        };
+        let queue = InputQueue::start_waking("breaks", pty.clone(), 1 << 20, Some(REC));
+        close_a_paste(&queue, 1).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(*pty.taken.lock().unwrap(), closed());
+        assert_eq!(queue.offer(b"x".to_vec()), Offer::Closed);
+        assert_eq!(queue.queued(), 0);
     }
 
     /// Nothing without a record to write.

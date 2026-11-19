@@ -41,8 +41,8 @@
 //! an INPUT's own included, and no paste is in the queue, the writer writes
 //! the record once for that marker. The next INPUT is still followed by its
 //! own.
-//! Neither record is a guarantee. The 50 ms were measured on one conhost
-//! (10.0.26100.9818 and .9949), and they are counted from the write the
+//! Neither record is a guarantee. The 50 ms were measured only on 26100's
+//! conhost 10.0.26100.9818 and .9949, and they are counted from the write the
 //! agent hands its PTY: a ConPTY taking no input at that moment (its output
 //! held back) takes the input and its record together, and conhost can
 //! still hold both. Both records go once 26100's inbox conhost no longer

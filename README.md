@@ -65,6 +65,15 @@ The only desktop package distributed is the one the Microsoft Store signs: the S
 installs and updates it, and the release workflow publishes no desktop installer
 (STORE-ONLY-DESKTOP in `docs/decisions.md`).
 
+From a terminal, winget installs the same Store package:
+
+```powershell
+winget install 9P82QRJ6VDWL --source msstore
+```
+
+`winget search lasterm --source msstore` lists it as `Lasterm 9P82QRJ6VDWL`. winget's default
+`winget` source holds no Lasterm manifest, so the `--source msstore` flag is required.
+
 ---
 
 ## Architecture

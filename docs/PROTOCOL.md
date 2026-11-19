@@ -2186,7 +2186,10 @@ Auth: `Authorization: Bearer <token>` (except `/health`).
 A bearer that is missing or malformed answers `401 AUTH_REQUIRED`, and one that is unknown,
 revoked, swept or expired answers `401 AUTH_INVALID`. A bearer the hub cannot check because its
 token store cannot be read answers `503 AUTH_UNAVAILABLE`: the request is still refused, but the
-token was not judged, and the client should keep it and retry.
+token was not judged, and the client should keep it and retry. The primary token (`auth.json`) is
+the exception: it never expires and cannot be revoked, so the hub accepts it without the store,
+compared with the value it holds. The header is exactly `Bearer <token>`; anything else is
+malformed.
 
 ### Pagination
 
@@ -2944,7 +2947,7 @@ Errors: `CHECKSUM_MISMATCH`/`CHECKSUM_MISSING` (422), `INSECURE_CACHE_DIR`/`ALRE
 }
 ```
 
-All agent-manager routes require `Authorization: Bearer <token>` (`AUTH_REQUIRED`, `AUTH_INVALID`, or `AUTH_UNAVAILABLE` with a 503 while the token store cannot be read). Mutation routes also enforce the Origin guard (`ORIGIN_FORBIDDEN`).
+All agent-manager routes require `Authorization: Bearer <token>` (`AUTH_REQUIRED`, `AUTH_INVALID`, or `AUTH_UNAVAILABLE` with a 503 while the token store cannot be read, for any token but the primary, which is accepted then as on every REST route). Mutation routes also enforce the Origin guard (`ORIGIN_FORBIDDEN`).
 
 **Error responses:**
 ```typescript

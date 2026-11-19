@@ -205,7 +205,7 @@ export function registerFileRoutes(server: FastifyInstance, deps: FileRouteDeps)
 				"Name the window that holds this terminal's write lock in X-Lasterm-Client-Id",
 			);
 		}
-		const check = deps.writerCheck(channelId, clientId, request.authTokenRecord?.id ?? null);
+		const check = deps.writerCheck(channelId, clientId, request.authTokenId);
 		if (check !== "holder") {
 			return refuse(
 				reply,

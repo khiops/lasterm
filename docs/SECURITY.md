@@ -99,8 +99,13 @@
 - WSS: First message must be `AUTH { token }`. Connection closed if invalid. The token is checked
   again before each later frame is acted on, and the socket is closed once the token no longer
   validates. Revoking a token closes the sockets it opened at once (PROTOCOL.md § 4.1).
+- One bearer verdict for REST, the agent routes and the WebSocket (`judgeCredential` in `auth.ts`):
+  the token store's answer when it gives one; while it cannot answer, the primary token is accepted
+  on REST and the agent routes, compared with `auth.json`'s value (the store adds nothing to a token
+  that never expires and cannot be revoked), and every other credential is refused unjudged; the
+  WebSocket refuses the primary too then, since everything a socket serves reads the same database.
 - Token comparison: constant-time (crypto.timingSafeEqual). A token the hub holds in memory — the
-  primary token on the agent routes, the owner token of a shutdown or quit, the asset token of a
+  primary token judged without the store, the owner token of a shutdown or quit, the asset token of a
   public URL — is compared through `tokensEqual` in `auth.ts`. A credential the store checks is
   looked up by its SHA-256 hash, which a guess cannot steer. A spec refuses a plain `===` against a
   token anywhere in the hub's sources (#514).
@@ -692,7 +697,7 @@ names that client in a later `write_lock.force`. `tokenId` is the credential's r
 |-------|---------|--------|---------------|
 | Hub start | `hub.start` | `bindAddress`, `port`, `permissionsCheck` (`passed`; `not_checked_on_windows`, § 2.2) | The runtime record is published and the hub is serving |
 | Auth success | `auth.success` | `via` (`ws`, `rest`), `sourceIp`, `tokenId`, `clientId` (WebSocket) | Every accepted WebSocket AUTH. On REST, the first accepted request of each credential from each address in a hub run: every request carries the bearer, and recording each would bury the rest |
-| Auth failure | `auth.failure` | `via` (`ws`, `rest`, `pair`), `sourceIp`, `reason`, `clientId` (WebSocket), `tokenStatus` (with `invalid_token`) | REST: `missing_header`, `malformed_header`, `invalid_token`, `database_unavailable`. WebSocket: `auth_timeout`, `not_auth_first`, `invalid_token`, `database_unavailable`, `token_no_longer_valid`. Pairing verification: `rate_limited`, `invalid_format`, `unknown_code`, `code_used`, `code_expired`. `invalid_token` is refused the same way whatever its cause, and `tokenStatus` says which: `unknown` (no credential has that value), `revoked`, `swept` (by a restart) or `expired`. A revoked or swept token still being offered is a device that kept a credential it was meant to lose. `token_no_longer_valid` is a WebSocket the hub had accepted and then closed because its token stopped validating, on its next frame or at once when the token was revoked; `tokenStatus` says why, and `clientId` matches the `auth.success` that opened it. `database_unavailable` is a hub built with no token store at all; a store that exists but cannot be read is not an authentication failure (below) |
+| Auth failure | `auth.failure` | `via` (`ws`, `rest`, `pair`), `sourceIp`, `reason`, `clientId` (WebSocket), `tokenStatus` (with `invalid_token`) | REST: `missing_header`, `malformed_header`, `invalid_token`. WebSocket: `auth_timeout`, `not_auth_first`, `invalid_token`, `database_unavailable`, `token_no_longer_valid`. Pairing verification: `rate_limited`, `invalid_format`, `unknown_code`, `code_used`, `code_expired`. `invalid_token` is refused the same way whatever its cause, and `tokenStatus` says which: `unknown` (no credential has that value), `revoked`, `swept` (by a restart) or `expired`. A revoked or swept token still being offered is a device that kept a credential it was meant to lose. `token_no_longer_valid` is a WebSocket the hub had accepted and then closed because its token stopped validating, on its next frame or at once when the token was revoked; `tokenStatus` says why, and `clientId` matches the `auth.success` that opened it. `database_unavailable` is a WebSocket on a hub built with no token store at all, where REST accepts the primary token alone and refuses anything else as `invalid_token`; a store that exists but cannot be read is not an authentication failure (below) |
 | Pairing code generated | `pairing.generated` | `pairingId`, `expiresAt`, `sourceIp` of the request | `POST /api/pair` issues a code |
 | Pairing code verified | `pairing.verified` | `pairingId`, `tokenId` of the token issued, `sourceIp` | `POST /api/pair/verify` redeems a code |
 | SSH connect | `ssh.connect` | `hostId`, `hostLabel`, `authMethod` (`agent`, `key`, `password`), `signer` (key auth only: `agent`, the SSH agent held the key and signed; `file`, the key file did, § 3.2) | A host session takes up an authenticated connection: its first connect and every reconnect. A Test connection is not recorded |
@@ -710,14 +715,16 @@ does (ERROR, or WARN for a 5xx a route chose), and the desktop moves `hub.log` t
 the same size (#525).
 
 **A token store that cannot be read is not recorded here.** While `meta.db` is closed, corrupt or
-locked, every credential is refused (503 on REST, a `1013` close on the WebSocket) without being
-judged. Nobody failed to authenticate, and one `auth.failure` per refused request would read as a
-burst of failures from every client, the pattern a brute-force alert looks for. The outage goes to
-the diagnostic log instead, once: ERROR when the store first fails to answer, WARN when it answers
-again, with the number of credentials refused meanwhile. The same holds for an open WebSocket closed
-because the store stopped answering. A store that can be read but not written accepts credentials
-and fails to record their use; that is a WARN once, and another when a use is recorded again, with
-the number that were not.
+locked, every credential but the primary token is refused (503 on REST and the agent routes, a
+`1013` close on the WebSocket) without being judged. The primary token is accepted on REST and the
+agent routes; the WebSocket closes with `1013` for it too. Nobody failed to authenticate, and one
+`auth.failure` per refused request would read as a burst of failures from every client, the
+pattern a brute-force alert looks for. The outage goes to the diagnostic log instead, once: ERROR
+when the store first fails to answer, WARN when it answers again, with the number of credentials
+refused meanwhile, zero when only the primary token was presented on REST. The same holds for an
+open WebSocket closed because the store stopped answering. A store that can be read but not
+written accepts credentials and fails to record their use; that is a WARN once, and another when a
+use is recorded again, with the number that were not.
 
 ### 7.2 What is NOT logged
 

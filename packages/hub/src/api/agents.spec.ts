@@ -120,6 +120,37 @@ describe("GET /api/agents/targets", () => {
 		}
 	});
 
+	it("takes the store's refusal as final, even for the value of the primary", async () => {
+		const cacheDir = makeTempDir();
+		// A store that answers but holds no primary row: what it refuses, nothing in
+		// memory may accept behind its back.
+		const dbs = openTestDatabases();
+		try {
+			server = Fastify({ logger: false });
+			registerAgentRoutes(server, {
+				authToken: TEST_TOKEN,
+				db: dbs.meta,
+				tokenTtlDays: 90,
+				getBinaryCacheDir: () => cacheDir,
+				hubVersion: HUB_VERSION,
+				hubPlatform: HUB_PLATFORM,
+				resolveAgentBinaryPath: () => BUNDLED_PATH,
+				versionReader: () => HUB_VERSION,
+			});
+
+			const res = await server.inject({
+				method: "GET",
+				url: "/api/agents/targets",
+				headers: { authorization: `Bearer ${TEST_TOKEN}` },
+			});
+
+			expect(res.statusCode).toBe(401);
+			expect(res.json().error.code).toBe("AUTH_INVALID");
+		} finally {
+			dbs.close();
+		}
+	});
+
 	it("rejects all Bearer tokens when no route auth token is configured", async () => {
 		server = Fastify({ logger: false });
 		registerAgentRoutes(server);

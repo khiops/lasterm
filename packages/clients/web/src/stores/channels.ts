@@ -1057,10 +1057,6 @@ export const useChannelsStore = defineStore("channels", () => {
 		// this window heard for it goes from its report (#932).
 		reports.value = new Map(reports.value).set(msg.channelId, { status: msg.status });
 
-		// Ignore channels for other hosts — this client may be viewing a
-		// different host and should not accumulate foreign channels.
-		if (activeHostId.value !== msg.hostId) return;
-
 		// M1: purge any buffered pendingStatuses entry for this channel —
 		// the channel is about to be materialized with its correct status from
 		// the message itself.  Leaving a stale entry would allow a later
@@ -1072,6 +1068,10 @@ export const useChannelsStore = defineStore("channels", () => {
 			next.delete(msg.channelId);
 			pendingStatuses.value = next;
 		}
+
+		// Ignore channels for other hosts — this client may be viewing a
+		// different host and should not accumulate foreign channels.
+		if (activeHostId.value !== msg.hostId) return;
 
 		// A channel this client already knows is either one it just fetched after
 		// its own SPAWN_OK, or a dead terminal that has just been brought back

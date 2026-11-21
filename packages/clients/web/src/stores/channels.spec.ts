@@ -2609,5 +2609,9 @@ describe("useChannelsStore — the end a window holds, kept and cleared (#932)",
 
 		expect(store.reportOf("ch-other")).toEqual({ status: "live" });
 		expect(store.endReasonOf("ch-other")).toBeUndefined();
+		// Nor in what waits for that host's list: the store holds no end for it
+		// any more, so an answer naming E1 is that end, not a repeat.
+		store.takeEndedAnswer("ch-other", { endId: "E1", exitCode: 3 });
+		expect(store.reportOf("ch-other")).toEqual({ status: "dead", exitCode: 3, endId: "E1" });
 	});
 });

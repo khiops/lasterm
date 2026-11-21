@@ -2894,11 +2894,11 @@ export class SessionManager {
 
 	/**
 	 * Stop the daemon `agent` reaches, and let go of the connection once it has.
-	 * `interruptUploads` runs when the agent stops, its connection ends (a
-	 * displaced one included, which this hub closes), or the wait ends with no
-	 * answer while it may be ending; never on a refusal, an error answer or a
-	 * `--stop` that failed with the connection still up, which stop nothing
-	 * (#1102).
+	 * `interruptUploads` runs on every answer but a refusal or an error, which
+	 * stop nothing and keep the connection: the agent stopped, its connection
+	 * ended (a displaced one included, which this hub closes), the wait ended
+	 * with no answer while it may be ending, or the STOP could not be sent,
+	 * the link being gone already (#1102).
 	 */
 	private async stopAgentToReplace(
 		hostId: string,
@@ -2918,9 +2918,7 @@ export class SessionManager {
 				this.releaseAgent(hostId, agent);
 			},
 		});
-		if (stop.kind !== "refused" && stop.kind !== "error" && stop.kind !== "unsent") {
-			interruptUploads();
-		}
+		if (stop.kind !== "refused" && stop.kind !== "error") interruptUploads();
 		switch (stop.kind) {
 			case "displaced":
 			case "closed_by_hub":
@@ -2955,69 +2953,40 @@ export class SessionManager {
 						"The agent did not say it had stopped. Its terminals may be ending; look again before asking twice.",
 				};
 			case "unsent":
-				// No connection to say it on: the out-of-band stop below still
-				// has the SSH connection, which is what it runs over.
+				// No connection to say it on, so the link the uploads used is
+				// gone: the out-of-band stop below runs over SSH.
 				break;
 		}
 
-		// The daemon stopping can end the SSH connection before `--stop` says
-		// how it went, or the connection may already be gone: the uploads end
-		// with it, so they are interrupted whenever it is found ended.
-		let closed = false;
-		const onClose = (): void => {
-			closed = true;
-			interruptUploads();
-		};
-		const ended = (): boolean => {
-			if (closed || !agent.connected) interruptUploads();
-			return closed || !agent.connected;
-		};
-		agent.prependListener("close", onClose);
-		try {
-			const remotePath = agent.remoteAgentPath;
-			if (remotePath === null) {
-				return {
-					replaced: false,
-					message: "This hub does not know where that agent is installed.",
-				};
-			}
-
-			const resolved = await agent.execOnHost(REMOTE_STATE_DIR_COMMAND);
-			const stateDir = resolved.stdout.trim();
-			if (resolved.exitCode !== 0 || !stateDir.startsWith("/")) {
-				return { replaced: false, message: "The host could not say where its agent's socket is." };
-			}
-
-			const stopCommand = await agent.execOnHost(
-				remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir)),
-			);
-			if (stopCommand.exitCode !== 0) {
-				if (ended()) {
-					return {
-						replaced: false,
-						message:
-							"The connection ended while the agent was being stopped, without confirming it stopped.",
-					};
-				}
-				return {
-					replaced: false,
-					message: `The agent would not stop (exit ${stopCommand.exitCode}). Nothing was changed.`,
-				};
-			}
-
-			// Its terminals ended with it. Letting go of the connection is what makes
-			// the next attach deploy and start the version this hub carries.
-			interruptUploads();
-			agent.close();
-			this.releaseAgent(hostId, agent);
-			return {
-				replaced: true,
-				message: "The agent was stopped. The next terminal on this host starts the current one.",
-			};
-		} finally {
-			agent.off("close", onClose);
-			ended();
+		const remotePath = agent.remoteAgentPath;
+		if (remotePath === null) {
+			return { replaced: false, message: "This hub does not know where that agent is installed." };
 		}
+
+		const resolved = await agent.execOnHost(REMOTE_STATE_DIR_COMMAND);
+		const stateDir = resolved.stdout.trim();
+		if (resolved.exitCode !== 0 || !stateDir.startsWith("/")) {
+			return { replaced: false, message: "The host could not say where its agent's socket is." };
+		}
+
+		const stopCommand = await agent.execOnHost(
+			remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir)),
+		);
+		if (stopCommand.exitCode !== 0) {
+			return {
+				replaced: false,
+				message: `The agent would not stop (exit ${stopCommand.exitCode}).`,
+			};
+		}
+
+		// Its terminals ended with it. Letting go of the connection is what makes
+		// the next attach deploy and start the version this hub carries.
+		agent.close();
+		this.releaseAgent(hostId, agent);
+		return {
+			replaced: true,
+			message: "The agent was stopped. The next terminal on this host starts the current one.",
+		};
 	}
 
 	/**

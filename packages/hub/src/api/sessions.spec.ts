@@ -1792,38 +1792,26 @@ describe("POST stop-keeping", () => {
 		expect(uploads.held).toEqual([true]);
 	});
 
-	it.each(["error", "stop-command-fails"])(
-		"Replace that changes nothing (%s) leaves the uploads running (#1102)",
-		async (mode) => {
-			const f = fixture();
-			if (mode === "error") {
-				f.agent.send.mockImplementation((msg: ProtocolMessage) => {
-					if (msg.type !== "STOP") return;
-					setImmediate(() =>
-						f.agent.emit("message", { type: "ERROR", code: "INTERNAL_ERROR", message: "no" }),
-					);
-				});
-			} else {
-				stopCannotBeSent(f);
-				f.agent.execOnHost.mockImplementation(async (command: string) =>
-					command === REMOTE_STATE_DIR_COMMAND
-						? { stdout: "/state", exitCode: 0 }
-						: { stdout: "", exitCode: 1 },
-				);
-			}
-			const uploads = recordUploads(f);
-			const replace = await server.inject({
-				method: "POST",
-				url: `/api/hosts/${hostId}/agent/replace`,
-				payload: { stop_transfers: true },
-			});
-			expect(replace.statusCode).toBe(409);
-			expect(replace.json()).toMatchObject({
-				error: { message: expect.stringContaining("Nothing was changed") },
-			});
-			expect(uploads.interrupted).toEqual([]);
-		},
-	);
+	it("Replace whose STOP is answered with an error leaves the uploads running (#1102)", async () => {
+		const f = fixture();
+		f.agent.send.mockImplementation((msg: ProtocolMessage) => {
+			if (msg.type !== "STOP") return;
+			setImmediate(() =>
+				f.agent.emit("message", { type: "ERROR", code: "INTERNAL_ERROR", message: "no" }),
+			);
+		});
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(409);
+		expect(replace.json()).toMatchObject({
+			error: { message: expect.stringContaining("Nothing was changed") },
+		});
+		expect(uploads.interrupted).toEqual([]);
+	});
 
 	it.each([
 		["timeout", true],
@@ -1874,57 +1862,6 @@ describe("POST stop-keeping", () => {
 			} finally {
 				vi.useRealTimers();
 			}
-		},
-	);
-
-	it("Replace whose --stop ends the connection before saying how it went still interrupts the uploads (#1102)", async () => {
-		const f = fixture();
-		stopCannotBeSent(f);
-		f.agent.execOnHost.mockImplementation(async (command: string) => {
-			if (command === REMOTE_STATE_DIR_COMMAND) return { stdout: "/state", exitCode: 0 };
-			f.agent.connected = false;
-			f.agent.emit("close");
-			return { stdout: "", exitCode: 1 };
-		});
-		const uploads = recordUploads(f);
-		const replace = await server.inject({
-			method: "POST",
-			url: `/api/hosts/${hostId}/agent/replace`,
-			payload: { stop_transfers: true },
-		});
-		expect(replace.statusCode).toBe(409);
-		expect(replace.json()).toMatchObject({
-			error: { message: expect.stringContaining("without confirming it stopped") },
-		});
-		expect(uploads.interrupted).toEqual([hostId]);
-	});
-
-	it.each(["closes-during-state-dir", "gone-before-close-event"])(
-		"Replace's fallback finding the connection ended (%s) interrupts the uploads (#1102)",
-		async (mode) => {
-			const f = fixture();
-			stopCannotBeSent(f);
-			f.agent.execOnHost.mockImplementation(async (command: string) => {
-				if (command === REMOTE_STATE_DIR_COMMAND) {
-					if (mode === "closes-during-state-dir") {
-						f.agent.connected = false;
-						f.agent.emit("close");
-						return { stdout: "", exitCode: 1 };
-					}
-					return { stdout: "/state", exitCode: 0 };
-				}
-				// Gone, its close event not heard yet.
-				f.agent.connected = false;
-				return { stdout: "", exitCode: 1 };
-			});
-			const uploads = recordUploads(f);
-			const replace = await server.inject({
-				method: "POST",
-				url: `/api/hosts/${hostId}/agent/replace`,
-				payload: { stop_transfers: true },
-			});
-			expect(replace.statusCode).toBe(409);
-			expect(uploads.interrupted).toEqual([hostId]);
 		},
 	);
 

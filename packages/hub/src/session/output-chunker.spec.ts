@@ -266,8 +266,8 @@ describe("OutputChunker", () => {
 			expect(dal.insertChunk).toHaveBeenCalledTimes(2);
 			const retry = getMockCall(dal.insertChunk as ReturnType<typeof vi.fn>, 1);
 			expect([...(retry.dataBlob as Uint8Array)]).toEqual([4, 5]);
-			// The failed write took no sequence number: no gap in the spool.
-			expect(retry.seq).toBe(1);
+			// The dropped batch keeps its seq unused: a reader sees the gap.
+			expect(retry.seq).toBe(2);
 		} finally {
 			error.mockRestore();
 		}
@@ -286,7 +286,7 @@ describe("OutputChunker", () => {
 			expect(dal.insertChunk).toHaveBeenCalledTimes(2);
 			const second = getMockCall(dal.insertChunk as ReturnType<typeof vi.fn>, 1);
 			expect([...(second.dataBlob as Uint8Array)]).toEqual([4, 5]);
-			expect(second.seq).toBe(1);
+			expect(second.seq).toBe(2);
 			// Told by its code, with the channel and what was dropped.
 			const logged = error.mock.calls.flat().join(" ");
 			expect(logged).toContain("SQLITE_FULL");

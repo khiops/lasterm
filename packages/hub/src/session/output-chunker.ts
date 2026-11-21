@@ -91,9 +91,11 @@ export class OutputChunker {
 	 * by its code and its bytes are dropped, never rethrown (#1098). The spool
 	 * is the attach tail and the screen snapshot covers what it misses; kept,
 	 * the bytes would grow without bound while the disk stays full (a live
-	 * terminal) or never be retried (an ended one). The failed write took no
-	 * seq, so the spool's seq numbers have no gap; the bytes themselves are
-	 * lost, and the screen may show it until the next snapshot.
+	 * terminal) or never be retried (an ended one). Their seq is kept
+	 * unused, so the spool has a gap where they were: a reader that finds one
+	 * answers `truncated` instead of replaying the output after it as if it
+	 * followed the screen before it. The bytes are lost for good; the screen
+	 * is right again only once a later snapshot is stored.
 	 */
 	private flushOrDrop(channelId: string): void {
 		try {
@@ -102,6 +104,7 @@ export class OutputChunker {
 			const buf = this.channels.get(channelId);
 			const droppedBytes = buf?.totalBytes ?? 0;
 			if (buf) {
+				buf.nextSeq++;
 				buf.chunks = [];
 				buf.totalBytes = 0;
 				if (buf.timer) {

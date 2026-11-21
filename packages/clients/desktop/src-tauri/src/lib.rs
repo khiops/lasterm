@@ -10466,6 +10466,20 @@ mod tests {
         assert_eq!(config.app.windows[0].title, product_name);
     }
 
+    // The installers' identity: tauri.dev.conf.json, which the build scripts pass
+    // the Tauri CLI on a dev build, names what build.rs compiles in. Mutation:
+    // the file's identifier or name drifting from the build script's.
+    #[test]
+    fn the_dev_installer_config_names_the_dev_identity() {
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.dev.conf.json")).unwrap();
+        let (identifier, product_name) = build_channel::channel_identity("dev");
+        assert_eq!(
+            file,
+            serde_json::json!({ "identifier": identifier, "productName": product_name })
+        );
+    }
+
     // AC4, the desktop's rule.
     #[test]
     fn the_build_script_reads_the_channel_like_every_component() {

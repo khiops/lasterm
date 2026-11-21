@@ -51,6 +51,9 @@ Set-Location $Root
 # with literal backslashes through an .exe one (Volta), so it failed to parse.
 $bundleArgs = @()
 if ($NoBundle) { $bundleArgs += "--no-bundle" }
+# A development build's installers carry its own name and identifier, as its
+# executable does (build.rs, #1084): the CLI's bundler reads only --config.
+if ($env:LASTERM_CHANNEL -ne "release") { $bundleArgs += @("--config", "tauri.dev.conf.json") }
 pnpm -F @lasterm/desktop tauri build --config tauri.prebuilt-frontend.json @bundleArgs
 if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
 

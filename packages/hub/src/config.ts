@@ -910,7 +910,9 @@ export class ConfigResolver {
 	/**
 	 * Load [terminal], [gc], [ui], [tabs], [panes], [channels], [startup], [title], [search],
 	 * and [appearance] sections from config.toml at the given config directory.
-	 * Silently no-ops if the file does not exist or is malformed.
+	 * On the release channel, silently no-ops if the file does not exist or is
+	 * malformed. On the dev channel, rebuilds from what the shared file and the
+	 * overlay give now, a missing or broken one giving nothing (#1084).
 	 */
 	loadFromFile(configDir: string): void {
 		this._configDir = configDir;

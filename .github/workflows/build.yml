@@ -619,7 +619,10 @@ jobs:
           # Bundled as resources, which Tauri installs beside the hub (#889).
           cp dist/sea/lasterm_hub_lock.node dist/sea/lasterm_tls_identity.node packages/clients/desktop/src-tauri/
           if [ -n "$BUNDLES" ]; then
-            pnpm -F @lasterm/desktop tauri build --bundles "$BUNDLES" --config '{"build":{"beforeBuildCommand":""}}'
+            # A dev build's installers carry the dev name and identifier (#1084).
+            channel_config=()
+            [ "$LASTERM_CHANNEL" = release ] || channel_config=(--config tauri.dev.conf.json)
+            pnpm -F @lasterm/desktop tauri build --bundles "$BUNDLES" --config '{"build":{"beforeBuildCommand":""}}' "${channel_config[@]}"
           else
             pnpm -F @lasterm/desktop tauri build --no-bundle --config tauri.prebuilt-frontend.json
           fi
@@ -653,7 +656,9 @@ jobs:
         # depends on whether pnpm is a .cmd or an .exe launcher.
         run: |
           if ($env:BUNDLES) {
-            pnpm -F @lasterm/desktop tauri build --bundles "$env:BUNDLES" --config tauri.prebuilt-frontend.json
+            # A dev build's installers carry the dev name and identifier (#1084).
+            $channelConfig = if ($env:LASTERM_CHANNEL -ne 'release') { @('--config', 'tauri.dev.conf.json') } else { @() }
+            pnpm -F @lasterm/desktop tauri build --bundles "$env:BUNDLES" --config tauri.prebuilt-frontend.json @channelConfig
           } else {
             pnpm -F @lasterm/desktop tauri build --no-bundle --config tauri.prebuilt-frontend.json
           }

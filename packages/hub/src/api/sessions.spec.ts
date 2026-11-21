@@ -2421,6 +2421,33 @@ describe("POST stop-keeping", () => {
 		expect(f.agent.sent).toContainEqual({ type: "STOP", force: true });
 	});
 
+	it("leaves the uploads running when the daemon refuses a stop consented for them, and interrupts them once it stops (#1102)", async () => {
+		const f = fixture();
+		f.agent.othersHold = 3;
+		const uploads = recordUploads(f);
+		const declined = await stop({ end_terminals: true, stop_transfers: true });
+		expect(declined.statusCode).toBe(409);
+		expect(declined.json()).toMatchObject({
+			error: { code: "OTHER_HUBS_HOLD_CHANNELS", other_owner_channels: 3 },
+		});
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(409);
+		expect(replace.json()).toMatchObject({
+			error: { code: "OTHER_HUBS_HOLD_CHANNELS", other_owner_channels: 3 },
+		});
+		expect(uploads.interrupted).toEqual([]);
+		unchanged(f);
+
+		const forced = await stop({ end_terminals: true, stop_transfers: true, force: true });
+		expect(forced.json()).toMatchObject({ outcome: "stopped", ended: 2 });
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
 	// A STOP with no connection to say it on: only a forced request goes on to
 	// the agent's own --stop, over SSH.
 	function stopCannotBeSent(f: ReturnType<typeof fixture>): void {
@@ -2429,8 +2456,178 @@ describe("POST stop-keeping", () => {
 		});
 	}
 
+	// What the uploads saw: interrupted for which host, and whether the hub
+	// still held the connection they run over when they were. `counted` uploads
+	// run to the host until they are interrupted.
+	function recordUploads(f: ReturnType<typeof fixture>, counted = 1) {
+		const seen = { interrupted: [] as string[], held: [] as boolean[] };
+		sm.setTransfers({
+			activeOn: (id) => (id === hostId && seen.interrupted.length === 0 ? counted : 0),
+			interruptOn: (id) => {
+				seen.held.push(sm.agents.get(hostId) === f.agent);
+				seen.interrupted.push(id);
+			},
+		});
+		return seen;
+	}
+
+	it("Replace interrupts the uploads it was told about once the daemon stops, before letting go of the connection (#1102)", async () => {
+		const f = fixture();
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(200);
+		expect(replace.json()).toMatchObject({ replaced: true });
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
+	it("Stop keeping with no upload counted interrupts none once the daemon stops (#1102)", async () => {
+		const f = fixture();
+		const uploads = recordUploads(f, 0);
+		const response = await stop({ end_terminals: true });
+		expect(response.json()).toMatchObject({ outcome: "stopped", ended: 2 });
+		expect(uploads.interrupted).toEqual([]);
+	});
+
+	it("Replace with no upload counted interrupts none once the daemon stops (#1102)", async () => {
+		const f = fixture();
+		const uploads = recordUploads(f, 0);
+		const response = await replace({});
+		expect(response.statusCode).toBe(200);
+		expect(response.json()).toMatchObject({ replaced: true });
+		expect(uploads.interrupted).toEqual([]);
+	});
+
+	it("Stop keeping whose STOP cannot be sent still interrupts the uploads before the connection is let go (#1102)", async () => {
+		const f = fixture();
+		stopCannotBeSent(f);
+		const uploads = recordUploads(f);
+		const response = await stop({ end_terminals: true, stop_transfers: true });
+		expect(response.json()).toMatchObject({ outcome: "disabled_not_stopped" });
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
+	it("Replace whose STOP is answered with an error leaves the uploads running (#1102)", async () => {
+		const f = fixture();
+		f.agent.send.mockImplementation((msg: ProtocolMessage) => {
+			if (msg.type !== "STOP") return;
+			setImmediate(() =>
+				f.agent.emit("message", { type: "ERROR", code: "INTERNAL_ERROR", message: "no" }),
+			);
+		});
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(409);
+		expect(replace.json()).toMatchObject({
+			error: { message: expect.stringContaining("Nothing was changed") },
+		});
+		expect(uploads.interrupted).toEqual([]);
+	});
+
+	it.each([
+		[
+			"timeout",
+			"The agent did not say it had stopped. Its terminals may be ending; look again before asking twice.",
+		],
+		["unconfirmed", "The connection ended without confirming the agent stopped."],
+		["closed_by_hub", "The connection ended without confirming the agent stopped."],
+		["displaced", "The connection ended without confirming the agent stopped."],
+	] as const)(
+		"Replace whose STOP ends %s: the uploads are interrupted, the agent may be ending or its connection ended (#1102)",
+		async (mode, message) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const f = fixture();
+				if (mode === "unconfirmed") {
+					f.agent.helloMessage = {
+						...DAEMON_HELLO,
+						capabilities: [...(DAEMON_HELLO.capabilities ?? []), "stop-accepted"],
+					};
+				}
+				f.agent.send.mockImplementation((msg: ProtocolMessage) => {
+					if (msg.type !== "STOP" || mode === "timeout") return;
+					queueMicrotask(() => {
+						if (mode === "closed_by_hub") void f.agent.close();
+						else if (mode === "unconfirmed") {
+							f.agent.connected = false;
+							f.agent.emit("close");
+						} else {
+							f.agent.emit("message", {
+								type: "ERROR",
+								code: "DISPLACED",
+								message: "displaced",
+							});
+						}
+					});
+				});
+				const uploads = recordUploads(f);
+				const replace = server.inject({
+					method: "POST",
+					url: `/api/hosts/${hostId}/agent/replace`,
+					payload: { stop_transfers: true },
+				});
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				await vi.advanceTimersByTimeAsync(15_001);
+				const response = await replace;
+				expect(response.statusCode).toBe(409);
+				expect(response.json()).toEqual({ error: { code: "AGENT_NOT_REPLACED", message } });
+				expect(uploads.interrupted).toEqual([hostId]);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	it("Replace whose STOP cannot be sent interrupts the uploads before its own --stop lets go (#1102)", async () => {
+		const f = fixture();
+		stopCannotBeSent(f);
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.json()).toMatchObject({ replaced: true });
+		expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
+	it.each([
+		["missing-path", "This hub does not know where that agent is installed."],
+		["state-exit", "The host could not say where its agent's socket is."],
+		["nonzero", "The agent would not stop (exit 1)."],
+	] as const)(
+		"Replace whose STOP cannot be sent and whose --stop fails on %s still interrupts the uploads, their link being gone (#1102)",
+		async (mode, message) => {
+			const f = fixture();
+			stopCannotBeSent(f);
+			if (mode === "missing-path") f.agent.remoteAgentPath = null;
+			f.agent.execOnHost.mockImplementation(async (command: string) =>
+				command === REMOTE_STATE_DIR_COMMAND
+					? { stdout: "/state", exitCode: mode === "state-exit" ? 1 : 0 }
+					: { stdout: "", exitCode: 1 },
+			);
+			const uploads = recordUploads(f);
+			const response = await replace({ stop_transfers: true });
+			expect(response.statusCode).toBe(409);
+			expect(response.json()).toEqual({ error: { code: "AGENT_NOT_REPLACED", message } });
+			expect(uploads.interrupted).toEqual([hostId]);
+		},
+	);
+
 	it.each(["exit-zero", "daemon-close"])(
-		"--stop after an unsent STOP confirms on %s",
+		"--stop after an unsent STOP confirms on %s, the uploads interrupted before it runs (#1102)",
 		async (mode) => {
 			const f = fixture();
 			stopCannotBeSent(f);
@@ -2442,45 +2639,67 @@ describe("POST stop-keeping", () => {
 					return { stdout: "", exitCode: 1 };
 				});
 			}
-			const response = await stop({ end_terminals: true, force: true });
+			const uploads = recordUploads(f);
+			const response = await stop({ end_terminals: true, force: true, stop_transfers: true });
 			expect(response.statusCode).toBe(200);
 			expect(response.json()).toMatchObject({ outcome: "stopped", ended: 2 });
 			expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
 			expect(f.agent.sent).toEqual([]);
 			for (const id of f.channelIds) expect(f.dal.getChannel(id)?.endReason).toBe("stopped");
+			expect(uploads.interrupted).toEqual([hostId]);
+			expect(uploads.held).toEqual([true]);
 		},
 	);
 
-	it.each(["timeout", "error", "displaced", "closed_by_hub", "unsent"])(
-		"unconfirmed STOP %s disables and disconnects",
-		async (mode) => {
-			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-			try {
-				const f = fixture();
-				f.agent.send.mockImplementation(() => {
-					if (mode === "unsent") throw new Error("transport unavailable");
-					if (mode === "timeout") return;
-					queueMicrotask(() => {
-						if (mode === "closed_by_hub") void f.agent.close();
-						else
-							f.agent.emit("message", {
-								type: "ERROR",
-								code: mode === "displaced" ? "DISPLACED" : "STOP_FAILED",
-								message: "unconfirmed",
-							});
-					});
-				});
-				const result = disabled(f, { end_terminals: true });
-				await new Promise<void>((resolve) => setImmediate(resolve));
-				await new Promise<void>((resolve) => setImmediate(resolve));
-				await vi.advanceTimersByTimeAsync(15_001);
-				await result;
-				expect(f.agent.execOnHost).not.toHaveBeenCalled();
-			} finally {
-				vi.useRealTimers();
+	// `held`: the uploads are interrupted before the hub lets go of a
+	// connection still up at the answer; null where it had already ended.
+	it.each([
+		["timeout", [true]],
+		["error", [true]],
+		["displaced", null],
+		["closed_by_hub", null],
+		["unconfirmed", null],
+		["unsent", [true]],
+	] as const)("unconfirmed STOP %s disables and disconnects", async (mode, held) => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const f = fixture();
+			if (mode === "unconfirmed") {
+				f.agent.helloMessage = {
+					...DAEMON_HELLO,
+					capabilities: [...(DAEMON_HELLO.capabilities ?? []), "stop-accepted"],
+				};
 			}
-		},
-	);
+			f.agent.send.mockImplementation(() => {
+				if (mode === "unsent") throw new Error("transport unavailable");
+				if (mode === "timeout") return;
+				queueMicrotask(() => {
+					if (mode === "closed_by_hub") void f.agent.close();
+					else if (mode === "unconfirmed") {
+						f.agent.connected = false;
+						f.agent.emit("close");
+					} else
+						f.agent.emit("message", {
+							type: "ERROR",
+							code: mode === "displaced" ? "DISPLACED" : "STOP_FAILED",
+							message: "unconfirmed",
+						});
+				});
+			});
+			const uploads = recordUploads(f);
+			const result = disabled(f, { end_terminals: true, stop_transfers: true });
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			await vi.advanceTimersByTimeAsync(15_001);
+			await result;
+			expect(f.agent.execOnHost).not.toHaveBeenCalled();
+			// The connection is dropped whatever the answer: the uploads stop (#1102).
+			expect(uploads.interrupted).toEqual([hostId]);
+			if (held !== null) expect(uploads.held).toEqual(held);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 
 	it.each([
 		"missing-path",
@@ -2492,35 +2711,41 @@ describe("POST stop-keeping", () => {
 		"exec-timeout",
 		"nonzero",
 		"hub-close",
-	])("--stop after an unsent STOP: %s is unconfirmed", async (mode) => {
-		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-		try {
-			const f = fixture();
-			stopCannotBeSent(f);
-			if (mode === "missing-path") f.agent.remoteAgentPath = null;
-			f.agent.execOnHost.mockImplementation(async (command: string) => {
-				if (command === REMOTE_STATE_DIR_COMMAND) {
-					if (mode === "state-reject") throw new Error("state command failed");
-					if (mode === "state-close") {
-						f.agent.connected = false;
-						f.agent.emit("close");
-						return { stdout: "", exitCode: 1 };
+	])(
+		"--stop after an unsent STOP: %s is unconfirmed, the uploads interrupted before it runs (#1102)",
+		async (mode) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const f = fixture();
+				stopCannotBeSent(f);
+				if (mode === "missing-path") f.agent.remoteAgentPath = null;
+				f.agent.execOnHost.mockImplementation(async (command: string) => {
+					if (command === REMOTE_STATE_DIR_COMMAND) {
+						if (mode === "state-reject") throw new Error("state command failed");
+						if (mode === "state-close") {
+							f.agent.connected = false;
+							f.agent.emit("close");
+							return { stdout: "", exitCode: 1 };
+						}
+						return {
+							stdout: mode === "state-relative" ? "relative" : "/state",
+							exitCode: mode === "state-exit" ? 1 : 0,
+						};
 					}
-					return {
-						stdout: mode === "state-relative" ? "relative" : "/state",
-						exitCode: mode === "state-exit" ? 1 : 0,
-					};
-				}
-				if (mode === "exec-reject" || mode === "exec-timeout") throw new Error(mode);
-				if (mode === "hub-close") await f.agent.close();
-				return { stdout: "", exitCode: mode.startsWith("state-") ? 0 : 1 };
-			});
-			await disabled(f, { end_terminals: true, force: true });
-			if (mode === "missing-path") expect(f.agent.execOnHost).not.toHaveBeenCalled();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
+					if (mode === "exec-reject" || mode === "exec-timeout") throw new Error(mode);
+					if (mode === "hub-close") await f.agent.close();
+					return { stdout: "", exitCode: mode.startsWith("state-") ? 0 : 1 };
+				});
+				const uploads = recordUploads(f);
+				await disabled(f, { end_terminals: true, force: true, stop_transfers: true });
+				if (mode === "missing-path") expect(f.agent.execOnHost).not.toHaveBeenCalled();
+				expect(uploads.interrupted).toEqual([hostId]);
+				expect(uploads.held).toEqual([true]);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
 
 	it("allows only a forced unsent STOP to fall back to --stop", async () => {
 		const f = fixture();

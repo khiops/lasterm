@@ -2722,6 +2722,28 @@ describe("useChannelsStore — a status heard while a list fetch is in flight (#
 		expect(listed).not.toHaveProperty("endId");
 	});
 
+	it("a run heard after a STATE_SYNC that left the terminal out outlives that sync", async () => {
+		const { store, fetching, release } = await listedThenFetching(row("live"));
+
+		store.applyStateSync([]);
+		store.updateChannelStatus("ch-race", "live");
+		release();
+		await fetching;
+
+		expect(store.statusOf("ch-race")).toBe("live");
+	});
+
+	it("a STATE_SYNC that leaves the terminal out after a run still marks it dead", async () => {
+		const { store, fetching, release } = await listedThenFetching(row("live"));
+
+		store.updateChannelStatus("ch-race", "live");
+		store.applyStateSync([]);
+		release();
+		await fetching;
+
+		expect(store.statusOf("ch-race")).toBe("dead");
+	});
+
 	/** ch-race listed live, then two overlapping fetches whose rows read it live, each released by its own call. */
 	async function listedThenTwoFetches() {
 		mockFetch.mockImplementation((url: string) => {

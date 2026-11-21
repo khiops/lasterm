@@ -387,11 +387,21 @@ export const useChannelsStore = defineStore("channels", () => {
 
 	/**
 	 * Statuses heard for listed channels DURING each in-flight fetch, keyed by
-	 * fetch generation. The fetch's rows were read before them, so they win
-	 * over those rows when it commits, as `pendingStatuses` does for channels
-	 * not listed (#1091).
+	 * fetch generation. Statuses heard since a fetch began override its rows
+	 * when it commits, as `pendingStatuses` does for channels not listed: the
+	 * hub may have read those rows before them (#1091).
 	 */
 	const statusesDuringFetch = new Map<number, Map<string, PendingStatus>>();
+
+	/**
+	 * A status heard for a channel since the last STATE_SYNC says the hub knows
+	 * it: the next fetch must not mark it dead for being absent from that sync
+	 * (#1091).
+	 */
+	function knownToHub(channelId: string): void {
+		if (lastSyncIds.value === null || lastSyncIds.value.has(channelId)) return;
+		lastSyncIds.value = new Set(lastSyncIds.value).add(channelId);
+	}
 
 	/** Record a status heard for a listed channel for every fetch in flight (#1091). */
 	function heardDuringFetch(channelId: string, heard: PendingStatus): void {
@@ -661,9 +671,8 @@ export const useChannelsStore = defineStore("channels", () => {
 				}
 			}
 
-			// Statuses heard for listed channels since this fetch started are
-			// newer than its rows: an end heard meanwhile must not read live
-			// again (#1091).
+			// Statuses heard for listed channels since this fetch began override
+			// its rows: an end heard meanwhile must not read live again (#1091).
 			if (myHeard.size > 0) {
 				merged = merged.map((ch) => {
 					const heard = myHeard.get(ch.id);
@@ -786,6 +795,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		endReason?: ChannelEndReason,
 		endId?: string,
 	): void {
+		knownToHub(channelId);
 		const previousEnd = recordedEndId(channelId);
 		const replacesEnd = status !== "dead" || (endId !== undefined && endId !== previousEnd);
 		const keptEnd = status === "dead" ? (endId ?? previousEnd) : undefined;
@@ -1133,6 +1143,7 @@ export const useChannelsStore = defineStore("channels", () => {
 				// Its end, why it came and its exit code are over (#592, #932), and
 				// over the rows of a fetch in flight too (#1091).
 				heardDuringFetch(msg.channelId, { status: msg.status, replacesEnd: true });
+				knownToHub(msg.channelId);
 				const rest = withoutEnd(known);
 				const revived: Channel = {
 					...rest,

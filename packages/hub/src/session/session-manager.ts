@@ -2960,53 +2960,73 @@ export class SessionManager {
 				break;
 		}
 
-		const remotePath = agent.remoteAgentPath;
-		if (remotePath === null) {
-			return { replaced: false, message: "This hub does not know where that agent is installed." };
-		}
-
-		const resolved = await agent.execOnHost(REMOTE_STATE_DIR_COMMAND);
-		const stateDir = resolved.stdout.trim();
-		if (resolved.exitCode !== 0 || !stateDir.startsWith("/")) {
-			return { replaced: false, message: "The host could not say where its agent's socket is." };
-		}
-
 		// The daemon stopping can end the SSH connection before `--stop` says
-		// how it went: the uploads end with that connection, so they are
-		// interrupted when it closes, whatever the exit code says.
-		agent.prependListener("close", interruptUploads);
-		let stopCommand: Awaited<ReturnType<SshAgent["execOnHost"]>>;
+		// how it went, or the connection may already be gone: the uploads end
+		// with it, so they are interrupted whenever it is found ended.
+		let closed = false;
+		const onClose = (): void => {
+			closed = true;
+			interruptUploads();
+		};
+		const ended = (): boolean => {
+			if (closed || !agent.connected) interruptUploads();
+			return closed || !agent.connected;
+		};
+		agent.prependListener("close", onClose);
 		try {
-			stopCommand = await agent.execOnHost(
+			const remotePath = agent.remoteAgentPath;
+			if (remotePath === null) {
+				return {
+					replaced: false,
+					message: "This hub does not know where that agent is installed.",
+				};
+			}
+
+			const resolved = await agent.execOnHost(REMOTE_STATE_DIR_COMMAND);
+			const stateDir = resolved.stdout.trim();
+			if (resolved.exitCode !== 0 || !stateDir.startsWith("/")) {
+				return { replaced: false, message: "The host could not say where its agent's socket is." };
+			}
+
+			const stopCommand = await agent.execOnHost(
 				remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir)),
 			);
-		} finally {
-			agent.off("close", interruptUploads);
-		}
-		if (stopCommand.exitCode !== 0) {
-			return {
-				replaced: false,
-				message: `The agent would not stop (exit ${stopCommand.exitCode}). Nothing was changed.`,
-			};
-		}
+			if (stopCommand.exitCode !== 0) {
+				if (ended()) {
+					return {
+						replaced: false,
+						message:
+							"The connection ended while the agent was being stopped, without confirming it stopped.",
+					};
+				}
+				return {
+					replaced: false,
+					message: `The agent would not stop (exit ${stopCommand.exitCode}). Nothing was changed.`,
+				};
+			}
 
-		// Its terminals ended with it. Letting go of the connection is what makes
-		// the next attach deploy and start the version this hub carries.
-		interruptUploads();
-		agent.close();
-		this.releaseAgent(hostId, agent);
-		return {
-			replaced: true,
-			message: "The agent was stopped. The next terminal on this host starts the current one.",
-		};
+			// Its terminals ended with it. Letting go of the connection is what makes
+			// the next attach deploy and start the version this hub carries.
+			interruptUploads();
+			agent.close();
+			this.releaseAgent(hostId, agent);
+			return {
+				replaced: true,
+				message: "The agent was stopped. The next terminal on this host starts the current one.",
+			};
+		} finally {
+			agent.off("close", onClose);
+			ended();
+		}
 	}
 
 	/**
 	 * Interrupt the uploads to `hostId`, once, when the stop they were
-	 * consented for goes ahead (#833). Called only past the daemon's answer,
-	 * the end of the wait for it, or the connection closing under `--stop`, so
-	 * that its refusal, which stops nothing, leaves them running (#1102); and
-	 * from `onStopped` too, before the hub lets go of the connection they use.
+	 * consented for goes ahead (#833): never before the STOP is answered,
+	 * unanswered in time, or could not be sent, so that a refusal, which stops
+	 * nothing, leaves them running (#1102). Each caller says which outcomes
+	 * interrupt them; `onStopped` calls it before the hub lets go of the
+	 * connection they use.
 	 */
 	private uploadsInterrupter(hostId: string, transfers: number): () => void {
 		let done = transfers === 0;

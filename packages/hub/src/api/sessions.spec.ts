@@ -1893,9 +1893,40 @@ describe("POST stop-keeping", () => {
 			payload: { stop_transfers: true },
 		});
 		expect(replace.statusCode).toBe(409);
+		expect(replace.json()).toMatchObject({
+			error: { message: expect.stringContaining("without confirming it stopped") },
+		});
 		expect(uploads.interrupted).toEqual([hostId]);
-		expect(uploads.held).toEqual([true]);
 	});
+
+	it.each(["closes-during-state-dir", "gone-before-close-event"])(
+		"Replace's fallback finding the connection ended (%s) interrupts the uploads (#1102)",
+		async (mode) => {
+			const f = fixture();
+			stopCannotBeSent(f);
+			f.agent.execOnHost.mockImplementation(async (command: string) => {
+				if (command === REMOTE_STATE_DIR_COMMAND) {
+					if (mode === "closes-during-state-dir") {
+						f.agent.connected = false;
+						f.agent.emit("close");
+						return { stdout: "", exitCode: 1 };
+					}
+					return { stdout: "/state", exitCode: 0 };
+				}
+				// Gone, its close event not heard yet.
+				f.agent.connected = false;
+				return { stdout: "", exitCode: 1 };
+			});
+			const uploads = recordUploads(f);
+			const replace = await server.inject({
+				method: "POST",
+				url: `/api/hosts/${hostId}/agent/replace`,
+				payload: { stop_transfers: true },
+			});
+			expect(replace.statusCode).toBe(409);
+			expect(uploads.interrupted).toEqual([hostId]);
+		},
+	);
 
 	it("Replace whose STOP cannot be sent interrupts the uploads before its own --stop lets go (#1102)", async () => {
 		const f = fixture();

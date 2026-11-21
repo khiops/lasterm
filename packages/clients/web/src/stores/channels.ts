@@ -289,7 +289,7 @@ interface PendingStatus {
 	endId?: string;
 	replacesEnd?: true;
 	/** A terminal created again: its own session and size win over a fetched row's (#1109). */
-	row?: Pick<Channel, "sessionId" | "cols" | "rows" | "updatedAt" | "displayTitle">;
+	row?: Pick<Channel, "sessionId" | "cols" | "rows">;
 }
 
 /**
@@ -1174,13 +1174,8 @@ export const useChannelsStore = defineStore("channels", () => {
 		heardDuringFetch(msg.channelId, {
 			status: msg.status,
 			replacesEnd: true,
-			row: {
-				sessionId: msg.sessionId,
-				cols: msg.cols,
-				rows: msg.rows,
-				updatedAt: msg.updatedAt,
-				...(msg.displayTitle !== undefined && { displayTitle: msg.displayTitle }),
-			},
+			// Session and size only: a title or time changed since is the newer word.
+			row: { sessionId: msg.sessionId, cols: msg.cols, rows: msg.rows },
 		});
 		knownToHub(msg.channelId);
 

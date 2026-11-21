@@ -3056,7 +3056,6 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 			cols: 132,
 			rows: 43,
 			status: "live",
-			displayTitle: "new title",
 			createdAt: "2026-11-21T00:01:00Z",
 			updatedAt: "2026-11-21T00:01:00Z",
 		} as Parameters<typeof store.handleChannelCreated>[0]);
@@ -3064,8 +3063,6 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		await fetching;
 
 		const ch = store.channels.find((c) => c.id === "ch-a");
-		expect(ch?.updatedAt).toBe("2026-11-21T00:01:00Z");
-		expect(ch?.displayTitle).toBe("new title");
 		expect(ch?.status).toBe("live");
 		expect(ch?.sessionId).toBe("sess-new");
 		expect(ch?.cols).toBe(132);
@@ -3094,29 +3091,28 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		expect(ch?.sessionId).toBe("sess-new");
 		expect(ch?.cols).toBe(132);
 		expect(ch?.rows).toBe(43);
-		expect(ch?.updatedAt).toBe("2026-11-21T00:01:00Z");
 	});
 
-	it("a creation without a title keeps the listed row's title", async () => {
-		const { store, fetching, release } = await listedThenFetching([
-			{ ...row("ch-a", "dead"), display_title: "listed title" },
-		]);
+	it("a title set after a new channel's creation is not undone when the fetch commits", async () => {
+		const { store, fetching, release } = await listedThenFetching([row("ch-b", "live")]);
 
 		store.handleChannelCreated({
 			type: "CHANNEL_CREATED",
-			channelId: "ch-a",
+			channelId: "ch-new",
 			sessionId: "sess-new",
 			hostId: "host-1",
 			cols: 80,
 			rows: 24,
 			status: "live",
+			displayTitle: "creation title",
 			createdAt: "2026-11-21T00:01:00Z",
 			updatedAt: "2026-11-21T00:01:00Z",
 		} as Parameters<typeof store.handleChannelCreated>[0]);
+		store.setDisplayTitle("ch-new", "later title");
 		release();
 		await fetching;
 
-		expect(store.channels.find((c) => c.id === "ch-a")?.displayTitle).toBe("listed title");
+		expect(store.channels.find((c) => c.id === "ch-new")?.displayTitle).toBe("later title");
 	});
 
 	it("the latest of two creations during the fetch wins", async () => {

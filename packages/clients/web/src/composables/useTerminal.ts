@@ -1173,28 +1173,30 @@ export function useTerminal(
 		channelId = null;
 		const term = terminal.value;
 		// A newer end than the screen's: nothing of the earlier end stays, even
-		// when this one has nothing to draw (#932). One that has is drawn over a
-		// reset below.
-		const drawn =
-			last !== undefined &&
-			(last.snapshot !== null || last.tail.some((part) => part.byteLength > 0));
-		if (term && newerEnd && !drawn) {
-			term.reset();
+		// when this one has nothing to draw (#932). The reset goes in the write
+		// queue, after output still waiting there for the earlier screen.
+		if (term && newerEnd) {
+			term.write(FULL_RESET);
 			shownId = id;
 		}
 		if (last !== undefined) {
 			endedSize = { cols: last.cols, rows: last.rows };
 			layout();
-			if (term && !keepScreen) showLastOutput(term, id, last);
+			if (term && !keepScreen) showLastOutput(term, id, last, newerEnd);
 		}
 		term?.write(MOUSE_REPORTING_OFF);
 	}
 
 	/** Write what an ended terminal last printed, as `showEnded` decides. */
-	function showLastOutput(term: Terminal, id: string, last: EndedOutput): void {
+	function showLastOutput(
+		term: Terminal,
+		id: string,
+		last: EndedOutput,
+		resetQueued = false,
+	): void {
 		const somethingToDraw = last.snapshot !== null || last.tail.some((part) => part.byteLength > 0);
 		if (somethingToDraw) {
-			term.reset();
+			if (!resetQueued) term.reset();
 			replay(() => {
 				if (last.snapshot?.serialized) term.write(last.snapshot.serialized);
 				for (const part of last.tail) term.write(part);
@@ -1204,7 +1206,7 @@ export function useTerminal(
 			}
 			shownId = id;
 		} else if (shownId !== id) {
-			term.reset();
+			if (!resetQueued) term.reset();
 			if (last.truncated === true) writeNotice("its last output was too long to show");
 			shownId = id;
 		}

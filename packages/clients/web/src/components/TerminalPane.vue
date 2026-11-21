@@ -622,6 +622,13 @@ let endSeenLiveOf: string | null = null;
  */
 let screenEndId: string | null = null;
 
+/**
+ * The end id of the last end this pane reacted to (`onTerminalEnded`), seen
+ * live or found. A CHANNEL_DEAD naming it is not news: what the pane holds
+ * about that end, a hold on an end right after its start included, stays.
+ */
+let reactedEndId: string | null = null;
+
 // ---------------------------------------------------------------------------
 // When the terminal ends (#574)
 // ---------------------------------------------------------------------------
@@ -665,6 +672,7 @@ watch(effectiveChannelId, () => {
 	heldBack.value = null;
 	hold.value = null;
 	screenEndId = null;
+	reactedEndId = null;
 });
 
 /**
@@ -676,9 +684,11 @@ watch(effectiveChannelId, () => {
  * connect (#592).
  */
 function onTerminalEnded(end: EndSeen, endReason?: ChannelEndReason): void {
+	const endId = channelsStore.reportOf(effectiveChannelId.value)?.endId ?? null;
+	reactedEndId = endId;
 	if (end.seen === 'live') {
 		endSeenLiveOf = effectiveChannelId.value;
-		screenEndId = channelsStore.reportOf(effectiveChannelId.value)?.endId ?? null;
+		screenEndId = endId;
 	}
 	const facts: EndFacts = {
 		...end,
@@ -782,9 +792,10 @@ async function attachAndCover(
 			refusal.endId !== undefined &&
 			screenEndId !== null &&
 			refusal.endId !== screenEndId;
-		if (newerEnd) {
-			// Another end than the one it showed: nothing it held about that one
-			// says anything of this one, which it found (#932).
+		if (newerEnd && refusal.endId !== reactedEndId) {
+			// Another end than the one it showed, and one it has not answered:
+			// nothing it held about the earlier one says anything of this one,
+			// which it found (#932).
 			heldBack.value = null;
 			hold.value = null;
 			endWatch.forget(chId);

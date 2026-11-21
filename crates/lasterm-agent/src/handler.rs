@@ -1378,14 +1378,12 @@ fn spawn_reader_task(
             "PTY process exited"
         );
 
-        let msg = AgentToHub::ChannelExit {
-            channel_id: channel_id.clone(),
+        let msg = exit_message(
+            &channel_id,
             exit_code,
             signal,
-            screen: (at_pty_end && ended_by_itself)
-                .then(|| final_screen(&mirror))
-                .flatten(),
-        };
+            (at_pty_end && ended_by_itself).then_some(&mirror),
+        );
         send_channel_event(&channel_events, &flow, &owner, &channel_id, &msg);
     });
 }
@@ -1577,6 +1575,23 @@ async fn ask_reader(
 /// `serialized` and `input_modes` together: a bound on the frame, which a
 /// daemon keeps for its hub while it is away however large it is (#933).
 const FINAL_SCREEN_MAX_BYTES: usize = 256 * 1024;
+
+/// The CHANNEL_EXIT of a terminal, with the final screen of `mirror` when it
+/// is given (a program that ended by itself, read to its PTY's end) and fits
+/// [`FINAL_SCREEN_MAX_BYTES`] (#933).
+fn exit_message(
+    channel_id: &str,
+    exit_code: i32,
+    signal: Option<String>,
+    mirror: Option<&HeadlessMirror>,
+) -> AgentToHub {
+    AgentToHub::ChannelExit {
+        channel_id: channel_id.to_owned(),
+        exit_code,
+        signal,
+        screen: mirror.and_then(final_screen),
+    }
+}
 
 /// The mirror's screen, for the CHANNEL_EXIT of a terminal whose program
 /// ended by itself; `None` above [`FINAL_SCREEN_MAX_BYTES`] (#933).
@@ -2529,12 +2544,20 @@ mod stdio_tests {
         }
         mirror.process(cells.as_bytes());
         assert!(mirror.snapshot().serialized.len() > FINAL_SCREEN_MAX_BYTES);
-        assert!(final_screen(&mirror).is_none());
+        let exit = serde_json::to_value(exit_message("big", 7, None, Some(&mirror))).unwrap();
+        assert_eq!(exit["type"], "CHANNEL_EXIT", "{exit}");
+        assert_eq!(exit["exit_code"], 7, "{exit}");
+        assert!(exit.get("screen").is_none(), "{exit}");
 
         let mut small = HeadlessMirror::new(80, 24, 0);
         small.process(b"small");
-        let screen = final_screen(&small).expect("a small screen goes");
-        assert!(screen.serialized.contains("small"));
+        let exit = serde_json::to_value(exit_message("small", 0, None, Some(&small))).unwrap();
+        assert!(
+            exit["screen"]["serialized"]
+                .as_str()
+                .is_some_and(|s| s.contains("small")),
+            "{exit}"
+        );
     }
 
     /// A terminal the hub destroyed sends its exit without a screen (#933).

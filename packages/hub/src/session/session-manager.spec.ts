@@ -4257,6 +4257,31 @@ describe("SessionManager", () => {
 				expect(refusal).not.toHaveProperty("exitCode");
 			});
 
+			it("the refusal names a killed end's reason", async () => {
+				const heard: ProtocolMessage[] = [];
+				sm.addClient(makeClient("writer", heard));
+				const channelId = await sm.handleSpawn("writer", { type: "SPAWN", hostId: "local" });
+				if (channelId === null) throw new Error("expected a local channel");
+				const agent = mockLocalAgents.at(-1);
+				if (agent === undefined) throw new Error("expected the local agent");
+				expect(sm.destroyChannel(channelId)).toBe(true);
+				(agent as unknown as EventEmitter).emit("message", {
+					type: "CHANNEL_EXIT",
+					channelId,
+					exitCode: 1,
+				});
+				const row = new MetaDAL(dbManager.meta).getChannel(channelId);
+				if (row === undefined) return;
+
+				const { received } = await attachFresh(channelId, "reader");
+
+				expect(received.find((m) => m.type === "ERROR")).toMatchObject({
+					code: "CHANNEL_DEAD",
+					endId: row.endId,
+					endReason: "killed",
+				});
+			});
+
 			it("a terminal ended before end ids names none", async () => {
 				endedTerminal("ended-old");
 

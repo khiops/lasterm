@@ -64,7 +64,6 @@ function apiRowToChannel(row: Record<string, unknown>): Channel {
 	// A dead terminal the hub ended itself: no pane brings back one killed (#592).
 	const endReason = endReasonOfRow(row);
 	if (endReason !== undefined) ch.endReason = endReason;
-	if (typeof row.end_id === "string") ch.endId = row.end_id;
 	return ch;
 }
 
@@ -289,6 +288,22 @@ interface PendingStatus {
 	endReason?: ChannelEndReason;
 	endId?: string;
 	replacesEnd?: true;
+}
+
+/**
+ * The status to hold pending for a channel, over the one held already. The
+ * same end told again keeps what was heard of it and, until a fetch takes it,
+ * that it replaces the fetched row's end (#932).
+ */
+function bufferedStatus(held: PendingStatus | undefined, heard: PendingStatus): PendingStatus {
+	const sameEnd =
+		held !== undefined &&
+		heard.replacesEnd !== true &&
+		heard.status === "dead" &&
+		held.status === "dead" &&
+		(heard.endId === undefined || heard.endId === held.endId);
+	if (!sameEnd) return heard;
+	return { ...held, ...heard, ...(held.replacesEnd === true && { replacesEnd: true as const }) };
 }
 
 /** A channel without what an end says of it: its exit code, reason and end id (#932). */
@@ -749,13 +764,16 @@ export const useChannelsStore = defineStore("channels", () => {
 		if (idx === -1) {
 			// Channel not loaded yet — buffer for later application
 			const next = new Map(pendingStatuses.value);
-			next.set(channelId, {
-				status,
-				...(exitCode !== undefined && { exitCode }),
-				...(endReason !== undefined && { endReason }),
-				...(keptEnd !== undefined && { endId: keptEnd }),
-				...(replacesEnd && { replacesEnd: true as const }),
-			});
+			next.set(
+				channelId,
+				bufferedStatus(next.get(channelId), {
+					status,
+					...(exitCode !== undefined && { exitCode }),
+					...(endReason !== undefined && { endReason }),
+					...(keptEnd !== undefined && { endId: keptEnd }),
+					...(replacesEnd && { replacesEnd: true as const }),
+				}),
+			);
 			pendingStatuses.value = next;
 			return;
 		}
@@ -936,10 +954,14 @@ export const useChannelsStore = defineStore("channels", () => {
 			// Channels not loaded yet — buffer all
 			const next = new Map(pendingStatuses.value);
 			for (const sc of syncChannels) {
-				next.set(sc.channelId, {
-					status: sc.status,
-					...(sc.exitCode !== undefined && { exitCode: sc.exitCode }),
-				});
+				next.set(
+					sc.channelId,
+					bufferedStatus(next.get(sc.channelId), {
+						status: sc.status,
+						...(sc.exitCode !== undefined && { exitCode: sc.exitCode }),
+						...(sc.status !== "dead" && { replacesEnd: true as const }),
+					}),
+				);
 			}
 			pendingStatuses.value = next;
 			return;
@@ -976,10 +998,14 @@ export const useChannelsStore = defineStore("channels", () => {
 		const next = new Map(pendingStatuses.value);
 		for (const sc of syncChannels) {
 			if (!loadedIds.has(sc.channelId)) {
-				next.set(sc.channelId, {
-					status: sc.status,
-					...(sc.exitCode !== undefined && { exitCode: sc.exitCode }),
-				});
+				next.set(
+					sc.channelId,
+					bufferedStatus(next.get(sc.channelId), {
+						status: sc.status,
+						...(sc.exitCode !== undefined && { exitCode: sc.exitCode }),
+						...(sc.status !== "dead" && { replacesEnd: true as const }),
+					}),
+				);
 			}
 		}
 		if (next.size > 0) {
@@ -1025,6 +1051,10 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * SPAWN_OK).
 	 */
 	function handleChannelCreated(msg: ChannelCreatedMessage): void {
+		// A terminal that starts has no end, whichever host it is on: the end
+		// this window heard for it goes from its report (#932).
+		reports.value = new Map(reports.value).set(msg.channelId, { status: msg.status });
+
 		// Ignore channels for other hosts — this client may be viewing a
 		// different host and should not accumulate foreign channels.
 		if (activeHostId.value !== msg.hostId) return;

@@ -3,6 +3,16 @@ import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
 
+/**
+ * A channel as the REST routes give it: without its end id, which the hub
+ * sends only with the end (CHANNEL_STATE) and with the refusal of an attach
+ * (CHANNEL_DEAD) (#932).
+ */
+function listedChannel(channel: Channel): Omit<Channel, "endId"> {
+	const { endId: _end, ...listed } = channel;
+	return listed;
+}
+
 export function registerChannelRoutes(
 	server: FastifyInstance,
 	metaDal: MetaDAL,
@@ -29,7 +39,7 @@ export function registerChannelRoutes(
 			const hostOf = host_id === undefined ? metaDal.listChannelHosts() : null;
 
 			return channels.map((ch) => {
-				const row = toSnakeCase(ch) as Record<string, unknown>;
+				const row = toSnakeCase(listedChannel(ch)) as Record<string, unknown>;
 				row.display_title = sessionManager.resolveDisplayTitle(ch.id);
 				row.host_id = host_id ?? hostOf?.get(ch.id) ?? null;
 				return row;
@@ -64,7 +74,7 @@ export function registerChannelRoutes(
 		if (!channel) {
 			return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Channel not found" } });
 		}
-		const row = toSnakeCase(channel) as Record<string, unknown>;
+		const row = toSnakeCase(listedChannel(channel)) as Record<string, unknown>;
 		row.display_title = sessionManager.resolveDisplayTitle(channel.id);
 		return row;
 	});
@@ -176,7 +186,7 @@ export function registerChannelRoutes(
 			}
 
 			const updated = metaDal.getChannel(id);
-			return reply.code(200).send(toSnakeCase(updated));
+			return reply.code(200).send(toSnakeCase(updated && listedChannel(updated)));
 		},
 	);
 

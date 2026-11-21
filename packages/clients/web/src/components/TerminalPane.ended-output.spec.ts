@@ -437,8 +437,8 @@ describe("TerminalPane over a newer ending than the one it shows (#932)", () => 
 			),
 		);
 
-		expect(xterm.events[0]).toBe("<reset>");
-		expect(xterm.events).toContain("NEWER");
+		// The reset goes in the write queue, after what waited for the kept screen.
+		expect(xterm.events.slice(0, 2)).toEqual(["c", "NEWER"]);
 		expect(paneText()).toContain("exited (code 5)");
 		expect(paneText()).not.toContain("stopped from elsewhere");
 		expect(useChannelsStore().reportOf(T)).not.toHaveProperty("endReason");
@@ -453,7 +453,7 @@ describe("TerminalPane over a newer ending than the one it shows (#932)", () => 
 
 		await socketComesBack(() => refuseEnd({ endId: "E2" }));
 
-		expect(xterm.events).toEqual(["<reset>", MOUSE_OFF]);
+		expect(xterm.events).toEqual(["c", MOUSE_OFF]);
 		expect(paneText()).toContain("exited");
 		expect(paneText()).not.toContain("(code");
 	});
@@ -490,7 +490,7 @@ describe("TerminalPane over a newer ending than the one it shows (#932)", () => 
 
 			await socketComesBack(() => refuseEnd({ endId: "E2" }, last));
 
-			expect(xterm.events).toEqual(["<reset>", MOUSE_OFF]);
+			expect(xterm.events).toEqual(["c", MOUSE_OFF]);
 		});
 	}
 
@@ -516,7 +516,7 @@ describe("TerminalPane over a newer ending than the one it shows (#932)", () => 
 		refuseEnd({ endId: "E2" }, lastOutput({ snapshot: null, tail: [bytes("QUICK-END")] }));
 		await settle();
 
-		expect(xterm.events.slice(0, 2)).toEqual(["<reset>", "QUICK-END"]);
+		expect(xterm.events.slice(0, 2)).toEqual(["c", "QUICK-END"]);
 	});
 
 	it("a cached answer keeps the end its screen holds", async () => {
@@ -536,7 +536,7 @@ describe("TerminalPane over a newer ending than the one it shows (#932)", () => 
 		refuseEnd({ endId: "E2" }, lastOutput({ snapshot: null, tail: [bytes("AFTER-CACHE")] }));
 		await settle();
 
-		expect(xterm.events.slice(0, 2)).toEqual(["<reset>", "AFTER-CACHE"]);
+		expect(xterm.events.slice(0, 2)).toEqual(["c", "AFTER-CACHE"]);
 	});
 
 	it("a newer ending follows the setting as a new end", async () => {
@@ -554,6 +554,33 @@ describe("TerminalPane over a newer ending than the one it shows (#932)", () => 
 
 		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
 		expect(spawns()[0]).toMatchObject({ reuseChannelId: T, automatic: true });
+	});
+
+	it("an end it already answered keeps its hold", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		mountPane(ref(T), "live", { setUp: () => useChannelsStore().selectChannel(T) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "WHOLE");
+		await settle();
+		// Killed: the setting leaves it.
+		useChannelsStore().updateChannelStatus(T, "dead", undefined, "killed", "E1");
+		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		hear({ type: "SPAWN_OK", channelId: T, requestId: spawns()[0]?.requestId });
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		// The new shell ends at once, reported before the restart's attach is answered.
+		useChannelsStore().updateChannelStatus(T, "dead", 1, undefined, "E2");
+		await settle();
+		expect(paneText()).toContain("ended right after starting");
+
+		refuseEnd({ endId: "E2", exitCode: 1 }, lastOutput());
+		await settle();
+
+		// Not started again: the hold on an end right after its start stands.
+		expect(spawns()).toHaveLength(1);
+		expect(paneText()).toContain("ended right after starting");
 	});
 
 	it("the ending it watched stays when the hub names the same end", async () => {

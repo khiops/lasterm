@@ -23,7 +23,12 @@ import type {
 	UiAttachOkMessage,
 	UiSpawnOkMessage,
 } from "@lasterm/shared";
-import { DEFAULT_CHANNEL_NAME, generateId, validateCustomCommand } from "@lasterm/shared";
+import {
+	DEFAULT_CHANNEL_NAME,
+	FINAL_SCREEN_REDRAW_PREFIX,
+	generateId,
+	validateCustomCommand,
+} from "@lasterm/shared";
 import type { AgentConnection } from "./agent-connection.js";
 import { daemonAuthFrame } from "./daemon-auth.js";
 import { hostDefaultProfile } from "./host-profile-menu.js";
@@ -1256,6 +1261,63 @@ export class ChannelLifecycleManager {
 			});
 			return undefined;
 		}
+	}
+
+	/**
+	 * Take the final screen a terminal's CHANNEL_EXIT carries (#933), before
+	 * its end is recorded.
+	 *
+	 * When the last output the spool answers with is complete (no gap, at most
+	 * `MAX_ATTACH_TAIL_BYTES` after the newest snapshot, or a whole stream from
+	 * its first seq) and the screen's redraw still fits beside it, the redraw
+	 * goes after that output: the answer keeps what scrolled off and ends on the
+	 * exact screen, whichever run the snapshot before it was taken in. Otherwise
+	 * the screen becomes the newest snapshot. A screen whose JSON would exceed
+	 * `MAX_ENDED_SNAPSHOT_BYTES` is never sent to a pane, so it is not taken.
+	 *
+	 * It never throws: the end is reported whatever happens here. A storage
+	 * error is logged by code, and nothing after it is done.
+	 */
+	takeFinalScreen(channelId: string, screen: SnapshotData): void {
+		if (!this.ctx.channels.has(channelId)) return;
+		try {
+			const stored = Buffer.byteLength(JSON.stringify(screen));
+			if (stored > ChannelLifecycleManager.MAX_ENDED_SNAPSHOT_BYTES) return;
+			this.ctx.chunker.flush(channelId);
+			const answer = this.readScreen(channelId, true);
+			const complete =
+				answer.truncated !== true && (answer.snapshot !== null || answer.tail.length > 0);
+			const redraw = Buffer.from(FINAL_SCREEN_REDRAW_PREFIX + screen.serialized, "utf8");
+			const tailBytes = answer.tail.reduce((total, part) => total + part.byteLength, 0);
+			if (
+				complete &&
+				tailBytes + redraw.byteLength <= ChannelLifecycleManager.MAX_ATTACH_TAIL_BYTES
+			) {
+				// Written as one output row after every seq used, as a snapshot is:
+				// a write that fails leaves nothing buffered for a later flush.
+				const seq = Math.max(
+					this.ctx.chunker.getNextSeq(channelId),
+					this.ctx.spoolDal.getMaxSeq(channelId) + 1,
+				);
+				this.ctx.spoolDal.insertChunk({
+					channelId,
+					seq,
+					kind: "output",
+					dataBlob: redraw,
+					uncompressedLen: redraw.byteLength,
+				});
+				this.ctx.chunker.bumpSeq(channelId, seq + 1);
+				return;
+			}
+		} catch (err) {
+			// The id and the error's code only, as `storeSnapshot` logs.
+			this.ctx.hubLogger?.log("warn", "channel-lifecycle: final screen not stored", {
+				channelId,
+				code: (err as { code?: unknown } | null)?.code ?? "unknown",
+			});
+			return;
+		}
+		this.storeSnapshot(channelId, screen);
 	}
 
 	// ─── Re-attach channels ───────────────────────────────────────────────────

@@ -141,3 +141,12 @@ export const ErrorCode = {
 } as const;
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode];
+
+/**
+ * What a final screen's redraw starts with (#933): the whole screen as the
+ * scroll region, origin and insert modes off, autowrap on, and US ASCII in
+ * G0 to G3 with G0 shifted in. `serialized` and the character sets it ends
+ * with assume that state, which the output before it may have changed.
+ */
+export const FINAL_SCREEN_REDRAW_PREFIX =
+	"\x1b[r\x1b[?6l\x1b[4l\x1b[?7h\x1b(B\x1b)B\x1b*B\x1b+B\x0f";

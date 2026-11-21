@@ -29,6 +29,7 @@
 
 import { lstatSync, readdirSync, rmdirSync, type Stats, unlinkSync } from "node:fs";
 import path from "node:path";
+import { type BuildChannel, buildChannel, channelBaseName } from "@lasterm/shared";
 import { lastermDir } from "@lasterm/shared/dist/platform-dirs.js";
 import { detectSea } from "@lasterm/shared/dist/sea-addon-loader.js";
 
@@ -133,13 +134,17 @@ function removeIfEmpty(directory: string): void {
 
 /**
  * The roots an earlier executable extracted under: lasterm's cache directory
- * and, on POSIX, the fallback under XDG_RUNTIME_DIR.
+ * and, on POSIX, the fallback under XDG_RUNTIME_DIR, both this build channel's
+ * (#1084).
  */
-export function retiredAddonRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+export function retiredAddonRoots(
+	env: NodeJS.ProcessEnv = process.env,
+	channel: BuildChannel = buildChannel(),
+): string[] {
 	const roots = [lastermDir("cache")];
 	const runtime = env.XDG_RUNTIME_DIR;
 	if (process.platform !== "win32" && runtime !== undefined && path.isAbsolute(runtime)) {
-		roots.push(path.join(runtime, "lasterm"));
+		roots.push(path.join(runtime, channelBaseName(channel)));
 	}
 	return roots;
 }

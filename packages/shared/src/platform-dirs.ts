@@ -18,6 +18,7 @@
  */
 import { homedir } from "node:os";
 import path from "node:path";
+import { type BuildChannel, buildChannel, channelBaseName } from "./build-channel.js";
 
 export type PlatformDirKind = "state" | "config" | "cache";
 
@@ -26,6 +27,8 @@ export interface PlatformDirContext {
 	readonly platform: NodeJS.Platform;
 	readonly env: Readonly<Record<string, string | undefined>>;
 	readonly homedir: () => string;
+	/** The build channel whose directory is wanted; the running build's when absent (#1084). */
+	readonly channel?: BuildChannel;
 }
 
 /** Thrown when the environment does not say where a directory is. */
@@ -57,7 +60,7 @@ const HOME_DEFAULT: Record<PlatformDirKind, readonly string[]> = {
 };
 
 function currentContext(): PlatformDirContext {
-	return { platform: process.platform, env: process.env, homedir };
+	return { platform: process.platform, env: process.env, homedir, channel: buildChannel() };
 }
 
 function pathFor(context: PlatformDirContext): typeof path.posix {
@@ -102,8 +105,9 @@ export function platformBaseDir(
 }
 
 /**
- * lasterm's own directory for `kind`. On Windows the cache sits inside the
- * state tree (`%LOCALAPPDATA%\lasterm\cache`), where it has always been.
+ * lasterm's own directory for `kind`: `lasterm` on the release channel,
+ * `lasterm-dev` on the dev channel (#1084). On Windows the cache sits inside
+ * the state tree (`%LOCALAPPDATA%\lasterm\cache`), where it has always been.
  */
 export function lastermDir(
 	kind: PlatformDirKind,
@@ -111,7 +115,8 @@ export function lastermDir(
 ): string {
 	const paths = pathFor(context);
 	const base = platformBaseDir(kind, context);
+	const name = channelBaseName(context.channel ?? buildChannel());
 	return context.platform === "win32" && kind === "cache"
-		? paths.join(base, "lasterm", "cache")
-		: paths.join(base, "lasterm");
+		? paths.join(base, name, "cache")
+		: paths.join(base, name);
 }

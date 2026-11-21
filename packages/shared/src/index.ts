@@ -2,6 +2,7 @@
 
 export * from "./agent-config.js";
 export * from "./appearance.js";
+export * from "./build-channel.js";
 export * from "./codec.js";
 export * from "./config.js";
 export * from "./constants.js";

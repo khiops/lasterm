@@ -110,8 +110,8 @@ const STORAGE_SOURCE = join(ROOT, "packages", "hub", "src", "storage");
  * the CLI entry. SQLite is node:sqlite, a built-in module, required here as the
  * executable requires it.
  */
-async function bundleAsTheExecutable<T>(source: string): Promise<T> {
-	const { buildOptions } = await import("./build-sea-hub.js");
+async function bundleAsTheExecutable<T>(source: string, env?: NodeJS.ProcessEnv): Promise<T> {
+	const { buildOptions, channelDefine } = await import("./build-sea-hub.js");
 	const dir = mkdtempSync(join(tmpdir(), "lasterm-bundled-"));
 	try {
 		const outfile = join(dir, `${basename(source)}.cjs`);
@@ -121,6 +121,7 @@ async function bundleAsTheExecutable<T>(source: string): Promise<T> {
 			outfile,
 			footer: {},
 			logLevel: "silent",
+			...(env && { define: { ...buildOptions.define, ...channelDefine(env) } }),
 		});
 		return createRequire(import.meta.url)(outfile) as T;
 	} finally {
@@ -169,4 +170,52 @@ describe("hub sea-addon-loader in non-SEA mode", () => {
 		const { detectSea } = await import("../packages/hub/src/sea-addon-loader.js");
 		expect(detectSea()).toBe(false);
 	});
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// The build channel is fixed in the executable (#1084)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("the executable's build channel (#1084)", () => {
+	const SHARED_SOURCE = join(ROOT, "packages", "shared", "src");
+
+	it.each([
+		["release", "lasterm-build-channel:release"],
+		[undefined, "lasterm-build-channel:dev"],
+		["Release", "lasterm-build-channel:dev"],
+		["dev", "lasterm-build-channel:dev"],
+	])("defines the marker from LASTERM_CHANNEL=%s", async (value, marker) => {
+		const { channelDefine } = await import("./build-sea-hub.js");
+		expect(channelDefine(value === undefined ? {} : { LASTERM_CHANNEL: value })).toEqual({
+			__LASTERM_CHANNEL_MARKER__: JSON.stringify(marker),
+		});
+	});
+
+	// Mutation caught: the resolver reading process.env.LASTERM_CHANNEL in the
+	// bundle, whatever the marker says.
+	it.each([
+		["release", "dev", "lasterm"],
+		["release", undefined, "lasterm"],
+		["dev", "release", "lasterm-dev"],
+	])(
+		"a bundle built with %s resolves its names with LASTERM_CHANNEL=%s at run time",
+		async (built, atRunTime, name) => {
+			const shared = await bundleAsTheExecutable<
+				typeof import("../packages/shared/src/platform-dirs.js")
+			>(join(SHARED_SOURCE, "platform-dirs.ts"), { LASTERM_CHANNEL: built });
+			vi.stubEnv("LASTERM_CHANNEL", atRunTime);
+			try {
+				const context = {
+					platform: "linux" as const,
+					env: { XDG_STATE_HOME: "/x" },
+					homedir: () => "/h",
+				};
+				// No channel in the context: the bundle's own build channel.
+				expect(shared.lastermDir("state", context)).toBe(`/x/${name}`);
+			} finally {
+				vi.unstubAllEnvs();
+			}
+		},
+		60_000,
+	);
 });

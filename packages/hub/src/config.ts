@@ -11,8 +11,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import TOML from "@iarna/toml";
+import type TOML from "@iarna/toml";
 import type {
 	AgentConfig,
 	AppearanceConfig,
@@ -61,6 +60,12 @@ import {
 } from "@lasterm/shared";
 import { replaceFileSync } from "@lasterm/shared/dist/replace-file.js";
 import { edit, initSync } from "@rainbowatcher/toml-edit-js";
+import {
+	configFilePath,
+	readConfigTable,
+	readOverlay,
+	readsSharedConfig,
+} from "./config-sources.js";
 import type { MetaDAL } from "./storage/meta.js";
 
 // Initialize toml-edit-js WASM (sync — called once at module load)
@@ -130,12 +135,10 @@ function extractGcConfig(parsed: TOML.JsonMap): GcConfig {
  * Used by server.ts to provide GC config before SessionManager is created.
  */
 export function loadGcConfig(configDir: string): GcConfig {
-	const configPath = join(configDir, "config.toml");
-	if (!existsSync(configPath)) return { ...DEFAULT_GC_CONFIG };
-
 	try {
-		const content = readFileSync(configPath, "utf8");
-		return extractGcConfig(TOML.parse(content));
+		const parsed = readConfigTable(configDir);
+		if (parsed === undefined) return { ...DEFAULT_GC_CONFIG };
+		return extractGcConfig(parsed);
 	} catch {
 		return { ...DEFAULT_GC_CONFIG };
 	}
@@ -147,12 +150,10 @@ export function loadGcConfig(configDir: string): GcConfig {
  * Used by server.ts to compile CORS regexps before any route registration.
  */
 export function loadCorsOrigins(configDir: string): string[] {
-	const configPath = join(configDir, "config.toml");
-	if (!existsSync(configPath)) return [...DEFAULT_CORS_ORIGINS];
-
 	try {
-		const content = readFileSync(configPath, "utf8");
-		return extractCorsConfig(TOML.parse(content)) ?? [...DEFAULT_CORS_ORIGINS];
+		const parsed = readConfigTable(configDir);
+		if (parsed === undefined) return [...DEFAULT_CORS_ORIGINS];
+		return extractCorsConfig(parsed) ?? [...DEFAULT_CORS_ORIGINS];
 	} catch {
 		return [...DEFAULT_CORS_ORIGINS];
 	}
@@ -164,10 +165,8 @@ export function loadCorsOrigins(configDir: string): string[] {
  * temptation at precisely the point credentials start to matter.
  */
 export function loadTlsConfig(configDir: string): TlsConfig {
-	const configPath = join(configDir, "config.toml");
-	if (!existsSync(configPath)) return {};
-
-	const parsed = TOML.parse(readFileSync(configPath, "utf8"));
+	const parsed = readConfigTable(configDir);
+	if (parsed === undefined) return {};
 	const section = parsed.server;
 	if (section == null || typeof section !== "object") return {};
 	const raw = section as Record<string, unknown>;
@@ -461,12 +460,10 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
  * Returns defaults if the file is missing, malformed, or has no [ui] section.
  */
 export function loadUiConfig(configDir: string): UiConfig {
-	const configPath = join(configDir, "config.toml");
-	if (!existsSync(configPath)) return { ...DEFAULT_UI_CONFIG };
-
 	try {
-		const content = readFileSync(configPath, "utf8");
-		return extractUiConfig(TOML.parse(content));
+		const parsed = readConfigTable(configDir);
+		if (parsed === undefined) return { ...DEFAULT_UI_CONFIG };
+		return extractUiConfig(parsed);
 	} catch {
 		return { ...DEFAULT_UI_CONFIG };
 	}
@@ -812,12 +809,10 @@ export function extractAgentConfig(parsed: TOML.JsonMap): AgentConfig {
  * Returns defaults if the file is missing, malformed, or has no [auth] section.
  */
 export function loadAuthConfig(configDir: string): AuthConfig {
-	const configPath = join(configDir, "config.toml");
-	if (!existsSync(configPath)) return { ...DEFAULT_AUTH_CONFIG };
-
 	try {
-		const content = readFileSync(configPath, "utf8");
-		return extractAuthConfig(TOML.parse(content));
+		const parsed = readConfigTable(configDir);
+		if (parsed === undefined) return { ...DEFAULT_AUTH_CONFIG };
+		return extractAuthConfig(parsed);
 	} catch {
 		return { ...DEFAULT_AUTH_CONFIG };
 	}
@@ -919,17 +914,18 @@ export class ConfigResolver {
 	 */
 	loadFromFile(configDir: string): void {
 		this._configDir = configDir;
-		const configPath = join(configDir, "config.toml");
-		if (!existsSync(configPath)) return;
 
-		let parsed: TOML.JsonMap;
+		let parsed: TOML.JsonMap | undefined;
 		try {
-			const content = readFileSync(configPath, "utf8");
-			parsed = TOML.parse(content);
+			parsed = readConfigTable(configDir);
 		} catch {
 			// Malformed TOML — skip silently (do not crash the hub)
 			return;
 		}
+		if (parsed === undefined) return;
+		// A dev read rebuilds from what S and O give now: nothing a source gave
+		// before stays once it is gone or broken (#1084).
+		if (readsSharedConfig()) this.fileConfig = null;
 
 		// ── [terminal] section ──────────────────────────────────────────────
 		const terminalSection = parsed.terminal;
@@ -1092,8 +1088,14 @@ export class ConfigResolver {
 			throw new Error("ConfigResolver: configDir not set — call loadFromFile() first");
 		}
 
-		const configPath = join(this._configDir, "config.toml");
+		const configPath = configFilePath(this._configDir);
 		let tomlString = "";
+		if (readsSharedConfig()) {
+			// The dev build writes only its overlay, and never over one it cannot
+			// read: a save would lose what the developer wrote there (#1084).
+			const overlay = readOverlay(configPath);
+			if (!overlay.ok) throw new Error(`${overlay.error}; fix or remove it to save settings`);
+		}
 		if (existsSync(configPath)) {
 			tomlString = readFileSync(configPath, "utf8");
 		}

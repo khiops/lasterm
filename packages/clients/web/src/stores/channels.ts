@@ -414,9 +414,8 @@ export const useChannelsStore = defineStore("channels", () => {
 	function heardDuringFetch(channelId: string, heard: PendingStatus): void {
 		for (const heardHere of statusesDuringFetch.values()) {
 			const held = heardHere.get(channelId);
-			// A deletion stands until the channel is created again; any other
-			// status heard for a channel gone from the list is stale.
-			if (held === "deleted" && heard.replacesEnd !== true) continue;
+			// Heard for a channel in the list, so it was created again since a
+			// deletion recorded here: the deletion no longer stands.
 			heardHere.set(channelId, bufferedStatus(held === "deleted" ? undefined : held, heard));
 		}
 	}
@@ -672,7 +671,9 @@ export const useChannelsStore = defineStore("channels", () => {
 			const wsChannelsToKeep = [...channels.value].filter(
 				(c) => myWsAdded.has(c.id) && !dataIds.has(c.id),
 			);
-			let merged = [...data, ...wsChannelsToKeep].filter((c) => myHeard.get(c.id) !== "deleted");
+			// A channel deleted here is gone from `channels.value`, so only the rows
+			// the hub listed can bring one back.
+			let merged = [...data.filter((c) => myHeard.get(c.id) !== "deleted"), ...wsChannelsToKeep];
 
 			// Apply any WS status updates that arrived before the fetch completed.
 			// pendingStatuses accumulates CHANNEL_STATE and STATE_SYNC entries

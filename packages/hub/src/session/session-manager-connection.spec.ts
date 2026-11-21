@@ -1388,6 +1388,7 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 	it("is then a Yes host: a dropped link is dialled again through the daemon, not stdio", async () => {
 		const h = await leftOn();
 		expect(await keptAndConnected(h)).toBe(true);
+		const [held] = terminalsOn(h, 1);
 		const opens = h.remote.socketOpens;
 		h.remote.dropLinks();
 		await until(
@@ -1396,6 +1397,10 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 			15_000,
 		);
 		expect(startingCommands(h).filter((c) => c.includes("--stdio"))).toEqual([]);
+		// Taken up again, not started afresh.
+		await until("the terminal is taken up again", () => agentOf(h) !== undefined);
+		expect(h.remote.spawns).toBe(0);
+		expect(h.ctx.channels.get(held ?? "")?.status).not.toBe("dead");
 	});
 
 	it("refuses a host connected over stdio", async () => {
@@ -1416,7 +1421,7 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		const plain = h.sm.connectHost(h.host.id, { clientId: h.window.id });
 		await until("the plain connect asks about the key", () => verify !== undefined);
 		const before = deployMock.mock.calls.length;
-		expect(keepAndConnect(h).kind).toBe("busy");
+		expect(keepAndConnect(h).kind).toBe("connecting-already");
 		expect(deployMock.mock.calls.length).toBe(before);
 		if (verify !== undefined) h.sm.handleHostVerifyResponse(verify.promptId, "reject", h.window.id);
 		if (plain.kind === "connecting") await plain.done;
@@ -1450,7 +1455,9 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 	it("stores nothing and takes up nothing when the daemon never lists", async () => {
 		const h = await leftOn();
 		h.remote.neverLists = true;
+		const closes = vi.spyOn(SshAgent.prototype, "close");
 		expect(await keptAndConnected(h)).toBe(false);
+		expect(closes).toHaveBeenCalled();
 		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "DAEMON_UNREACHABLE" }));
 		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
 		expect(agentOf(h)).toBeUndefined();
@@ -1463,7 +1470,11 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 			if (input.sshRemoteDaemon === true) throw new Error("disk full");
 			return update(id, input);
 		});
+		h.remote.held = [generateId()];
+		const closes = vi.spyOn(SshAgent.prototype, "close");
 		expect(await keptAndConnected(h)).toBe(false);
+		expect(closes).toHaveBeenCalled();
+		expect(h.remote.destroys).toEqual([]);
 		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "INTERNAL_ERROR" }));
 		expect(agentOf(h)).toBeUndefined();
 	});
@@ -1471,11 +1482,13 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 	it("is nobody's until stored: a second connect is busy, and an open waits, then fails with it", async () => {
 		const h = await leftOn();
 		h.remote.holdsList = true;
+		h.remote.held = [generateId()];
+		const closes = vi.spyOn(SshAgent.prototype, "close");
 		const outcome = keepAndConnect(h);
 		if (outcome.kind !== "connecting") throw new Error(outcome.kind);
 		await until("the daemon is asked for its list", () => h.remote.listStream !== null);
 		expect(sessionStates(h).some((state) => state.status === "active")).toBe(false);
-		expect(h.sm.connectHost(h.host.id, { clientId: h.window.id }).kind).toBe("busy");
+		expect(h.sm.connectHost(h.host.id, { clientId: h.window.id }).kind).toBe("connecting-already");
 		const opening = h.sm.handleSpawn(h.window.id, { type: "SPAWN", hostId: h.host.id });
 		await new Promise((resolve) => setTimeout(resolve, 200));
 		expect(h.remote.spawns).toBe(0);
@@ -1487,6 +1500,8 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		expect(h.remote.spawns).toBe(0);
 		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "HOST_CHANGED" }));
 		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
+		expect(closes).toHaveBeenCalled();
+		expect(h.remote.destroys).toEqual([]);
 	});
 
 	it.each(["close", "disconnect"] as const)(
@@ -1494,6 +1509,8 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		async (how) => {
 			const h = await leftOn();
 			h.remote.holdsList = true;
+			h.remote.held = [generateId()];
+			const closes = vi.spyOn(SshAgent.prototype, "close");
 			const outcome = keepAndConnect(h);
 			if (outcome.kind !== "connecting") throw new Error(outcome.kind);
 			await until("the daemon is asked for its list", () => h.remote.listStream !== null);
@@ -1510,6 +1527,8 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 			expect(sessionStates(h).some((state) => state.status === "active")).toBe(false);
 			// Ended as an aborted attempt is, with nothing to tell anyone.
 			if (how === "disconnect") expect(errorsHeard(h)).toEqual([]);
+			expect(closes).toHaveBeenCalled();
+			expect(h.remote.destroys).toEqual([]);
 		},
 	);
 

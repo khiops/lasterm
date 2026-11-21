@@ -528,8 +528,8 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 
 	// A current daemon's connection is closed (#805), and so is an outdated
 	// one's while its list still names the terminals being destroyed: it is
-	// stopped only once it holds nothing (#701). The DESTROYs go first either
-	// way (#923).
+	// retired at the next connection's adoption, or ends at its idle timeout
+	// (#701). The DESTROYs go first either way (#923).
 	it.each([
 		["at this hub's version", DAEMON_HELLO, "close"],
 		["older than this hub", OUTDATED_DAEMON_HELLO, "close"],

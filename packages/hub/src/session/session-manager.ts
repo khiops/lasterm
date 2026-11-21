@@ -271,6 +271,8 @@ export type HostConnectionOutcome =
 	| { readonly kind: "not-ssh" }
 	| { readonly kind: "quitting" }
 	| { readonly kind: "busy" }
+	/** Another connection of the host is being made, which a daemon-only one never joins (#701). */
+	| { readonly kind: "connecting-already" }
 	/** `daemon_only` on a host whose stored OS is not linux or darwin (#701). */
 	| { readonly kind: "daemon-not-possible" }
 	/** `daemon_only` on a host connected otherwise than through its daemon (#701). */
@@ -900,7 +902,10 @@ export class SessionManager {
 		this.lifecycle.closeSession(hostId, sessionId, "killed");
 		// A daemon older than this hub, which now holds nothing of it, is
 		// stopped rather than left running with nothing to do (#805); the next
-		// terminal there starts the current one. Any other connection is
+		// terminal there starts the current one. A remote daemon whose list
+		// still names the terminals just destroyed is not yet idle by it: its
+		// connection is closed, and it is retired at the next connection's
+		// adoption, or ends at its idle timeout (#701). Any other connection is
 		// closed, the daemon left as it is.
 		if (agent && !this.retirement.retireDetached(hostId, agent)) void agent.close();
 		return "closed";
@@ -3116,7 +3121,7 @@ export class SessionManager {
 		if (this.hostIsBeingStopped(hostId)) return { kind: "busy" };
 		if (host?.type !== "ssh") return { kind: "not-ssh" };
 		if (this.isQuitting()) return { kind: "quitting" };
-		if (this.daemonOnlyReaches.has(hostId)) return { kind: "busy" };
+		if (this.daemonOnlyReaches.has(hostId)) return { kind: "connecting-already" };
 		if (options.daemonOnly === true) {
 			// A socket a daemon listens on is reached only on these (#701).
 			if (host.os !== "linux" && host.os !== "darwin") return { kind: "daemon-not-possible" };
@@ -3129,7 +3134,7 @@ export class SessionManager {
 				return { kind: "connected" };
 			}
 			// Never joined: what it would join may deploy, launch or run stdio.
-			if (this.ctx.acquisitions.has(hostId)) return { kind: "busy" };
+			if (this.ctx.acquisitions.has(hostId)) return { kind: "connecting-already" };
 			this.userActsOnHost(hostId, false);
 			return {
 				kind: "connecting",
@@ -3540,6 +3545,8 @@ export class SessionManager {
 		if (daemonOnly !== undefined) this.daemonOnlyReaches.add(hostId);
 		let session: SessionState | undefined;
 		let neverConnected = false;
+		/** The daemon a daemon-only connection reached, until it is the host's for good (#701). */
+		let reached: AgentConnection | undefined;
 		try {
 			session = await this.agentMgr.getOrCreateSession(hostId, true, fence);
 			neverConnected = session.status === "starting";
@@ -3555,6 +3562,7 @@ export class SessionManager {
 				undefined,
 				daemonOnly !== undefined,
 			);
+			if (daemonOnly !== undefined) reached = agent;
 			if (
 				this.ctx.acquisitions.get(hostId) !== acq ||
 				acq.state !== "CONNECTING" ||
@@ -3577,6 +3585,7 @@ export class SessionManager {
 				this.broadcaster.updateSessionStatus(hostId, session.id, "active");
 				this.ctx.commits.adoptAgent(fence, hostId, agent);
 				this.lifecycle.takeUpListed(hostId, agent, listed);
+				reached = undefined;
 				Acq.commit(this.ctx, acq, session);
 				clearContext(this.ctx, acq.id);
 				return true;
@@ -3595,6 +3604,12 @@ export class SessionManager {
 				hostId,
 				message: err instanceof Error ? err.message : String(err),
 			});
+			// A daemon-only connection that failed after it was reached is let
+			// go of and closed: nothing stays connected for an attempt that failed.
+			if (reached !== undefined) {
+				this.releaseAgent(hostId, reached);
+				void reached.close();
+			}
 			this.settleFailedConnect(hostId, session, neverConnected);
 			this.failConnectingAcq(acq, err, lease, () => this.holdsHost(hostId));
 			onFailure?.(err);

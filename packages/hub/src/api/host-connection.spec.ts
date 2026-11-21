@@ -305,3 +305,14 @@ describe("connect's daemon_only, once Yes is stored (#701)", () => {
 		}
 	});
 });
+
+describe("a connect that meets another being made (#701)", () => {
+	it("answers 409 HOST_BUSY saying a connection is being made", async () => {
+		manager.connectHost.mockReturnValue({ kind: "connecting-already" });
+		const response = await post("connect", sshHostId, { daemon_only: true });
+		expect(response.statusCode).toBe(409);
+		expect(response.json()).toEqual({
+			error: { code: "HOST_BUSY", message: "A connection to this host is being made." },
+		});
+	});
+});

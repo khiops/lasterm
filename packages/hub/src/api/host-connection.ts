@@ -77,6 +77,10 @@ function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyRep
 			return reply.code(409).send({
 				error: { code: "HUB_QUITTING", message: "The hub is quitting." },
 			});
+		case "connecting-already":
+			return reply.code(409).send({
+				error: { code: "HOST_BUSY", message: "A connection to this host is being made." },
+			});
 		case "daemon-not-possible":
 			return reply.code(409).send({
 				error: {

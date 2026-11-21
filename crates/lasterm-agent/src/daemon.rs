@@ -1236,6 +1236,10 @@ async fn handle_stop(
     // under: none can start between the count and the teardown, and be ended
     // by a STOP that was only allowed because it was not there yet.
     mgr.begin_shutdown();
+    // Queued still under the lock, before the shutdown is asked for: the
+    // writer drains it before the end of stream, and the shutdown waits for
+    // the writers (#700).
+    let _ = send_encoded(frame_tx, &AgentToHub::StopAccepted {});
     drop(mgr);
     tracing::info!(
         connection_id,
@@ -1244,9 +1248,6 @@ async fn handle_stop(
         other_owner_channels = others,
         "STOP accepted: shutting the daemon down"
     );
-    // Queued before the shutdown is asked for: the writer drains it before
-    // the end of stream, and the shutdown waits for the writers (#700).
-    let _ = send_encoded(frame_tx, &AgentToHub::StopAccepted {});
     daemon.shutdown.request();
 }
 
@@ -4771,6 +4772,68 @@ mod tests {
                 assert!(types.contains(&"STOP_ACCEPTED"), "{types:?}");
                 let summary = daemon.finished().await.expect("a clean stop");
                 assert_eq!(summary.confirmed_shell_exits, 1);
+            }
+
+            /// A terminal printing without end, for a hub that stops reading:
+            /// its connection's writer is then blocked on the transport.
+            fn flood(channel_id: &str) -> HubToAgent {
+                spawn(
+                    channel_id,
+                    if cfg!(windows) {
+                        "for /l %i in (0,0,1) do @echo yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+                    } else {
+                        "yes yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+                    },
+                )
+            }
+
+            /// The daemon process's own shutdown path waits for a writer its
+            /// hub does not read: `run_daemon_impl` has not returned while
+            /// that writer is held, and once the hub reads, STOP_ACCEPTED is
+            /// there, whole (#700).
+            #[tokio::test]
+            async fn the_daemon_does_not_end_while_a_writer_it_owes_is_held() {
+                let daemon = TestDaemon::start("held-writer").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, flood("held-flood")).await;
+                // Not read from here on: the transport fills, then the writer blocks.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                a.send(&stop(true)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                assert!(
+                    !daemon.task.is_finished(),
+                    "the daemon ended with its writer still held"
+                );
+                let frames = a.frames_until_closed().await;
+                let types: Vec<&str> = frames.iter().map(frame_type).collect();
+                assert!(types.contains(&"STOP_ACCEPTED"), "no STOP_ACCEPTED");
+                daemon.finished().await.expect("a clean stop");
+            }
+
+            /// Two hubs that never read: the daemon ends once, after one bound
+            /// of about two seconds for both, not one each (#700).
+            #[tokio::test]
+            async fn the_daemon_ends_after_one_bound_for_writers_never_read() {
+                let daemon = TestDaemon::start("held-writers").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, flood("held-flood-a")).await;
+                let (mut b, _) = daemon.connect_as(KEY_B).await;
+                spawned(&mut b, flood("held-flood-b")).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                a.send(&stop(true)).await;
+                let started = std::time::Instant::now();
+                let summary = tokio::time::timeout(Duration::from_secs(20), daemon.finished())
+                    .await
+                    .expect("the daemon ends")
+                    .expect("a clean stop");
+                let took = started.elapsed();
+                assert_eq!(summary.confirmed_shell_exits + summary.unresolved.len(), 2);
+                assert!(took >= Duration::from_millis(1900), "{took:?}");
+                assert!(
+                    took < Duration::from_millis(3900),
+                    "a bound per writer: {took:?}"
+                );
+                drop((a, b));
             }
 
             /// Another hub connected but holding nothing does not keep the

@@ -367,3 +367,224 @@ describe("TerminalPane rings no bell for a replay (#927)", () => {
 		});
 	}
 });
+
+describe("TerminalPane over a newer ending than the one it shows (#932)", () => {
+	const bytes = (text: string) => new TextEncoder().encode(text);
+
+	/** A CHANNEL_DEAD naming an end, its code and reason, and the last output given. */
+	function refuseEnd(
+		end: { endId?: string; exitCode?: number; endReason?: "killed" | "stopped" },
+		last?: EndedOutput,
+	): void {
+		hear({
+			type: "ERROR",
+			code: "CHANNEL_DEAD",
+			message: "This terminal has ended.",
+			channelId: T,
+			...end,
+			...(last !== undefined && { lastOutput: last }),
+		});
+	}
+
+	/** A pane attached live to T, which ends while it watches, as end E1. */
+	async function watchE1End(end: { exitCode?: number; endReason?: "killed" } = {}) {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "WHOLE");
+		await settle();
+		useChannelsStore().updateChannelStatus(T, "dead", end.exitCode ?? 3, end.endReason, "E1");
+		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+	}
+
+	/** The socket is replaced; the pane's re-attach is answered by `answer`. */
+	async function socketComesBack(answer: () => void): Promise<void> {
+		const before = attaches().length;
+		useSessionStore().reconnectCount++;
+		await vi.waitFor(() => expect(attaches()).toHaveLength(before + 1));
+		answer();
+		await settle();
+	}
+
+	/** T listed in the store, as the list of its host in view has it, with E1's end. */
+	function listedWithE1(): void {
+		useChannelsStore().channels = [
+			{
+				id: T,
+				sessionId: "SESSION",
+				status: "dead",
+				cols: 80,
+				rows: 24,
+				exitCode: 3,
+				endReason: "killed",
+				endId: "E1",
+				createdAt: "2026-11-21T00:00:00.000Z",
+				updatedAt: "2026-11-21T00:00:00.000Z",
+			},
+		];
+	}
+
+	it("a newer ending replaces the one it watched", async () => {
+		await watchE1End({ endReason: "killed" });
+		listedWithE1();
+		await settle();
+		expect(paneText()).toContain("stopped from elsewhere");
+		xterm.events.length = 0;
+
+		await socketComesBack(() =>
+			refuseEnd(
+				{ endId: "E2", exitCode: 5 },
+				lastOutput({ snapshot: null, tail: [bytes("NEWER")] }),
+			),
+		);
+
+		expect(xterm.events[0]).toBe("<reset>");
+		expect(xterm.events).toContain("NEWER");
+		expect(paneText()).toContain("exited (code 5)");
+		expect(paneText()).not.toContain("stopped from elsewhere");
+		expect(useChannelsStore().reportOf(T)).not.toHaveProperty("endReason");
+		const listed = useChannelsStore().channels.find((c) => c.id === T);
+		expect(listed).toMatchObject({ exitCode: 5, endId: "E2" });
+		expect(listed).not.toHaveProperty("endReason");
+	});
+
+	it("a newer ending with nothing to show clears the kept screen", async () => {
+		await watchE1End();
+		xterm.events.length = 0;
+
+		await socketComesBack(() => refuseEnd({ endId: "E2" }));
+
+		expect(xterm.events).toEqual(["<reset>", MOUSE_OFF]);
+		expect(paneText()).toContain("exited");
+		expect(paneText()).not.toContain("(code");
+	});
+
+	it("a newer ending over a drawn one takes its code", async () => {
+		mountPane(ref(T), "dead");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		refuseEnd({ endId: "E1", exitCode: 3 }, lastOutput());
+		await vi.waitFor(() => expect(paneText()).toContain("exited (code 3)"));
+
+		await socketComesBack(() =>
+			refuseEnd(
+				{ endId: "E2", exitCode: 5 },
+				lastOutput({ snapshot: null, tail: [bytes("E2-OUT")] }),
+			),
+		);
+
+		expect(paneText()).toContain("exited (code 5)");
+		expect(xterm.events.slice(-2)).toEqual(["E2-OUT", MOUSE_OFF]);
+	});
+
+	const nothingToShow: Array<[string, EndedOutput | undefined]> = [
+		["absent", undefined],
+		["empty", lastOutput({ snapshot: null, tail: [] })],
+	];
+	for (const [label, last] of nothingToShow) {
+		it(`a newer ending with nothing to show clears a drawn one (${label})`, async () => {
+			mountPane(ref(T), "dead");
+			await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+			refuseEnd({ endId: "E1" }, lastOutput());
+			await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+			expect(xterm.events).toContain("LAST-SCREEN");
+			xterm.events.length = 0;
+
+			await socketComesBack(() => refuseEnd({ endId: "E2" }, last));
+
+			expect(xterm.events).toEqual(["<reset>", MOUSE_OFF]);
+		});
+	}
+
+	it("a first open takes the newer end's code", async () => {
+		mountPane(ref(T), "dead", {
+			setUp: () => useChannelsStore().updateChannelStatus(T, "dead", 3, undefined, "E1"),
+		});
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+
+		refuseEnd({ endId: "E2", exitCode: 5 }, lastOutput());
+
+		await vi.waitFor(() => expect(paneText()).toContain("exited (code 5)"));
+	});
+
+	it("a restart that ended before its attach replaces the kept ending", async () => {
+		await watchE1End();
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		hear({ type: "SPAWN_OK", channelId: T, requestId: spawns()[0]?.requestId });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		xterm.events.length = 0;
+
+		refuseEnd({ endId: "E2" }, lastOutput({ snapshot: null, tail: [bytes("QUICK-END")] }));
+		await settle();
+
+		expect(xterm.events.slice(0, 2)).toEqual(["<reset>", "QUICK-END"]);
+	});
+
+	it("a cached answer keeps the end its screen holds", async () => {
+		await watchE1End();
+		button("Restart")?.click();
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		hear({ type: "SPAWN_OK", channelId: T, requestId: spawns()[0]?.requestId });
+		useChannelsStore().updateChannelStatus(T, "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(2));
+		// Answered from the hub's memory: the kept screen stays.
+		attachOk(T, "CACHED", { cached: true });
+		await settle();
+		xterm.events.length = 0;
+
+		button("Reconnect")?.click();
+		await vi.waitFor(() => expect(attaches()).toHaveLength(3));
+		refuseEnd({ endId: "E2" }, lastOutput({ snapshot: null, tail: [bytes("AFTER-CACHE")] }));
+		await settle();
+
+		expect(xterm.events.slice(0, 2)).toEqual(["<reset>", "AFTER-CACHE"]);
+	});
+
+	it("a newer ending follows the setting as a new end", async () => {
+		xterm.profile = { whenEnded: "restart" };
+		mountPane(ref(T), "live", { setUp: () => useChannelsStore().selectChannel(T) });
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "WHOLE");
+		await settle();
+		// Killed: the setting does not restart it.
+		useChannelsStore().updateChannelStatus(T, "dead", undefined, "killed", "E1");
+		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+		expect(spawns()).toEqual([]);
+
+		await socketComesBack(() => refuseEnd({ endId: "E2", exitCode: 0 }, lastOutput()));
+
+		await vi.waitFor(() => expect(spawns()).toHaveLength(1));
+		expect(spawns()[0]).toMatchObject({ reuseChannelId: T, automatic: true });
+	});
+
+	it("the ending it watched stays when the hub names the same end", async () => {
+		await watchE1End();
+		const kept = [...xterm.events];
+
+		await socketComesBack(() => refuseEnd({ endId: "E1", exitCode: 3 }, lastOutput()));
+
+		expect(xterm.events).toEqual([...kept, MOUSE_OFF]);
+	});
+
+	it("an answer naming no end keeps the ending it watched", async () => {
+		await watchE1End();
+		const kept = [...xterm.events];
+
+		await socketComesBack(() => refuseEnd({}, lastOutput()));
+
+		expect(xterm.events).toEqual([...kept, MOUSE_OFF]);
+	});
+
+	it("an ending seen without an id stays", async () => {
+		mountPane(ref(T), "live");
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "WHOLE");
+		await settle();
+		useChannelsStore().updateChannelStatus(T, "dead", 1);
+		await vi.waitFor(() => expect(button("Restart")).toBeDefined());
+		const kept = [...xterm.events];
+
+		await socketComesBack(() => refuseEnd({ endId: "E2" }, lastOutput()));
+
+		expect(xterm.events).toEqual([...kept, MOUSE_OFF]);
+	});
+});

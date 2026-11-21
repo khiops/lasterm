@@ -1878,6 +1878,8 @@ export class SessionManager {
 							// being purged, and nothing reads its output any more,
 							// even while this hub still holds it in memory.
 							...(kept !== undefined && this.endedOutputOf(channelId, ended)),
+							// Which end this is, and its code and reason (#932).
+							...this.recordedEndOf(channelId),
 						};
 			client.send(errorMsg);
 			return false;
@@ -2066,6 +2068,7 @@ export class SessionManager {
 					message: "This terminal is no longer running on its host.",
 					channelId,
 					...this.endedOutputOf(channelId, channel),
+					...this.recordedEndOf(channelId),
 				} satisfies ErrorMessage);
 				return false;
 			}
@@ -2091,6 +2094,21 @@ export class SessionManager {
 			client.send(attachOk);
 		}
 		return true;
+	}
+
+	/**
+	 * The end meta.db records for a dead channel, for its CHANNEL_DEAD: its id,
+	 * exit code and reason, each when set (#932). Nothing for a row that is not
+	 * dead, or gone.
+	 */
+	private recordedEndOf(channelId: string): Pick<ErrorMessage, "endId" | "exitCode" | "endReason"> {
+		const row = this.ctx.metaDal.getChannel(channelId);
+		if (row?.status !== "dead") return {};
+		return {
+			...(row.endId !== undefined && { endId: row.endId }),
+			...(row.exitCode !== undefined && { exitCode: row.exitCode }),
+			...(row.endReason !== undefined && { endReason: row.endReason }),
+		};
 	}
 
 	/**

@@ -86,6 +86,8 @@ export interface EndWatch {
 	attached(channelId: string): void;
 	/** Nothing heard from now on is live: the socket went, or an attach was answered otherwise. */
 	lost(): void;
+	/** The hub named a newer end of this terminal than the one told: the next is not a repeat (#932). */
+	forget(channelId: string): void;
 	/** The terminal ended: how this pane learnt it. */
 	ended(channelId: string): EndSeen;
 }
@@ -112,6 +114,10 @@ export function createEndWatch(now: () => number): EndWatch {
 		lost() {
 			watching = null;
 			startingId = null;
+		},
+		forget(channelId) {
+			// A newer end of that terminal than the one told: not a repeat (#932).
+			if (toldId === channelId) toldId = null;
 		},
 		ended(channelId) {
 			const watched = watching?.channelId === channelId ? watching : null;

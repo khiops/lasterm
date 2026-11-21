@@ -64,6 +64,7 @@ function apiRowToChannel(row: Record<string, unknown>): Channel {
 	// A dead terminal the hub ended itself: no pane brings back one killed (#592).
 	const endReason = endReasonOfRow(row);
 	if (endReason !== undefined) ch.endReason = endReason;
+	if (typeof row.end_id === "string") ch.endId = row.end_id;
 	return ch;
 }
 
@@ -272,6 +273,28 @@ export interface ChannelReport {
 	status: Channel["status"];
 	exitCode?: number;
 	endReason?: ChannelEndReason;
+	/** The id the hub gave that end, once it has ended (#932). */
+	endId?: string;
+}
+
+/**
+ * A status heard for a channel no list in view holds yet. `replacesEnd`: it
+ * reports another end than the one the list may still show, or a terminal
+ * running again, so the fetched row's exit code, reason and end id give way
+ * to its own, absent ones included (#932).
+ */
+interface PendingStatus {
+	status: Channel["status"];
+	exitCode?: number;
+	endReason?: ChannelEndReason;
+	endId?: string;
+	replacesEnd?: true;
+}
+
+/** A channel without what an end says of it: its exit code, reason and end id (#932). */
+function withoutEnd(channel: Channel): Channel {
+	const { exitCode: _code, endReason: _reason, endId: _id, ...rest } = channel;
+	return rest;
 }
 
 /** What the index keeps of a channel whichever host is in view. */
@@ -306,9 +329,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	/** Channel IDs from the last STATE_SYNC — used to mark absent channels as dead after fetchChannels. */
 	const lastSyncIds = ref<Set<string> | null>(null);
 	/** Buffered channel status updates from WS that arrived before fetchChannels populated the list. */
-	const pendingStatuses = ref<Map<string, { status: Channel["status"]; exitCode?: number }>>(
-		new Map(),
-	);
+	const pendingStatuses = ref<Map<string, PendingStatus>>(new Map());
 
 	/**
 	 * What the hub last said about each channel, whichever host is in view.
@@ -589,9 +610,11 @@ export const useChannelsStore = defineStore("channels", () => {
 					if (p) {
 						statusUpdated = true;
 						return {
-							...ch,
+							...(p.replacesEnd === true ? withoutEnd(ch) : ch),
 							status: p.status,
 							...(p.exitCode !== undefined && { exitCode: p.exitCode }),
+							...(p.endReason !== undefined && { endReason: p.endReason }),
+							...(p.endId !== undefined && { endId: p.endId }),
 						};
 					}
 					return ch;
@@ -691,35 +714,77 @@ export const useChannelsStore = defineStore("channels", () => {
 	// Real-time channel state updates from CHANNEL_STATE WS messages
 	// -------------------------------------------------------------------------
 
+	/** The end id this window last heard for a channel, wherever it keeps it (#932). */
+	function recordedEndId(channelId: string): string | undefined {
+		return (
+			reports.value.get(channelId)?.endId ??
+			channels.value.find((c) => c.id === channelId)?.endId ??
+			pendingStatuses.value.get(channelId)?.endId
+		);
+	}
+
+	/**
+	 * What the hub says of a channel's status. A report of another end than
+	 * the one this window recorded, and a report of the terminal running again,
+	 * replace what the previous end said, its exit code and reason gone when
+	 * the report has none; the same end told again adds to it (#932).
+	 */
 	function updateChannelStatus(
 		channelId: string,
 		status: Channel["status"],
 		exitCode?: number,
 		endReason?: ChannelEndReason,
+		endId?: string,
 	): void {
+		const previousEnd = recordedEndId(channelId);
+		const replacesEnd = status !== "dead" || (endId !== undefined && endId !== previousEnd);
+		const keptEnd = status === "dead" ? (endId ?? previousEnd) : undefined;
 		reports.value = new Map(reports.value).set(channelId, {
 			status,
 			...(exitCode !== undefined && { exitCode }),
 			...(endReason !== undefined && { endReason }),
+			...(keptEnd !== undefined && { endId: keptEnd }),
 		});
 		const idx = channels.value.findIndex((c) => c.id === channelId);
 		if (idx === -1) {
 			// Channel not loaded yet — buffer for later application
 			const next = new Map(pendingStatuses.value);
-			next.set(channelId, { status, ...(exitCode !== undefined && { exitCode }) });
+			next.set(channelId, {
+				status,
+				...(exitCode !== undefined && { exitCode }),
+				...(endReason !== undefined && { endReason }),
+				...(keptEnd !== undefined && { endId: keptEnd }),
+				...(replacesEnd && { replacesEnd: true as const }),
+			});
 			pendingStatuses.value = next;
 			return;
 		}
 		const existing = channels.value[idx];
 		if (existing === undefined) return;
 		// Why it ended goes with this end only: a terminal running again, or one
-		// that ended by itself, has none (#592).
-		const { endReason: _before, ...updated } = existing;
-		updated.status = status;
+		// that ended by itself, has none (#592). A newer end, or a run, takes
+		// the previous end's exit code and id with it (#932).
+		const { endReason: _before, ...kept } = replacesEnd ? withoutEnd(existing) : existing;
+		const updated: Channel = { ...kept, status };
 		if (exitCode !== undefined) updated.exitCode = exitCode;
+		if (keptEnd !== undefined) updated.endId = keptEnd;
 		const next = [...channels.value];
 		next[idx] = status === "dead" && endReason !== undefined ? { ...updated, endReason } : updated;
 		channels.value = next;
+	}
+
+	/**
+	 * The end a CHANNEL_DEAD names, answering an attach (#932). When this
+	 * window recorded another end for that channel, or none, the answer's end
+	 * replaces it wherever a card reads it, its exit code and reason gone when
+	 * the answer has none. An answer naming no end changes nothing.
+	 */
+	function takeEndedAnswer(
+		channelId: string,
+		end: { endId?: string; exitCode?: number; endReason?: ChannelEndReason },
+	): void {
+		if (end.endId === undefined || end.endId === recordedEndId(channelId)) return;
+		updateChannelStatus(channelId, "dead", end.exitCode, end.endReason, end.endId);
 	}
 
 	/** The hub's last report on a channel, whichever host it is on. */
@@ -985,8 +1050,8 @@ export const useChannelsStore = defineStore("channels", () => {
 		if (knownIndex !== -1) {
 			const known = channels.value[knownIndex];
 			if (known !== undefined) {
-				// Its end, and why it came, are over (#592).
-				const { endReason: _ended, ...rest } = known;
+				// Its end, why it came and its exit code are over (#592, #932).
+				const rest = withoutEnd(known);
 				const revived: Channel = {
 					...rest,
 					sessionId: msg.sessionId,
@@ -1915,6 +1980,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		selectChannel,
 		markUnread,
 		updateChannelStatus,
+		takeEndedAnswer,
 		reportOf,
 		endReasonOf,
 		statusOf,

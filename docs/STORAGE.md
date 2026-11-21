@@ -227,8 +227,9 @@ CREATE TABLE channels (
   rows        INTEGER NOT NULL DEFAULT 24,
   status      TEXT NOT NULL DEFAULT 'born'
               CHECK(status IN ('born', 'live', 'orphan', 'dead')),
-  exit_code   INTEGER,                                   -- set when DEAD
+  exit_code   INTEGER,                                   -- set when DEAD; NULL once it runs again (#932)
   end_reason  TEXT,                                      -- 'killed' | 'stopped' when the hub ended it; NULL otherwise (#592)
+  end_id      TEXT,                                      -- ULID naming this end; NULL while it runs (#932)
   profile_json TEXT,                                     -- JSON: layer 4 overrides
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL
@@ -256,6 +257,17 @@ that the hub found gone, and for every terminal that had ended before the column
 those ended was never recorded. A value the hub does not know is read as none. The
 channel list carries it as `end_reason`, and STATE_SYNC names every dead channel `'killed'`
 (PROTOCOL.md § 4.6).
+
+`end_id` names one end of the terminal (#932). The same statement gives it a new ULID when it
+writes `dead` over a row that was not dead, keeps it when the end is told again, and clears it
+with any other status; bringing the terminal back under its own id clears it too. `exit_code`
+is cleared the same way, by any status but `dead`: a terminal running again has no exit code,
+whether a revive or a restart that writes `live` brought it back. The hub sends `end_id` with
+the end (CHANNEL_STATE `dead`) and with the refusal of an attach on the ended terminal
+(CHANNEL_DEAD), so a window can tell an end it showed from a newer one (PROTOCOL.md § 4.2,
+§ 4.7). It is NULL for every end recorded before the column existed, and `markAllChannelsDead`,
+which nothing in the hub calls, writes none. A hub without end ids that restarts and ends a
+terminal leaves the earlier end's id in the row, which a hub with them then sends again.
 
 ### 3.5 Tab layouts
 
@@ -672,6 +684,7 @@ packages/hub/src/storage/migrations/
 │   ├── 027-ssh-auth-for-every-ssh-host.sql
 │   ├── 028-host-connect-timeout.sql
 │   ├── 029-proxy-jump-user-port.sql
+│   ├── 030-channel-end-id.sql
 │   └── ...
 └── spool/
     ├── 001-initial.sql
@@ -713,6 +726,7 @@ them. `spool.db` was not squashed: it still has its one migration.
 | `027-ssh-auth-for-every-ssh-host.sql` | Gives every SSH host stored without `ssh_auth` a method, by the rule `POST /api/hosts` now applies to one sent without it (#917): `key` when its `ssh_key_path` holds something other than ASCII whitespace, `agent` otherwise. Before, such a host was read as key auth when connected to and as the agent when gone through. No other column or row is touched, `updated_at` included; a local host keeps its NULL. A hub before #917, run again on the database, reads each method as stored, and can store an SSH host without one again: back on a hub with #917, connecting to it or through it is refused. |
 | `028-host-connect-timeout.sql` | Adds `hosts.connect_timeout_seconds`, NULL for every host already stored (#1034): how long each wait of a connection to the host may last, 20-120 s. NULL keeps the limits as before, or takes `ConnectTimeout` from `~/.ssh/config` when it is 20 s or more. A hub before #1034 ignores the column. |
 | `029-proxy-jump-user-port.sql` | Adds `hosts.ssh_proxy_user` and `hosts.ssh_proxy_port`, NULL for every host already stored (#1047): the user and port a jump linked to a saved host (`ssh_proxy_host_id`) is reached with when its `ProxyJump` wrote its own, over the saved host's. NULL follows the saved host. A hub before #1047 ignores the columns. |
+| `030-channel-end-id.sql` | Adds `channels.end_id`, NULL for every channel already stored (#932): the ULID the hub gives each end of a terminal, sent with CHANNEL_STATE `dead` and CHANNEL_DEAD so a window can tell an end it showed from a newer one. An end recorded before it has none. A hub before #932 reads the channels table with SELECT * and maps named fields, so it ignores the column, and leaves an earlier end's id in a row it restarts and ends. |
 
 ## 10. Backup & Restore
 

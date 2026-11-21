@@ -613,6 +613,15 @@ let attachedLive = false;
  */
 let endSeenLiveOf: string | null = null;
 
+/**
+ * The end id of the ending this pane's screen holds (#932): the end it saw
+ * live, or the one whose last output it drew. A CHANNEL_DEAD naming another
+ * end replaces the screen. Kept through a restart over the kept screen and a
+ * cached answer that keeps it; dropped when a live answer replaces the screen
+ * or the pane's terminal changes.
+ */
+let screenEndId: string | null = null;
+
 // ---------------------------------------------------------------------------
 // When the terminal ends (#574)
 // ---------------------------------------------------------------------------
@@ -650,10 +659,12 @@ const heldBackText = computed(() => (heldBack.value === null ? '' : heldBackMess
  */
 const hold = ref<EndHold | null>(null);
 
-// A reason is about one terminal: a pane handed another one drops it.
+// A reason is about one terminal: a pane handed another one drops it, and
+// the end its screen held (#932).
 watch(effectiveChannelId, () => {
 	heldBack.value = null;
 	hold.value = null;
+	screenEndId = null;
 });
 
 /**
@@ -665,7 +676,10 @@ watch(effectiveChannelId, () => {
  * connect (#592).
  */
 function onTerminalEnded(end: EndSeen, endReason?: ChannelEndReason): void {
-	if (end.seen === 'live') endSeenLiveOf = effectiveChannelId.value;
+	if (end.seen === 'live') {
+		endSeenLiveOf = effectiveChannelId.value;
+		screenEndId = channelsStore.reportOf(effectiveChannelId.value)?.endId ?? null;
+	}
 	const facts: EndFacts = {
 		...end,
 		directProcess: isDirectProcess.value,
@@ -739,14 +753,22 @@ async function attachAndCover(
 	opts?: { preserveContent?: boolean; replaceIfLive?: boolean; keepScreenIfEnded?: boolean },
 ): Promise<AttachResult | null> {
 	let result: AttachResult;
+	const keeps = opts?.preserveContent === true || opts?.keepScreenIfEnded === true;
 	try {
 		result = await reattachChannel(chId, {
 			...opts,
+			...(screenEndId !== null && { endShown: screenEndId }),
 			// An answer for a terminal this pane has left writes nothing (#927).
 			stillWanted: () => effectiveChannelId.value === chId,
 		});
 	} catch (err) {
-		const code = (err as { code?: string } | null)?.code;
+		const refusal = (err ?? {}) as {
+			code?: string;
+			endId?: string;
+			exitCode?: number;
+			endReason?: ChannelEndReason;
+		};
+		const code = refusal.code;
 		// Asked for another terminal since, or not showing this one any more: the
 		// answer is not about this pane, and nothing is to be done with it (#929).
 		if (code === ATTACH_SUPERSEDED) return null;
@@ -755,9 +777,35 @@ async function attachAndCover(
 		// over a terminal that had ended (#556).
 		const facts = factsFromRefusal(code);
 		if (facts === null) throw err;
+		const newerEnd =
+			code === 'CHANNEL_DEAD' &&
+			refusal.endId !== undefined &&
+			screenEndId !== null &&
+			refusal.endId !== screenEndId;
+		if (newerEnd) {
+			// Another end than the one it showed: nothing it held about that one
+			// says anything of this one, which it found (#932).
+			heldBack.value = null;
+			hold.value = null;
+			endWatch.forget(chId);
+		}
+		if (code === 'CHANNEL_DEAD' && refusal.endId !== undefined && (!keeps || newerEnd)) {
+			screenEndId = refusal.endId;
+		}
+		if (code === 'CHANNEL_DEAD') {
+			// The card reads the end the hub names, whichever end this window
+			// heard, and the reaction below reads its reason: taken first.
+			channelsStore.takeEndedAnswer(chId, {
+				...(refusal.endId !== undefined && { endId: refusal.endId }),
+				...(refusal.exitCode !== undefined && { exitCode: refusal.exitCode }),
+				...(refusal.endReason !== undefined && { endReason: refusal.endReason }),
+			});
+		}
 		takeAnswer(chId, facts);
 		return null;
 	}
+	// A cached answer over a kept screen leaves it: it still holds that end.
+	if (!(result.cached === true && opts?.preserveContent === true)) screenEndId = null;
 	takeAnswer(chId, factsFromAttachOk(result.cached));
 	// A live answer: the screen follows the terminal again, kept or replaced.
 	if (result.cached !== true) missedOutput = false;

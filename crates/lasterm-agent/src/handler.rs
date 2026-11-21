@@ -2520,7 +2520,7 @@ mod stdio_tests {
         // A colour change before every cell: far more bytes than cells.
         let mut cells = String::new();
         for i in 0..(500 * 500) {
-            cells.push_str(&format!("[3{}m#", i % 8));
+            cells.push_str(&format!("\x1b[3{}m#", i % 8));
         }
         mirror.process(cells.as_bytes());
         assert!(mirror.snapshot().serialized.len() > FINAL_SCREEN_MAX_BYTES);

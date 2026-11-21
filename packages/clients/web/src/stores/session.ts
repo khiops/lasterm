@@ -483,7 +483,13 @@ export const useSessionStore = defineStore("session", () => {
 	function _registerChannelHandlers(channelsStore: ReturnType<typeof useChannelsStore>): void {
 		wsClient.on("CHANNEL_STATE", (msg) => {
 			if (msg.type === "CHANNEL_STATE") {
-				channelsStore.updateChannelStatus(msg.channelId, msg.status, msg.exitCode, msg.endReason);
+				channelsStore.updateChannelStatus(
+					msg.channelId,
+					msg.status,
+					msg.exitCode,
+					msg.endReason,
+					msg.endId,
+				);
 			}
 		});
 

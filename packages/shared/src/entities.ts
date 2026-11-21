@@ -264,6 +264,11 @@ export interface Channel {
 	 * never brings back one that was killed (#592).
 	 */
 	endReason?: ChannelEndReason;
+	/**
+	 * Only on a dead channel: the id of the end its row records, new at each
+	 * end, absent for one recorded before end ids (#932).
+	 */
+	endId?: string;
 	createdAt: string;
 	updatedAt: string;
 }

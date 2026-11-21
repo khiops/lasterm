@@ -147,6 +147,23 @@ export const settingsSchema: SettingDefinition[] = [
 		description: "Show notification badge on tab when terminal receives BEL",
 	},
 
+	// ─── Terminal category — a paste of several lines (#1015) ─────────
+	{
+		key: "pasteWarning",
+		label: "Paste of several lines",
+		type: "select",
+		category: "terminal",
+		section: "terminal",
+		scopes: ["global", "host", "channel"],
+		options: [
+			{ label: "Ask when it would run at once", value: "auto" },
+			{ label: "Always ask", value: "always" },
+			{ label: "Never ask", value: "never" },
+		],
+		description:
+			"Before pasting two or more lines, show how many and the first ones, with Paste and Cancel. Ask when it would run at once: only when the program has not turned bracketed paste on, as cmd and PowerShell do not, so that each line would run as it arrives. One line ending in a line break does not ask.",
+	},
+
 	// ─── Terminal category — when a terminal ends (#574) ───────────────
 	{
 		key: "whenEnded",

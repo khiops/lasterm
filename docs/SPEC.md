@@ -1404,9 +1404,16 @@ is the one check each part makes:
 | `transfer_fallback_dir` | `transferFallbackDir` | string, ≤ 1024 | `""` (the home) | global, host | Where an upload lands otherwise, and where the files panel opens when the shell's folder is unknown (#836). `${VAR}` is expanded on the host as the agent expands a launch profile's `cwd` (§ 3.3, Host Files). |
 | `transfer_verify` | `transferVerify` | boolean | `true` | global, host | Check uploads by SHA-256 over SSH commands, on hosts whose server offers no SFTP. |
 
+A paste of two or more lines can ask first (#1015), through one more key of the same four layers:
+
+| TOML key | Profile key | Values | Default | Notes |
+|----------|-------------|--------|---------|-------|
+| `paste_warning` | `pasteWarning` | `auto`, `always`, `never` | `auto` | When a paste of two or more lines waits on a card over the pane (how many lines, the first three, Paste and Cancel) before any of it is sent. `auto` asks only while the program has bracketed paste off, as the pane's xterm last parsed it, so that each line would run as it arrives (cmd and PowerShell never turn it on). A single line ending in one line break does not count. "Don't ask again" on the card writes `never` for the terminal's host or everywhere, through `planProfileWrite`. |
+
 A terminal's profile refuses the two host keys (`HOST_ONLY_PROFILE_KEYS`). Every value is checked
-where it is written, by the tables of `file-transfer.ts`, and one in `config.toml` that a route would
-refuse is not read. The window's settings of the files panel are global, in `[transfer]`
+where it is written, by `TERMINAL_PROFILE_VALIDATORS` (`@lasterm/shared`: the tables of
+`file-transfer.ts` and `paste_warning`'s), and one in `config.toml` that a route would refuse is not
+read. The window's settings of the files panel are global, in `[transfer]`
 (`panel_side`, `open_on_drag`, `max_concurrent` 1–3, `show_hidden`), and its width in
 `[layout] transfer_panel_width` (240–520 px); CONFIG_REFERENCE.md has them all.
 

@@ -7,6 +7,7 @@ import {
 	type ExperimentalConfig,
 	TRANSFER_CONFIG_KEYS,
 	TRANSFER_PROFILE_KEYS,
+	TRANSFER_PROFILE_VALIDATORS,
 	type TransferConfig,
 } from "./file-transfer.js";
 import type { HostRailBadgeSize } from "./host-rail.js";
@@ -277,6 +278,7 @@ export const DEFAULT_PROFILE: TerminalProfile = {
 	envMode: "inherit",
 	env: {},
 	whenEnded: "ask",
+	pasteWarning: "auto",
 	transferDrop: "upload",
 	transferConfirmDrop: true,
 	transferOnConflict: "ask",
@@ -413,10 +415,30 @@ export const TERMINAL_PROFILE_KEYS = [
 	"envMode",
 	"env",
 	"whenEnded",
+	"pasteWarning",
 	...TRANSFER_PROFILE_KEYS,
 ] as const;
 
 export type TerminalProfileKey = (typeof TERMINAL_PROFILE_KEYS)[number];
+
+/** When a paste of two or more lines asks first (#1015). */
+export const PASTE_WARNINGS = ["auto", "always", "never"] as const;
+
+export type PasteWarning = (typeof PASTE_WARNINGS)[number];
+
+export function isPasteWarning(value: unknown): value is PasteWarning {
+	return (PASTE_WARNINGS as readonly unknown[]).includes(value);
+}
+
+/**
+ * The terminal-profile values that are checked, by key: what the hub's routes
+ * refuse and what it does not read from `config.toml`. A key without an entry
+ * is taken as given.
+ */
+export const TERMINAL_PROFILE_VALIDATORS: Readonly<Record<string, (value: unknown) => boolean>> = {
+	...TRANSFER_PROFILE_VALIDATORS,
+	pasteWarning: isPasteWarning,
+};
 
 export const MAX_WALLPAPER_BLUR = 20;
 export const MAX_WALLPAPER_SIZE = 10 * 1024 * 1024; // 10 MB

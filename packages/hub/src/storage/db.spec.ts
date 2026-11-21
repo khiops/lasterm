@@ -120,7 +120,7 @@ describe("openTestDatabases", () => {
 		dbs2.close();
 
 		expect(v1).toBe(30);
-		expect(v2).toBe(29);
+		expect(v2).toBe(30);
 	});
 
 	it("close() closes memory databases synchronously and returns a promise", async () => {
@@ -362,6 +362,7 @@ describe("meta.db and its baseline", () => {
 			);
 			CREATE TABLE launch_profiles (id TEXT PRIMARY KEY, name TEXT);
 			CREATE TABLE workspaces (id TEXT PRIMARY KEY);
+			CREATE TABLE channels (id TEXT PRIMARY KEY, status TEXT);
 		`);
 		before.close();
 
@@ -380,6 +381,7 @@ describe("meta.db and its baseline", () => {
 			{ version: 30 },
 		]);
 		expect(tables(dbs.meta)).toEqual([
+			"channels",
 			"host_launch_profiles",
 			"hosts",
 			"launch_profiles",
@@ -389,6 +391,8 @@ describe("meta.db and its baseline", () => {
 			"workspaces",
 		]);
 		expect(columns(dbs.meta, "launch_profiles")).toEqual(["id", "name", "report_directory"]);
+		// Migration 030 adds its column to the channels a database of then holds (#932).
+		expect(columns(dbs.meta, "channels")).toEqual(["id", "status", "end_id"]);
 		expect(columns(dbs.meta, "hosts")).toEqual([
 			"id",
 			"type",

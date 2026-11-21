@@ -331,6 +331,8 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 							sessionId: index === 0 ? SESSION_ID : olderSession,
 							status: "dead",
 							endReason: "killed",
+							// Each end has an id of its own (#932).
+							endId: expect.any(String),
 						},
 					]);
 				}
@@ -881,6 +883,7 @@ describe("POST /api/hosts/:id/agent/replace, when no end is reported (#599)", ()
 					sessionId: SESSION_ID,
 					status: "dead",
 					endReason: "stopped",
+					endId: expect.any(String),
 				},
 			]);
 			// Kept with the end: found at the next launch, it follows its setting (#592).

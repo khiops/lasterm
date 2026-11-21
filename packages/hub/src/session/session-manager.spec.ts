@@ -4368,6 +4368,8 @@ describe("SessionManager", () => {
 							code: "CHANNEL_DEAD",
 							message: "This terminal is no longer running on its host.",
 							channelId,
+							// The end meta.db recorded, read without the spool (#932).
+							endId: expect.any(String),
 						},
 					]);
 					expect(logged.filter(([level]) => level === "warn")).toEqual([
@@ -4399,6 +4401,7 @@ describe("SessionManager", () => {
 						code: "CHANNEL_DEAD",
 						message: "This terminal is no longer running on its host.",
 						channelId,
+						endId: expect.any(String),
 					},
 				]);
 				const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext })
@@ -10351,7 +10354,14 @@ describe("SessionManager — an end the hub caused says so (#580)", () => {
 		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 1 });
 
 		expect(endsOf(heard, channelId)).toEqual([
-			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", endReason: "killed" },
+			{
+				type: "CHANNEL_STATE",
+				channelId,
+				sessionId,
+				status: "dead",
+				endReason: "killed",
+				endId: expect.any(String),
+			},
 		]);
 	});
 
@@ -10361,7 +10371,14 @@ describe("SessionManager — an end the hub caused says so (#580)", () => {
 		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
 
 		expect(endsOf(heard, channelId)).toEqual([
-			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", exitCode: 0 },
+			{
+				type: "CHANNEL_STATE",
+				channelId,
+				sessionId,
+				status: "dead",
+				exitCode: 0,
+				endId: expect.any(String),
+			},
 		]);
 	});
 
@@ -10371,7 +10388,14 @@ describe("SessionManager — an end the hub caused says so (#580)", () => {
 		await sm.closeSession(sessionId);
 
 		expect(endsOf(heard, channelId)).toEqual([
-			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", endReason: "killed" },
+			{
+				type: "CHANNEL_STATE",
+				channelId,
+				sessionId,
+				status: "dead",
+				endReason: "killed",
+				endId: expect.any(String),
+			},
 		]);
 	});
 

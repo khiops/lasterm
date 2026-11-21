@@ -2487,12 +2487,17 @@ mod stdio_tests {
         let manager = Arc::new(Mutex::new(PtyManager::new()));
         let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
         let (shell, args) = if cfg!(windows) {
-            ("cmd.exe", vec!["/c".to_owned(), "echo final-line".to_owned()])
+            (
+                "cmd.exe",
+                vec!["/c".to_owned(), "echo final-line".to_owned()],
+            )
         } else {
-            ("/bin/sh", vec!["-c".to_owned(), "printf final-line".to_owned()])
+            (
+                "/bin/sh",
+                vec!["-c".to_owned(), "printf final-line".to_owned()],
+            )
         };
-        let mut events =
-            start_shell_in("ends", shell, args, None, false, &manager, &senders).await;
+        let mut events = start_shell_in("ends", shell, args, None, false, &manager, &senders).await;
         let exit = exit_of(&mut events).await;
 
         let screen = &exit["screen"];

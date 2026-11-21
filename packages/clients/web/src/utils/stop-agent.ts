@@ -12,6 +12,12 @@ export type StopAgentResult =
 	| { readonly kind: "declined" }
 	| { readonly kind: "failed"; readonly message: string };
 
+/** "1 upload", "3 uploads", or "Uploads" when the hub gave no count. */
+export function uploadsPhrase(count: number | undefined): string {
+	if (count === undefined) return "Uploads";
+	return `${count} upload${count === 1 ? "" : "s"}`;
+}
+
 export async function stopAgentWithConsent(
 	hostLabel: string,
 	deps: StopAgentDeps,
@@ -32,6 +38,13 @@ export async function stopAgentWithConsent(
 			const count = error.terminals ?? 0;
 			message = `Its ${count} terminal${count === 1 ? "" : "s"} here end.`;
 			consent = { end_terminals: true };
+		} else if (
+			answer.status === 409 &&
+			error?.code === "TRANSFERS_WOULD_STOP" &&
+			!body.stop_transfers
+		) {
+			message = `${uploadsPhrase(error.transfers)} to this host stop.`;
+			consent = { stop_transfers: true };
 		} else if (answer.status === 409 && error?.code === "OTHER_HUBS_HOLD_CHANNELS" && !body.force) {
 			const count = error.other_owner_channels;
 			message = `${count ?? "Unknown"} terminal${count === 1 ? "" : "s"} opened by other Lasterm hubs would end too.`;

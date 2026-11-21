@@ -726,14 +726,14 @@ async function onReplaceAgent(): Promise<void> {
 	replaceMessage.value = null;
 	try {
 		replaceMessage.value = await replaceAgentWithConsent({
-			post: async (force) => {
+			post: async (consent) => {
 				const response = await hubFetch(`${hubBaseUrl()}/api/hosts/${host.id}/agent/replace`, {
 					method: "POST",
 					headers: {
 						"Content-Type": "application/json",
 						Authorization: `Bearer ${useAuthStore().token ?? ""}`,
 					},
-					body: JSON.stringify({ force }),
+					body: JSON.stringify(consent),
 				});
 				return {
 					ok: response.ok,

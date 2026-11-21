@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 # Refuses unless each binary was built for the release channel (#1084): it must
 # carry the marker lasterm-build-channel:release, which the build writes into
 # the hub and the desktop, and not lasterm-build-channel:dev. A binary with no

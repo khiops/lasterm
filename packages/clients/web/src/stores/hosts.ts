@@ -58,6 +58,7 @@ export type HostGroupCreateAnswer = { readonly ok: true; readonly group: HostGro
 export interface StopKeepingAgentBody {
 	end_terminals?: boolean;
 	force?: boolean;
+	stop_transfers?: boolean;
 }
 
 export interface StopKeepingAgentAnswer {
@@ -68,6 +69,7 @@ export interface StopKeepingAgentAnswer {
 			code?: string;
 			message?: string;
 			terminals?: number;
+			transfers?: number;
 			other_owner_channels?: number;
 		};
 	};

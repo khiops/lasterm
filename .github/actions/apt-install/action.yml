@@ -28,7 +28,7 @@ runs:
         PACKAGES: ${{ inputs.packages }}
       run: |
         digest="$({ printf '%s\n' "$PACKAGES"; cat /var/lib/dpkg/status; } | sha256sum | cut -c1-16)"
-        echo "key=apt-debs-$RUNNER_OS-$RUNNER_ARCH-$digest" >> "$GITHUB_OUTPUT"
+        echo "key=apt-debs-proof1083-$RUNNER_OS-$RUNNER_ARCH-$digest" >> "$GITHUB_OUTPUT"
         # One directory per key: a second use in the same job must not
         # restore into, and then install, the first one's files.
         echo "dir=$RUNNER_TEMP/apt-debs-$digest" >> "$GITHUB_OUTPUT"
@@ -84,7 +84,7 @@ runs:
         # in apt's archive directory and are not fetched again.
         sudo apt-get clean
         status=0
-        download || status=$?
+        timeout 1s sudo apt-get update || status=$?
         if ((status == 124)); then
           echo "::warning title=Ubuntu mirror too slow::The runner's Ubuntu mirror did not answer in time; trying archive.ubuntu.com."
           sudo grep -rlE 'azure\.archive\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null |

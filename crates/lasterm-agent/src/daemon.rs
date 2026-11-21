@@ -4810,6 +4810,32 @@ mod tests {
                 daemon.finished().await.expect("a clean stop");
             }
 
+            /// Two hubs: the first reads, so its writer is done at once; the
+            /// second does not, so its writer is held until it reads again,
+            /// within the bound. `run_daemon_impl` waits for the second, not
+            /// only the first, and that hub reads STOP_ACCEPTED whole (#700).
+            #[tokio::test]
+            async fn the_daemon_waits_for_every_writer_it_owes_not_only_the_first() {
+                let daemon = TestDaemon::start("every-writer").await;
+                let (mut quick, _) = daemon.connect_as(KEY_A).await;
+                let (mut held, _) = daemon.connect_as(KEY_B).await;
+                spawned(&mut held, flood("every-writer-flood")).await;
+                // Not read from here on: the transport fills, then the writer blocks.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                held.send(&stop(true)).await;
+                // Read to its end: this writer is done while the other is held.
+                quick.frames_until_closed().await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                assert!(
+                    !daemon.task.is_finished(),
+                    "the daemon ended after the first writer only"
+                );
+                let frames = held.frames_until_closed().await;
+                let types: Vec<&str> = frames.iter().map(frame_type).collect();
+                assert!(types.contains(&"STOP_ACCEPTED"), "no STOP_ACCEPTED");
+                daemon.finished().await.expect("a clean stop");
+            }
+
             /// Two hubs that never read: the daemon ends once, after one bound
             /// of about two seconds for both, not one each (#700).
             #[tokio::test]

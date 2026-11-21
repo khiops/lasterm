@@ -1455,9 +1455,9 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 	it("stores nothing and takes up nothing when the daemon never lists", async () => {
 		const h = await leftOn();
 		h.remote.neverLists = true;
-		const closes = vi.spyOn(SshAgent.prototype, "close");
 		expect(await keptAndConnected(h)).toBe(false);
-		expect(closes).toHaveBeenCalled();
+		// This attempt's own connection was closed (close() marks it the hub's doing).
+		expect([...SshAgentsSeen].at(-1)?.closedByHub).toBe(true);
 		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "DAEMON_UNREACHABLE" }));
 		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
 		expect(agentOf(h)).toBeUndefined();
@@ -1471,9 +1471,9 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 			return update(id, input);
 		});
 		h.remote.held = [generateId()];
-		const closes = vi.spyOn(SshAgent.prototype, "close");
 		expect(await keptAndConnected(h)).toBe(false);
-		expect(closes).toHaveBeenCalled();
+		// This attempt's own connection was closed (close() marks it the hub's doing).
+		expect([...SshAgentsSeen].at(-1)?.closedByHub).toBe(true);
 		expect(h.remote.destroys).toEqual([]);
 		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "INTERNAL_ERROR" }));
 		expect(agentOf(h)).toBeUndefined();
@@ -1483,7 +1483,6 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		const h = await leftOn();
 		h.remote.holdsList = true;
 		h.remote.held = [generateId()];
-		const closes = vi.spyOn(SshAgent.prototype, "close");
 		const outcome = keepAndConnect(h);
 		if (outcome.kind !== "connecting") throw new Error(outcome.kind);
 		await until("the daemon is asked for its list", () => h.remote.listStream !== null);
@@ -1500,7 +1499,8 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		expect(h.remote.spawns).toBe(0);
 		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "HOST_CHANGED" }));
 		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
-		expect(closes).toHaveBeenCalled();
+		// This attempt's own connection was closed (close() marks it the hub's doing).
+		expect([...SshAgentsSeen].at(-1)?.closedByHub).toBe(true);
 		expect(h.remote.destroys).toEqual([]);
 	});
 
@@ -1510,7 +1510,6 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 			const h = await leftOn();
 			h.remote.holdsList = true;
 			h.remote.held = [generateId()];
-			const closes = vi.spyOn(SshAgent.prototype, "close");
 			const outcome = keepAndConnect(h);
 			if (outcome.kind !== "connecting") throw new Error(outcome.kind);
 			await until("the daemon is asked for its list", () => h.remote.listStream !== null);
@@ -1527,7 +1526,8 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 			expect(sessionStates(h).some((state) => state.status === "active")).toBe(false);
 			// Ended as an aborted attempt is, with nothing to tell anyone.
 			if (how === "disconnect") expect(errorsHeard(h)).toEqual([]);
-			expect(closes).toHaveBeenCalled();
+			// This attempt's own connection was closed (close() marks it the hub's doing).
+			expect([...SshAgentsSeen].at(-1)?.closedByHub).toBe(true);
 			expect(h.remote.destroys).toEqual([]);
 		},
 	);

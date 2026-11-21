@@ -4186,6 +4186,21 @@ describe("SessionManager", () => {
 				expect(last.truncated).toBe(true);
 			});
 
+			it("an exit screen too large to send is not appended either", async () => {
+				const { channelId, emit } = await liveTerminal();
+				emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+				emit({ type: "OUTPUT", channelId, seq: 1, ts: "", data: Buffer.from("few") });
+				// A complete answer, which a screen that fits would end with its redraw.
+				const huge = { ...FINAL, serialized: "\u001b".repeat(50 * KIB) };
+				emit(exitWith(channelId, huge));
+
+				const last = lastOutputOf((await attachFresh(channelId, "reader")).received);
+
+				expect(last.snapshot).toEqual(SCREEN);
+				expect(text(last.tail)).toEqual(["few"]);
+				expect(last).not.toHaveProperty("truncated");
+			});
+
 			it("an exit's screen frees no snapshot slot", async () => {
 				const { channelId, emit } = await liveTerminal();
 				const scheduler = ctxOf().scheduler as unknown as { _inFlightSnapshots: number };
@@ -4233,11 +4248,13 @@ describe("SessionManager", () => {
 
 			it("an exit's screen for an unknown terminal is not stored", async () => {
 				const { emit } = await liveTerminal();
+				// A stream complete from its first seq, as a terminal the hub let go of leaves.
+				store("NOTHELDHERE", 1, "output", "x");
 				emit(exitWith("NOTHELDHERE", FINAL));
 
 				const spool = new SpoolDAL(dbManager.spool);
 				expect(spool.getNewestSnapshotRef("NOTHELDHERE")).toBeUndefined();
-				expect(spool.getMaxSeq("NOTHELDHERE")).toBeLessThan(1);
+				expect(spool.getMaxSeq("NOTHELDHERE")).toBe(1);
 			});
 		});
 

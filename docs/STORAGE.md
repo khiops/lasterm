@@ -227,7 +227,7 @@ CREATE TABLE channels (
   rows        INTEGER NOT NULL DEFAULT 24,
   status      TEXT NOT NULL DEFAULT 'born'
               CHECK(status IN ('born', 'live', 'orphan', 'dead')),
-  exit_code   INTEGER,                                   -- set when DEAD; NULL once it runs again (#932)
+  exit_code   INTEGER,                                   -- set when DEAD; cleared when it runs again (#932)
   end_reason  TEXT,                                      -- 'killed' | 'stopped' when the hub ended it; NULL otherwise (#592)
   end_id      TEXT,                                      -- ULID naming this end; NULL while it runs (#932)
   profile_json TEXT,                                     -- JSON: layer 4 overrides
@@ -262,7 +262,7 @@ channel list carries it as `end_reason`, and STATE_SYNC names every dead channel
 writes `dead` over a row that was not dead, keeps it when the end is told again, and clears it
 with any other status; bringing the terminal back under its own id clears it too. `exit_code`
 is cleared the same way, by any status but `dead`: a terminal running again has no exit code,
-whether a revive or a restart that writes `live` brought it back. The hub sends `end_id` with
+whether a revive or a restart that writes `live` brought it back. A row a hub before #932 restarted keeps the earlier run's code until its next status write. The hub sends `end_id` with
 the end (CHANNEL_STATE `dead`) and with the refusal of an attach on the ended terminal
 (CHANNEL_DEAD), so a window can tell an end it showed from a newer one (PROTOCOL.md § 4.2,
 § 4.7). It is NULL for every end recorded before the column existed, and `markAllChannelsDead`,

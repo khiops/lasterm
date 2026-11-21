@@ -51,7 +51,7 @@ jobs:
       # The action installs them from cached .deb files; only a cache miss
       # downloads, and a slow mirror then fails within minutes (#728).
       - name: Install Tauri and WebDriver dependencies
-        timeout-minutes: 8
+        timeout-minutes: 15
         uses: ./.github/actions/apt-install
         with:
           packages: libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf webkitgtk-webdriver xvfb

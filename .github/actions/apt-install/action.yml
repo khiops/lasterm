@@ -80,8 +80,9 @@ runs:
 
         # The runner's default mirror (azure.archive.ubuntu.com) is the one that
         # slows down (#728, #1083). A first try that fails or is too slow fails over to the main
-        # archive instead of failing the job; the files already downloaded stay
-        # in apt's archive directory and are not fetched again.
+        # archive instead of failing the job. The second try starts from an empty
+        # archive directory: a mirror that lags the first one must not leave two
+        # versions of a package side by side for the install below.
         sudo apt-get clean
         status=0
         download || status=$?
@@ -92,6 +93,7 @@ runs:
           sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt || true
           { sudo grep -rlE 'azure\.archive\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true; } |
             xargs -r sudo sed -i -E 's#https?://azure\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g'
+          sudo apt-get clean
           status=0
           download || status=$?
           if ((status == 124)); then

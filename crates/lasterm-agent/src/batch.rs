@@ -246,12 +246,14 @@ impl Batcher {
         }
     }
 
-    /// Send what `channel_id` has buffered, now.
+    /// Send what `channel_id` has buffered, now, and keep no buffer for it:
+    /// its next output makes a new one. A channel whose exit is never sent,
+    /// withdrawn by a DESTROY (#1089), leaves none behind either.
     fn release(&mut self, channel_id: &str, tx: &mpsc::UnboundedSender<BatchedEvent>) {
         let held = self
             .buffers
-            .get_mut(channel_id)
-            .and_then(|buf| buf.take(channel_id));
+            .remove(channel_id)
+            .and_then(|mut buf| buf.take(channel_id));
         if let Some(batch) = held {
             let _ = tx.send(BatchedEvent::Output(batch));
         }
@@ -426,6 +428,25 @@ mod tests {
         );
         let after = expect_event(batch_rx.recv().await);
         assert_eq!(after.frame, b"after");
+    }
+
+    /// An event about a channel takes its buffer with it, its output first:
+    /// a channel whose exit is withdrawn sends its LOG last, and keeps no
+    /// buffer for the daemon's lifetime (#1089).
+    #[test]
+    fn an_event_leaves_no_buffer_behind() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<BatchedEvent>();
+        let mut batcher = Batcher::default();
+        batcher.accept(output("withdrawn", 1, b"bye"), &tx);
+
+        batcher.accept(event("withdrawn", b"PTY closed"), &tx);
+
+        assert_eq!(expect_output(rx.try_recv().ok()).data, b"bye");
+        assert_eq!(expect_event(rx.try_recv().ok()).frame, b"PTY closed");
+        assert!(
+            !batcher.buffers.contains_key("withdrawn"),
+            "the channel's buffer must go with its last event"
+        );
     }
 
     /// A channel that ended keeps no buffer: the loop used to hold an empty

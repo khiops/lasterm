@@ -3045,6 +3045,53 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		expect(store.statusOf("ch-a")).toBe("live");
 	});
 
+	it("a channel created again during the fetch keeps its own session and size, not the listed row's", async () => {
+		const { store, fetching, release } = await listedThenFetching([row("ch-a", "dead")]);
+
+		store.handleChannelCreated({
+			type: "CHANNEL_CREATED",
+			channelId: "ch-a",
+			sessionId: "sess-new",
+			hostId: "host-1",
+			cols: 132,
+			rows: 43,
+			status: "live",
+			createdAt: "2026-11-21T00:01:00Z",
+			updatedAt: "2026-11-21T00:01:00Z",
+		} as Parameters<typeof store.handleChannelCreated>[0]);
+		release();
+		await fetching;
+
+		const ch = store.channels.find((c) => c.id === "ch-a");
+		expect(ch?.status).toBe("live");
+		expect(ch?.sessionId).toBe("sess-new");
+		expect(ch?.cols).toBe(132);
+		expect(ch?.rows).toBe(43);
+	});
+
+	it("a status heard after the re-creation keeps the re-created session and size", async () => {
+		const { store, fetching, release } = await listedThenFetching([row("ch-a", "dead")]);
+
+		store.handleChannelCreated({
+			type: "CHANNEL_CREATED",
+			channelId: "ch-a",
+			sessionId: "sess-new",
+			hostId: "host-1",
+			cols: 132,
+			rows: 43,
+			status: "live",
+			createdAt: "2026-11-21T00:01:00Z",
+			updatedAt: "2026-11-21T00:01:00Z",
+		} as Parameters<typeof store.handleChannelCreated>[0]);
+		store.updateChannelStatus("ch-a", "live");
+		release();
+		await fetching;
+
+		const ch = store.channels.find((c) => c.id === "ch-a");
+		expect(ch?.sessionId).toBe("sess-new");
+		expect(ch?.cols).toBe(132);
+	});
+
 	it("a purge answered after another host's list was fetched leaves that host's channels alone", async () => {
 		const ok = (body: unknown) => Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
 		const rowsOf: Record<string, Record<string, unknown>[]> = {

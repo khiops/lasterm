@@ -4586,6 +4586,12 @@ describe("TerminalPane overlay card colours (#574)", () => {
 // out, and xterm pastes nothing of its own. Otherwise xterm pastes as always.
 
 describe("TerminalPane pasting through an agent that adapts input (#1012)", () => {
+	// What these measure is how a paste goes out, not the card a paste of several
+	// lines gets first (#1015): their terminal never asks.
+	beforeEach(() => {
+		xterm.profile = { ...xterm.profile, pasteWarning: "never" };
+	});
+
 	const START = "\u001b[200~";
 	const END = "\u001b[201~";
 
@@ -4810,6 +4816,12 @@ describe("TerminalPane pasting through an agent that adapts input (#1012)", () =
 // after a second, and its outcome said when it ends early.
 
 describe("TerminalPane streaming a paste (#1014)", () => {
+	// What these measure is how a paste goes out, not the card a paste of several
+	// lines gets first (#1015): their terminal never asks.
+	beforeEach(() => {
+		xterm.profile = { ...xterm.profile, pasteWarning: "never" };
+	});
+
 	const CHUNK = 32 * 1024;
 	type PasteFrame = {
 		pasteId: number;
@@ -5269,5 +5281,252 @@ describe("TerminalPane streaming a paste (#1014)", () => {
 
 		paste("x".repeat(16 * 1024 * 1024));
 		expect(chunks()).toHaveLength(8);
+	});
+});
+
+// ─── Asking before a paste of several lines (#1015) ──────────────────────────
+//
+// A paste its program would run line by line waits on a card over the pane:
+// what the composable decides is in useTerminal.browser.spec.ts, the card's
+// own content in PasteConfirm.spec.ts; this holds the pane's part: the setting
+// it reads, "Don't ask again", and where the keyboard goes.
+
+describe("TerminalPane asking before a paste of several lines (#1015)", () => {
+	function paste(text: string): Event {
+		const event = new Event("paste", { bubbles: true, cancelable: true });
+		Object.defineProperty(event, "clipboardData", { value: { getData: () => text } });
+		terminal().textarea.dispatchEvent(event);
+		return event;
+	}
+	const pasteCard = () => root.querySelector<HTMLElement>(".paste-confirm");
+	const pasteButton = (label: string) =>
+		[...(pasteCard()?.querySelectorAll("button") ?? [])].find(
+			(b) => b.textContent?.trim() === label,
+		) as HTMLButtonElement | undefined;
+	const dontAsk = () => pasteCard()?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+	const everywhere = () =>
+		pasteCard()?.querySelectorAll<HTMLInputElement>('input[type="radio"]')[1];
+	const toasts = () => useToastStore().messages.map((t) => t.text);
+	/** The config writes sent, in order: method, path and body. */
+	const configWrites = () =>
+		vi
+			.mocked(fetch)
+			.mock.calls.map(([url, init]) => ({
+				method: (init as RequestInit | undefined)?.method,
+				path: String(url).replace(/^[a-z]+:\/\/[^/]+/, ""),
+				body: (init as RequestInit | undefined)?.body,
+			}))
+			.filter((call) => call.method === "PUT" || call.method === "PATCH")
+			.map((call) => ({ ...call, body: JSON.parse(String(call.body)) }));
+
+	/** A live pane over T, this window the writer, its tab shown and the keyboard in it. */
+	async function openShown(): Promise<void> {
+		await openLive({
+			setUp: () => {
+				writer();
+				shown();
+			},
+		});
+		terminal().focus();
+	}
+
+	/** A pane whose paste of `text` waits on its card. */
+	async function asked(text = "a\nb"): Promise<void> {
+		await openShown();
+		paste(text);
+		await settle();
+		expect(pasteCard()).not.toBeNull();
+	}
+
+	it("asks with no setting, and sends the paste only on Paste", async () => {
+		await asked();
+		expect(inputs()).toEqual([]);
+		pasteButton("Paste")?.click();
+		await settle();
+		expect(inputs()).toEqual(["a\rb"]);
+		expect(pasteCard()).toBeNull();
+	});
+
+	it("sends a paste of several lines at once when its host says never ask", async () => {
+		xterm.profile = { pasteWarning: "never" };
+		await openShown();
+		paste("a\nb");
+		await settle();
+		expect(pasteCard()).toBeNull();
+		expect(inputs()).toEqual(["a\rb"]);
+	});
+
+	it("reads the setting at each paste", async () => {
+		await asked();
+		pasteButton("Cancel")?.click();
+		await settle();
+		const { profile } = paneProfile();
+		profile.value = { ...profile.value, pasteWarning: "never" };
+		await settle();
+		paste("c\nd");
+		await settle();
+		expect(pasteCard()).toBeNull();
+		expect(inputs()).toEqual(["c\rd"]);
+	});
+
+	it("writes never for this host on Paste with Don't ask again, and pastes", async () => {
+		await asked();
+		dontAsk()?.click();
+		pasteButton("Paste")?.click();
+		await settle();
+		expect(inputs()).toEqual(["a\rb"]);
+		await vi.waitFor(() =>
+			expect(configWrites()).toEqual([
+				{
+					method: "PATCH",
+					path: `/api/hosts/${HOST}/profile`,
+					body: { profile: { pasteWarning: "never" } },
+				},
+				{
+					method: "PATCH",
+					path: `/api/channels/${T}/profile`,
+					body: { profile: { pasteWarning: null } },
+				},
+			]),
+		);
+	});
+
+	it("writes never everywhere, dropping the host's and the terminal's own, and pastes", async () => {
+		xterm.profile = { pasteWarning: "always" };
+		await asked();
+		everywhere()?.click();
+		pasteButton("Paste")?.click();
+		await settle();
+		expect(inputs()).toEqual(["a\rb"]);
+		await vi.waitFor(() =>
+			expect(configWrites()).toEqual([
+				{
+					method: "PUT",
+					path: "/api/config/global",
+					body: { terminal: { pasteWarning: "never" } },
+				},
+				{
+					method: "PATCH",
+					path: `/api/hosts/${HOST}/profile`,
+					body: { profile: { pasteWarning: null } },
+				},
+				{
+					method: "PATCH",
+					path: `/api/channels/${T}/profile`,
+					body: { profile: { pasteWarning: null } },
+				},
+			]),
+		);
+	});
+
+	it("sends the paste without waiting for Don't ask again to be saved", async () => {
+		await asked();
+		let release: () => void = () => {};
+		vi.mocked(fetch).mockImplementation(
+			() =>
+				new Promise<Response>((resolve) => {
+					release = () => resolve(new Response("{}", { status: 200 }));
+				}),
+		);
+		dontAsk()?.click();
+		pasteButton("Paste")?.click();
+		try {
+			await settle();
+			expect(inputs()).toEqual(["a\rb"]);
+		} finally {
+			release();
+		}
+	});
+
+	it("says so when Don't ask again could not be saved, and pastes all the same", async () => {
+		await asked();
+		vi.mocked(fetch).mockResolvedValue(new Response("{}", { status: 500 }));
+		dontAsk()?.click();
+		pasteButton("Paste")?.click();
+		await settle();
+		expect(inputs()).toEqual(["a\rb"]);
+		await vi.waitFor(() => expect(toasts()).toContain('Could not save "Don\'t ask again".'));
+	});
+
+	it("writes nothing on Cancel, even with Don't ask again checked", async () => {
+		await asked();
+		dontAsk()?.click();
+		pasteButton("Cancel")?.click();
+		await settle();
+		expect(inputs()).toEqual([]);
+		expect(configWrites()).toEqual([]);
+	});
+
+	it("writes nothing on Paste without Don't ask again", async () => {
+		await asked();
+		pasteButton("Paste")?.click();
+		await settle();
+		expect(inputs()).toEqual(["a\rb"]);
+		expect(configWrites()).toEqual([]);
+	});
+
+	for (const label of ["Paste", "Cancel"]) {
+		it(`gives the keyboard back to the terminal after ${label}`, async () => {
+			await asked();
+			pasteButton(label)?.focus();
+			pasteButton(label)?.click();
+			await settle();
+			expect(document.activeElement).toBe(terminal().textarea);
+		});
+	}
+
+	it("gives the keyboard back to the terminal when an attach takes the card away", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		await asked();
+		expect(document.activeElement).toBe(pasteCard());
+		useSessionStore().reconnectCount++;
+		await settle();
+		await vi.advanceTimersByTimeAsync(10_000);
+		await settle();
+		expect(pasteCard()).toBeNull();
+		expect(document.activeElement).toBe(terminal().textarea);
+	});
+
+	it("drops the paste when its terminal ends, and leaves the keyboard to the ended card", async () => {
+		await asked();
+		expect(document.activeElement).toBe(pasteCard());
+		endIt();
+		await vi.waitFor(() => expect(card()).not.toBeNull());
+		await settle();
+		expect(pasteCard()).toBeNull();
+		expect(inputs()).toEqual([]);
+		expect(document.activeElement).toBe(card());
+	});
+
+	it("takes the keyboard again for a paste that replaces the one it holds", async () => {
+		await asked();
+		terminal().focus();
+		paste("c\nd\ne");
+		await settle();
+		expect(pasteCard()?.textContent).toContain("Paste 3 lines?");
+		expect(document.activeElement).toBe(pasteCard());
+	});
+
+	it("gives the card the keyboard when search closes over it", async () => {
+		await openShown();
+		press({ ctrlKey: true, shiftKey: true, key: "F" }, "\u0006");
+		await settle();
+		terminal().focus();
+		paste("a\nb");
+		await settle();
+		expect(pasteCard()).not.toBeNull();
+		root.querySelector<HTMLButtonElement>(".search-overlay__btn--close")?.click();
+		await settle();
+		expect(document.activeElement).toBe(pasteCard());
+	});
+
+	it("gives the card the keyboard when its tab is shown again", async () => {
+		await asked();
+		(document.activeElement as HTMLElement | null)?.blur();
+		useChannelsStore().selectChannel(S);
+		await settle();
+		useChannelsStore().selectChannel(T);
+		await settle();
+		expect(document.activeElement).toBe(pasteCard());
 	});
 });

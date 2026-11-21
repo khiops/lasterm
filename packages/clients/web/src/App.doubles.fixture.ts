@@ -422,6 +422,8 @@ export const xtermModule = {
 		options: Record<string, unknown>;
 		/** As xterm's parser: handlers for sequences, which this double never calls (#1012). */
 		parser = { registerCsiHandler: () => ({ dispose() {} }) };
+		/** As xterm's modes: bracketed paste off, as cmd and pwsh leave it (#1015). */
+		modes = { bracketedPasteMode: false };
 		cols = 80;
 		rows = 24;
 		unicode = { activeVersion: "" };
@@ -480,6 +482,11 @@ export const xtermModule = {
 		}
 		hasSelection(): boolean {
 			return false;
+		}
+		/** As xterm 6.0.0's `paste` with bracketed paste off: line ends made CRs. */
+		paste(text: string): void {
+			const data = text.replace(/\r?\n/g, "\r");
+			for (const listener of this.dataListeners) listener(data);
 		}
 		focus(): void {
 			this.textarea?.focus();

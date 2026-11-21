@@ -176,6 +176,8 @@ vi.mock("@xterm/xterm", () => ({
 		private scrollListeners: Array<() => void> = [];
 		/** Where xterm takes the keyboard: its helper textarea, inside its element. */
 		textarea = document.createElement("textarea");
+		/** As xterm's modes; a test sets bracketed paste here, as a program's `?2004h` would (#1015). */
+		modes = { bracketedPasteMode: false };
 		/** As xterm's parser: handlers for sequences, which this double never calls (#1012). */
 		parser = { registerCsiHandler: () => ({ dispose() {} }) };
 		constructor(options: Record<string, unknown>) {
@@ -187,12 +189,10 @@ vi.mock("@xterm/xterm", () => ({
 			this.textarea.className = "xterm-helper-textarea";
 			this.element.appendChild(this.textarea);
 			// As xterm 6.0.0: it pastes on a paste event at its textarea or its
-			// element, stopping it there, here as with bracketed paste off
-			// (`Clipboard.ts`, `handlePasteEvent`).
+			// element, stopping it there (`Clipboard.ts`, `handlePasteEvent`).
 			const paste = (event: ClipboardEvent): void => {
 				event.stopPropagation();
-				const text = event.clipboardData?.getData("text/plain") ?? "";
-				this.input(text.replace(/\r?\n/g, "\r"));
+				this.paste(event.clipboardData?.getData("text/plain") ?? "");
 			};
 			this.textarea.addEventListener("paste", paste);
 			this.element.addEventListener("paste", paste);
@@ -258,6 +258,11 @@ vi.mock("@xterm/xterm", () => ({
 		/** As xterm: the selection goes. */
 		clearSelection(): void {
 			xterm.selection = false;
+		}
+		/** As xterm 6.0.0's `paste`: line ends made CRs, bracketed while bracketed paste is on. */
+		paste(text: string): void {
+			const lines = text.replace(/\r?\n/g, "\r");
+			this.input(this.modes.bracketedPasteMode ? `\u001b[200~${lines}\u001b[201~` : lines);
 		}
 		/** As xterm's `input`: data sent as if the user typed it, to the onData listeners. */
 		input(data: string, _wasUserInput = true): void {

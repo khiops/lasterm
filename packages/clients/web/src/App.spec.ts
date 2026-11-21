@@ -2487,3 +2487,56 @@ describe("the window wallpaper's fade (#194)", () => {
 		expect(layer.style.transitionDuration).toBe(`${WALLPAPER_FADE_MS}ms`);
 	});
 });
+
+// A paste of several lines waiting on its card holds the pane's keyboard
+// (#1015): coming back to the pane gives it to the card, not to the terminal
+// behind it, where Tab and Escape would reach the program.
+describe("a paste waiting on its card keeps the pane's keyboard (#1015)", () => {
+	it("gives the keyboard to the card when its tab is shown again", async () => {
+		await mountWindow({
+			channels: [live("T1"), live("T2")],
+			layout: {
+				tabs: [
+					{ id: "TAB1", root: term("T1", "P1") },
+					{ id: "TAB2", root: term("T2", "P2") },
+				],
+			},
+		});
+		focusPane("P1");
+		const textarea = pane("P1")?.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
+		const event = new Event("paste", { bubbles: true, cancelable: true });
+		Object.defineProperty(event, "clipboardData", { value: { getData: () => "a\nb" } });
+		textarea?.dispatchEvent(event);
+		await vi.waitFor(() => expect(pane("P1")?.querySelector(".paste-confirm")).not.toBeNull());
+
+		await press("Tab", { ctrl: true });
+		expect(paneWithKeyboard()).toBe("P2");
+		await press("Tab", { ctrl: true });
+
+		await vi.waitFor(() =>
+			expect(document.activeElement).toBe(pane("P1")?.querySelector(".paste-confirm")),
+		);
+	});
+
+	// Within one tab no pane is selected again, so only the window's own choice of
+	// where a pane's keyboard goes can find the card.
+	it("gives the keyboard to the card when focus moves back to its pane", async () => {
+		await mountWindow({
+			channels: [live("T1"), live("T2")],
+			layout: {
+				tabs: [{ id: "TAB1", root: split("vertical", term("T1", "P1"), term("T2", "P2")) }],
+			},
+		});
+		focusPane("P1");
+		const textarea = pane("P1")?.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea");
+		const event = new Event("paste", { bubbles: true, cancelable: true });
+		Object.defineProperty(event, "clipboardData", { value: { getData: () => "a\nb" } });
+		textarea?.dispatchEvent(event);
+		await vi.waitFor(() => expect(pane("P1")?.querySelector(".paste-confirm")).not.toBeNull());
+
+		focusPane("P2");
+		await press("ArrowLeft", { alt: true, code: "ArrowLeft" });
+
+		expect(document.activeElement).toBe(pane("P1")?.querySelector(".paste-confirm"));
+	});
+});

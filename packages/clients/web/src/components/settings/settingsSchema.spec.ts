@@ -278,6 +278,20 @@ describe("settingsSchema", () => {
 // nobody could tell from the panel. A setting's key must appear in code other
 // than the panel, the validators, the config parser and the tests.
 
+describe("settingsSchema — a paste of several lines (#1015)", () => {
+	it("offers pasteWarning in Terminal, its three values, at every scope", () => {
+		const def = settingsSchema.find((d) => d.key === "pasteWarning");
+		expect(def).toMatchObject({ type: "select", category: "terminal", section: "terminal" });
+		expect(def?.scopes).toEqual(["global", "host", "channel"]);
+		expect(def?.options?.map((o) => o.value)).toEqual(["auto", "always", "never"]);
+		for (const scope of ["global", "host", "channel"] as const) {
+			expect(
+				getSchemaForCategoryScope("terminal", scope).some((d) => d.key === "pasteWarning"),
+			).toBe(true);
+		}
+	});
+});
+
 describe("settingsSchema — nothing offered in vain", () => {
 	// Every source that could act on a setting, as text. The web client, the
 	// hub, the shared package, and the desktop shell.

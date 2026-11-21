@@ -130,11 +130,6 @@ struct ActiveConnection {
     cancel: Cancel,
     /// Channel to send encoded frames to the connection's writer task.
     frame_tx: FrameSender,
-    /// Closed when that writer task ends: the shutdown waits on it, so that
-    /// what was queued before the end of stream, STOP_ACCEPTED included,
-    /// is written before the process exits (#700). `None` for a test's
-    /// stand-in connection, which has no writer.
-    writer_done: Option<watch::Receiver<()>>,
 }
 
 /// Where each hub's frames go: its current connection, or while it has none,
@@ -147,6 +142,12 @@ struct HubRoutes {
     connections: HashMap<OwnerId, ActiveConnection>,
     queues: HashMap<OwnerId, AwayQueue>,
     flows: Flows,
+    /// Every authenticated connection's writer still running, current or
+    /// not (displaced, or its hub gone, with frames still to write): each
+    /// closes when its writer task ends, and the shutdown waits on all of
+    /// them, so that what was queued, STOP_ACCEPTED included, is written
+    /// before the process exits (#700).
+    writers: Vec<watch::Receiver<()>>,
 }
 
 type Routes = Arc<Mutex<HubRoutes>>;
@@ -157,6 +158,7 @@ impl HubRoutes {
             connections: HashMap::new(),
             queues: HashMap::new(),
             flows,
+            writers: Vec::new(),
         }
     }
 
@@ -278,18 +280,15 @@ async fn end_daemon(pty_manager: &Arc<Mutex<PtyManager>>, routes: &Routes) -> De
 
 async fn disconnect_all(routes: &Routes) {
     let bound = WRITER_DRAIN_BOUND;
-    let mut writers = Vec::new();
-    {
+    let writers = {
         let mut routes = routes.lock().await;
         let ended: Vec<(OwnerId, ActiveConnection)> = routes.connections.drain().collect();
         for (owner, active) in ended {
             routes.flows.of(&owner).detach(active.connection_id);
             active.cancel.send_replace(true);
-            if let Some(done) = active.writer_done {
-                writers.push(done);
-            }
         }
-    }
+        std::mem::take(&mut routes.writers)
+    };
     let all_written = async {
         for mut done in writers {
             // Err once the writer task has ended and dropped its sender.
@@ -1390,6 +1389,12 @@ async fn register_active(
     writer_done: Option<watch::Receiver<()>>,
 ) -> Option<u64> {
     let mut routes = routes.lock().await;
+    if let Some(done) = writer_done {
+        // Kept until its writer ends, whatever becomes of the connection;
+        // writers already ended are let go of here (#700).
+        routes.writers.retain(|writer| writer.has_changed().is_ok());
+        routes.writers.push(done);
+    }
     let mut displaced = None;
     if let Some(old) = routes.connections.remove(owner) {
         tracing::info!(
@@ -1439,7 +1444,6 @@ async fn register_active(
             connection_id,
             cancel: cancel.clone(),
             frame_tx: frame_tx.clone(),
-            writer_done,
         },
     );
     displaced
@@ -2902,6 +2906,35 @@ mod tests {
     #[test]
     fn writers_are_waited_for_two_seconds_in_all() {
         assert_eq!(WRITER_DRAIN_BOUND, Duration::from_secs(2));
+    }
+
+    /// A connection displaced while its writer is still held is waited for
+    /// too: it is no longer its hub's current one, and its frames are still
+    /// owed (#700).
+    #[tokio::test]
+    async fn the_shutdown_waits_for_a_displaced_connections_writer() {
+        let daemon = in_memory_daemon(None);
+        let hub = OwnerId::from_hub_key("hub-key");
+        let mut old = connect_in_memory_buffered(&daemon, &auth("", "hub-key"), 1, 64).await;
+        frames_until_type(&mut old, "CHANNEL_STATE_END").await;
+        block_writer(&daemon, &hub).await;
+        let (mut newer, _newer_handler) = connect_in_memory(&daemon, &auth("", "hub-key"), 2).await;
+        frames_until_type(&mut newer, "CHANNEL_STATE_END").await;
+        assert_eq!(current_connection(&daemon, &hub).await, Some(2));
+
+        let (manager, routes) = (Arc::clone(&daemon.pty_manager), Arc::clone(&daemon.routes));
+        let disconnected = tokio::spawn(async move { end_daemon(&manager, &routes).await });
+        let _ = frames_until_closed(&mut newer).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !disconnected.is_finished(),
+            "returned with the displaced connection's writer still held"
+        );
+        let _ = frames_until_closed(&mut old).await;
+        tokio::time::timeout(Duration::from_secs(5), disconnected)
+            .await
+            .expect("returns once that writer is done")
+            .unwrap();
     }
 
     /// Two writers that stay blocked: one bound of two seconds covers both,

@@ -3547,6 +3547,8 @@ export class SessionManager {
 		let neverConnected = false;
 		/** The daemon a daemon-only connection reached, until it is the host's for good (#701). */
 		let reached: AgentConnection | undefined;
+		/** Yes was stored for this attempt, and goes back if it fails after (#701). */
+		let yesStored = false;
 		try {
 			session = await this.agentMgr.getOrCreateSession(hostId, true, fence);
 			neverConnected = session.status === "starting";
@@ -3581,11 +3583,13 @@ export class SessionManager {
 					session.id,
 					client,
 				);
+				yesStored = true;
 				daemonOnly.onHostStored?.();
 				this.broadcaster.updateSessionStatus(hostId, session.id, "active");
 				this.ctx.commits.adoptAgent(fence, hostId, agent);
 				this.lifecycle.takeUpListed(hostId, agent, listed);
 				reached = undefined;
+				yesStored = false;
 				Acq.commit(this.ctx, acq, session);
 				clearContext(this.ctx, acq.id);
 				return true;
@@ -3609,6 +3613,18 @@ export class SessionManager {
 			if (reached !== undefined) {
 				this.releaseAgent(hostId, reached);
 				void reached.close();
+			}
+			// Failed after Yes was stored: the setting goes back to what it was.
+			if (yesStored) {
+				try {
+					this.ctx.metaDal.updateHost(hostId, { sshRemoteDaemon: host.sshRemoteDaemon ?? null });
+					daemonOnly?.onHostStored?.();
+				} catch (cause) {
+					this.ctx.hubLogger?.log("error", "daemon-only connect: setting not put back", {
+						hostId,
+						cause: String(cause),
+					});
+				}
 			}
 			this.settleFailedConnect(hostId, session, neverConnected);
 			this.failConnectingAcq(acq, err, lease, () => this.holdsHost(hostId));

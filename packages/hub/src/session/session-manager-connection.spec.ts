@@ -1908,3 +1908,22 @@ describe("A daemon's own list, as it changes (#701)", { timeout: 30_000 }, () =>
 		expect(h.remote.stops).toEqual([]);
 	});
 });
+
+describe("Keep the agent left here and connect, failing after Yes (#701)", {
+	timeout: 20_000,
+}, () => {
+	it("puts the setting back and closes when taking the terminals up fails", async () => {
+		const h = await leftOn();
+		const announced = vi.fn();
+		vi.spyOn(h.ctx.commits, "adoptAgent").mockImplementationOnce(() => {
+			throw new Error("disk full");
+		});
+		const outcome = keepAndConnect(h, announced);
+		if (outcome.kind !== "connecting") throw new Error(outcome.kind);
+		expect(await outcome.done).toBe(false);
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
+		expect(announced).toHaveBeenCalledTimes(2);
+		expect([...SshAgentsSeen].at(-1)?.closedByHub).toBe(true);
+		expect(agentOf(h)).toBeUndefined();
+	});
+});

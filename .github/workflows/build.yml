@@ -317,7 +317,12 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
       # The compiler and its components come from rust-toolchain.toml (#248).
+      # A rebuild of an older tag (release.yml's tag input) checks out a commit
+      # that may predate this action: it then installs the compiler alone.
       - run: rustup toolchain install
+        if: ${{ hashFiles('.github/actions/pin-rust/action.yml') == '' }}
+      - uses: ./.github/actions/pin-rust
+        if: ${{ hashFiles('.github/actions/pin-rust/action.yml') != '' }}
       - run: rustup target add ${{ matrix.triple }}
       # For the import check after the build, which Node runs by stripping types.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -561,7 +566,12 @@ jobs:
           check-latest: true
           cache: "pnpm"
       # The compiler and its components come from rust-toolchain.toml (#248).
+      # A rebuild of an older tag (release.yml's tag input) checks out a commit
+      # that may predate this action: it then installs the compiler alone.
       - run: rustup toolchain install
+        if: ${{ hashFiles('.github/actions/pin-rust/action.yml') == '' }}
+      - uses: ./.github/actions/pin-rust
+        if: ${{ hashFiles('.github/actions/pin-rust/action.yml') != '' }}
       # Saved from main only, as build-agent's (#741).
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:

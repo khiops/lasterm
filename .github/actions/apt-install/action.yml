@@ -116,7 +116,10 @@ runs:
           echo "save=true" >> "$GITHUB_OUTPUT"
         fi
     - name: Save the .deb files
-      if: steps.install.outputs.save == 'true'
+      # Main only, as rust-cache's saves (#741): a pull request's cache serves
+      # that pull request alone, and each one saved here kept the repository
+      # nearer its cache limit (#748).
+      if: steps.install.outputs.save == 'true' && github.ref == 'refs/heads/main'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.key.outputs.dir }}

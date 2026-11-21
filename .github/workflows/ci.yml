@@ -22,7 +22,9 @@ jobs:
   desktop-webview-boundary:
     name: Desktop webview boundary (Linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # About 2.3 times the slowest successful run, 13.1 minutes, which a slow apt
+    # mirror once exhausted; the mirror now fails within minutes (#728, #748).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
@@ -32,7 +34,7 @@ jobs:
           check-latest: true
           cache: "pnpm"
       # The compiler and its components come from rust-toolchain.toml (#248).
-      - run: rustup toolchain install
+      - uses: ./.github/actions/pin-rust
       # Every rust-cache here and in build.yml is saved from main only (#741): a
       # pull request's cache serves only that pull request, while every pull
       # request restores main's, and saving one from each kept the repository
@@ -102,7 +104,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The compiler and its components come from rust-toolchain.toml (#248).
-      - run: rustup toolchain install
+      - uses: ./.github/actions/pin-rust
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: packages/clients/desktop/src-tauri
@@ -143,7 +145,7 @@ jobs:
           node-version-file: .nvmrc
           check-latest: true
       # The compiler and its components come from rust-toolchain.toml (#248).
-      - run: rustup toolchain install
+      - uses: ./.github/actions/pin-rust
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: crates/lasterm-tls-identity

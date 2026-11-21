@@ -2,9 +2,9 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { request } from "node:https";
-import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { decodeMessage, encodeMessage } from "../../packages/shared/src/index.js";
+import { lastermDir } from "../../packages/shared/src/platform-dirs.js";
 import { createHubTlsAgent } from "../../packages/hub/src/hub-transport.js";
 import { requestHub } from "../../packages/hub/src/cli.js";
 import type {
@@ -19,14 +19,9 @@ interface HostSummary {
 	label: string;
 }
 
-const stateDir =
-	platform() === "win32"
-		? join(process.env.LOCALAPPDATA ?? "", "lasterm")
-		: join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "lasterm");
-const configDir =
-	platform() === "win32"
-		? join(process.env.APPDATA ?? "", "lasterm")
-		: join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "lasterm");
+// The hub's own resolvers, so the build channel's directories follow (#1084).
+const stateDir = lastermDir("state");
+const configDir = lastermDir("config");
 const runtime = JSON.parse(readFileSync(join(stateDir, "runtime.json"), "utf8")) as {
 	port?: unknown;
 	spki?: string;

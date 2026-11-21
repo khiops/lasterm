@@ -280,3 +280,114 @@ describe("package.json", () => {
 		expect(devDeps).toHaveProperty("@tauri-apps/cli");
 	});
 });
+
+// The build channel's identity on what the Tauri CLI bundles (#1084): this
+// package runs the CLI through tauri-channel.mjs, which adds the dev identity
+// when a dev build bundles, as the last of the CLI's own arguments.
+describe("tauri-channel.mjs", () => {
+	const DEV_CONFIG = resolve(DESKTOP_DIR, "tauri.dev.conf.json");
+	const DEV_CHANNELS = [
+		{},
+		{ LASTERM_CHANNEL: "" },
+		{ LASTERM_CHANNEL: "Release" },
+		{ LASTERM_CHANNEL: "dev" },
+	];
+
+	// Mutation: the scripts calling the CLI directly again.
+	it("is what this package's tauri and build scripts run", () => {
+		const scripts = (readJson("package.json") as { scripts: Record<string, string> }).scripts;
+		expect(scripts.tauri).toBe("node tauri-channel.mjs");
+		expect(scripts.build).toBe("node tauri-channel.mjs build");
+	});
+
+	// Mutations: the channel compared without case; `bundle` not recognised;
+	// the identity put before the caller's own `--config`, which then wins.
+	it("adds the dev identity when a dev build bundles", async () => {
+		const { channelArgs } = await import("./tauri-channel.mjs");
+		for (const env of DEV_CHANNELS) {
+			expect(channelArgs(["build", "--config", "x.json"], env)).toEqual([
+				"build",
+				"--config",
+				"x.json",
+				"--config",
+				DEV_CONFIG,
+			]);
+			expect(channelArgs(["bundle"], env)).toEqual(["bundle", "--config", DEV_CONFIG]);
+		}
+	});
+
+	// What follows `--` goes to Cargo, which refuses `--config <file>`.
+	// Mutation: the identity appended at the end.
+	it("adds the dev identity before `--`", async () => {
+		const { channelArgs } = await import("./tauri-channel.mjs");
+		for (const env of DEV_CHANNELS) {
+			expect(channelArgs(["build", "--", "--locked"], env)).toEqual([
+				"build",
+				"--config",
+				DEV_CONFIG,
+				"--",
+				"--locked",
+			]);
+			expect(channelArgs(["build", "--bundles", "nsis", "--", "--locked"], env)).toEqual([
+				"build",
+				"--bundles",
+				"nsis",
+				"--config",
+				DEV_CONFIG,
+				"--",
+				"--locked",
+			]);
+		}
+	});
+
+	// The CLI's own options may come before the subcommand. Mutations: the
+	// subcommand read as the first argument; only `-v` and `--verbose` skipped.
+	it("finds the subcommand after the CLI's own options", async () => {
+		const { channelArgs } = await import("./tauri-channel.mjs");
+		for (const env of DEV_CHANNELS) {
+			expect(channelArgs(["--verbose", "build"], env)).toEqual([
+				"--verbose",
+				"build",
+				"--config",
+				DEV_CONFIG,
+			]);
+			expect(channelArgs(["-v", "bundle"], env)).toEqual(["-v", "bundle", "--config", DEV_CONFIG]);
+			expect(channelArgs(["-vv", "build", "--", "--locked"], env)).toEqual([
+				"-vv",
+				"build",
+				"--config",
+				DEV_CONFIG,
+				"--",
+				"--locked",
+			]);
+		}
+	});
+
+	// Mutation: the identity added whatever the channel.
+	it("leaves a release build as it is", async () => {
+		const { channelArgs } = await import("./tauri-channel.mjs");
+		const env = { LASTERM_CHANNEL: "release" };
+		expect(channelArgs(["build", "--no-bundle"], env)).toEqual(["build", "--no-bundle"]);
+		expect(channelArgs(["--verbose", "build", "--", "--locked"], env)).toEqual([
+			"--verbose",
+			"build",
+			"--",
+			"--locked",
+		]);
+		expect(channelArgs(["bundle"], env)).toEqual(["bundle"]);
+	});
+
+	// Mutations: the identity added to every command; `build` or `bundle`
+	// looked for anywhere in the arguments.
+	it("leaves every other command as it is", async () => {
+		const { channelArgs } = await import("./tauri-channel.mjs");
+		expect(channelArgs(["dev"], {})).toEqual(["dev"]);
+		expect(channelArgs(["info"], {})).toEqual(["info"]);
+		expect(channelArgs(["-v", "dev", "--features", "bundle"], {})).toEqual([
+			"-v",
+			"dev",
+			"--features",
+			"bundle",
+		]);
+	});
+});

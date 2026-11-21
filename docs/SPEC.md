@@ -1495,6 +1495,20 @@ the variable (`platform-dirs.ts`). The hub has no separate data directory. The d
 `%LOCALAPPDATA%\lasterm\` on Windows, which is the state directory, and `$XDG_DATA_HOME/lasterm/`
 (`~/.local/share/lasterm/`) on Linux, where no desktop is released (§ 10.3).
 
+### Build channels
+
+The paths above are the release channel's, the one only the release workflow builds
+(`LASTERM_CHANNEL=release`). Every other build is a development build, and wherever `lasterm`
+names a directory, a pipe or a lock above, it uses `lasterm-dev` instead: `%APPDATA%\lasterm-dev\`,
+`\\.\pipe\lasterm-dev-agent-<user>`, and so on (#1084). Its desktop is `app.lasterm.desktop.dev`,
+named Lasterm Dev, and starts its hub with `--channel dev`, which a release hub refuses; the hub
+starts its local agent with `--channel dev`. So a development build runs beside the Store install
+on one account. Its configuration is the release's `config.toml` (on Windows, the Store package's
+copy under `%LOCALAPPDATA%\Packages\O2CSI.Lasterm_sx7tynvv0nmw4\LocalCache\Roaming\lasterm\` when
+it exists, else `%APPDATA%\lasterm\`), read only, with its own `config.toml` applied on top, key by
+key in each section; its Settings changes go to its own file only, and the release file's
+`[agent] socket_path` is ignored ([CONFIG_REFERENCE.md](CONFIG_REFERENCE.md)).
+
 ### Directory Contents
 
 ```

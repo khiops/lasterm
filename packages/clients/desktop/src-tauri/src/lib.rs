@@ -1,5 +1,9 @@
 use lasterm_process_lock::ProcessLock;
 use window_material::WindowSurface;
+#[cfg(test)]
+#[path = "../build_channel.rs"]
+mod build_channel;
+mod channel;
 pub mod hub_log;
 pub mod tls_identity;
 mod uploads;
@@ -766,7 +770,7 @@ fn desktop_instance_lock_path() -> Result<PathBuf, String> {
     }
     #[cfg(windows)]
     {
-        windows_desktop_instance_lock_path(std::env::var_os("LOCALAPPDATA"))
+        windows_desktop_instance_lock_path(std::env::var_os("LOCALAPPDATA"), channel::base_name())
     }
 }
 
@@ -789,7 +793,7 @@ fn unix_desktop_runtime_dir_for_environment_at(
     uid: u32,
     _xdg_runtime_dir: Option<&std::ffi::OsStr>,
 ) -> PathBuf {
-    base.join(format!("lasterm-{uid}"))
+    base.join(format!("{}-{uid}", channel::base_name()))
 }
 
 #[cfg(unix)]
@@ -805,12 +809,18 @@ fn desktop_raise_endpoint(lock_path: &Path) -> Result<DesktopRaiseEndpoint, Stri
     })
 }
 
+/// The raise pipe of a channel: `\\.\pipe\<base>-desktop-raise-<user>` (#1084).
+#[cfg(any(windows, test))]
+fn desktop_raise_pipe_name(base: &str, username: &str) -> String {
+    format!(r"\\.\pipe\{base}-desktop-raise-{username}")
+}
+
 #[cfg(windows)]
 fn desktop_raise_endpoint(lock_path: &Path) -> Result<DesktopRaiseEndpoint, String> {
     // Named pipes are machine-global. Match the agent daemon's user-scoped
     // naming, while the owner-only DACL below is the actual access boundary.
     let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".to_string());
-    let pipe_name = format!(r"\\.\pipe\lasterm-desktop-raise-{username}");
+    let pipe_name = desktop_raise_pipe_name(channel::base_name(), &username);
     // A test takes a lock of its own, in a directory of its own. A pipe of its
     // own too keeps it from reaching, and raising, a Lasterm running on the
     // same machine, which also made the handoff test fail there.
@@ -829,6 +839,7 @@ fn desktop_raise_endpoint(lock_path: &Path) -> Result<DesktopRaiseEndpoint, Stri
 #[cfg(any(target_os = "windows", test))]
 fn windows_desktop_instance_lock_path(
     local_app_data: Option<std::ffi::OsString>,
+    base: &str,
 ) -> Result<PathBuf, String> {
     let local_app_data = local_app_data
         .filter(|path| !path.is_empty())
@@ -855,7 +866,7 @@ fn windows_desktop_instance_lock_path(
     // authority remains host-local. It is under the user's profile, whose default
     // ACL already excludes other users; a full ACL audit is intentionally out of
     // scope here.
-    let runtime_dir = local_app_data_path.join("lasterm").join("runtime");
+    let runtime_dir = local_app_data_path.join(base).join("runtime");
     prepare_windows_runtime_dir(&runtime_dir)?;
     Ok(runtime_dir.join("desktop-instance.lock"))
 }
@@ -2297,13 +2308,17 @@ enum WindowCloseChoice {
 fn lasterm_config_dir() -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
-        windows_lasterm_config_dir_for_environment(std::env::var_os("APPDATA").as_deref())
+        windows_lasterm_config_dir_for_environment(
+            std::env::var_os("APPDATA").as_deref(),
+            channel::base_name(),
+        )
     }
     #[cfg(not(target_os = "windows"))]
     {
         unix_lasterm_config_dir_for_environment(
             std::env::var_os("XDG_CONFIG_HOME").as_deref(),
             std::env::var_os("HOME").as_deref(),
+            channel::base_name(),
         )
     }
 }
@@ -2311,6 +2326,7 @@ fn lasterm_config_dir() -> Result<PathBuf, String> {
 #[cfg(any(target_os = "windows", test))]
 fn windows_lasterm_config_dir_for_environment(
     app_data: Option<&std::ffi::OsStr>,
+    base: &str,
 ) -> Result<PathBuf, String> {
     let config_dir = app_data
         .filter(|directory| !directory.is_empty())
@@ -2323,13 +2339,14 @@ fn windows_lasterm_config_dir_for_environment(
         ));
     }
 
-    Ok(config_dir.join("lasterm"))
+    Ok(config_dir.join(base))
 }
 
 #[cfg(not(target_os = "windows"))]
 fn unix_lasterm_config_dir_for_environment(
     xdg_config_home: Option<&std::ffi::OsStr>,
     home: Option<&std::ffi::OsStr>,
+    base: &str,
 ) -> Result<PathBuf, String> {
     // "All paths set in these environment variables must be absolute. If an
     // implementation encounters a relative path in any of these variables it
@@ -2342,7 +2359,7 @@ fn unix_lasterm_config_dir_for_environment(
                 .map(PathBuf::from)
                 .map(|home| home.join(".config"))
         })
-        .map(|config_dir| config_dir.join("lasterm"))
+        .map(|config_dir| config_dir.join(base))
         .ok_or_else(|| "cannot determine the home directory".to_string())
 }
 
@@ -2554,13 +2571,17 @@ fn set_close_behavior(behavior: CloseBehavior) -> Result<(), String> {
 fn get_state_dir() -> Result<std::path::PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
-        windows_lasterm_state_dir_for_environment(std::env::var_os("LOCALAPPDATA").as_deref())
+        windows_lasterm_state_dir_for_environment(
+            std::env::var_os("LOCALAPPDATA").as_deref(),
+            channel::base_name(),
+        )
     }
     #[cfg(not(target_os = "windows"))]
     {
         unix_lasterm_state_dir_for_environment(
             std::env::var_os("XDG_STATE_HOME").as_deref(),
             std::env::var_os("HOME").as_deref(),
+            channel::base_name(),
         )
     }
 }
@@ -2568,6 +2589,7 @@ fn get_state_dir() -> Result<std::path::PathBuf, String> {
 #[cfg(any(target_os = "windows", test))]
 fn windows_lasterm_state_dir_for_environment(
     local_app_data: Option<&std::ffi::OsStr>,
+    base: &str,
 ) -> Result<PathBuf, String> {
     let state_dir = local_app_data
         .filter(|directory| !directory.is_empty())
@@ -2580,13 +2602,14 @@ fn windows_lasterm_state_dir_for_environment(
         ));
     }
 
-    Ok(state_dir.join("lasterm"))
+    Ok(state_dir.join(base))
 }
 
 #[cfg(not(target_os = "windows"))]
 fn unix_lasterm_state_dir_for_environment(
     xdg_state_home: Option<&std::ffi::OsStr>,
     home: Option<&std::ffi::OsStr>,
+    base: &str,
 ) -> Result<PathBuf, String> {
     // "All paths set in these environment variables must be absolute. If an
     // implementation encounters a relative path in any of these variables it
@@ -2599,7 +2622,7 @@ fn unix_lasterm_state_dir_for_environment(
                 .map(PathBuf::from)
                 .map(|home| home.join(".local").join("state"))
         })
-        .map(|state_dir| state_dir.join("lasterm"))
+        .map(|state_dir| state_dir.join(base))
         .ok_or_else(|| "cannot determine the home directory".to_string())
 }
 
@@ -2666,14 +2689,31 @@ fn read_protected_file(path: &Path) -> Result<Option<String>, String> {
 
 fn hub_pin_store_path() -> Result<PathBuf, String> {
     dirs::data_local_dir()
-        // Keep the authority under its own 0700 leaf, not beside hub.log: the
-        // log directory is intentionally ordinary application storage.
-        .map(|path| {
-            path.join("lasterm")
-                .join("identity")
-                .join(HUB_PIN_STORE_FILE)
-        })
+        .map(|path| hub_pin_store_path_in(&path, channel::base_name()))
         .ok_or_else(|| "failed to resolve the desktop pin-store directory".to_string())
+}
+
+/// The pin store under `data_local`, in the channel's directory (#1084).
+fn hub_pin_store_path_in(data_local: &Path, base: &str) -> PathBuf {
+    // Keep the authority under its own 0700 leaf, not beside hub.log: the
+    // log directory is intentionally ordinary application storage.
+    data_local
+        .join(base)
+        .join("identity")
+        .join(HUB_PIN_STORE_FILE)
+}
+
+/// The directory the hub's log goes to under `data_local`, the channel's (#1084).
+#[cfg_attr(dev, allow(dead_code))]
+fn hub_log_dir_in(data_local: &Path, base: &str) -> PathBuf {
+    data_local.join(base)
+}
+
+/// What the desktop passes its hub: stop with this process (#188), and refuse
+/// unless it is a hub of this build's channel (#1084).
+#[cfg_attr(dev, allow(dead_code))]
+fn hub_start_args(channel: channel::Channel) -> [&'static str; 4] {
+    ["start", "--exit-with-stdin", "--channel", channel.as_str()]
 }
 
 /// SSH-known-hosts shape: the stable identity names one entry, its first public
@@ -5727,10 +5767,10 @@ fn notify_uploads_waiting(app: tauri::AppHandle, waiting: u32) {
         let show = app
             .dialog()
             .message(uploads::waiting_notice(waiting))
-            .title("Lasterm")
+            .title(channel::product_name())
             .kind(MessageDialogKind::Info)
             .buttons(MessageDialogButtons::OkCancelCustom(
-                "Show Lasterm".to_string(),
+                show_label(channel::build_channel()),
                 "Later".to_string(),
             ))
             .owned_by(owner.as_ref())
@@ -5791,6 +5831,16 @@ fn sync_uploads_tray(app: &tauri::AppHandle) {
     }) {
         eprintln!("[lasterm] WARN: cannot update the tray for the uploads: {error}");
     }
+}
+
+/// The tray's show item: "Show Lasterm", or "Show Lasterm Dev" (#1084).
+fn show_label(channel: channel::Channel) -> String {
+    format!("Show {}", channel.product_name())
+}
+
+/// The Tauri context, with this build's identity (build.rs merged it in).
+fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
 }
 
 /// The tray, its menu, and the lines the uploads add above "Show Lasterm":
@@ -6058,14 +6108,15 @@ fn launch_hub(app: &tauri::AppHandle) -> Result<u16, String> {
         .shell()
         .sidecar("lasterm-hub")
         .map_err(|error| format!("The hub program could not be located in this build: {error}"))?
-        .args(["start", "--exit-with-stdin"]);
+        .args(hub_start_args(channel::build_channel()));
     let (mut rx, child) = sidecar
         .spawn()
         .map_err(|error| format!("The hub could not be started: {error}"))?;
 
-    let log_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("lasterm");
+    let log_dir = hub_log_dir_in(
+        &dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
+        channel::base_name(),
+    );
     #[expect(
         clippy::disallowed_methods,
         reason = "creates the non-protected hub diagnostic-log directory"
@@ -6284,12 +6335,12 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     build_main_window(app.handle(), window_material::surface_for_host(&background))?;
 
     // System tray
-    let show = MenuItemBuilder::with_id("show", "Show Lasterm").build(app)?;
+    let show = MenuItemBuilder::with_id("show", show_label(channel::build_channel())).build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
     let menu = MenuBuilder::new(app).items(&[&show, &quit]).build()?;
     // Added above those two only while uploads run (#837), so the menu is as it
     // was otherwise.
-    let uploads_status = MenuItemBuilder::with_id("uploads-status", uploads::TRAY_TEXT_IDLE)
+    let uploads_status = MenuItemBuilder::with_id("uploads-status", uploads::tray_text_idle())
         .enabled(false)
         .build(app)?;
     let cancel_uploads_quit_item = MenuItemBuilder::with_id(
@@ -6303,7 +6354,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // and never found again. The app's own icon is the one already bundled for
     // every other surface, so the thing in the tray looks like the thing it is.
     let tray = TrayIconBuilder::new()
-        .tooltip(uploads::TRAY_TEXT_IDLE)
+        .tooltip(uploads::tray_text_idle())
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => {
@@ -6338,7 +6389,10 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 status: uploads_status,
                 cancel: cancel_uploads_quit_item,
                 separator: uploads_separator,
-                shown: Mutex::new((uploads::TRAY_TEXT_IDLE.to_string(), TrayMenuTop::default())),
+                shown: Mutex::new((
+                    uploads::tray_text_idle().to_string(),
+                    TrayMenuTop::default(),
+                )),
             });
             app.manage(tray);
         }
@@ -6552,7 +6606,7 @@ pub fn run() {
             }
         })
         .setup(setup_app)
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while running lasterm")
         .run(|_app, _event| {});
 }
@@ -7663,6 +7717,7 @@ mod tests {
         let config_dir = unix_lasterm_config_dir_for_environment(
             Some(std::ffi::OsStr::new("relative-config/.")),
             Some(home.as_os_str()),
+            "lasterm",
         )
         .expect("ignore relative XDG_CONFIG_HOME");
         assert_eq!(config_dir, home.join(".config/lasterm"));
@@ -7695,8 +7750,12 @@ mod tests {
         let directory = instance_test_dir("absolute-xdg-config-home");
 
         assert_eq!(
-            unix_lasterm_config_dir_for_environment(Some(directory.path().as_os_str()), None)
-                .expect("use absolute XDG_CONFIG_HOME"),
+            unix_lasterm_config_dir_for_environment(
+                Some(directory.path().as_os_str()),
+                None,
+                "lasterm"
+            )
+            .expect("use absolute XDG_CONFIG_HOME"),
             directory.join("lasterm")
         );
     }
@@ -7707,11 +7766,11 @@ mod tests {
         let home = std::ffi::OsStr::new("relative-home");
 
         assert!(
-            unix_lasterm_config_dir_for_environment(None, Some(home)).is_err(),
+            unix_lasterm_config_dir_for_environment(None, Some(home), "lasterm").is_err(),
             "a relative HOME must not resolve a configuration directory"
         );
         assert!(
-            unix_lasterm_state_dir_for_environment(None, Some(home)).is_err(),
+            unix_lasterm_state_dir_for_environment(None, Some(home), "lasterm").is_err(),
             "a relative HOME must not resolve a state directory"
         );
     }
@@ -7909,16 +7968,17 @@ mod tests {
     #[test]
     fn windows_local_app_data_absent_or_empty_is_refused() {
         for local_app_data in [None, Some(std::ffi::OsString::new())] {
-            let error = windows_desktop_instance_lock_path(local_app_data).unwrap_err();
+            let error = windows_desktop_instance_lock_path(local_app_data, "lasterm").unwrap_err();
             assert!(error.contains("LOCALAPPDATA"));
         }
     }
 
     #[test]
     fn relative_app_data_is_refused_with_its_variable_name() {
-        let error = windows_lasterm_config_dir_for_environment(Some(std::ffi::OsStr::new(
-            "relative-app-data",
-        )))
+        let error = windows_lasterm_config_dir_for_environment(
+            Some(std::ffi::OsStr::new("relative-app-data")),
+            "lasterm",
+        )
         .expect_err("relative APPDATA must be refused");
         assert!(error.contains("APPDATA"), "error: {error}");
         assert!(error.contains("relative-app-data"), "error: {error}");
@@ -7928,24 +7988,29 @@ mod tests {
     fn absolute_app_data_is_used() {
         let directory = instance_test_dir("absolute-app-data");
         assert_eq!(
-            windows_lasterm_config_dir_for_environment(Some(directory.path().as_os_str()))
-                .expect("absolute APPDATA works"),
+            windows_lasterm_config_dir_for_environment(
+                Some(directory.path().as_os_str()),
+                "lasterm"
+            )
+            .expect("absolute APPDATA works"),
             directory.join("lasterm")
         );
     }
 
     #[test]
     fn relative_local_app_data_is_refused_with_its_variable_name() {
-        let error = windows_desktop_instance_lock_path(Some(std::ffi::OsString::from(
-            "relative-local-app-data",
-        )))
+        let error = windows_desktop_instance_lock_path(
+            Some(std::ffi::OsString::from("relative-local-app-data")),
+            "lasterm",
+        )
         .expect_err("relative LOCALAPPDATA must be refused");
         assert!(error.contains("LOCALAPPDATA"), "error: {error}");
         assert!(error.contains("relative-local-app-data"), "error: {error}");
 
-        let error = windows_lasterm_state_dir_for_environment(Some(std::ffi::OsStr::new(
-            "relative-local-app-data",
-        )))
+        let error = windows_lasterm_state_dir_for_environment(
+            Some(std::ffi::OsStr::new("relative-local-app-data")),
+            "lasterm",
+        )
         .expect_err("relative LOCALAPPDATA must not resolve the state directory");
         assert!(error.contains("LOCALAPPDATA"), "error: {error}");
         assert!(error.contains("relative-local-app-data"), "error: {error}");
@@ -7954,9 +8019,10 @@ mod tests {
     #[test]
     fn invalid_app_data_reaches_the_hub_auth_token_caller() {
         let result =
-            read_hub_auth_token_from_config_dir(windows_lasterm_config_dir_for_environment(Some(
-                std::ffi::OsStr::new("relative-app-data"),
-            )));
+            read_hub_auth_token_from_config_dir(windows_lasterm_config_dir_for_environment(
+                Some(std::ffi::OsStr::new("relative-app-data")),
+                "lasterm",
+            ));
 
         let error = result.expect_err("relative APPDATA must not become an absent token");
         assert!(error.contains("APPDATA"), "error: {error}");
@@ -7966,9 +8032,11 @@ mod tests {
     #[test]
     fn windows_local_app_data_creates_the_runtime_paths() {
         let local_app_data = instance_test_dir("windows-local-app-data");
-        let lock_path =
-            windows_desktop_instance_lock_path(Some(local_app_data.path().to_path_buf().into()))
-                .unwrap();
+        let lock_path = windows_desktop_instance_lock_path(
+            Some(local_app_data.path().to_path_buf().into()),
+            "lasterm",
+        )
+        .unwrap();
         let runtime_dir = local_app_data.join("lasterm").join("runtime");
 
         assert_eq!(lock_path, runtime_dir.join("desktop-instance.lock"));
@@ -7981,7 +8049,8 @@ mod tests {
         let path = dir.join("not-a-directory");
         std::fs::write(&path, "not a directory").unwrap();
 
-        let error = windows_desktop_instance_lock_path(Some(path.clone().into())).unwrap_err();
+        let error =
+            windows_desktop_instance_lock_path(Some(path.clone().into()), "lasterm").unwrap_err();
         assert!(error.contains(&path.display().to_string()));
     }
 
@@ -7989,7 +8058,8 @@ mod tests {
     fn windows_unc_local_app_data_is_refused_with_its_value() {
         let unc = r"\\server\share";
         let error =
-            windows_desktop_instance_lock_path(Some(std::ffi::OsString::from(unc))).unwrap_err();
+            windows_desktop_instance_lock_path(Some(std::ffi::OsString::from(unc)), "lasterm")
+                .unwrap_err();
         assert!(error.contains(unc));
         assert!(error.contains("host-local"));
     }
@@ -10258,5 +10328,198 @@ mod tests {
             2,
             "after its first message is acknowledged the relay reads the queued second message"
         );
+    }
+
+    // ─── Build channel (#1084) ───────────────────────────────────────────────
+
+    // AC2. Mutation: one of the names left spelled `lasterm` (red on its dev case).
+    #[test]
+    fn the_desktop_names_follow_the_channel() {
+        assert_eq!(
+            desktop_raise_pipe_name("lasterm", "alice"),
+            r"\\.\pipe\lasterm-desktop-raise-alice"
+        );
+        assert_eq!(
+            desktop_raise_pipe_name("lasterm-dev", "alice"),
+            r"\\.\pipe\lasterm-dev-desktop-raise-alice"
+        );
+        let local = PathBuf::from("local");
+        for base in ["lasterm", "lasterm-dev"] {
+            assert_eq!(
+                hub_pin_store_path_in(&local, base),
+                local.join(base).join("identity").join(HUB_PIN_STORE_FILE)
+            );
+            assert_eq!(hub_log_dir_in(&local, base), local.join(base));
+        }
+        let directory = instance_test_dir("channel-app-data");
+        assert_eq!(
+            windows_lasterm_config_dir_for_environment(
+                Some(directory.path().as_os_str()),
+                "lasterm-dev"
+            )
+            .unwrap(),
+            directory.join("lasterm-dev")
+        );
+        assert_eq!(
+            windows_lasterm_state_dir_for_environment(
+                Some(directory.path().as_os_str()),
+                "lasterm-dev"
+            )
+            .unwrap(),
+            directory.join("lasterm-dev")
+        );
+    }
+
+    #[test]
+    fn the_windows_lock_follows_the_channel() {
+        let local_app_data = instance_test_dir("channel-local-app-data");
+        let lock_path = windows_desktop_instance_lock_path(
+            Some(local_app_data.path().to_path_buf().into()),
+            "lasterm-dev",
+        )
+        .unwrap();
+        assert_eq!(
+            lock_path,
+            local_app_data
+                .join("lasterm-dev")
+                .join("runtime")
+                .join("desktop-instance.lock")
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn the_unix_directories_follow_the_channel_with_xdg_and_with_home() {
+        let xdg = std::ffi::OsStr::new("/xdg");
+        let home = std::ffi::OsStr::new("/home/jane");
+        for base in ["lasterm", "lasterm-dev"] {
+            assert_eq!(
+                unix_lasterm_config_dir_for_environment(Some(xdg), Some(home), base).unwrap(),
+                PathBuf::from("/xdg").join(base)
+            );
+            assert_eq!(
+                unix_lasterm_config_dir_for_environment(None, Some(home), base).unwrap(),
+                PathBuf::from("/home/jane/.config").join(base)
+            );
+            assert_eq!(
+                unix_lasterm_state_dir_for_environment(Some(xdg), Some(home), base).unwrap(),
+                PathBuf::from("/xdg").join(base)
+            );
+            assert_eq!(
+                unix_lasterm_state_dir_for_environment(None, Some(home), base).unwrap(),
+                PathBuf::from("/home/jane/.local/state").join(base)
+            );
+        }
+    }
+
+    // The tests are built like any build, from LASTERM_CHANNEL: these name what
+    // that build's channel gives.
+    fn expected_channel() -> channel::Channel {
+        if env!("LASTERM_BUILD_CHANNEL") == "release" {
+            channel::Channel::Release
+        } else {
+            channel::Channel::Dev
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_unix_runtime_directory_follows_the_channel() {
+        assert_eq!(
+            unix_desktop_runtime_dir(1000),
+            PathBuf::from(format!("/tmp/{}-1000", expected_channel().base_name()))
+        );
+    }
+
+    // AC7. Mutation: the channel not passed to the hub.
+    #[test]
+    fn the_hub_is_started_with_the_build_channel() {
+        assert_eq!(
+            hub_start_args(channel::Channel::Dev),
+            ["start", "--exit-with-stdin", "--channel", "dev"]
+        );
+        assert_eq!(
+            hub_start_args(channel::Channel::Release),
+            ["start", "--exit-with-stdin", "--channel", "release"]
+        );
+    }
+
+    // AC14. Mutation: the show item left "Show Lasterm".
+    #[test]
+    fn the_tray_show_item_names_the_channels_product() {
+        assert_eq!(show_label(channel::Channel::Release), "Show Lasterm");
+        assert_eq!(show_label(channel::Channel::Dev), "Show Lasterm Dev");
+    }
+
+    // AC11, the compiled identity. Mutation: the identity merged only by
+    // build-desktop.ps1, so a plain cargo build keeps the release's.
+    #[test]
+    fn the_compiled_identity_is_the_build_channels() {
+        let context: tauri::Context<tauri::test::MockRuntime> = app_context();
+        let config = context.config();
+        let (identifier, product_name) = match expected_channel() {
+            channel::Channel::Release => ("app.lasterm.desktop", "Lasterm"),
+            channel::Channel::Dev => ("app.lasterm.desktop.dev", "Lasterm Dev"),
+        };
+        assert_eq!(config.identifier, identifier);
+        assert_eq!(config.product_name.as_deref(), Some(product_name));
+        assert_eq!(config.app.windows[0].title, product_name);
+    }
+
+    // The installers' identity: tauri.dev.conf.json, which tauri-channel.mjs
+    // passes the Tauri CLI when a dev build bundles, names what build.rs
+    // compiles in. Mutation: the file's identifier or name drifting from the
+    // build script's.
+    #[test]
+    fn the_dev_installer_config_names_the_dev_identity() {
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.dev.conf.json")).unwrap();
+        let (identifier, product_name) = build_channel::channel_identity("dev");
+        assert_eq!(
+            file,
+            serde_json::json!({ "identifier": identifier, "productName": product_name })
+        );
+    }
+
+    // AC4, the desktop's rule.
+    #[test]
+    fn the_build_script_reads_the_channel_like_every_component() {
+        assert_eq!(
+            build_channel::channel_from_value(Some("release")),
+            "release"
+        );
+        for value in [None, Some(""), Some("Release"), Some("dev"), Some("x")] {
+            assert_eq!(build_channel::channel_from_value(value), "dev", "{value:?}");
+        }
+    }
+
+    // AC11, the merge. Mutations: the channel's keys replace the CLI's whole
+    // value (the foreign key lost); the CLI's identity wins.
+    #[test]
+    fn the_build_script_merges_the_channel_into_the_clis_tauri_config() {
+        let cli = r#"{"build":{"devUrl":"http://localhost:9999"},"identifier":"some.other.id","productName":"Other"}"#;
+        let base = serde_json::json!({
+            "identifier": "app.lasterm.desktop",
+            "app": { "windows": [{ "label": "main", "title": "Lasterm", "width": 1280 }] }
+        });
+        let merged: serde_json::Value = serde_json::from_str(
+            &build_channel::merge_channel_config(Some(cli), &base, "dev").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(merged["build"]["devUrl"], "http://localhost:9999");
+        assert_eq!(merged["identifier"], "app.lasterm.desktop.dev");
+        assert_eq!(merged["productName"], "Lasterm Dev");
+        assert_eq!(
+            merged["app"]["windows"],
+            serde_json::json!([{ "label": "main", "title": "Lasterm Dev", "width": 1280 }])
+        );
+
+        let release: serde_json::Value = serde_json::from_str(
+            &build_channel::merge_channel_config(None, &base, "release").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(release["identifier"], "app.lasterm.desktop");
+        assert_eq!(release["productName"], "Lasterm");
+        assert_eq!(release["app"]["windows"][0]["title"], "Lasterm");
     }
 }

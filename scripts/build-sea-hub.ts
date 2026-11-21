@@ -37,6 +37,7 @@ import {
 	type MigrationSet,
 	readMigrationFiles,
 } from "../packages/hub/src/storage/migration-files.js";
+import { CHANNEL_MARKER_PREFIX, channelFromValue } from "../packages/shared/src/build-channel.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -202,6 +203,23 @@ function importMetaShimPlugin(): Plugin {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Build channel — fixed in the executable (#1084)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The define that fixes the hub's build channel: `__LASTERM_CHANNEL_MARKER__`
+ * becomes the literal `lasterm-build-channel:<channel>`, the channel taken from
+ * the build environment's `LASTERM_CHANNEL` (exactly `release`, else `dev`).
+ * The executable then holds that marker, and only that one, which
+ * pack-msix.ps1 searches for; and it resolves its names from it, whatever
+ * `LASTERM_CHANNEL` says when it runs.
+ */
+export function channelDefine(env: NodeJS.ProcessEnv): Record<string, string> {
+	const marker = `${CHANNEL_MARKER_PREFIX}${channelFromValue(env.LASTERM_CHANNEL)}`;
+	return { __LASTERM_CHANNEL_MARKER__: JSON.stringify(marker) };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // esbuild config
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -225,6 +243,7 @@ export const buildOptions: BuildOptions = {
 		"import.meta.url": "__importMetaUrl",
 		"process.env.LASTERM_BUILD_HASH": JSON.stringify(SEA_BUILD_HASH),
 		"process.env.LASTERM_VERSION": JSON.stringify(SEA_VERSION),
+		...channelDefine(process.env),
 	},
 	banner: {
 		js: [

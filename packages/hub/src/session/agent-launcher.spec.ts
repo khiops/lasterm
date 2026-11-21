@@ -1,7 +1,8 @@
 import { chmodSync, existsSync, mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import net from "node:net";
-import path from "node:path";
+import os from "node:os";
+import path, { join } from "node:path";
 import {
 	type AgentConfig,
 	DEFAULT_AGENT_CONFIG,
@@ -315,6 +316,37 @@ describe("connectOrLaunch", () => {
 			TEST_TIMEOUT,
 		);
 	});
+
+	// AC6 (#1084). Mutations: flag omitted, or always passed (the release launch
+	// above ends with --log-files-kept, as it always has).
+	it(
+		"passes --channel dev to the daemon a dev hub launches",
+		async () => {
+			vi.stubEnv("LASTERM_CHANNEL", "dev");
+			let capturedArgs: unknown[] = [];
+			mockSpawnImpl = (...args: unknown[]) => {
+				capturedArgs = args;
+				setTimeout(async () => {
+					daemon = await createMockDaemon(socketPath);
+				}, 150);
+				return { unref: vi.fn(), pid: 12345 };
+			};
+			const seaBinary = path.join(tmpDir, "lasterm-agent");
+			await writeFile(seaBinary, "#!/bin/sh\n");
+			try {
+				agent = await connectOrLaunch(socketPath, { ...config, logFilesKept: 30 }, seaBinary);
+			} finally {
+				vi.unstubAllEnvs();
+			}
+			expect((capturedArgs[1] as string[]).slice(-4)).toEqual([
+				"--log-files-kept",
+				"30",
+				"--channel",
+				"dev",
+			]);
+		},
+		TEST_TIMEOUT,
+	);
 
 	/**
 	 * Mutation caught: removing the `ensurePrivateSocketDirectory` call in
@@ -721,5 +753,75 @@ describe("readBoundedLogTail", () => {
 		// Content is still present — not a trivially-empty result.
 		expect(result).toContain("alpha");
 		expect(result).toContain("gamma");
+	});
+});
+
+describe("stopLocalAgent and the dev channel (#1084)", () => {
+	const PIPE_X = String.raw`\\.\pipe\x`;
+
+	async function stopArgv(override: string | undefined): Promise<unknown[]> {
+		const { EventEmitter } = await import("node:events");
+		const child = new EventEmitter() as import("node:child_process").ChildProcess;
+		Object.assign(child, { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: vi.fn() });
+		const run = vi.fn((..._args: unknown[]) => {
+			setImmediate(() => child.emit("close", 0, null));
+			return child;
+		});
+		await stopLocalAgent(override, {
+			agentPath: "/opt/lasterm-agent",
+			spawn: run as unknown as typeof import("node:child_process").spawn,
+		});
+		return run.mock.calls[0]?.[1] as unknown[];
+	}
+
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	// AC6. Mutations: flag omitted, always passed, passed on launch only.
+	it("passes --channel dev from a dev hub, and nothing from a release hub", async () => {
+		vi.stubEnv("LASTERM_CHANNEL", "dev");
+		expect(await stopArgv(AGENT_ENDPOINT)).toEqual([
+			"--stop",
+			"--socket",
+			AGENT_ENDPOINT,
+			"--channel",
+			"dev",
+		]);
+		vi.stubEnv("LASTERM_CHANNEL", "release");
+		expect(await stopArgv(AGENT_ENDPOINT)).toEqual(["--stop", "--socket", AGENT_ENDPOINT]);
+	});
+
+	// AC5 (launcher). The override comes from the configuration the hub read:
+	// on dev the shared file's socket_path never reaches it.
+	it("stops the dev default endpoint when only the shared config names a socket_path", async () => {
+		const root = makeTempDir("lasterm-launcher-dev-");
+		const restore = usePlatformDirs({ state: join(root, "local"), config: join(root, "roaming") });
+		try {
+			vi.stubEnv("XDG_RUNTIME_DIR", "/run/user/1000");
+			const { ConfigResolver } = await import("../config.js");
+			const { resetConfigWarnings } = await import("../config-sources.js");
+			resetConfigWarnings();
+			const shared = join(root, "roaming", "lasterm", "config.toml");
+			mkdirSync(join(root, "roaming", "lasterm"), { recursive: true });
+			writeFileSync(shared, `[agent]\nsocket_path = '${PIPE_X}'\n`);
+			const read = (channel: string, dir: string) => {
+				vi.stubEnv("LASTERM_CHANNEL", channel);
+				const resolver = new ConfigResolver(null as never);
+				resolver.loadFromFile(dir);
+				return resolver.agentConfig.socketPath;
+			};
+			// The same file gives the release channel the override.
+			expect(read("release", join(root, "roaming", "lasterm"))).toBe(PIPE_X);
+			const devOverride = read("dev", join(root, "roaming", "lasterm-dev"));
+			const devDefault =
+				process.platform === "win32"
+					? String.raw`\\.\pipe\lasterm-dev-agent-` + os.userInfo().username
+					: "/run/user/1000/lasterm-dev/agent.sock";
+			expect((await stopArgv(devOverride))[2]).toBe(devDefault);
+		} finally {
+			restore();
+			await removeTempDir(root);
+		}
 	});
 });

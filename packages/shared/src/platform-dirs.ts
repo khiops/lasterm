@@ -16,8 +16,54 @@
  *   Directory specification requires, and the home-directory default is used,
  *   which must itself be absolute.
  */
-import { homedir } from "node:os";
+import os from "node:os";
 import path from "node:path";
+
+/**
+ * The build channel: `release` for what the release workflow builds, `dev` for
+ * every other build (#1084). A development build and the Store install then use
+ * different pipes, locks and directories, so both run on one Windows account.
+ *
+ * The rule, the same in every language that names: the build environment's
+ * `LASTERM_CHANNEL` set to exactly `release` gives `release`; anything else,
+ * absent included, gives `dev`.
+ *
+ * The hub executable has its channel fixed when it is built: build-sea-hub.ts
+ * replaces `__LASTERM_CHANNEL_MARKER__` with the literal
+ * `lasterm-build-channel:<channel>`, which pack-msix.ps1 searches the binary
+ * for. A hub run from source has no such literal and reads `LASTERM_CHANNEL`
+ * from its environment.
+ *
+ * It lives here, beside the names it picks, because this module imports only
+ * Node's builtins: scripts load it under plain Node (scripts/dev/ui/cdp.mjs).
+ * build-channel.ts re-exports it.
+ */
+export type BuildChannel = "release" | "dev";
+
+/** The marker's prefix; the binary holds it followed by its channel only. */
+export const CHANNEL_MARKER_PREFIX = "lasterm-build-channel:";
+
+declare const __LASTERM_CHANNEL_MARKER__: string | undefined;
+
+/** The channel a `LASTERM_CHANNEL` value gives. */
+export function channelFromValue(value: string | undefined): BuildChannel {
+	return value === "release" ? "release" : "dev";
+}
+
+/** The channel the build fixed, or for a source run, the environment's. */
+export function buildChannel(): BuildChannel {
+	const marker =
+		typeof __LASTERM_CHANNEL_MARKER__ === "string" ? __LASTERM_CHANNEL_MARKER__ : undefined;
+	if (marker !== undefined) {
+		return channelFromValue(marker.slice(CHANNEL_MARKER_PREFIX.length));
+	}
+	return channelFromValue(process.env.LASTERM_CHANNEL);
+}
+
+/** The name every channel-specific directory, pipe and lock is built from. */
+export function channelBaseName(channel: BuildChannel): string {
+	return channel === "release" ? "lasterm" : "lasterm-dev";
+}
 
 export type PlatformDirKind = "state" | "config" | "cache";
 
@@ -26,6 +72,8 @@ export interface PlatformDirContext {
 	readonly platform: NodeJS.Platform;
 	readonly env: Readonly<Record<string, string | undefined>>;
 	readonly homedir: () => string;
+	/** The build channel whose directory is wanted; the running build's when absent (#1084). */
+	readonly channel?: BuildChannel;
 }
 
 /** Thrown when the environment does not say where a directory is. */
@@ -57,7 +105,12 @@ const HOME_DEFAULT: Record<PlatformDirKind, readonly string[]> = {
 };
 
 function currentContext(): PlatformDirContext {
-	return { platform: process.platform, env: process.env, homedir };
+	return {
+		platform: process.platform,
+		env: process.env,
+		homedir: () => os.homedir(),
+		channel: buildChannel(),
+	};
 }
 
 function pathFor(context: PlatformDirContext): typeof path.posix {
@@ -102,8 +155,9 @@ export function platformBaseDir(
 }
 
 /**
- * lasterm's own directory for `kind`. On Windows the cache sits inside the
- * state tree (`%LOCALAPPDATA%\lasterm\cache`), where it has always been.
+ * lasterm's own directory for `kind`: `lasterm` on the release channel,
+ * `lasterm-dev` on the dev channel (#1084). On Windows the cache sits inside
+ * the state tree (`%LOCALAPPDATA%\lasterm\cache`), where it has always been.
  */
 export function lastermDir(
 	kind: PlatformDirKind,
@@ -111,7 +165,8 @@ export function lastermDir(
 ): string {
 	const paths = pathFor(context);
 	const base = platformBaseDir(kind, context);
+	const name = channelBaseName(context.channel ?? buildChannel());
 	return context.platform === "win32" && kind === "cache"
-		? paths.join(base, "lasterm", "cache")
-		: paths.join(base, "lasterm");
+		? paths.join(base, name, "cache")
+		: paths.join(base, name);
 }

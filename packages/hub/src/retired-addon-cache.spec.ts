@@ -131,4 +131,15 @@ describe("retiredAddonRoots", () => {
 		expect(roots.slice(1)).toEqual(windows ? [] : [path.join(runtime, "lasterm")]);
 		expect(retiredAddonRoots({ XDG_RUNTIME_DIR: "relative" })).toHaveLength(1);
 	});
+
+	// Mutation caught: the runtime fallback left spelled `lasterm`, so a dev hub
+	// would clear the Store hub's extraction root (#1084).
+	it.skipIf(windows)("follows the build channel for the runtime fallback (#1084)", () => {
+		expect(retiredAddonRoots({ XDG_RUNTIME_DIR: "/run/user/1000" }, "dev").slice(1)).toEqual([
+			"/run/user/1000/lasterm-dev",
+		]);
+		expect(retiredAddonRoots({ XDG_RUNTIME_DIR: "/run/user/1000" }, "release").slice(1)).toEqual([
+			"/run/user/1000/lasterm",
+		]);
+	});
 });

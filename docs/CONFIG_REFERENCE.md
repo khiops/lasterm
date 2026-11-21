@@ -7,6 +7,15 @@
 | Linux / macOS | `$XDG_CONFIG_HOME/lasterm/config.toml` (default: `~/.config/lasterm/config.toml`) |
 | Windows | `%APPDATA%\lasterm\config.toml` |
 
+A development build, any build but the release workflow's, reads that file too, as the release
+build sees it (on Windows, the Store package's own copy when it has one), and applies its own
+`lasterm-dev/config.toml` on top: a key there replaces the same key of the same section, and
+`[appearance.<key>]` tables merge key by key too; any other value, such as `[terminal] env`,
+replaces the release file's whole. It never writes the release file: Settings and
+`lasterm config edit` change its own file only. It ignores the release file's `[agent]
+socket_path`, which names the release build's agent, but uses one set in its own file. A file
+that does not parse is ignored, with one warning (SPEC.md § 7, Build channels).
+
 ## Config Cascade
 
 Settings are resolved through four layers. Each layer deep-merges on top of the previous; the last layer wins.

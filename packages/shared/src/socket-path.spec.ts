@@ -23,7 +23,7 @@ describe("getSocketPath", () => {
 		it("returns XDG_RUNTIME_DIR path when set", () => {
 			process.env.XDG_RUNTIME_DIR = "/run/user/1000";
 
-			const result = getSocketPath();
+			const result = getSocketPath(undefined, "release");
 
 			expect(result).toBe("/run/user/1000/lasterm/agent.sock");
 		});
@@ -38,9 +38,24 @@ describe("getSocketPath", () => {
 				shell: "/bin/bash",
 			});
 
-			const result = getSocketPath();
+			const result = getSocketPath(undefined, "release");
 
 			expect(result).toBe("/tmp/lasterm-1234/agent.sock");
+		});
+
+		it("uses lasterm-dev on the dev channel, under XDG_RUNTIME_DIR and in /tmp (#1084)", () => {
+			process.env.XDG_RUNTIME_DIR = "/run/user/1000";
+			expect(getSocketPath(undefined, "dev")).toBe("/run/user/1000/lasterm-dev/agent.sock");
+
+			delete process.env.XDG_RUNTIME_DIR;
+			vi.spyOn(os, "userInfo").mockReturnValue({
+				uid: 1234,
+				gid: 1234,
+				username: "testuser",
+				homedir: "/home/testuser",
+				shell: "/bin/bash",
+			});
+			expect(getSocketPath(undefined, "dev")).toBe("/tmp/lasterm-dev-1234/agent.sock");
 		});
 
 		it("returns override path when provided", () => {
@@ -61,9 +76,22 @@ describe("getSocketPath", () => {
 				shell: null,
 			});
 
-			const result = getSocketPath();
+			const result = getSocketPath(undefined, "release");
 
 			expect(result).toBe("\\\\.\\pipe\\lasterm-agent-alice");
+		});
+
+		it("names the lasterm-dev pipe on the dev channel (#1084)", () => {
+			Object.defineProperty(process, "platform", { value: "win32" });
+			vi.spyOn(os, "userInfo").mockReturnValue({
+				uid: -1,
+				gid: -1,
+				username: "alice",
+				homedir: "C:\\Users\\alice",
+				shell: null,
+			});
+
+			expect(getSocketPath(undefined, "dev")).toBe("\\\\.\\pipe\\lasterm-dev-agent-alice");
 		});
 
 		it("returns a pipe override as given", () => {

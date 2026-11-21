@@ -11,6 +11,11 @@
  * Windows from falling back to its OpenSSH agent's pipe. A spec that wants an
  * agent starts a fake one and points `SSH_AUTH_SOCK` at it. Set directly rather
  * than stubbed, so that a spec's `vi.unstubAllEnvs` comes back to it.
+ *
+ * The build channel is release: a hub run from source reads `LASTERM_CHANNEL`,
+ * and absent means dev (#1084). The names and the one-file configuration the
+ * specs were written against are the release channel's; a spec about the dev
+ * channel sets it itself.
  */
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -26,6 +31,9 @@ const restore = usePlatformDirs({
 	cache: join(root, "cache"),
 });
 
+const developerChannel = process.env.LASTERM_CHANNEL;
+process.env.LASTERM_CHANNEL = "release";
+
 const developerAgent = process.env.SSH_AUTH_SOCK;
 process.env.SSH_AUTH_SOCK =
 	process.platform === "win32"
@@ -34,6 +42,8 @@ process.env.SSH_AUTH_SOCK =
 
 afterAll(() => {
 	restore();
+	if (developerChannel === undefined) delete process.env.LASTERM_CHANNEL;
+	else process.env.LASTERM_CHANNEL = developerChannel;
 	if (developerAgent === undefined) delete process.env.SSH_AUTH_SOCK;
 	else process.env.SSH_AUTH_SOCK = developerAgent;
 	try {

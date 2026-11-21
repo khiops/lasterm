@@ -293,7 +293,8 @@ interface PendingStatus {
 /**
  * The status to hold pending for a channel, over the one held already. The
  * same end told again keeps what was heard of it and, until a fetch takes it,
- * that it replaces the fetched row's end (#932).
+ * that it replaces the fetched row's end (#932); so does an end heard after a
+ * run (#1091).
  */
 function bufferedStatus(held: PendingStatus | undefined, heard: PendingStatus): PendingStatus {
 	const sameEnd =
@@ -302,7 +303,13 @@ function bufferedStatus(held: PendingStatus | undefined, heard: PendingStatus): 
 		heard.status === "dead" &&
 		held.status === "dead" &&
 		(heard.endId === undefined || heard.endId === held.endId);
-	if (!sameEnd) return heard;
+	// After a run, any end is a new one: the row's earlier end stays gone even
+	// when that end names no id (#1091).
+	if (!sameEnd) {
+		return held?.replacesEnd === true && held.status !== "dead"
+			? { ...heard, replacesEnd: true }
+			: heard;
+	}
 	return { ...held, ...heard, ...(held.replacesEnd === true && { replacesEnd: true as const }) };
 }
 
@@ -394,9 +401,9 @@ export const useChannelsStore = defineStore("channels", () => {
 	const statusesDuringFetch = new Map<number, Map<string, PendingStatus>>();
 
 	/**
-	 * A status heard for a channel since the last STATE_SYNC says the hub knows
-	 * it: the next fetch must not mark it dead for being absent from that sync
-	 * (#1091).
+	 * A run heard for a channel since the last STATE_SYNC says the hub has it:
+	 * the next fetch must not mark it dead for being absent from that sync
+	 * (#1091). An end heard leaves that check in place.
 	 */
 	function knownToHub(channelId: string): void {
 		if (lastSyncIds.value === null || lastSyncIds.value.has(channelId)) return;
@@ -608,6 +615,8 @@ export const useChannelsStore = defineStore("channels", () => {
 		// Register a tracking set for WS-added channels during this fetch.
 		const myWsAdded = new Set<string>();
 		wsAddedDuringFetch.value = new Map(wsAddedDuringFetch.value).set(myGeneration, myWsAdded);
+		// Older generations can no longer commit: stop recording for them.
+		statusesDuringFetch.clear();
 		const myHeard = new Map<string, PendingStatus>();
 		statusesDuringFetch.set(myGeneration, myHeard);
 
@@ -795,7 +804,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		endReason?: ChannelEndReason,
 		endId?: string,
 	): void {
-		knownToHub(channelId);
+		if (status !== "dead") knownToHub(channelId);
 		const previousEnd = recordedEndId(channelId);
 		const replacesEnd = status !== "dead" || (endId !== undefined && endId !== previousEnd);
 		const keptEnd = status === "dead" ? (endId ?? previousEnd) : undefined;
@@ -1136,14 +1145,15 @@ export const useChannelsStore = defineStore("channels", () => {
 		// under its own id. Both are the hub's truth about it, so take it: the
 		// one that was dead is live again, on a new session, and skipping this
 		// left it greyed out in the sidebar with its terminal running behind it.
+		// A fetch in flight may list it with an older row, ended (#1091).
+		heardDuringFetch(msg.channelId, { status: msg.status, replacesEnd: true });
+		knownToHub(msg.channelId);
+
 		const knownIndex = channels.value.findIndex((c) => c.id === msg.channelId);
 		if (knownIndex !== -1) {
 			const known = channels.value[knownIndex];
 			if (known !== undefined) {
-				// Its end, why it came and its exit code are over (#592, #932), and
-				// over the rows of a fetch in flight too (#1091).
-				heardDuringFetch(msg.channelId, { status: msg.status, replacesEnd: true });
-				knownToHub(msg.channelId);
+				// Its end, why it came and its exit code are over (#592, #932).
 				const rest = withoutEnd(known);
 				const revived: Channel = {
 					...rest,

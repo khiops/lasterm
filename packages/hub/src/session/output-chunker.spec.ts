@@ -250,4 +250,26 @@ describe("OutputChunker", () => {
 		const blob = getMockCall(vi.mocked(dal.insertChunk), 0).dataBlob;
 		expect(Array.from(blob)).toEqual([1, 2, 3, 4]);
 	});
+	it("drops the bytes a failed write could not store, and writes only newer output afterwards (#1098)", () => {
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			(dal.insertChunk as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+				throw Object.assign(new Error("disk full"), { code: "SQLITE_FULL" });
+			});
+			chunker.trackChannel("ch1");
+			chunker.onOutput("ch1", new Uint8Array([1, 2, 3]));
+			expect(() => vi.advanceTimersByTime(1_000)).not.toThrow();
+
+			chunker.onOutput("ch1", new Uint8Array([4, 5]));
+			vi.advanceTimersByTime(1_000);
+
+			expect(dal.insertChunk).toHaveBeenCalledTimes(2);
+			const retry = getMockCall(dal.insertChunk as ReturnType<typeof vi.fn>, 1);
+			expect([...(retry.dataBlob as Uint8Array)]).toEqual([4, 5]);
+			// The failed write took no sequence number: no gap in the spool.
+			expect(retry.seq).toBe(1);
+		} finally {
+			error.mockRestore();
+		}
+	});
 });

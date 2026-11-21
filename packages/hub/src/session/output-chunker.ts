@@ -40,7 +40,7 @@ export class OutputChunker {
 
 		// Size-triggered flush
 		if (buf.totalBytes >= CHUNK_MAX_BYTES) {
-			this.flush(channelId);
+			this.flushOrDrop(channelId);
 			return;
 		}
 
@@ -48,12 +48,15 @@ export class OutputChunker {
 		if (!buf.timer) {
 			buf.timer = setTimeout(() => {
 				buf.timer = null;
-				this.flush(channelId);
+				this.flushOrDrop(channelId);
 			}, CHUNK_FLUSH_MS);
 		}
 	}
 
-	/** Force-flush buffered data to spool.db */
+	/**
+	 * Force-flush buffered data to spool.db. A failed write throws and leaves
+	 * the bytes buffered: the callers that ask for it log it themselves.
+	 */
 	flush(channelId: string): void {
 		const buf = this.channels.get(channelId);
 		if (!buf || buf.totalBytes === 0) return;
@@ -80,9 +83,39 @@ export class OutputChunker {
 		}
 	}
 
+	/**
+	 * Flush from a path that has no handler: a size or timer flush, the end of
+	 * a terminal, a shutdown. A failed write (disk full, I/O error) is logged
+	 * by its code and its bytes are dropped, never rethrown (#1098). The spool
+	 * is the attach tail and the screen snapshot covers what it misses; kept,
+	 * the bytes would grow without bound while the disk stays full (a live
+	 * terminal) or never be retried (an ended one). The failed write took no
+	 * seq, so the spool has no gap.
+	 */
+	private flushOrDrop(channelId: string): void {
+		try {
+			this.flush(channelId);
+		} catch (err) {
+			const buf = this.channels.get(channelId);
+			const droppedBytes = buf?.totalBytes ?? 0;
+			if (buf) {
+				buf.chunks = [];
+				buf.totalBytes = 0;
+				if (buf.timer) {
+					clearTimeout(buf.timer);
+					buf.timer = null;
+				}
+			}
+			const code = (err as { code?: unknown } | null)?.code;
+			console.error(
+				`[lasterm-spool] write failed (${typeof code === "string" ? code : "no code"}), dropped ${droppedBytes} bytes of output for channel ${channelId}`,
+			);
+		}
+	}
+
 	/** Flush and stop tracking a channel */
 	untrackChannel(channelId: string): void {
-		this.flush(channelId);
+		this.flushOrDrop(channelId);
 		const buf = this.channels.get(channelId);
 		if (buf?.timer) clearTimeout(buf.timer);
 		this.channels.delete(channelId);

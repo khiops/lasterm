@@ -17,13 +17,20 @@ export interface ReplaceAgentResponse {
 			readonly code?: string;
 			readonly message?: string;
 			readonly other_owner_channels?: number;
+			readonly transfers?: number;
 		};
 	};
 }
 
+/** What the person agreed to so far, as the request carries it. */
+export interface ReplaceAgentConsent {
+	readonly force: boolean;
+	readonly stop_transfers: boolean;
+}
+
 export interface ReplaceAgentDeps {
-	/** POST /api/hosts/:id/agent/replace with `{ force }`. */
-	readonly post: (force: boolean) => Promise<ReplaceAgentResponse>;
+	/** POST /api/hosts/:id/agent/replace with `{ force, stop_transfers }`. */
+	readonly post: (consent: ReplaceAgentConsent) => Promise<ReplaceAgentResponse>;
 	/** Ask the person; true only on an explicit yes. */
 	readonly confirm: (question: string) => boolean | Promise<boolean>;
 }
@@ -39,18 +46,43 @@ export function otherHubsQuestion(count: number | undefined): string {
 	return `${what} will be closed. Replace anyway?`;
 }
 
-/** Ask for the replacement, and for the forced one only after a yes. Resolves to what to show. */
-export async function replaceAgentWithConsent(deps: ReplaceAgentDeps): Promise<string> {
-	const first = await deps.post(false);
-	if (first.ok) return first.body.message ?? "The agent was stopped.";
-	if (first.status !== 409 || first.body.error?.code !== "OTHER_HUBS_HOLD_CHANNELS") {
-		return first.body.error?.message ?? `The hub answered ${first.status}.`;
-	}
+/** The question asked before interrupting the uploads to the host. */
+export function transfersQuestion(count: number | undefined): string {
+	const what =
+		count === undefined
+			? "Uploads to this host"
+			: count === 1
+				? "1 upload to this host"
+				: `${count} uploads to this host`;
+	return `${what} will be interrupted. Replace anyway?`;
+}
 
-	if (!(await deps.confirm(otherHubsQuestion(first.body.error.other_owner_channels)))) {
-		return "Nothing was replaced: the terminals other hubs opened are still running.";
+/** Ask for the replacement, and for each wider one only after a yes. Resolves to what to show. */
+export async function replaceAgentWithConsent(deps: ReplaceAgentDeps): Promise<string> {
+	let consent: ReplaceAgentConsent = { force: false, stop_transfers: false };
+	while (true) {
+		const answer = await deps.post(consent);
+		if (answer.ok) return answer.body.message ?? "The agent was stopped.";
+		const error = answer.body.error;
+		let question: string;
+		let declined: string;
+		let next: ReplaceAgentConsent;
+		if (answer.status === 409 && error?.code === "OTHER_HUBS_HOLD_CHANNELS" && !consent.force) {
+			question = otherHubsQuestion(error.other_owner_channels);
+			declined = "Nothing was replaced: the terminals other hubs opened are still running.";
+			next = { ...consent, force: true };
+		} else if (
+			answer.status === 409 &&
+			error?.code === "TRANSFERS_WOULD_STOP" &&
+			!consent.stop_transfers
+		) {
+			question = transfersQuestion(error.transfers);
+			declined = "Nothing was replaced: the uploads to this host are still running.";
+			next = { ...consent, stop_transfers: true };
+		} else {
+			return error?.message ?? `The hub answered ${answer.status}.`;
+		}
+		if (!(await deps.confirm(question))) return declined;
+		consent = next;
 	}
-	const forced = await deps.post(true);
-	if (forced.ok) return forced.body.message ?? "The agent was stopped.";
-	return forced.body.error?.message ?? `The hub answered ${forced.status}.`;
 }

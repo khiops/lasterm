@@ -20,14 +20,23 @@ const done: StopKeepingAgentAnswer = {
 	status: 200,
 	body: { outcome: "stopped", host, ended: 2 },
 };
-function refusal(code: string, status = 409): StopKeepingAgentAnswer {
+function refusal(code: string, status = 409, transfers?: number | null): StopKeepingAgentAnswer {
 	return {
 		ok: false,
 		status,
-		body: { error: { code, message: "hub reason", terminals: 2, other_owner_channels: 3 } },
+		body: {
+			error: {
+				code,
+				message: "hub reason",
+				terminals: 2,
+				other_owner_channels: 3,
+				// 4 by default; null leaves the count out, as a hub that gave none.
+				...(transfers !== null && { transfers: transfers ?? 4 }),
+			},
+		},
 	};
 }
-const codes = ["TERMINALS_WOULD_END", "OTHER_HUBS_HOLD_CHANNELS"];
+const codes = ["TERMINALS_WOULD_END", "OTHER_HUBS_HOLD_CHANNELS", "TRANSFERS_WOULD_STOP"];
 
 describe("stopAgentWithConsent", () => {
 	it("posts an empty body and returns the outcome", async () => {
@@ -55,11 +64,19 @@ describe("stopAgentWithConsent", () => {
 		expect((await stopAgentWithConsent("pi", { post, confirm })).kind).toBe("done");
 		expect(post.mock.calls).toEqual([
 			[{}],
-			[code === "TERMINALS_WOULD_END" ? { end_terminals: true } : { force: true }],
+			[
+				code === "TERMINALS_WOULD_END"
+					? { end_terminals: true }
+					: code === "TRANSFERS_WOULD_STOP"
+						? { stop_transfers: true }
+						: { force: true },
+			],
 		]);
 		const question = confirm.mock.calls[0]?.[0];
 		expect(question.title).toBe("Stop the agent on pi?");
 		if (code === "TERMINALS_WOULD_END") expect(question.message).toBe("Its 2 terminals here end.");
+		if (code === "TRANSFERS_WOULD_STOP")
+			expect(question.message).toBe("4 uploads to this host stop.");
 		if (code === "OTHER_HUBS_HOLD_CHANNELS") expect(question.message).toContain("3 terminals");
 	});
 
@@ -75,6 +92,53 @@ describe("stopAgentWithConsent", () => {
 			[{ end_terminals: true }],
 			[{ end_terminals: true, force: true }],
 		]);
+	});
+
+	it("keeps every consent given when the uploads ask last (#1090)", async () => {
+		const post = vi
+			.fn()
+			.mockResolvedValueOnce(refusal("TERMINALS_WOULD_END"))
+			.mockResolvedValueOnce(refusal("TRANSFERS_WOULD_STOP"))
+			.mockResolvedValueOnce(refusal("OTHER_HUBS_HOLD_CHANNELS"))
+			.mockResolvedValueOnce(done);
+		await stopAgentWithConsent("pi", { post, confirm: () => true });
+		expect(post.mock.calls.at(-1)).toEqual([
+			{ end_terminals: true, stop_transfers: true, force: true },
+		]);
+	});
+
+	it.each([
+		[1, "1 upload to this host stop."],
+		[null, "Uploads to this host stop."],
+	])("words the uploads for a count of %s (#1090)", async (count, message) => {
+		const post = vi
+			.fn()
+			.mockResolvedValueOnce(refusal("TRANSFERS_WOULD_STOP", 409, count))
+			.mockResolvedValueOnce(done);
+		const confirm = vi.fn().mockResolvedValue(true);
+		await stopAgentWithConsent("pi", { post, confirm });
+		expect(confirm.mock.calls[0]?.[0].message).toBe(message);
+	});
+
+	it("keeps force when the uploads ask after other hubs (#1090)", async () => {
+		const post = vi
+			.fn()
+			.mockResolvedValueOnce(refusal("OTHER_HUBS_HOLD_CHANNELS"))
+			.mockResolvedValueOnce(refusal("TRANSFERS_WOULD_STOP"))
+			.mockResolvedValueOnce(done);
+		await stopAgentWithConsent("pi", { post, confirm: () => true });
+		expect(post.mock.calls.at(-1)).toEqual([{ force: true, stop_transfers: true }]);
+	});
+
+	it("does not ask again for the uploads once agreed (#1090)", async () => {
+		const post = vi.fn().mockResolvedValue(refusal("TRANSFERS_WOULD_STOP"));
+		const confirm = vi.fn().mockResolvedValue(true);
+		expect(await stopAgentWithConsent("pi", { post, confirm })).toEqual({
+			kind: "failed",
+			message: "hub reason",
+		});
+		expect(confirm).toHaveBeenCalledOnce();
+		expect(post).toHaveBeenCalledTimes(2);
 	});
 
 	it("declines OTHER_HUBS_HOLD_CHANNELS after terminal consent", async () => {

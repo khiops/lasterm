@@ -1,13 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import {
 	otherHubsQuestion,
+	type ReplaceAgentConsent,
 	type ReplaceAgentResponse,
 	replaceAgentWithConsent,
+	transfersQuestion,
 } from "./replace-agent.js";
 
 /** The hub, answering each POST in turn with the next of these. */
 function mockedHub(...answers: ReplaceAgentResponse[]) {
-	const post = vi.fn(async (_force: boolean) => {
+	const post = vi.fn(async (_consent: ReplaceAgentConsent) => {
 		const next = answers.shift();
 		if (next === undefined) throw new Error("the hub was asked more often than expected");
 		return next;
@@ -43,7 +45,10 @@ describe("replacing an agent other hubs use (#127)", () => {
 		expect(confirm).toHaveBeenCalledWith(
 			"2 terminals opened by other hubs on this host will be closed. Replace anyway?",
 		);
-		expect(post.mock.calls).toEqual([[false], [true]]);
+		expect(post.mock.calls).toEqual([
+			[{ force: false, stop_transfers: false }],
+			[{ force: true, stop_transfers: false }],
+		]);
 		expect(shown).toBe("The agent was stopped.");
 	});
 
@@ -53,7 +58,7 @@ describe("replacing an agent other hubs use (#127)", () => {
 
 		const shown = await replaceAgentWithConsent({ post, confirm });
 
-		expect(post.mock.calls).toEqual([[false]]);
+		expect(post.mock.calls).toEqual([[{ force: false, stop_transfers: false }]]);
 		expect(shown).toContain("Nothing was replaced");
 	});
 
@@ -63,7 +68,7 @@ describe("replacing an agent other hubs use (#127)", () => {
 
 		expect(await replaceAgentWithConsent({ post, confirm })).toBe("The agent was stopped.");
 		expect(confirm).not.toHaveBeenCalled();
-		expect(post.mock.calls).toEqual([[false]]);
+		expect(post.mock.calls).toEqual([[{ force: false, stop_transfers: false }]]);
 	});
 
 	it("asks nothing when the refusal is of another kind, and shows it", async () => {
@@ -76,6 +81,69 @@ describe("replacing an agent other hubs use (#127)", () => {
 
 		expect(await replaceAgentWithConsent({ post, confirm })).toBe("no agent connected");
 		expect(confirm).not.toHaveBeenCalled();
+	});
+});
+
+const uploadsRunning = (count?: number): ReplaceAgentResponse => ({
+	ok: false,
+	status: 409,
+	body: {
+		error: {
+			code: "TRANSFERS_WOULD_STOP",
+			message: "Send stop_transfers: true to stop the uploads to this host.",
+			...(count !== undefined && { transfers: count }),
+		},
+	},
+});
+
+describe("replacing while uploads to the host run (#1090)", () => {
+	it("asks with the upload count, and on a yes asks again with stop_transfers", async () => {
+		const post = mockedHub(uploadsRunning(2), replaced);
+		const confirm = vi.fn(() => true);
+
+		expect(await replaceAgentWithConsent({ post, confirm })).toBe("The agent was stopped.");
+		expect(confirm).toHaveBeenCalledWith(
+			"2 uploads to this host will be interrupted. Replace anyway?",
+		);
+		expect(post.mock.calls).toEqual([
+			[{ force: false, stop_transfers: false }],
+			[{ force: false, stop_transfers: true }],
+		]);
+	});
+
+	it("on a no, sends nothing more and says nothing was replaced", async () => {
+		const post = mockedHub(uploadsRunning(1));
+		const shown = await replaceAgentWithConsent({ post, confirm: () => false });
+		expect(shown).toContain("Nothing was replaced");
+		expect(post).toHaveBeenCalledOnce();
+	});
+
+	it("keeps the uploads' yes when other hubs' terminals ask next", async () => {
+		const post = mockedHub(uploadsRunning(1), otherHubsHold(2), replaced);
+		await replaceAgentWithConsent({ post, confirm: () => true });
+		expect(post.mock.calls.at(-1)).toEqual([{ force: true, stop_transfers: true }]);
+	});
+
+	it("keeps force when the uploads ask after other hubs", async () => {
+		const post = mockedHub(otherHubsHold(2), uploadsRunning(1), replaced);
+		await replaceAgentWithConsent({ post, confirm: () => true });
+		expect(post.mock.calls.at(-1)).toEqual([{ force: true, stop_transfers: true }]);
+	});
+
+	it("does not ask again for the uploads once agreed", async () => {
+		const post = mockedHub(uploadsRunning(1), uploadsRunning(1));
+		const confirm = vi.fn(() => true);
+		expect(await replaceAgentWithConsent({ post, confirm })).toContain("stop_transfers");
+		expect(confirm).toHaveBeenCalledOnce();
+	});
+});
+
+describe("transfersQuestion", () => {
+	it("says how many, in the right number, or none when unknown", () => {
+		expect(transfersQuestion(1)).toBe("1 upload to this host will be interrupted. Replace anyway?");
+		expect(transfersQuestion(undefined)).toBe(
+			"Uploads to this host will be interrupted. Replace anyway?",
+		);
 	});
 });
 

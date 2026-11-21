@@ -336,6 +336,9 @@ pub(crate) fn build_hello(daemon: bool) -> AgentToHub {
     ];
     if daemon {
         capabilities.push("hub-identity".into());
+        // Answers a STOP it takes with STOP_ACCEPTED before its connection
+        // ends (#700).
+        capabilities.push("stop-accepted".into());
     }
     // One detection for both: the default is named as the list names it, which
     // is how the hub finds its profile (#804).
@@ -2891,6 +2894,9 @@ mod stdio_tests {
         };
         assert!(capabilities(true).contains(&"hub-identity".to_string()));
         assert!(!capabilities(false).contains(&"hub-identity".to_string()));
+        // Only a daemon answers a STOP it takes with STOP_ACCEPTED (#700).
+        assert!(capabilities(true).contains(&"stop-accepted".to_string()));
+        assert!(!capabilities(false).contains(&"stop-accepted".to_string()));
     }
 
     /// Both kinds of agent build the environment themselves and answer

@@ -545,6 +545,32 @@ export interface AttachRemoteDaemonOptions {
 	 * alone bounds it. Absent: `sshExec`'s own 10 s and `READY_DEADLINE_MS`.
 	 */
 	connectTimeoutMs?: number;
+	/**
+	 * False to reach a daemon already running and never start one (#701):
+	 * what does not answer is then `NoRunningDaemon`, or `DaemonUnreachable`
+	 * when the host cannot say that nothing listens.
+	 */
+	launch?: boolean;
+}
+
+/** Nothing listens on the daemon's socket, and none was started (#701). */
+export class NoRunningDaemon extends Error {
+	constructor(readonly paths: RemoteDaemonPaths) {
+		super("No Lasterm agent is running on this host.");
+		this.name = "NoRunningDaemon";
+	}
+}
+
+/**
+ * The daemon's socket could not be reached, and the host cannot say whether
+ * one listens: forwarding refused, a listening socket the channel still
+ * fails on, or a host whose socket table cannot be read (#701).
+ */
+export class DaemonUnreachable extends Error {
+	constructor(readonly paths: RemoteDaemonPaths | null) {
+		super("Lasterm could not reach an agent on this host, and cannot tell whether one is running.");
+		this.name = "DaemonUnreachable";
+	}
 }
 
 export interface RemoteDaemonAttachment {
@@ -614,7 +640,10 @@ export async function attachRemoteDaemon(
 			placement: null,
 		};
 	} catch (err) {
-		if (refusedOutright(err)) throw new SocketForwardingRefused(paths, { kind: "none" });
+		if (refusedOutright(err)) {
+			if (options.launch === false) throw new DaemonUnreachable(paths);
+			throw new SocketForwardingRefused(paths, { kind: "none" });
+		}
 		// Nothing listening yet, the ordinary case on a first connect, or a
 		// server that refuses the channel in the same words.
 		before = await socketState();
@@ -628,8 +657,15 @@ export async function attachRemoteDaemon(
 				placement: null,
 			};
 		} catch {
+			if (options.launch === false) throw new DaemonUnreachable(paths);
 			throw new SocketForwardingRefused(paths, { kind: "already-running" });
 		}
+	}
+	// Only a socket seen silent is said to have no agent: `unknown` is not
+	// "missing" (#701).
+	if (options.launch === false) {
+		if (before === "silent") throw new NoRunningDaemon(paths);
+		throw new DaemonUnreachable(paths);
 	}
 
 	const launch = await exec(

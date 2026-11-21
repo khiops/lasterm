@@ -171,6 +171,21 @@ describe("a host's connection, asked for (#648)", () => {
 		]);
 	});
 
+	it("asks to reach only the agent left there, with this window's id (#701)", async () => {
+		const store = load();
+		useAuthStore().setClientId(WINDOW);
+		fetchStub.mockClear();
+
+		await store.connectHost("pi", { daemonOnly: true });
+
+		expect(sent()).toEqual([
+			{
+				url: expect.stringMatching(/\/api\/hosts\/pi\/connect$/),
+				body: { daemon_only: true, client_id: WINDOW },
+			},
+		]);
+	});
+
 	it("hands back what the hub answered, refusal included", async () => {
 		const store = load();
 		fetchStub.mockImplementationOnce(

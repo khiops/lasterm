@@ -18,6 +18,7 @@ import type { Client } from "ssh2";
 import { describe, expect, it } from "vitest";
 import {
 	attachRemoteDaemon,
+	DaemonUnreachable,
 	DETACH_SCRIPT,
 	describeRemoteDaemonPlacement,
 	hostKeepsDaemon,
@@ -881,6 +882,28 @@ describe("attachRemoteDaemon — a server that refuses socket forwarding (#765)"
 		expect(err).toBeInstanceOf(SocketForwardingRefused);
 		return err as SocketForwardingRefused;
 	}
+
+	it.each([1, 3])(
+		"reaching only a running daemon (#701), a channel refused with reason %i is unreachable, and launches nothing",
+		async (reason) => {
+			const host = remote();
+			const err = await attachRemoteDaemon({
+				conn,
+				agentPath: "lasterm-agent",
+				exec: host.exec,
+				open: async () => {
+					throw Object.assign(new Error("(SSH) Channel open failure: "), { reason });
+				},
+				sleep: async () => {},
+				launch: false,
+			}).then(
+				() => new Error("reached a daemon that cannot be reached"),
+				(caught: unknown) => caught,
+			);
+			expect(err).toBeInstanceOf(DaemonUnreachable);
+			expect(host.commands.some((c) => c.includes("--daemon"))).toBe(false);
+		},
+	);
 
 	it("starts nothing when the server prohibits the channel type outright", async () => {
 		const host = remote();

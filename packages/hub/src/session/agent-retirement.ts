@@ -15,6 +15,7 @@
  */
 import { HUB_VERSION } from "../build-version.js";
 import type { AgentConnection } from "./agent-connection.js";
+import { inventoryFacts } from "./daemon-inventory.js";
 import { type DaemonStopOutcome, requestDaemonStop } from "./daemon-stop.js";
 import type { SharedSessionContext } from "./session-context.js";
 
@@ -108,6 +109,12 @@ export interface RetirementHost {
 	 * daemon's connection carries their SFTP session, so it waits for them.
 	 */
 	transfersOn?(hostId: string): number;
+	/**
+	 * Dial a remote host again if its connection dropped while the host was
+	 * held for the stop: the close handling skips the reconnect then, and a
+	 * stop that was not confirmed may have left the daemon running (#700).
+	 */
+	reconnectIfDropped?(hostId: string): void;
 }
 
 type StoppableAgent = AgentConnection & {
@@ -230,6 +237,13 @@ export class AgentRetirement {
 		for (const channel of this.ctx.channels.values()) {
 			if (channel.hostId === hostId && channel.status !== "dead") return false;
 		}
+		// A remote daemon is idle only by its own complete list: it may hold
+		// terminals another host record tracks, or ones shown ended (#701).
+		if (host?.type === "ssh") {
+			const inventory = agent.daemonInventory;
+			if (inventory === undefined) return false;
+			if (inventoryFacts(inventory, this.ctx.channels, hostId).held > 0) return false;
+		}
 		// The local host's uploads go through the hub's own file system.
 		if (host?.type === "ssh" && (this.host.transfersOn?.(hostId) ?? 0) > 0) return false;
 		return true;
@@ -292,6 +306,7 @@ export class AgentRetirement {
 		} finally {
 			this.ctx.stoppingAgents.delete(hostId);
 		}
+		if (outcome.kind === "unconfirmed") this.host.reconnectIfDropped?.(hostId);
 
 		if (outcome.kind !== "retired") {
 			this.ctx.hubLogger?.log("info", "agent-retirement: the agent is kept", {

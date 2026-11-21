@@ -90,6 +90,32 @@ export const ErrorCode = {
 	OTHER_HUBS_HOLD_CHANNELS: "OTHER_HUBS_HOLD_CHANNELS",
 	/** REST stop-keeping: the connected agent did not reach a remote daemon. */
 	NO_DAEMON_CONNECTION: "NO_DAEMON_CONNECTION",
+	/**
+	 * REST connect with `daemon_only` (#701): the host's stored OS is not one
+	 * whose daemon a socket reaches (linux or darwin), unknown included.
+	 */
+	DAEMON_NOT_POSSIBLE: "DAEMON_NOT_POSSIBLE",
+	/** Connect with `daemon_only` (#701): nothing listens on the daemon's socket. */
+	NO_AGENT_RUNNING: "NO_AGENT_RUNNING",
+	/**
+	 * Connect with `daemon_only` (#701): the daemon's socket could not be
+	 * reached, and the host cannot say whether one listens; also an inventory
+	 * the daemon did not send in time.
+	 */
+	DAEMON_UNREACHABLE: "DAEMON_UNREACHABLE",
+	/** Connect with `daemon_only` (#701): the daemon answered, then refused this hub's AUTH. */
+	AGENT_REFUSED_HUB: "AGENT_REFUSED_HUB",
+	/** Connect with `daemon_only` (#701): the host's destination changed while connecting. */
+	HOST_CHANGED: "HOST_CHANGED",
+	/**
+	 * Stop-keeping and Replace (#701): the daemon holds a terminal another
+	 * host record of this hub tracks; stopping it from here would end it.
+	 */
+	OTHER_HOST_TERMINALS: "OTHER_HOST_TERMINALS",
+	/** Stop-keeping and Replace (#701): the daemon has not said which terminals it holds. */
+	AGENT_INVENTORY_UNKNOWN: "AGENT_INVENTORY_UNKNOWN",
+	/** Replace (#701): the daemon still runs terminals this hub shows as ended. */
+	TERMINALS_SHOWN_ENDED: "TERMINALS_SHOWN_ENDED",
 	/** REST PUT host: use stop-keeping before revoking a connected daemon policy. */
 	DAEMON_CONNECTED: "DAEMON_CONNECTED",
 	/** REST: the host has no agent connected to this hub, so there is nobody to ask (#576), including POST /api/hosts/:id/agent/stop-keeping. */

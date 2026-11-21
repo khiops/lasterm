@@ -143,6 +143,12 @@ pub enum AgentToHub {
         #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// A daemon took a STOP and is shutting down: no new terminal starts from
+    /// here, and the connection ends once its terminals are torn down
+    /// (`stop-accepted`, #700). A hub counts that end as the stop only after
+    /// this frame; without it, a close may be a lost link.
+    #[serde(rename = "STOP_ACCEPTED")]
+    StopAccepted {},
     #[serde(rename = "LOG")]
     Log {
         channel_id: String,

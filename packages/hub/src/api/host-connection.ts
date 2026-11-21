@@ -37,6 +37,18 @@ export function readHostConnectionBody(
 	return { force: force === true, ...(clientId !== undefined && { clientId }) };
 }
 
+/**
+ * Read connect's `daemon_only` (#701): a boolean or nothing. Reconnect and
+ * disconnect do not read it, and ignore it as anything else in their body.
+ */
+export function readDaemonOnly(body: unknown): boolean | { readonly error: string } {
+	if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
+	const daemonOnly = (body as { daemon_only?: unknown }).daemon_only;
+	if (daemonOnly === undefined) return false;
+	if (typeof daemonOnly !== "boolean") return { error: "daemon_only must be true or false." };
+	return daemonOnly;
+}
+
 /** "3 terminals", "1 terminal". */
 export function terminalsText(count: number): string {
 	return count === 1 ? "1 terminal" : `${count} terminals`;
@@ -64,6 +76,25 @@ function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyRep
 		case "quitting":
 			return reply.code(409).send({
 				error: { code: "HUB_QUITTING", message: "The hub is quitting." },
+			});
+		case "connecting-already":
+			return reply.code(409).send({
+				error: { code: "HOST_BUSY", message: "A connection to this host is being made." },
+			});
+		case "daemon-not-possible":
+			return reply.code(409).send({
+				error: {
+					code: ErrorCode.DAEMON_NOT_POSSIBLE,
+					message:
+						"Only a Linux or macOS host keeps an agent this hub can reach, and this host's system is not known to be one.",
+				},
+			});
+		case "no-daemon-connection":
+			return reply.code(409).send({
+				error: {
+					code: ErrorCode.NO_DAEMON_CONNECTION,
+					message: "This host is connected without its daemon. Disconnect it first.",
+				},
 			});
 		case "terminals-would-end":
 			return reply.code(409).send({
@@ -142,15 +173,26 @@ export function registerHostConnectionRoutes(
 	);
 	const routes: ReadonlyArray<{
 		readonly path: string;
-		readonly act: (hostId: string, request: HostConnectionRequest) => HostConnectionOutcome;
+		readonly act: (
+			hostId: string,
+			request: HostConnectionRequest,
+			body: unknown,
+		) => HostConnectionOutcome | { readonly error: string };
 	}> = [
 		{
 			path: "/api/hosts/:id/connect",
-			act: (hostId, request) =>
-				sessionManager.connectHost(
-					hostId,
-					request.clientId !== undefined ? { clientId: request.clientId } : {},
-				),
+			act: (hostId, request, body) => {
+				const daemonOnly = readDaemonOnly(body);
+				if (typeof daemonOnly !== "boolean") return daemonOnly;
+				return sessionManager.connectHost(hostId, {
+					...(request.clientId !== undefined && { clientId: request.clientId }),
+					...(daemonOnly && {
+						daemonOnly: true,
+						// Yes stored once its daemon answered: every window reads it again.
+						onHostStored: () => announce("hosts"),
+					}),
+				});
+			},
 		},
 		{
 			path: "/api/hosts/:id/reconnect",
@@ -172,7 +214,13 @@ export function registerHostConnectionRoutes(
 			if ("error" in body) {
 				return reply.code(400).send({ error: { code: "VALIDATION_ERROR", message: body.error } });
 			}
-			return answer(reply, route.act(host.id, body));
+			const outcome = route.act(host.id, body, request.body);
+			if ("error" in outcome) {
+				return reply
+					.code(400)
+					.send({ error: { code: "VALIDATION_ERROR", message: outcome.error } });
+			}
+			return answer(reply, outcome);
 		});
 	}
 }

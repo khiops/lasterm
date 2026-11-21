@@ -260,6 +260,9 @@ export class ChannelLifecycleManager {
 		return new Promise<{ channelId: string | null; errCode: string | null }>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.ctx.pendingRequests.delete(spawnMsg.requestId);
+				// Unanswered, the terminal may still start: what the daemon holds is
+				// no longer known, and no stop is decided on it (#701).
+				agent.daemonInventory = undefined;
 				// The connection it went over went down meanwhile: the host is away,
 				// which says nothing about the terminal (#605).
 				const hostStatus = hostAwayDuringSpawn(this.ctx, hostId, agent);
@@ -899,6 +902,8 @@ export class ChannelLifecycleManager {
 		return new Promise<RestartSpawnResult>((resolve) => {
 			const timer = setTimeout(() => {
 				this.ctx.pendingRequests.delete(spawnMsg.requestId);
+				// Unanswered, the replacement may still start (#701).
+				agent.daemonInventory = undefined;
 				resolve({ ok: false, channelId: null, errCode: null });
 			}, SPAWN_TIMEOUT_MS);
 
@@ -1400,6 +1405,8 @@ export class ChannelLifecycleManager {
 				this.ctx.channels.get(channelId) === ch && this.ctx.agents.get(hostId) === agent;
 			const timeout = setTimeout(() => {
 				this.ctx.pendingRequests.delete(requestId);
+				// Unanswered, the terminal may still start (#701).
+				agent.daemonInventory = undefined;
 				if (!stillCurrent()) {
 					settle();
 					return;
@@ -1459,23 +1466,8 @@ export class ChannelLifecycleManager {
 	): Promise<boolean> {
 		if (agent.usedRemoteDaemon !== true) return false;
 		try {
-			// Its list is of the terminals it held when asked. The agent is
-			// already the way to this host, so a pane can start one before the
-			// list arrives, which is then not in it (#599).
-			const askedAt = this.askingAgent();
-			// A daemon waits for this before it says what it holds, since what
-			// it says depends on who is asking (#127). It never gets this hub's
-			// token: see daemonAuthFrame.
-			agent.send(daemonAuthFrame({ token: null, hubKey: this.ctx.hubKey }));
-			this.reconcileChannelState(hostId, await agent.waitForChannelState(), agent, askedAt);
-			// The session was announced active before the daemon had said what
-			// other hubs hold there; say it now that it has.
-			if (agent.otherOwnerChannels !== undefined && this.ctx.agents.get(hostId) === agent) {
-				this.broadcaster.announceSessionState(hostId);
-			}
-			// Judged: a daemon older than this hub holding nothing of this hub's
-			// is replaced now, before anything starts on it (#805).
-			this.agentMayBeIdle(hostId);
+			const listed = await this.listDaemonChannels(agent);
+			this.takeUpListed(hostId, agent, listed);
 		} catch (stateErr) {
 			// Reachable, and it will not say what it holds. Most likely it wants a
 			// token: a remote running its own hub has an auth.json of its own, and
@@ -1487,6 +1479,54 @@ export class ChannelLifecycleManager {
 			);
 		}
 		return true;
+	}
+
+	/**
+	 * Ask a daemon what it holds of this hub's: AUTH, then its list. Rejects
+	 * with `AgentRefusedHub` when it refuses the AUTH, and otherwise when the
+	 * list does not come in time.
+	 *
+	 * Its list is of the terminals it held when asked. The agent may already
+	 * be the way to this host, so a pane can start one before the list
+	 * arrives, which is then not in it (#599): `askedAt` says when.
+	 */
+	async listDaemonChannels(
+		agent: AgentConnection,
+	): Promise<{ readonly states: AgentChannelStateMessage[]; readonly askedAt: number }> {
+		const askedAt = this.askingAgent();
+		// A daemon waits for this before it says what it holds, since what it
+		// says depends on who is asking (#127). It never gets this hub's token:
+		// see daemonAuthFrame.
+		agent.send(daemonAuthFrame({ token: null, hubKey: this.ctx.hubKey }));
+		return { states: await agent.waitForChannelState(), askedAt };
+	}
+
+	/**
+	 * Take up what a daemon listed for this host, and keep that list on the
+	 * agent for the stops asked of it (#701).
+	 */
+	takeUpListed(
+		hostId: string,
+		agent: AgentConnection,
+		listed: { readonly states: AgentChannelStateMessage[]; readonly askedAt: number },
+	): void {
+		const destroyed = this.reconcileChannelState(hostId, listed.states, agent, listed.askedAt);
+		const exited = agent.exitedSinceList ?? new Set<string>();
+		agent.exitedSinceList = undefined;
+		agent.daemonInventory = {
+			listed: new Set(
+				listed.states.map((state) => state.channelId).filter((id) => !exited.has(id)),
+			),
+			destroyed,
+		};
+		// The session was announced active before the daemon had said what
+		// other hubs hold there; say it now that it has.
+		if (agent.otherOwnerChannels !== undefined && this.ctx.agents.get(hostId) === agent) {
+			this.broadcaster.announceSessionState(hostId);
+		}
+		// Judged: a daemon older than this hub holding nothing of this hub's
+		// is replaced now, before anything starts on it (#805).
+		this.agentMayBeIdle(hostId);
 	}
 
 	/**
@@ -1508,8 +1548,8 @@ export class ChannelLifecycleManager {
 		states: AgentChannelStateMessage[],
 		agent: AgentConnection,
 		askedAt?: number,
-	): void {
-		this.destroyOrphans(hostId, states, agent);
+	): ReadonlySet<string> {
+		const destroyed = this.destroyOrphans(hostId, states, agent);
 		const reportedIds = new Set(states.filter((s) => s.alive).map((s) => s.channelId));
 
 		for (const [channelId, channelState] of this.ctx.channels) {
@@ -1557,6 +1597,7 @@ export class ChannelLifecycleManager {
 				this.forgetChannel(channelId);
 			}
 		}
+		return destroyed;
 	}
 
 	/**
@@ -1571,11 +1612,12 @@ export class ChannelLifecycleManager {
 	 * entries can reach one daemon — or recorded as not yet dead. A terminal
 	 * this hub has declared dead is its to end.
 	 */
+	/** Destroy this hub's orphans among `states`, and say which. */
 	private destroyOrphans(
 		hostId: string,
 		states: AgentChannelStateMessage[],
 		agent: AgentConnection,
-	): void {
+	): ReadonlySet<string> {
 		const orphans = states
 			.map((state) => state.channelId)
 			.filter((channelId) => {
@@ -1583,7 +1625,7 @@ export class ChannelLifecycleManager {
 				const recorded = this.ctx.metaDal.getChannel(channelId);
 				return recorded === undefined || recorded.status === "dead";
 			});
-		if (orphans.length === 0) return;
+		if (orphans.length === 0) return new Set();
 		for (const channelId of orphans) {
 			agent.send({ type: "DESTROY", channelId } satisfies DestroyMessage);
 		}
@@ -1595,6 +1637,7 @@ export class ChannelLifecycleManager {
 			hostId,
 			channelIds: orphans,
 		});
+		return new Set(orphans);
 	}
 
 	// ─── Private elevation helpers ────────────────────────────────────────────

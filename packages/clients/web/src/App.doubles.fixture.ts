@@ -27,6 +27,10 @@ export interface HostRow {
 	sort_order?: number;
 	/** An SSH host the hub holds a live session to, as it says once the window authenticates. */
 	connected?: boolean;
+	/** Its system, when known; unknown otherwise. */
+	os?: "linux" | "darwin" | "windows";
+	/** Whether it is set to keep an agent; unset otherwise. */
+	ssh_remote_daemon?: boolean;
 }
 
 /** A terminal as `GET /api/channels` lists it. */
@@ -337,7 +341,8 @@ function hostListing(host: HostRow): Record<string, unknown> {
 		trust_remote_hints: "deny",
 		host_group_id: host.host_group_id ?? null,
 		sort_order: host.sort_order ?? 0,
-		os: null,
+		os: host.os ?? null,
+		...(host.ssh_remote_daemon !== undefined && { ssh_remote_daemon: host.ssh_remote_daemon }),
 		arch: null,
 		created_at: AT,
 		updated_at: AT,

@@ -357,6 +357,15 @@ export interface AgentChannelStateMessage {
 	alive: boolean;
 }
 
+/**
+ * Agent → Hub (daemon mode, `stop-accepted`): the daemon took the STOP and is
+ * shutting down; its connection ends once its terminals are torn down. A
+ * close counts as the stop only after this (#700).
+ */
+export interface StopAcceptedMessage {
+	type: "STOP_ACCEPTED";
+}
+
 /** Agent → Hub (daemon mode): sentinel marking end of AGENT_CHANNEL_STATE enumeration */
 export interface ChannelStateEndMessage {
 	type: "CHANNEL_STATE_END";
@@ -1195,6 +1204,7 @@ export type AgentMessage =
 	| HeartbeatAckMessage
 	| AgentChannelStateMessage
 	| ChannelStateEndMessage
+	| StopAcceptedMessage
 	| AgentTitleChangeMessage
 	| AgentProcessTitleMessage
 	| CwdChangeMessage
@@ -1354,6 +1364,7 @@ export type ProtocolMessage =
 	| PromptCancelMessage
 	| AgentChannelStateMessage
 	| ChannelStateEndMessage
+	| StopAcceptedMessage
 	| AgentTitleChangeMessage
 	| AgentProcessTitleMessage
 	| AgentBellMessage

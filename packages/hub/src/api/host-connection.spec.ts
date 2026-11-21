@@ -4,6 +4,7 @@ import type { HostConnectionOutcome, SessionManager } from "../session/session-m
 import { type DatabaseManager, openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import {
+	readDaemonOnly,
 	readHostConnectionBody,
 	readStopKeepingBody,
 	registerHostConnectionRoutes,
@@ -220,5 +221,98 @@ describe("POST /api/hosts/:id/connect|reconnect|disconnect (#648)", () => {
 		const res = await post("disconnect", sshHostId);
 		expect(res.statusCode).toBe(409);
 		expect(res.json()).toMatchObject({ error: { code: "HUB_QUITTING" } });
+	});
+});
+
+describe("connect's daemon_only (#701)", () => {
+	it("is read as a boolean or nothing by connect alone", () => {
+		expect(readDaemonOnly(undefined)).toBe(false);
+		expect(readDaemonOnly({})).toBe(false);
+		expect(readDaemonOnly({ daemon_only: true })).toBe(true);
+		expect(readDaemonOnly({ daemon_only: false })).toBe(false);
+		for (const daemonOnly of ["true", 1, null]) {
+			expect(readDaemonOnly({ daemon_only: daemonOnly })).toEqual({
+				error: "daemon_only must be true or false.",
+			});
+		}
+	});
+
+	it("refuses a connect whose daemon_only is not a boolean, and asks the hub nothing", async () => {
+		const response = await post("connect", sshHostId, { daemon_only: "x" });
+		expect(response.statusCode).toBe(400);
+		expect(manager.connectHost).not.toHaveBeenCalled();
+	});
+
+	it("passes daemon_only true to the hub, and false as a plain connect", async () => {
+		manager.connectHost.mockReturnValue({ kind: "connected" });
+		await post("connect", sshHostId, { daemon_only: true, client_id: WINDOW_ID });
+		expect(manager.connectHost).toHaveBeenLastCalledWith(
+			sshHostId,
+			expect.objectContaining({ daemonOnly: true, clientId: WINDOW_ID }),
+		);
+		await post("connect", sshHostId, { daemon_only: false, client_id: WINDOW_ID });
+		expect(manager.connectHost).toHaveBeenLastCalledWith(sshHostId, { clientId: WINDOW_ID });
+	});
+
+	it.each(["reconnect", "disconnect"])(
+		"%s ignores daemon_only as anything else",
+		async (action) => {
+			const act = action === "reconnect" ? manager.reconnectHost : manager.disconnectHost;
+			act.mockReturnValue({ kind: "disconnected", ended: 0 });
+			const response = await post(action, sshHostId, { daemon_only: "x" });
+			expect(response.statusCode).toBe(200);
+			expect(act).toHaveBeenCalled();
+		},
+	);
+
+	it("answers 409 for an OS no daemon is reached on, and for a host connected without its daemon", async () => {
+		manager.connectHost.mockReturnValue({ kind: "daemon-not-possible" });
+		const notPossible = await post("connect", sshHostId, { daemon_only: true });
+		expect(notPossible.statusCode).toBe(409);
+		expect(notPossible.json()).toMatchObject({ error: { code: "DAEMON_NOT_POSSIBLE" } });
+		manager.connectHost.mockReturnValue({ kind: "no-daemon-connection" });
+		const stdio = await post("connect", sshHostId, { daemon_only: true });
+		expect(stdio.statusCode).toBe(409);
+		expect(stdio.json()).toMatchObject({ error: { code: "NO_DAEMON_CONNECTION" } });
+	});
+});
+
+describe("connect's daemon_only, once Yes is stored (#701)", () => {
+	it("announces HOSTS_CHANGED for the hosts when the hub says it stored Yes", async () => {
+		const announce = vi.fn();
+		const own = Fastify({ logger: false });
+		registerHostConnectionRoutes(own, new MetaDAL(dbs.meta), manager, announce);
+		await own.ready();
+		try {
+			manager.connectHost.mockReturnValue({
+				kind: "connecting",
+				ended: 0,
+				done: Promise.resolve(true),
+			});
+			await own.inject({
+				method: "POST",
+				url: `/api/hosts/${sshHostId}/connect`,
+				payload: { daemon_only: true },
+			});
+			const options = manager.connectHost.mock.calls.at(-1)?.[1] as
+				| { onHostStored?: () => void }
+				| undefined;
+			expect(announce).not.toHaveBeenCalled();
+			options?.onHostStored?.();
+			expect(announce).toHaveBeenCalledWith("hosts");
+		} finally {
+			await own.close();
+		}
+	});
+});
+
+describe("a connect that meets another being made (#701)", () => {
+	it("answers 409 HOST_BUSY saying a connection is being made", async () => {
+		manager.connectHost.mockReturnValue({ kind: "connecting-already" });
+		const response = await post("connect", sshHostId, { daemon_only: true });
+		expect(response.statusCode).toBe(409);
+		expect(response.json()).toEqual({
+			error: { code: "HOST_BUSY", message: "A connection to this host is being made." },
+		});
 	});
 });

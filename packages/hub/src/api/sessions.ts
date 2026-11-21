@@ -118,7 +118,11 @@ export function registerSessionRoutes(
 				if (
 					outcome.code === ErrorCode.OTHER_HUBS_HOLD_CHANNELS ||
 					outcome.code === "HOST_BUSY" ||
-					outcome.code === ErrorCode.TRANSFERS_WOULD_STOP
+					outcome.code === ErrorCode.TRANSFERS_WOULD_STOP ||
+					// What the daemon's own list forbids (#701).
+					outcome.code === ErrorCode.OTHER_HOST_TERMINALS ||
+					outcome.code === ErrorCode.AGENT_INVENTORY_UNKNOWN ||
+					outcome.code === ErrorCode.TERMINALS_SHOWN_ENDED
 				) {
 					return reply.code(409).send({
 						error: {

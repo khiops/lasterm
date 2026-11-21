@@ -426,6 +426,9 @@ export class AgentConnectionManager {
 					exitLogger.close();
 					this.ctx.loggerRegistry?.delete(exitMsg.channelId);
 				}
+				// No longer held there: the stops asked of this daemon count it no
+				// more (#701).
+				agent.daemonInventory?.listed.delete(exitMsg.channelId);
 				// Its last one here, perhaps: an agent older than this hub goes now (#805).
 				this.lifecycle.agentMayBeIdle(hostId);
 			} else if (msg.type === "TITLE_CHANGE") {
@@ -696,6 +699,8 @@ export class AgentConnectionManager {
 				count: states.length,
 			});
 			this.lifecycle.reconcileChannelState(hostId, states, agent, askedAt);
+			// The local agent keeps no list for its stops (#701).
+			agent.exitedSinceList = undefined;
 
 			assertQuitFence(this.ctx, quitEpoch);
 			this.ctx.commits.adoptAgent(quitEpoch, hostId, agent);

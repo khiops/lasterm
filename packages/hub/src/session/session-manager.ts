@@ -2894,7 +2894,9 @@ export class SessionManager {
 
 	/**
 	 * Stop the daemon `agent` reaches, and let go of the connection once it has.
-	 * `interruptUploads` runs once the daemon's answer is not a refusal.
+	 * `interruptUploads` runs when the agent stops or its connection ends, never
+	 * on an answer that leaves both as they were: a refusal, an error, a
+	 * displaced connection, a `--stop` that failed (#1102).
 	 */
 	private async stopAgentToReplace(
 		hostId: string,
@@ -2914,7 +2916,9 @@ export class SessionManager {
 				this.releaseAgent(hostId, agent);
 			},
 		});
-		if (stop.kind !== "refused") interruptUploads();
+		if (stop.kind === "unconfirmed" || stop.kind === "closed_by_hub" || stop.kind === "timeout") {
+			interruptUploads();
+		}
 		switch (stop.kind) {
 			case "displaced":
 			case "closed_by_hub":
@@ -2977,6 +2981,7 @@ export class SessionManager {
 
 		// Its terminals ended with it. Letting go of the connection is what makes
 		// the next attach deploy and start the version this hub carries.
+		interruptUploads();
 		agent.close();
 		this.releaseAgent(hostId, agent);
 		return {

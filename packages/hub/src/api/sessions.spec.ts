@@ -1722,16 +1722,7 @@ describe("POST stop-keeping", () => {
 	it("leaves the uploads running when the daemon refuses a stop consented for them, and interrupts them once it stops (#1102)", async () => {
 		const f = fixture();
 		f.agent.othersHold = 3;
-		const interrupted: string[] = [];
-		// Whether the hub still held the connection the uploads run over.
-		const heldWhenInterrupted: boolean[] = [];
-		sm.setTransfers({
-			activeOn: (id) => (id === hostId && interrupted.length === 0 ? 1 : 0),
-			interruptOn: (id) => {
-				heldWhenInterrupted.push(sm.agents.get(hostId) === f.agent);
-				interrupted.push(id);
-			},
-		});
+		const uploads = recordUploads(f);
 		const declined = await stop({ end_terminals: true, stop_transfers: true });
 		expect(declined.statusCode).toBe(409);
 		expect(declined.json()).toMatchObject({
@@ -1746,13 +1737,13 @@ describe("POST stop-keeping", () => {
 		expect(replace.json()).toMatchObject({
 			error: { code: "OTHER_HUBS_HOLD_CHANNELS", other_owner_channels: 3 },
 		});
-		expect(interrupted).toEqual([]);
+		expect(uploads.interrupted).toEqual([]);
 		unchanged(f);
 
 		const forced = await stop({ end_terminals: true, stop_transfers: true, force: true });
 		expect(forced.json()).toMatchObject({ outcome: "stopped", ended: 2 });
-		expect(interrupted).toEqual([hostId]);
-		expect(heldWhenInterrupted).toEqual([true]);
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
 	});
 
 	// A STOP with no connection to say it on: only a forced request goes on to
@@ -1762,6 +1753,92 @@ describe("POST stop-keeping", () => {
 			throw new Error("transport unavailable");
 		});
 	}
+
+	// What the uploads saw: interrupted for which host, and whether the hub
+	// still held the connection they run over when they were.
+	function recordUploads(f: ReturnType<typeof fixture>) {
+		const seen = { interrupted: [] as string[], held: [] as boolean[] };
+		sm.setTransfers({
+			activeOn: (id) => (id === hostId && seen.interrupted.length === 0 ? 1 : 0),
+			interruptOn: (id) => {
+				seen.held.push(sm.agents.get(hostId) === f.agent);
+				seen.interrupted.push(id);
+			},
+		});
+		return seen;
+	}
+
+	it("Replace interrupts the uploads it was told about once the daemon stops, before letting go of the connection (#1102)", async () => {
+		const f = fixture();
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(200);
+		expect(replace.json()).toMatchObject({ replaced: true });
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
+	it("Stop keeping whose STOP cannot be sent still interrupts the uploads before the connection is let go (#1102)", async () => {
+		const f = fixture();
+		stopCannotBeSent(f);
+		const uploads = recordUploads(f);
+		const response = await stop({ end_terminals: true, stop_transfers: true });
+		expect(response.json()).toMatchObject({ outcome: "disabled_not_stopped" });
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
+	it.each(["error", "stop-command-fails"])(
+		"Replace that changes nothing (%s) leaves the uploads running (#1102)",
+		async (mode) => {
+			const f = fixture();
+			if (mode === "error") {
+				f.agent.send.mockImplementation((msg: ProtocolMessage) => {
+					if (msg.type !== "STOP") return;
+					setImmediate(() =>
+						f.agent.emit("message", { type: "ERROR", code: "INTERNAL_ERROR", message: "no" }),
+					);
+				});
+			} else {
+				stopCannotBeSent(f);
+				f.agent.execOnHost.mockImplementation(async (command: string) =>
+					command === REMOTE_STATE_DIR_COMMAND
+						? { stdout: "/state", exitCode: 0 }
+						: { stdout: "", exitCode: 1 },
+				);
+			}
+			const uploads = recordUploads(f);
+			const replace = await server.inject({
+				method: "POST",
+				url: `/api/hosts/${hostId}/agent/replace`,
+				payload: { stop_transfers: true },
+			});
+			expect(replace.statusCode).toBe(409);
+			expect(replace.json()).toMatchObject({
+				error: { message: expect.stringContaining("Nothing was changed") },
+			});
+			expect(uploads.interrupted).toEqual([]);
+		},
+	);
+
+	it("Replace whose STOP cannot be sent interrupts the uploads before its own --stop lets go (#1102)", async () => {
+		const f = fixture();
+		stopCannotBeSent(f);
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.json()).toMatchObject({ replaced: true });
+		expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
 
 	it.each(["exit-zero", "daemon-close"])(
 		"--stop after an unsent STOP confirms on %s",

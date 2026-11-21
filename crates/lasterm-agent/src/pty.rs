@@ -3,6 +3,7 @@ use std::io;
 use std::time::Duration;
 
 use async_xpty::{CommandBuilder, ExitStatus, PtyProcess};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::input::{wake_record_for, InputQueue, INPUT_QUEUE_BYTES};
@@ -31,8 +32,70 @@ impl PtyChannelState {
     }
 }
 
+/// A channel whose program has ended, from the moment its reader takes its
+/// workload back until its CHANNEL_EXIT has been routed to its hub (#1089).
+///
+/// The id stays taken all that time: a SPAWN reusing it is refused, or, once
+/// the exit is on its way, waits for it, and a hub connecting meanwhile is
+/// told the channel is still there, then gets its exit. A SPAWN accepted in
+/// between got its SPAWN_OK first, and the hub read the late exit as the end
+/// of the terminal that took its place.
+pub(crate) struct Ending {
+    owner: OwnerId,
+    pid: u32,
+    /// Set once its exit is sent: it closes when that exit has been routed.
+    routed: Option<watch::Receiver<()>>,
+}
+
+impl Ending {
+    /// Whether it still holds its id: its exit is not sent, or not yet routed.
+    fn holds(&self) -> bool {
+        self.routed
+            .as_ref()
+            .is_none_or(|routed| routed.has_changed().is_ok())
+    }
+}
+
+/// What became of an [`Ending`] when its reader came to send its exit.
+pub(crate) enum EndingSend {
+    /// Still its own: the exit goes, and the id is held until `routed` closes.
+    Send(watch::Sender<()>),
+    /// The hub destroyed it, or another workload took its id: no exit is
+    /// sent (PROTOCOL.md § 3.2).
+    Withdrawn,
+}
+
+/// The channels whose reader waits, its workload's exit status in hand,
+/// before it sends its exit: the window of #1089, made wide enough to be hit.
+/// By id, so that tests running beside each other are not slowed.
+#[cfg(test)]
+static DELAYED_EXITS: std::sync::Mutex<Vec<(String, Duration)>> = std::sync::Mutex::new(Vec::new());
+
+/// Have the reader of `channel_id` wait `delay` before it sends its exit.
+#[cfg(test)]
+pub(crate) fn delay_exit_of(channel_id: &str, delay: Duration) {
+    DELAYED_EXITS
+        .lock()
+        .expect("delayed exits")
+        .push((channel_id.to_owned(), delay));
+}
+
+/// How long the reader of `channel_id` waits before it sends its exit.
+#[cfg(test)]
+pub(crate) fn exit_delay_of(channel_id: &str) -> Option<Duration> {
+    DELAYED_EXITS
+        .lock()
+        .expect("delayed exits")
+        .iter()
+        .find(|(id, _)| id == channel_id)
+        .map(|(_, delay)| *delay)
+}
+
 pub struct PtyManager {
     pub(crate) channels: HashMap<String, PtyChannelState>,
+    /// Channels whose program ended and whose exit has not reached its hub's
+    /// route yet (#1089).
+    ending: HashMap<String, Ending>,
     shutting_down: bool,
     teardown_wait_timeout: Duration,
     /// The most input a channel's queue holds (#740).
@@ -173,6 +236,7 @@ impl PtyManager {
     pub fn new() -> Self {
         Self {
             channels: HashMap::new(),
+            ending: HashMap::new(),
             shutting_down: false,
             teardown_wait_timeout: CHANNEL_TEARDOWN_WAIT_TIMEOUT,
             input_bound: INPUT_QUEUE_BYTES,
@@ -265,7 +329,7 @@ impl PtyManager {
         }
 
         if let Some(ref id) = channel_id {
-            if self.channels.contains_key(id) {
+            if self.channels.contains_key(id) || self.is_ending(id) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
                     "channel already exists",
@@ -316,14 +380,99 @@ impl PtyManager {
             .filter(|channel| channel.owner() == owner)
     }
 
-    /// How many channels hubs other than `owner` hold.
+    /// How many channels hubs other than `owner` hold, ended ones whose exit
+    /// has not reached its route included.
     pub(crate) fn held_by_others(&self, owner: &OwnerId) -> u32 {
         let others = self
             .channels
             .values()
             .filter(|channel| channel.owner() != owner)
-            .count();
+            .count()
+            + self
+                .ending
+                .values()
+                .filter(|ending| ending.holds() && &ending.owner != owner)
+                .count();
         u32::try_from(others).unwrap_or(u32::MAX)
+    }
+
+    /// `owner`'s channels whose program ended and whose exit has not reached
+    /// its route, with their pids: still there for a hub that connects now.
+    pub(crate) fn ending_of(&self, owner: &OwnerId) -> Vec<(String, u32)> {
+        self.ending
+            .iter()
+            .filter(|(_, ending)| ending.holds() && &ending.owner == owner)
+            .map(|(id, ending)| (id.clone(), ending.pid))
+            .collect()
+    }
+
+    /// Whether `channel_id` is held by a channel whose exit has not reached
+    /// its route.
+    fn is_ending(&self, channel_id: &str) -> bool {
+        self.ending.get(channel_id).is_some_and(Ending::holds)
+    }
+
+    /// What a SPAWN reusing `channel_id` waits for first: the routing of the
+    /// exit of the channel that held it, once that exit is on its way.
+    pub(crate) fn exit_in_transit(&self, channel_id: &str) -> Option<watch::Receiver<()>> {
+        self.ending
+            .get(channel_id)
+            .filter(|ending| ending.holds())
+            .and_then(|ending| ending.routed.clone())
+    }
+
+    /// Take back the workload of `channel_id`, its program ended, keeping
+    /// the id held until its exit has been routed.
+    pub(crate) fn take_ended(&mut self, channel_id: &str) -> Option<PtyProcess> {
+        let channel = self.channels.remove(channel_id)?;
+        let pid = channel.process.pid();
+        self.ending.insert(
+            channel_id.to_owned(),
+            Ending {
+                owner: channel.owner,
+                pid,
+                routed: None,
+            },
+        );
+        Some(channel.process)
+    }
+
+    /// The reader of `pid` is about to send the exit of `channel_id`.
+    pub(crate) fn send_ending(&mut self, channel_id: &str, pid: u32) -> EndingSend {
+        match self.ending.get_mut(channel_id) {
+            Some(ending) if ending.pid == pid && ending.routed.is_none() => {
+                let (routed_tx, routed_rx) = watch::channel(());
+                ending.routed = Some(routed_rx);
+                EndingSend::Send(routed_tx)
+            }
+            _ => EndingSend::Withdrawn,
+        }
+    }
+
+    /// The exit of `pid` under `channel_id` has been routed: its id is free.
+    pub(crate) fn release_ending(&mut self, channel_id: &str, pid: u32) {
+        if self
+            .ending
+            .get(channel_id)
+            .is_some_and(|ending| ending.pid == pid)
+        {
+            self.ending.remove(channel_id);
+        }
+    }
+
+    /// The hub DESTROYs `channel_id`, whose program has ended and whose exit
+    /// is not sent yet: it asked for its end, so none is sent, and the id is
+    /// free for the SPAWN of a restart. Returns whether there was one.
+    /// An exit already on its way is left to arrive first.
+    pub(crate) fn withdraw_ending(&mut self, channel_id: &str, owner: &OwnerId) -> bool {
+        let withdrawn = self
+            .ending
+            .get(channel_id)
+            .is_some_and(|ending| &ending.owner == owner && ending.routed.is_none());
+        if withdrawn {
+            self.ending.remove(channel_id);
+        }
+        withdrawn
     }
 
     #[allow(dead_code)] // Used in tests

@@ -30,6 +30,9 @@ pub struct EventFrame {
     pub ends_channel: bool,
     /// What this frame counts against its hub's connection (#553).
     pub charge: InTransit,
+    /// Held while the frame is on its way, dropped once it is routed: the
+    /// exit of a channel whose id stays taken until then (#1089).
+    pub routed: Option<tokio::sync::watch::Sender<()>>,
 }
 
 /// A channel's ATTACH_OK or SNAPSHOT_RES, rendered by its reader (#931).
@@ -136,12 +139,14 @@ impl BatchedEvent {
                 owner: b.owner,
                 channel_id: b.channel_id,
                 charge: b.charge,
+                routed: None,
             })),
             BatchedEvent::Frame(event) => Ok(Delivery::Owner(RoutedFrame {
                 owner: event.owner,
                 channel_id: event.channel_id,
                 frame: event.frame,
                 charge: Some(event.charge),
+                routed: event.routed,
             })),
         }
     }
@@ -154,6 +159,8 @@ pub struct RoutedFrame {
     pub frame: Vec<u8>,
     /// What it counts against that hub's connection until it is written.
     pub charge: Option<InTransit>,
+    /// Dropped once it is routed (`EventFrame::routed`).
+    pub routed: Option<tokio::sync::watch::Sender<()>>,
 }
 
 const BATCH_INTERVAL_MS: u64 = 16;
@@ -313,6 +320,7 @@ mod tests {
             frame: frame.to_vec(),
             ends_channel: false,
             charge: charge(frame.len()),
+            routed: None,
         })
     }
 
@@ -323,6 +331,7 @@ mod tests {
             frame: b"exit".to_vec(),
             ends_channel: true,
             charge: charge(4),
+            routed: None,
         })
     }
 

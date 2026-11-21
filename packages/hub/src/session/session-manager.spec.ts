@@ -44,6 +44,11 @@ let nextLocalSpawnChannelIdOverride: string | null = null;
 /** Set before a test to have the next local SPAWN refused with this SPAWN_ERR. */
 let nextLocalSpawnError: { code: string; message: string } | null = null;
 let nextLocalAttachNotFoundChannelId: string | null = null;
+/**
+ * Set before a test to have the next local SPAWN's program end at once: its
+ * CHANNEL_EXIT, with this code, comes in the same read as the SPAWN_OK.
+ */
+let nextLocalSpawnEndsWith: number | null = null;
 let localChannelStateWaitCount = 0;
 let nextLocalChannelStateFailure: Error | null = null;
 /** The capabilities the next local agent says in its HELLO; none said when null. */
@@ -127,12 +132,18 @@ vi.mock("./agent-launcher.js", async () => {
 					});
 					return;
 				}
+				const endsWith = nextLocalSpawnEndsWith;
+				nextLocalSpawnEndsWith = null;
 				setImmediate(() => {
 					this.emit("message", {
 						type: "SPAWN_OK",
 						requestId: spawnMsg.requestId,
 						channelId,
 					});
+					// One read, as AgentConnection emits its frames: synchronously.
+					if (endsWith !== null) {
+						this.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: endsWith });
+					}
 				});
 			} else if (msg.type === "ATTACH") {
 				const attachMsg = msg as unknown as { channelId: string; requestId: string };
@@ -189,6 +200,7 @@ vi.mock("./agent-launcher.js", async () => {
 afterEach(() => {
 	nextLocalSpawnChannelIdOverride = null;
 	nextLocalSpawnError = null;
+	nextLocalSpawnEndsWith = null;
 	nextLocalAttachNotFoundChannelId = null;
 	nextLocalChannelStateFailure = null;
 });
@@ -1025,6 +1037,25 @@ describe("SessionManager", () => {
 		expect(c2).toContainEqual(
 			expect.objectContaining({ type: "SESSION_STATE", sessionId: first?.id, status: "active" }),
 		);
+	});
+
+	// #1089: the SPAWN_OK of a restart and the new program's CHANNEL_EXIT in
+	// one read. The exit is the new run's end.
+	it("a restarted program that ends at once is shown ended", async () => {
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c1", received));
+		await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+
+		nextLocalSpawnEndsWith = 3;
+		expect(await sm.restartChannel("local-ch-1")).toBe(true);
+
+		const { MetaDAL } = await import("../storage/meta.js");
+		const dal = new MetaDAL(dbManager.meta);
+		expect(dal.getChannel("local-ch-1")?.status).toBe("dead");
+		const states = received.filter(
+			(m) => m.type === "CHANNEL_STATE" && (m as { channelId?: string }).channelId === "local-ch-1",
+		);
+		expect(states.at(-1)).toMatchObject({ status: "dead", exitCode: 3 });
 	});
 
 	// ─── DB persistence ─────────────────────────────────────────────────────

@@ -732,10 +732,9 @@ export class ChannelLifecycleManager {
 			}
 
 			// Cache miss — try passwordless first
-			const firstResult = await this.sendRestartSpawn(agent, baseElevatedSpawn, hostId);
-			if (firstResult.ok && firstResult.channelId !== null) {
+			const firstResult = await this.sendRestartSpawn(agent, baseElevatedSpawn, hostId, (newId) =>
 				this.applyRestartState(
-					firstResult.channelId,
+					newId,
 					channelId,
 					channel,
 					hostId,
@@ -747,9 +746,9 @@ export class ChannelLifecycleManager {
 					cols,
 					rows,
 					channel.directProcess,
-				);
-				return true;
-			}
+				),
+			);
+			if (firstResult.ok && firstResult.channelId !== null) return true;
 
 			if (firstResult.errCode !== "ELEVATION_PASSWORD_REQUIRED") {
 				return false;
@@ -822,28 +821,27 @@ export class ChannelLifecycleManager {
 			rows,
 		};
 
-		const restartResult = await this.sendRestartSpawn(agent, restartSpawn, hostId);
-		if (!restartResult.ok || restartResult.channelId === null) return false;
-
-		this.applyRestartState(
-			restartResult.channelId,
-			channelId,
-			channel,
-			hostId,
-			sessionEntry,
-			ch,
-			shell,
-			args,
-			cwd,
-			cols,
-			rows,
-			channel.directProcess,
+		const restartResult = await this.sendRestartSpawn(agent, restartSpawn, hostId, (newId) =>
+			this.applyRestartState(
+				newId,
+				channelId,
+				channel,
+				hostId,
+				sessionEntry,
+				ch,
+				shell,
+				args,
+				cwd,
+				cols,
+				rows,
+				channel.directProcess,
+			),
 		);
-		return true;
+		return restartResult.ok && restartResult.channelId !== null;
 	}
 
 	/**
-	 * Send SPAWN and wait for SPAWN_OK/ERR, then apply restart state on success.
+	 * Send SPAWN and wait for SPAWN_OK/ERR, applying restart state on success.
 	 */
 	async restartSendAndWait(
 		agent: AgentConnection,
@@ -860,29 +858,37 @@ export class ChannelLifecycleManager {
 		rows: number,
 		directProcess?: boolean,
 	): Promise<boolean> {
-		const result = await this.sendRestartSpawn(agent, spawnMsg, hostId);
-		if (!result.ok || result.channelId === null) return false;
-		this.applyRestartState(
-			result.channelId,
-			channelId,
-			sourceChannel,
-			hostId,
-			sessionEntry,
-			ch,
-			shell,
-			args,
-			cwd,
-			cols,
-			rows,
-			directProcess,
+		const result = await this.sendRestartSpawn(agent, spawnMsg, hostId, (newId) =>
+			this.applyRestartState(
+				newId,
+				channelId,
+				sourceChannel,
+				hostId,
+				sessionEntry,
+				ch,
+				shell,
+				args,
+				cwd,
+				cols,
+				rows,
+				directProcess,
+			),
 		);
-		return true;
+		return result.ok && result.channelId !== null;
 	}
 
+	/**
+	 * Send a restart's SPAWN and wait for its answer. `started` records the new
+	 * run as the SPAWN_OK is handled, before the frames read with it: a program
+	 * that ends at once has its CHANNEL_EXIT in the same read, and that exit is
+	 * the new run's end (#1089). Recorded after the await instead, the exit was
+	 * read against the previous run and the terminal then marked live.
+	 */
 	private async sendRestartSpawn(
 		agent: AgentConnection,
 		spawnMsg: AgentSpawnMessage,
 		hostId: string,
+		started: (channelId: string) => void,
 	): Promise<RestartSpawnResult> {
 		if (this.ctx.stoppingAgents.has(hostId)) {
 			return { ok: false, channelId: null, errCode: "HOST_BUSY" };
@@ -899,7 +905,7 @@ export class ChannelLifecycleManager {
 			}
 			throw err;
 		}
-		return new Promise<RestartSpawnResult>((resolve) => {
+		return new Promise<RestartSpawnResult>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.ctx.pendingRequests.delete(spawnMsg.requestId);
 				// Unanswered, the replacement may still start (#701).
@@ -917,11 +923,15 @@ export class ChannelLifecycleManager {
 				clearTimeout(timer);
 				this.ctx.pendingRequests.delete(spawnMsg.requestId);
 				if (incoming.type === "SPAWN_OK") {
-					resolve({
-						ok: true,
-						channelId: (incoming as AgentSpawnOkMessage).channelId,
-						errCode: null,
-					});
+					const { channelId } = incoming as AgentSpawnOkMessage;
+					try {
+						started(channelId);
+					} catch (err) {
+						// The restart's caller gets it, as it did when this ran there.
+						reject(err);
+						return;
+					}
+					resolve({ ok: true, channelId, errCode: null });
 				} else if (incoming.type === "SPAWN_ERR") {
 					resolve({
 						ok: false,

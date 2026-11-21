@@ -1078,6 +1078,16 @@ where
                 pid: channel.process.pid(),
                 alive: true,
             })
+            // Ended, its exit still on its way: listed, and its exit follows
+            // (#1089).
+            .chain(mgr.ending_of(&owner).into_iter().map(|(channel_id, pid)| {
+                AgentToHub::AgentChannelState {
+                    channel_id,
+                    title: String::new(),
+                    pid,
+                    alive: true,
+                }
+            }))
             .collect();
         (states, mgr.held_by_others(&owner))
     };
@@ -1488,12 +1498,16 @@ fn spawn_output_router(mut batched_rx: mpsc::UnboundedReceiver<BatchedEvent>, ro
     tokio::spawn(async move {
         while let Some(event) = batched_rx.recv().await {
             match event.into_delivery() {
-                Ok(Delivery::Owner(routed)) => routes.lock().await.route(
-                    &routed.owner,
-                    &routed.channel_id,
-                    routed.frame,
-                    routed.charge,
-                ),
+                Ok(Delivery::Owner(routed)) => {
+                    routes.lock().await.route(
+                        &routed.owner,
+                        &routed.channel_id,
+                        routed.frame,
+                        routed.charge,
+                    );
+                    // In its hub's queue now: the id it held is free (#1089).
+                    drop(routed.routed);
+                }
                 Ok(Delivery::Asker(reply)) => reply.send(),
                 Err(_) => {}
             }
@@ -4710,8 +4724,13 @@ mod tests {
             /// exit arrive after the SPAWN_OK of its replacement, when the
             /// replacement first printed: the hub took the new terminal for
             /// dead.
+            ///
+            /// Its reader holds the exit a while, its workload's status in
+            /// hand: a reconnection in that window used to find the id free
+            /// and get its SPAWN_OK before the exit (#1089).
             #[tokio::test]
             async fn an_exit_while_its_hub_was_away_reaches_it_before_any_reply() {
+                crate::pty::delay_exit_of("flush-restarted", Duration::from_millis(300));
                 let daemon = TestDaemon::start("flush").await;
                 let (mut a, _) = daemon.connect_as(KEY_A).await;
                 // Waits for a line, then ends a second later: its hub is gone.
@@ -4743,6 +4762,36 @@ mod tests {
                 let later = a2.frames_until_quiet(Duration::from_millis(500)).await;
                 assert!(
                     !mentions(&later, "flush-restarted").contains(&"CHANNEL_EXIT".to_string()),
+                    "an exit after the SPAWN_OK marks the restarted terminal dead"
+                );
+
+                daemon.stop().await;
+            }
+
+            /// A restart of a terminal whose program has just ended, its exit
+            /// not sent yet, starts: the hub asked for its end, so that exit
+            /// is never sent, and none arrives after the replacement's
+            /// SPAWN_OK to mark it dead (#1089).
+            #[tokio::test]
+            async fn a_restart_while_an_exit_is_held_starts_and_gets_no_late_exit() {
+                crate::pty::delay_exit_of("held-restarted", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("held-restart").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, spawn("held-restarted", "exit 5")).await;
+                // Its PTY closed. Its reader takes its workload back right
+                // after, then holds the exit.
+                a.read_through(|frame| is_about(frame, "LOG", "held-restarted"))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "held-restarted".to_string(),
+                })
+                .await;
+                spawned(&mut a, interactive("held-restarted")).await;
+                let later = a.frames_until_quiet(Duration::from_millis(2000)).await;
+                assert!(
+                    !mentions(&later, "held-restarted").contains(&"CHANNEL_EXIT".to_string()),
                     "an exit after the SPAWN_OK marks the restarted terminal dead"
                 );
 

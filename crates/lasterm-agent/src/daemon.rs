@@ -4847,6 +4847,24 @@ mod tests {
                 daemon.stop().await;
             }
 
+            /// Another hub's ended terminal, its exit not sent yet, still
+            /// counts among the terminals other hubs hold (#1089).
+            #[tokio::test]
+            async fn an_ended_terminal_counts_for_other_hubs_until_its_exit_is_sent() {
+                crate::pty::delay_exit_of("held-count", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("held-count").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, spawn("held-count", "exit 5")).await;
+                a.read_through(|frame| is_about(frame, "LOG", "held-count"))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                let (_b, frames) = daemon.connect_as(KEY_B).await;
+                assert_eq!(state(&frames).1, 1);
+
+                daemon.stop().await;
+            }
+
             /// A SPAWN reusing the id of a terminal whose exit is on its way
             /// waits for it: the exit comes before its SPAWN_OK (#1089).
             #[tokio::test]

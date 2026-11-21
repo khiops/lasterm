@@ -26,8 +26,6 @@ pub struct EventFrame {
     pub owner: OwnerId,
     pub channel_id: String,
     pub frame: Vec<u8>,
-    /// The channel's last frame: its CHANNEL_EXIT. Nothing of it follows.
-    pub ends_channel: bool,
     /// What this frame counts against its hub's connection (#553).
     pub charge: InTransit,
     /// Held while the frame is on its way, dropped once it is routed: the
@@ -229,12 +227,10 @@ impl Batcher {
                 }
             }
             ChannelEvent::Frame(event) => {
+                // Its buffer goes too: an exit is a channel's last word, and
+                // keeping an empty buffer would grow the map by one per
+                // terminal ever run.
                 self.release(&event.channel_id, tx);
-                // Its exit is a channel's last word: keeping an empty buffer
-                // for it would grow the map by one per terminal ever run.
-                if event.ends_channel {
-                    self.buffers.remove(&event.channel_id);
-                }
                 let _ = tx.send(BatchedEvent::Frame(event));
             }
             // The output its screen holds goes first; what the reader reads
@@ -320,7 +316,6 @@ mod tests {
             owner: OwnerId::stdio(),
             channel_id: channel_id.into(),
             frame: frame.to_vec(),
-            ends_channel: false,
             charge: charge(frame.len()),
             routed: None,
         })
@@ -331,7 +326,6 @@ mod tests {
             owner: OwnerId::stdio(),
             channel_id: channel_id.into(),
             frame: b"exit".to_vec(),
-            ends_channel: true,
             charge: charge(4),
             routed: None,
         })
@@ -462,7 +456,7 @@ mod tests {
         batcher.accept(exit("ended"), &tx);
 
         assert_eq!(expect_output(rx.try_recv().ok()).data, b"bye");
-        assert!(expect_event(rx.try_recv().ok()).ends_channel);
+        assert_eq!(expect_event(rx.try_recv().ok()).frame, b"exit");
         assert!(
             !batcher.buffers.contains_key("ended"),
             "the ended channel's buffer must go with it"

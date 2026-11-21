@@ -1583,7 +1583,6 @@ fn send_channel_event(
             channel_id: channel_id.to_owned(),
             charge: flow.read(frame.len()),
             frame,
-            ends_channel: matches!(msg, AgentToHub::ChannelExit { .. }),
             routed: None,
         }));
     }
@@ -1606,7 +1605,6 @@ fn send_ending_exit(
             channel_id: channel_id.to_owned(),
             charge: flow.read(frame.len()),
             frame,
-            ends_channel: true,
             routed: Some(routed),
         }));
     }

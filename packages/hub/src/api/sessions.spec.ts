@@ -756,7 +756,7 @@ describe("DELETE /api/hosts/:id, the decisions no test held (#957)", () => {
 
 	it("D1 returns its outcome at once: deleteHost is not a Promise, and the row is gone when it returns", () => {
 		const outcome = sm.deleteHost(hostId, { force: true });
-		expect(outcome).toEqual({ kind: "deleted" });
+		expect(outcome).not.toBeInstanceOf(Promise);
 		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeUndefined();
 	});
 
@@ -776,24 +776,38 @@ describe("DELETE /api/hosts/:id, the decisions no test held (#957)", () => {
 				const attach = (
 					sm as unknown as { agentMgr: { daemonAttachPromises: Map<string, unknown> } }
 				).agentMgr.daemonAttachPromises;
-				const has = vi.spyOn(ctx.acquisitions, "has").mockReturnValue(kind === "acquisition");
-				if (kind === "stop") ctx.stoppingAgents.add(hostId);
 				const end = kind === "start" ? internals().retirement.startOn(hostId) : () => {};
-				if (kind === "attach") attach.set(hostId, new Promise(() => {}));
-				for (const query of ["", "?force=false", "?force=true"]) {
-					const response = await remove(query);
-					expect(response.statusCode).toBe(409);
-					expect(response.json().error.code).toBe("HOST_BUSY");
+				try {
+					if (kind === "stop") ctx.stoppingAgents.add(hostId);
+					if (kind === "acquisition") {
+						ctx.acquisitions.set(hostId, {
+							id: "held-acquisition",
+							hostId,
+							state: "CONNECTING",
+							controller: new AbortController(),
+							connectPromise: new Promise(() => {}),
+							_resolve: vi.fn(),
+							_reject: vi.fn(),
+							leases: new Set(),
+						});
+					}
+					if (kind === "attach") attach.set(hostId, new Promise(() => {}));
+					for (const query of ["", "?force=false", "?force=true"]) {
+						const response = await remove(query);
+						expect(response.statusCode).toBe(409);
+						expect(response.json().error.code).toBe("HOST_BUSY");
+					}
+					const dal = new MetaDAL(dbs.meta);
+					expect(dal.getHost(hostId)).toBeDefined();
+					expect(dal.getSession(SESSION_ID)).toBeDefined();
+					expect(dal.getChannel(channelId)).toBeDefined();
+					expect(agent.sent).toEqual([]);
+				} finally {
+					ctx.acquisitions.delete(hostId);
+					ctx.stoppingAgents.delete(hostId);
+					end();
+					attach.delete(hostId);
 				}
-				const dal = new MetaDAL(dbs.meta);
-				expect(dal.getHost(hostId)).toBeDefined();
-				expect(dal.getSession(SESSION_ID)).toBeDefined();
-				expect(dal.getChannel(channelId)).toBeDefined();
-				expect(agent.sent).toEqual([]);
-				has.mockRestore();
-				ctx.stoppingAgents.delete(hostId);
-				end();
-				attach.delete(hostId);
 			},
 		);
 	});
@@ -1208,6 +1222,75 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 		}
 	});
 
+	// D4b: whichever way a reconnect's SPAWN stops speaking for its terminal,
+	// the batch it belongs to still settles (#957).
+	it.each(["forgotten terminal", "replaced connection"])(
+		"R10 settles the batch when the timeout of a %s fires",
+		async (mode) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const { agent, ctx, lifecycle, channelId } = fixture();
+				const batch = lifecycle.spawnChannelsForHost(hostId, agent, vi.fn(), vi.fn());
+				let settled = false;
+				void batch.then(() => {
+					settled = true;
+				});
+				if (mode === "forgotten terminal") lifecycle.destroyChannel(channelId);
+				else ctx.agents.delete(hostId);
+				await vi.advanceTimersByTimeAsync(10_001);
+				expect(settled).toBe(true);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	// D4b: an old SPAWN speaks for the state object it was sent for, not for
+	// whatever is tracked under the same id by the time it answers.
+	it.each(["timeout", "answer"])(
+		"R10 ignores the %s of a SPAWN once another state is tracked under its id",
+		async (mode) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const { agent, ctx, lifecycle, channelId, heard } = fixture();
+				const old = ctx.channels.get(channelId)!;
+				lifecycle.reAttachChannels(hostId, SESSION_ID, agent);
+				const request = agent.sent.find((m) => m.type === "SPAWN")!;
+				if (request.type !== "SPAWN") throw new Error("expected SPAWN");
+				const replacement = { ...old, clients: new Set<string>() };
+				ctx.channels.set(channelId, replacement);
+				heard.length = 0;
+				const track = vi.spyOn(ctx.scheduler, "trackChannel");
+				if (mode === "answer")
+					agent.emit("message", {
+						type: "SPAWN_OK",
+						requestId: request.requestId,
+						channelId,
+						pid: 1,
+					});
+				else await vi.advanceTimersByTimeAsync(10_001);
+				expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([]);
+				expect(track).not.toHaveBeenCalled();
+				expect(ctx.channels.get(channelId)).toBe(replacement);
+				expect(replacement.status).toBe("live");
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	it("R7 answers an open for a host the hub does not know with its one message", async () => {
+		const { heard } = fixture();
+		const unknown = "01K580NOSUCHHOST000000000";
+		await sm.handleSpawn("c-window", { type: "SPAWN", hostId: unknown });
+		expect(heard).toContainEqual({
+			type: "ERROR",
+			code: "HOST_NOT_FOUND",
+			message: "That host is no longer in this hub's list.",
+			hostId: unknown,
+		});
+	});
+
 	it.each(["new-spawn", "new-spawn, old answer early", "lost", "adopted"])(
 		"R10 keeps the terminal after the old connection is %s",
 		async (mode) => {
@@ -1282,15 +1365,19 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 	// D5 (#957): a snapshot for a channel the hub no longer tracks is dropped
 	// at the one place that writes it, whoever brings it, and the scheduler's
 	// slot is freed all the same.
-	it("D5 frees the scheduler's slot for a forgotten channel's SNAPSHOT_RES, and stores nothing", () => {
-		const { agent, ctx, lifecycle, channelId } = fixture();
-		lifecycle.destroyChannel(channelId);
-		const slot = vi.spyOn(ctx.scheduler, "onSnapshotResponse");
-		const write = vi.spyOn(ctx.spoolDal, "insertSnapshot");
-		agent.emit("message", { type: "SNAPSHOT_RES", channelId, snapshot: { rows: [] } });
-		expect(slot).toHaveBeenCalledWith(channelId);
-		expect(write).not.toHaveBeenCalled();
-	});
+	it.each([false, true])(
+		"D5 frees the scheduler's slot for a forgotten channel's SNAPSHOT_RES, and stores nothing, row present=%s",
+		(rowPresent) => {
+			const { agent, ctx, lifecycle, channelId, dal } = fixture();
+			lifecycle.destroyChannel(channelId);
+			if (!rowPresent) dal.deleteCascadeForHost(hostId);
+			const slot = vi.spyOn(ctx.scheduler, "onSnapshotResponse");
+			const write = vi.spyOn(ctx.spoolDal, "insertSnapshot");
+			agent.emit("message", { type: "SNAPSHOT_RES", channelId, snapshot: { rows: [] } });
+			expect(slot).toHaveBeenCalledWith(channelId);
+			expect(write).not.toHaveBeenCalled();
+		},
+	);
 
 	it("D5 stores nothing for an ATTACH answer that comes after its channel is forgotten", async () => {
 		const { ctx, lifecycle, channelId } = fixture();
@@ -1415,6 +1502,22 @@ describe("DELETE /api/sessions/:id, the DESTROYs it sends (#910)", () => {
 			`dead ${channelIds[0]}`,
 			`dead ${channelIds[1]}`,
 		]);
+	});
+
+	// An agent older than this hub, on the local host, is stopped once the
+	// session's terminals are gone: its STOP comes after their DESTROYs.
+	it("V3 sends every DESTROY before the STOP that retires an outdated local daemon", async () => {
+		hostId = new MetaDAL(dbs.meta).createHost({ type: "local", label: "this machine" }).id;
+		const agent = connectedAgent();
+		agent.helloMessage = OUTDATED_DAEMON_HELLO;
+		const { channelIds } = liveTerminalsOn(agent, 2);
+		const order: string[] = [];
+		agent.send.mockImplementation((msg: ProtocolMessage) => {
+			order.push(msg.type === "DESTROY" ? `DESTROY ${msg.channelId}` : msg.type);
+		});
+		expect((await end()).statusCode).toBe(204);
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(order).toEqual([`DESTROY ${channelIds[0]}`, `DESTROY ${channelIds[1]}`, "STOP"]);
 	});
 
 	it("D6 sends nothing to an agent that is not connected, and still reports the terminals", async () => {

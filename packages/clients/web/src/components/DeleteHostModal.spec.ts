@@ -226,6 +226,7 @@ describe("DeleteHostModal hub consent (#910)", () => {
 			.spyOn(globalThis, "fetch")
 			.mockResolvedValueOnce(new Response(null, { status: 204 }));
 		const { onClose } = mountModal("nas");
+		useChannelsStore().channelHostMap = new Map([["01K580CHAN0000000000000001", "nas"]]);
 		useChannelsStore().channels = [
 			{
 				id: "01K580CHAN0000000000000001",

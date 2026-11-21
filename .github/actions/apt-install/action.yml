@@ -28,7 +28,7 @@ runs:
         PACKAGES: ${{ inputs.packages }}
       run: |
         digest="$({ printf '%s\n' "$PACKAGES"; cat /var/lib/dpkg/status; } | sha256sum | cut -c1-16)"
-        echo "key=apt-debs-proof1083-$RUNNER_OS-$RUNNER_ARCH-$digest" >> "$GITHUB_OUTPUT"
+        echo "key=apt-debs-proof1083b-$RUNNER_OS-$RUNNER_ARCH-$digest" >> "$GITHUB_OUTPUT"
         # One directory per key: a second use in the same job must not
         # restore into, and then install, the first one's files.
         echo "dir=$RUNNER_TEMP/apt-debs-$digest" >> "$GITHUB_OUTPUT"

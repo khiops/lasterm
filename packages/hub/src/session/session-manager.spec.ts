@@ -49,6 +49,8 @@ let nextLocalAttachNotFoundChannelId: string | null = null;
  * CHANNEL_EXIT, with this code, comes in the same read as the SPAWN_OK.
  */
 let nextLocalSpawnEndsWith: number | null = null;
+/** Set before a test to have the next elevated local SPAWN start without a secret. */
+let nextLocalElevationPasswordless = false;
 let localChannelStateWaitCount = 0;
 let nextLocalChannelStateFailure: Error | null = null;
 /** The capabilities the next local agent says in its HELLO; none said when null. */
@@ -121,7 +123,9 @@ vi.mock("./agent-launcher.js", async () => {
 					return;
 				}
 				// Two-step elevation: if elevated=true but no elevationSecret, return SPAWN_ERR
-				if (spawnMsg.elevated === true && !spawnMsg.elevationSecret) {
+				const passwordless = nextLocalElevationPasswordless;
+				nextLocalElevationPasswordless = false;
+				if (spawnMsg.elevated === true && !spawnMsg.elevationSecret && !passwordless) {
 					setImmediate(() => {
 						this.emit("message", {
 							type: "SPAWN_ERR",
@@ -201,6 +205,7 @@ afterEach(() => {
 	nextLocalSpawnChannelIdOverride = null;
 	nextLocalSpawnError = null;
 	nextLocalSpawnEndsWith = null;
+	nextLocalElevationPasswordless = false;
 	nextLocalAttachNotFoundChannelId = null;
 	nextLocalChannelStateFailure = null;
 });
@@ -7036,6 +7041,45 @@ describe("SessionManager — elevation support", () => {
 		const channel = dal.getChannel(channelId!);
 		expect(channel?.status).toBe("live");
 	});
+
+	// #1089: on every elevated restart path, a program that ends at once,
+	// its CHANNEL_EXIT in the SPAWN_OK's read, is shown ended.
+	it.each([
+		["a cached secret", "cached"],
+		["a passwordless first attempt", "passwordless"],
+		["a secret prompted after the passwordless attempt", "prompted"],
+	] as const)(
+		"an elevated restart with %s whose program ends at once is shown ended",
+		async (_, path) => {
+			const localHostId = await sm.ensureLocalHost();
+			const { MetaDAL } = await import("../storage/meta.js");
+			const dal = new MetaDAL(dbManager.meta);
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeAutoRespondClient("c-elev-ends", received, "p@ss"));
+			const channelId = await sm.handleSpawn("c-elev-ends", {
+				type: "SPAWN",
+				hostId: localHostId,
+				elevated: true,
+			});
+			expect(channelId).not.toBeNull();
+			if (path !== "cached") {
+				getElevationCache().set(`${localHostId}:c-elev-ends`, {
+					secret: "old",
+					expiresAt: Date.now() - 1,
+				});
+			}
+			nextLocalElevationPasswordless = path === "passwordless";
+
+			nextLocalSpawnEndsWith = 4;
+			expect(await sm.restartChannel(channelId!, "c-elev-ends")).toBe(true);
+
+			expect(dal.getChannel(channelId!)?.status).toBe("dead");
+			const states = received.filter(
+				(m) => m.type === "CHANNEL_STATE" && (m as { channelId?: string }).channelId === channelId,
+			);
+			expect(states.at(-1)).toMatchObject({ status: "dead", exitCode: 4 });
+		},
+	);
 
 	it("restart-elev-03: restartChannel cancels elevation → returns false", async () => {
 		const localHostId = await sm.ensureLocalHost();

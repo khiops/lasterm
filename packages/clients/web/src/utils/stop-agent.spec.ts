@@ -24,10 +24,12 @@ function refusal(code: string, status = 409): StopKeepingAgentAnswer {
 	return {
 		ok: false,
 		status,
-		body: { error: { code, message: "hub reason", terminals: 2, other_owner_channels: 3 } },
+		body: {
+			error: { code, message: "hub reason", terminals: 2, transfers: 4, other_owner_channels: 3 },
+		},
 	};
 }
-const codes = ["TERMINALS_WOULD_END", "OTHER_HUBS_HOLD_CHANNELS"];
+const codes = ["TERMINALS_WOULD_END", "OTHER_HUBS_HOLD_CHANNELS", "TRANSFERS_WOULD_STOP"];
 
 describe("stopAgentWithConsent", () => {
 	it("posts an empty body and returns the outcome", async () => {
@@ -55,11 +57,19 @@ describe("stopAgentWithConsent", () => {
 		expect((await stopAgentWithConsent("pi", { post, confirm })).kind).toBe("done");
 		expect(post.mock.calls).toEqual([
 			[{}],
-			[code === "TERMINALS_WOULD_END" ? { end_terminals: true } : { force: true }],
+			[
+				code === "TERMINALS_WOULD_END"
+					? { end_terminals: true }
+					: code === "TRANSFERS_WOULD_STOP"
+						? { stop_transfers: true }
+						: { force: true },
+			],
 		]);
 		const question = confirm.mock.calls[0]?.[0];
 		expect(question.title).toBe("Stop the agent on pi?");
 		if (code === "TERMINALS_WOULD_END") expect(question.message).toBe("Its 2 terminals here end.");
+		if (code === "TRANSFERS_WOULD_STOP")
+			expect(question.message).toBe("4 uploads to this host stop.");
 		if (code === "OTHER_HUBS_HOLD_CHANNELS") expect(question.message).toContain("3 terminals");
 	});
 
@@ -74,6 +84,19 @@ describe("stopAgentWithConsent", () => {
 			[{}],
 			[{ end_terminals: true }],
 			[{ end_terminals: true, force: true }],
+		]);
+	});
+
+	it("keeps every consent given when the uploads ask last (#1090)", async () => {
+		const post = vi
+			.fn()
+			.mockResolvedValueOnce(refusal("TERMINALS_WOULD_END"))
+			.mockResolvedValueOnce(refusal("TRANSFERS_WOULD_STOP"))
+			.mockResolvedValueOnce(refusal("OTHER_HUBS_HOLD_CHANNELS"))
+			.mockResolvedValueOnce(done);
+		await stopAgentWithConsent("pi", { post, confirm: () => true });
+		expect(post.mock.calls.at(-1)).toEqual([
+			{ end_terminals: true, stop_transfers: true, force: true },
 		]);
 	});
 

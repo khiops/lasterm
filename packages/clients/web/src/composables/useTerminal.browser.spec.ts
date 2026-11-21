@@ -10,6 +10,8 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ref } from "vue";
 import type { IWsClient } from "../services/ws-client.js";
+import { useToastStore } from "../stores/toast.js";
+import { PasteStream } from "./paste-stream.js";
 import { useTerminal } from "./useTerminal.js";
 
 const T = "01HZZZZZZZZZZZZZZZZZZZZZT1";
@@ -23,6 +25,9 @@ let host: HTMLDivElement;
 let pane: ReturnType<typeof useTerminal>;
 let sent: ProtocolMessage[];
 let hear: (msg: ProtocolMessage) => void;
+/** The pane's resolved `pasteWarning` (#1015): unset is "auto". */
+let warning: unknown;
+let connected: boolean;
 
 beforeEach(() => {
 	setActivePinia(createPinia());
@@ -31,12 +36,16 @@ beforeEach(() => {
 	host.style.height = "320px";
 	document.body.appendChild(host);
 	sent = [];
+	warning = undefined;
+	connected = true;
 	const listeners = new Map<string, Set<(msg: ProtocolMessage) => void>>();
 	hear = (msg) => {
 		for (const callback of [...(listeners.get(msg.type) ?? [])]) callback(msg);
 	};
 	const client = {
-		isConnected: true,
+		get isConnected() {
+			return connected;
+		},
 		send: (msg: ProtocolMessage) => sent.push(msg),
 		on(type: string, callback: (msg: ProtocolMessage) => void) {
 			const set = listeners.get(type) ?? new Set();
@@ -49,7 +58,9 @@ beforeEach(() => {
 		connect: () => Promise.resolve(),
 		close() {},
 	};
-	pane = useTerminal(ref(host), client as unknown as IWsClient);
+	pane = useTerminal(ref(host), client as unknown as IWsClient, undefined, undefined, {
+		pasteWarning: () => warning,
+	});
 	pane.init();
 });
 
@@ -256,6 +267,8 @@ describe("a paste through an agent that adapts input (#1012)", () => {
 
 	it("sends a Windows paste whose CRLF text is over the limit but whose bracketed form is not", async () => {
 		await attachedWith({ adaptsInput: true, snapshot: { inputModes: "" } });
+		// The size is what this measures, not the card a paste of several lines gets (#1015).
+		warning = "never";
 
 		// 65,536 units of text, a 49,164-byte bracketed form.
 		paste("xx\r\n".repeat(16_384));
@@ -317,5 +330,359 @@ describe("the character sets a snapshot carries (#1013)", () => {
 		await parsed();
 
 		expect(row(0)).toBe("┌──┐─q");
+	});
+});
+
+// A paste of several lines its program would run one by one waits on a card
+// (#1015). The decision follows the bracketed paste mode xterm last parsed.
+describe("a paste of several lines asks first (#1015)", () => {
+	const U = "01HZZZZZZZZZZZZZZZZZZZZZU1";
+	const pastes = () => sent.filter((m) => m.type === "PASTE");
+	const pasteBytes = () =>
+		pastes().map((m) => new TextDecoder().decode((m as { data: Uint8Array }).data));
+	const toasts = () => useToastStore().messages.map((t) => t.text);
+	/** The paste event, as `paste()` sends it, returned so that a test can look at it. */
+	function pasteEvent(text: string, data = new DataTransfer()): ClipboardEvent {
+		data.setData("text/plain", text);
+		const event = new ClipboardEvent("paste", {
+			clipboardData: data,
+			bubbles: true,
+			cancelable: true,
+		});
+		xterm().textarea?.dispatchEvent(event);
+		return event;
+	}
+	const OFF = { snapshot: { inputModes: "" } };
+	const ON = { snapshot: { inputModes: `${ESC}[?2004h` } };
+
+	it("holds a paste of two lines when the program has bracketed paste off", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		expect(pane.pendingPaste.value).toMatchObject({ lines: 2, bracketed: false });
+		expect(inputs()).toEqual([]);
+	});
+
+	it("sends a paste of several lines at once when the program waits for Enter", async () => {
+		await attachedWith({ adaptsInput: true, ...ON });
+		paste("a\nb");
+		expect(pane.pendingPaste.value).toBeNull();
+		expect(inputs()).toEqual([`${START}a\rb${END}`]);
+	});
+
+	it("asks with always even when the program has bracketed paste on", async () => {
+		warning = "always";
+		await attachedWith({ adaptsInput: true, ...ON });
+		paste("a\nb");
+		expect(pane.pendingPaste.value).toMatchObject({ lines: 2, bracketed: true });
+		expect(inputs()).toEqual([]);
+	});
+
+	it("never asks with never", async () => {
+		warning = "never";
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		expect(pane.pendingPaste.value).toBeNull();
+		expect(inputs()).toEqual([`${START}a\rb${END}`]);
+	});
+
+	it("takes a value it does not know for auto", async () => {
+		warning = "sometimes";
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		expect(pane.pendingPaste.value).not.toBeNull();
+	});
+
+	for (const setting of ["auto", "always"]) {
+		it(`sends one line ending in a line break at once, the break kept (${setting})`, async () => {
+			warning = setting;
+			await attachedWith({ adaptsInput: true, ...OFF });
+			paste("ls\n");
+			expect(pane.pendingPaste.value).toBeNull();
+			expect(inputs()).toEqual([`${START}ls\r${END}`]);
+		});
+	}
+
+	it("gives the card the first three lines", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("one\ntwo\nthree\nfour\nfive");
+		expect(pane.pendingPaste.value).toMatchObject({ lines: 5, preview: ["one", "two", "three"] });
+	});
+
+	it("counts a lone CR as a line break", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\rb");
+		expect(pane.pendingPaste.value).toMatchObject({ lines: 2 });
+	});
+
+	it("follows the mode the program sets later, once xterm has parsed it", async () => {
+		await attachedWith({ adaptsInput: true, ...ON });
+		print(`${ESC}[?2004l`);
+		await parsed();
+		paste("a\nb");
+		expect(pane.pendingPaste.value).not.toBeNull();
+		expect(inputs()).toEqual([]);
+
+		pane.cancelPaste();
+		print(`${ESC}[?2004h`);
+		await parsed();
+		paste("c\nd");
+		expect(pane.pendingPaste.value).toBeNull();
+		expect(inputs()).toEqual([`${START}c\rd${END}`]);
+	});
+
+	it("holds nothing while the socket is down, and sends nothing", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		connected = false;
+		paste("a\nb");
+		expect(pane.pendingPaste.value).toBeNull();
+		expect(inputs()).toEqual([]);
+	});
+
+	it("holds nothing without the write lock, and sends nothing", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		pane.canWrite.value = false;
+		paste("a\nb");
+		expect(pane.pendingPaste.value).toBeNull();
+		expect(inputs()).toEqual([]);
+	});
+
+	it("sends a held paste on confirm, once, bracketed, to an agent that adapts input", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		expect(pane.pendingPaste.value).not.toBeNull();
+		expect(inputs()).toEqual([]);
+		pane.confirmPaste();
+		expect(inputs()).toEqual([`${START}a\rb${END}`]);
+		expect(pane.pendingPaste.value).toBeNull();
+		pane.confirmPaste();
+		expect(inputs()).toHaveLength(1);
+	});
+
+	it("streams a held paste on confirm to an agent that streams pastes", async () => {
+		await attachedWith({ adaptsInput: true, streamsPaste: true, ...OFF });
+		paste("a\nb");
+		expect(pane.pendingPaste.value).not.toBeNull();
+		expect(pastes()).toEqual([]);
+		expect(inputs()).toEqual([]);
+		pane.confirmPaste();
+		expect(pasteBytes()).toEqual(["a\rb"]);
+		expect(inputs()).toEqual([]);
+		expect(pane.pendingPaste.value).toBeNull();
+		pane.confirmPaste();
+		expect(pastes()).toHaveLength(1);
+	});
+
+	it("gives a held paste to xterm's own paste on confirm for an older agent", async () => {
+		await attachedWith(OFF);
+		paste("a\nb");
+		expect(pane.pendingPaste.value).not.toBeNull();
+		expect(inputs()).toEqual([]);
+		pane.confirmPaste();
+		expect(inputs()).toEqual(["a\rb"]);
+		expect(pane.pendingPaste.value).toBeNull();
+		pane.confirmPaste();
+		expect(inputs()).toHaveLength(1);
+	});
+
+	it("lets xterm bracket a held paste for an older agent while bracketed paste is on", async () => {
+		warning = "always";
+		await attachedWith(ON);
+		paste("a\nb");
+		expect(inputs()).toEqual([]);
+		pane.confirmPaste();
+		expect(inputs()).toEqual([`${START}a\rb${END}`]);
+	});
+
+	it("reads the clipboard once, at the paste, and sends what it read then", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		const data = new DataTransfer();
+		const read = data.getData.bind(data);
+		let reads = 0;
+		data.getData = (format: string) => {
+			reads++;
+			return reads === 1 ? read(format) : "other";
+		};
+		pasteEvent("a\nb", data);
+		expect(reads).toBe(1);
+		pane.confirmPaste();
+		expect(reads).toBe(1);
+		expect(inputs()).toEqual([`${START}a\rb${END}`]);
+	});
+
+	it("cancels the event it holds, so that xterm pastes nothing of it", async () => {
+		await attachedWith(OFF);
+		const event = pasteEvent("a\nb");
+		expect(event.defaultPrevented).toBe(true);
+		expect(inputs()).toEqual([]);
+	});
+
+	it("checks a streaming paste again on confirm: one started meanwhile wins", async () => {
+		await attachedWith({ adaptsInput: true, streamsPaste: true, ...OFF });
+		paste("a\nb");
+		// Another pane showing the same terminal starts streaming a paste to it.
+		const other = new PasteStream({
+			send: () => {},
+			connected: () => true,
+			canSend: () => true,
+			toast: { show: () => 0, update: () => {}, dismiss: () => {} },
+			sendInput: () => {},
+		});
+		other.start(T, new TextEncoder().encode("other"));
+		try {
+			pane.confirmPaste();
+			expect(toasts()).toContain("A paste is still being sent to this terminal.");
+			expect(pastes()).toEqual([]);
+			expect(inputs()).toEqual([]);
+		} finally {
+			other.interrupt();
+		}
+	});
+
+	it("drops a held paste on cancel", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		pane.cancelPaste();
+		expect(pane.pendingPaste.value).toBeNull();
+		pane.confirmPaste();
+		expect(inputs()).toEqual([]);
+	});
+
+	it("drops a held paste when the pane attaches another terminal", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		pane.attachChannel(U, { adaptsInput: true });
+		expect(pane.pendingPaste.value).toBeNull();
+		pane.confirmPaste();
+		expect(inputs()).toEqual([]);
+	});
+
+	it("drops a held paste when the pane attaches the same terminal again", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		const again = pane.reattachChannel(T);
+		expect(pane.pendingPaste.value).toBeNull();
+		answer({ adaptsInput: true, ...OFF });
+		await again;
+		await parsed();
+		pane.confirmPaste();
+		expect(inputs()).toEqual([]);
+	});
+
+	it("drops a held paste when the pane is closed", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		pane.dispose();
+		expect(pane.pendingPaste.value).toBeNull();
+		pane.confirmPaste();
+		expect(inputs()).toEqual([]);
+	});
+
+	it("replaces a held paste with the next one that asks", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		paste("c\nd\ne");
+		expect(pane.pendingPaste.value).toMatchObject({ lines: 3 });
+		pane.confirmPaste();
+		expect(inputs()).toEqual([`${START}c\rd\re${END}`]);
+	});
+
+	it("drops a held paste when the next one goes at once", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		paste("c");
+		expect(inputs()).toEqual([`${START}c${END}`]);
+		expect(pane.pendingPaste.value).toBeNull();
+		pane.confirmPaste();
+		expect(inputs()).toHaveLength(1);
+	});
+
+	it("drops a held paste when the next one is refused", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		paste("x\n".repeat(40_000));
+		expect(toasts()).toContain("This paste is too large to send (64 KiB at most).");
+		expect(pane.pendingPaste.value).toBeNull();
+	});
+
+	it("keeps a held paste when the write lock goes, and sends nothing on confirm", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		pane.canWrite.value = false;
+		expect(pane.pendingPaste.value).not.toBeNull();
+		pane.confirmPaste();
+		expect(inputs()).toEqual([]);
+	});
+
+	it("keeps a held paste when the socket goes, and sends nothing on confirm", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		connected = false;
+		expect(pane.pendingPaste.value).not.toBeNull();
+		pane.confirmPaste();
+		expect(inputs()).toEqual([]);
+	});
+
+	it("refuses a paste over 64 KiB with its toast, without asking", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("x\n".repeat(40_000));
+		expect(toasts()).toContain("This paste is too large to send (64 KiB at most).");
+		expect(pane.pendingPaste.value).toBeNull();
+		expect(inputs()).toEqual([]);
+	});
+
+	it("refuses a streamed paste over 16 MiB with its toast, without asking", async () => {
+		await attachedWith({ adaptsInput: true, streamsPaste: true, ...OFF });
+		paste("x\n".repeat(8 * 1024 * 1024 + 1));
+		expect(toasts()).toContain("This paste is too large to send (16 MiB at most).");
+		expect(pane.pendingPaste.value).toBeNull();
+		expect(pastes()).toEqual([]);
+	});
+
+	it("refuses a paste while another of this terminal is still being sent, without asking", async () => {
+		await attachedWith({ adaptsInput: true, streamsPaste: true, ...OFF });
+		warning = "never";
+		paste("x\ny");
+		warning = undefined;
+		paste("a\nb");
+		expect(toasts()).toContain("A paste is still being sent to this terminal.");
+		expect(pane.pendingPaste.value).toBeNull();
+	});
+
+	it("reads the clipboard once for a paste it does not ask about, to an older agent too", async () => {
+		warning = "never";
+		await attachedWith(OFF);
+		const data = new DataTransfer();
+		const read = data.getData.bind(data);
+		let reads = 0;
+		data.getData = (format: string) => {
+			reads++;
+			return read(format);
+		};
+		pasteEvent("a\nb", data);
+		expect(reads).toBe(1);
+		expect(inputs()).toEqual(["a\rb"]);
+	});
+
+	it("gives the card a bounded prefix of a very long first line", async () => {
+		await attachedWith({ adaptsInput: true, streamsPaste: true, ...OFF });
+		paste(`${"x".repeat(100_000)}\nb`);
+		expect(pane.pendingPaste.value?.preview.map((line) => line.length)).toEqual([161, 1]);
+	});
+
+	it("drops a held paste on a paste event that carries no clipboard data", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		xterm().textarea?.dispatchEvent(
+			new ClipboardEvent("paste", { bubbles: true, cancelable: true }),
+		);
+		expect(pane.pendingPaste.value).toBeNull();
+	});
+
+	it("says a paste is too large before it says nothing for want of the write lock", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		pane.canWrite.value = false;
+		paste("x\n".repeat(40_000));
+		expect(toasts()).toContain("This paste is too large to send (64 KiB at most).");
+		expect(pane.pendingPaste.value).toBeNull();
 	});
 });

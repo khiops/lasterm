@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deepMerge, UI_SECTION_KEYS } from "./config.js";
+import { deepMerge, isPasteWarning, UI_SECTION_KEYS } from "./config.js";
 
 describe("deepMerge", () => {
 	it("scalar overwrite: later source wins", () => {
@@ -102,5 +102,16 @@ describe("UI_SECTION_KEYS", () => {
 	// terminal key is the setting; the search one is no longer taken.
 	it("no longer lists search.scrollbarMarkers", () => {
 		expect(UI_SECTION_KEYS.search).not.toContain("scrollbarMarkers");
+	});
+});
+
+describe("isPasteWarning (#1015)", () => {
+	it("accepts the three values and refuses any other", () => {
+		expect(isPasteWarning("auto")).toBe(true);
+		expect(isPasteWarning("always")).toBe(true);
+		expect(isPasteWarning("never")).toBe(true);
+		expect(isPasteWarning("sometimes")).toBe(false);
+		expect(isPasteWarning(true)).toBe(false);
+		expect(isPasteWarning(null)).toBe(false);
 	});
 });

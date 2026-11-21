@@ -1,7 +1,7 @@
 // In-memory TypeScript entity types for lasterm
 // These represent the domain model; DB types are defined in hub/storage
 
-import type { BellSound } from "./config.js";
+import type { BellSound, PasteWarning } from "./config.js";
 import type { TransferDrop, TransferOnConflict } from "./file-transfer.js";
 import type { ChannelEndReason } from "./protocol.js";
 
@@ -60,6 +60,12 @@ export interface TerminalProfile {
 	 * `panes.keepEnded` says.
 	 */
 	whenEnded?: "ask" | "restart" | "close";
+	/**
+	 * When a paste of two or more lines asks first (#1015): "auto" when the
+	 * program has not turned bracketed paste on, so its lines would run as they
+	 * arrive; "always"; "never". Default: "auto"
+	 */
+	pasteWarning?: PasteWarning;
 	/**
 	 * What dropping files on this terminal does (#835): "upload" sends them to
 	 * its host, "off" does nothing. Default: "upload"

@@ -305,6 +305,22 @@ describe("ConfigResolver.resolve", () => {
 		expect(resolver.resolve()).toMatchObject({ transferDrop: "upload", transferVerify: true });
 	});
 
+	it("reads paste_warning from config.toml, and leaves a value the routes would refuse (#1015)", () => {
+		const bad = join(tmpdir(), `lasterm-test-${Date.now()}-paste-bad`);
+		mkdirSync(bad, { recursive: true });
+		writeFileSync(join(bad, "config.toml"), '[terminal]\npaste_warning = "sometimes"\n');
+		const refused = new ConfigResolver(metaDal);
+		refused.loadFromFile(bad);
+		expect(refused.resolve().pasteWarning).toBe("auto");
+
+		const good = join(tmpdir(), `lasterm-test-${Date.now()}-paste-good`);
+		mkdirSync(good, { recursive: true });
+		writeFileSync(join(good, "config.toml"), '[terminal]\npaste_warning = "never"\n');
+		const read = new ConfigResolver(metaDal);
+		read.loadFromFile(good);
+		expect(read.resolve().pasteWarning).toBe("never");
+	});
+
 	// Every other field replaces the layer under it. Environment variables must
 	// not: a host that sets a proxy would erase the editor set globally.
 	it("merges environment variables key by key down the layers", () => {

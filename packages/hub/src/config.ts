@@ -52,9 +52,9 @@ import {
 	isTransferPanelWidth,
 	parseAgentConfig,
 	TERMINAL_PROFILE_KEYS,
+	TERMINAL_PROFILE_VALIDATORS,
 	TRANSFER_CONFIG_KEYS,
 	TRANSFER_CONFIG_VALIDATORS,
-	TRANSFER_PROFILE_VALIDATORS,
 	UI_CONFIG_SECTIONS,
 	validateCustomCommand,
 } from "@lasterm/shared";
@@ -941,11 +941,9 @@ export class ConfigResolver {
 					flat.env = envFromToml(val);
 				} else {
 					const profileKey = snakeToCamel(key);
-					// A file-transfer value the routes would refuse is not read
-					// from the file either: the default holds (#835).
-					const rule = (TRANSFER_PROFILE_VALIDATORS as Record<string, (v: unknown) => boolean>)[
-						profileKey
-					];
+					// A value the routes would refuse is not read from the file
+					// either: the default holds (#835, #1015).
+					const rule = TERMINAL_PROFILE_VALIDATORS[profileKey];
 					if (rule !== undefined && !rule(val)) continue;
 					flat[profileKey] = val;
 				}

@@ -1770,7 +1770,9 @@ function paneFocusTarget(paneId: string): HTMLElement | null {
 	const pane = document.querySelector(`.pane-area [data-pane-id="${CSS.escape(paneId)}"]`);
 	if (pane === null) return null;
 	if (pane.querySelector('.terminal-pane') !== null) {
+		// A paste waiting on its card first (#1015): it holds the keyboard until answered.
 		return (
+			pane.querySelector<HTMLElement>('.paste-confirm') ??
 			pane.querySelector<HTMLElement>('.exit-card') ??
 			pane.querySelector<HTMLElement>('.xterm-helper-textarea')
 		);

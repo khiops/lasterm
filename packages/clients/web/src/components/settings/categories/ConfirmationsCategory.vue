@@ -10,7 +10,8 @@
 			</p>
 			<p class="confirmations-help">
 				Closing a terminal that has ended is not asked about: Settings › Terminal says
-				whether it is deleted or kept in the sidebar.
+				whether it is deleted or kept in the sidebar. A paste of several lines is asked
+				about there too, globally, per host or per terminal.
 			</p>
 
 			<label v-for="entry in CONFIRMATIONS" :key="entry.key" class="confirmation-row">

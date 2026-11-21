@@ -11,12 +11,16 @@ export XDG_STATE_HOME="$TT/state"
 export XDG_RUNTIME_DIR="$TT/rt"
 export XDG_CONFIG_HOME="$TT/cfg"
 
-CONFIG_DIR="$XDG_CONFIG_HOME/lasterm"
-STATE_DIR="$XDG_STATE_HOME/lasterm"
-RUNTIME_DIR="$XDG_RUNTIME_DIR/lasterm"
+# From the hub's own resolvers, under the variables above, so the build
+# channel's names follow (#1084). CONFIG_DIR holds this hub's auth.json and its
+# own config.toml (on the dev channel, the overlay over the release file).
+hub_path() { (cd "$ROOT" && pnpm exec tsx scripts/dev/paths.mts "$1"); }
+CONFIG_DIR="$(hub_path config-dir)"
+STATE_DIR="$(hub_path state-dir)"
+SOCK="$(hub_path agent-socket)"
+RUNTIME_DIR="$(dirname "$SOCK")"
 HUBLOG="$TT/hub.log"
 PIDF="$TT/hub.pid"
-SOCK="$RUNTIME_DIR/agent.sock"
 
 ensure_dirs() {
 	mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$RUNTIME_DIR"

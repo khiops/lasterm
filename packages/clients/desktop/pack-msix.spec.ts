@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { makeTempDir, removeTempDir } from "../../hub/src/temp-dir.fixture.js";
 
 const SCRIPT = fileURLToPath(new URL("msix/pack-msix.ps1", import.meta.url));
+const MARKER_CHECK = fileURLToPath(new URL("msix/assert-release-binary.ps1", import.meta.url));
 /** A guard against a hang, not a measure: PowerShell takes a second or two to start. */
 const TIMEOUT_MS = 60_000;
 
@@ -30,7 +31,11 @@ afterEach(async () => {
  * `resources` (a file in src-tauri → its bytes) as tauri.conf.json's
  * bundle.resources mapping each to `targets`' entry.
  */
-function fixture(resources: Record<string, Buffer>, targets: Record<string, string>): string {
+function fixture(
+	resources: Record<string, Buffer>,
+	targets: Record<string, string>,
+	binaries: { desktop?: string; hub?: string } = {},
+): string {
 	// The long form of the path, which the script's messages carry.
 	const root = realpathSync.native(makeTempDir("lasterm-pack-msix-"));
 	tempDirs.push(root);
@@ -39,10 +44,14 @@ function fixture(resources: Record<string, Buffer>, targets: Record<string, stri
 		writeFileSync(join(root, path), bytes);
 	};
 	file("msix/pack-msix.ps1", readFileSync(SCRIPT));
+	file("msix/assert-release-binary.ps1", readFileSync(MARKER_CHECK));
 	file("msix/Package.appxmanifest", "<Package />");
 	file("src-tauri/Cargo.toml", '[package]\nname = "fixture-desktop"\n');
-	file("src-tauri/target/x86_64-pc-windows-msvc/release/fixture-desktop.exe", "desktop");
-	file("src-tauri/lasterm-hub-x86_64-pc-windows-msvc.exe", "hub");
+	file(
+		"src-tauri/target/x86_64-pc-windows-msvc/release/fixture-desktop.exe",
+		binaries.desktop ?? "desktop",
+	);
+	file("src-tauri/lasterm-hub-x86_64-pc-windows-msvc.exe", binaries.hub ?? "hub");
 	file("src-tauri/lasterm-agent-x86_64-pc-windows-msvc.exe", "agent");
 	for (const [source, bytes] of Object.entries(resources)) file(`src-tauri/${source}`, bytes);
 	file(
@@ -63,7 +72,7 @@ function pwsh(): string {
 }
 
 /** Runs the fixture's script to its staging: `staged`, or the message it stopped with. */
-function stage(root: string): { status: number | null; output: string } {
+function stage(root: string, flags = ""): { status: number | null; output: string } {
 	const script = join(root, "msix", "pack-msix.ps1").replace(/'/g, "''");
 	const env: NodeJS.ProcessEnv = {};
 	for (const [name, value] of Object.entries(process.env)) {
@@ -79,7 +88,7 @@ function stage(root: string): { status: number | null; output: string } {
 			"-ExecutionPolicy",
 			"Bypass",
 			"-Command",
-			`try { & '${script}' -SkipBuild -StageOnly; 'staged' } catch { 'refused: ' + $_.Exception.Message; exit 1 }`,
+			`try { & '${script}' -SkipBuild -StageOnly ${flags}; 'staged' } catch { 'refused: ' + $_.Exception.Message; exit 1 }`,
 		],
 		{ encoding: "utf8", env, timeout: TIMEOUT_MS },
 	);
@@ -136,6 +145,81 @@ describe.skipIf(process.platform !== "win32")("pack-msix.ps1 -StageOnly", () => 
 				`refused: ${join(root, "src-tauri", "tls_identity.node")} is empty, a placeholder rather than the hub's addon. Place the files the hub was built with (dist\\sea) in src-tauri, as scripts\\build-desktop.ps1 does.`,
 			);
 			expect(run.status).toBe(1);
+		},
+		TIMEOUT_MS,
+	);
+});
+
+// The release guard (#1084): with -Release, the desktop and the hub must both
+// carry the release channel's marker and not the dev one's.
+describe.skipIf(process.platform !== "win32")("pack-msix.ps1 -Release", () => {
+	const RELEASE = "bytes lasterm-build-channel:release bytes";
+	const DEV = "bytes lasterm-build-channel:dev bytes";
+	const BOTH = "lasterm-build-channel:release lasterm-build-channel:dev";
+	const ADDONS = {
+		resources: {
+			"hub_lock.node": Buffer.from("the hub lock addon"),
+			"tls_identity.node": Buffer.from("the TLS identity addon"),
+		},
+		targets: {
+			"hub_lock.node": "lasterm_hub_lock.node",
+			"tls_identity.node": "lasterm_tls_identity.node",
+		},
+	};
+
+	function run(desktop: string, hub: string, flags: string) {
+		const root = fixture(ADDONS.resources, ADDONS.targets, { desktop, hub });
+		return { root, ...stage(root, flags) };
+	}
+
+	// Mutations: the guard checks only the hub (a, c, c3), only the desktop
+	// (b, c2, c4), refuses only on a dev marker (c, c2), accepts on the release
+	// marker alone (c3, c4).
+	it.each([
+		["a dev desktop with a release hub", DEV, RELEASE, "desktop"],
+		["a release desktop with a dev hub", RELEASE, DEV, "hub"],
+		["a desktop with no marker", "desktop", RELEASE, "desktop"],
+		["a hub with no marker", RELEASE, "hub", "hub"],
+		["a desktop carrying both markers", BOTH, RELEASE, "desktop"],
+		["a hub carrying both markers", RELEASE, BOTH, "hub"],
+	])(
+		"refuses %s",
+		(_case, desktop, hub, refused) => {
+			const { root, status, output } = run(desktop, hub, "-Release");
+			const file =
+				refused === "desktop"
+					? join(
+							root,
+							"src-tauri",
+							"target",
+							"x86_64-pc-windows-msvc",
+							"release",
+							"fixture-desktop.exe",
+						)
+					: join(root, "src-tauri", "lasterm-hub-x86_64-pc-windows-msvc.exe");
+			expect(output).toContain(`refused: ${file} is not a release-channel build`);
+			expect(status).toBe(1);
+		},
+		TIMEOUT_MS,
+	);
+
+	it(
+		"stages a release desktop and a release hub",
+		() => {
+			const { status, output } = run(RELEASE, RELEASE, "-Release");
+			expect(output).toMatch(/^staged$/m);
+			expect(status, output).toBe(0);
+		},
+		TIMEOUT_MS,
+	);
+
+	// Mutation: the guard active without -Release.
+	it(
+		"stages development binaries without -Release",
+		() => {
+			const { status, output } = run(DEV, DEV, "");
+			expect(output).toMatch(/^staged$/m);
+			expect(status, output).toBe(0);
 		},
 		TIMEOUT_MS,
 	);

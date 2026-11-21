@@ -63,9 +63,14 @@ stop_agent() {
 	# agent checks its own identity record before stopping, so neither a reused
 	# pid nor someone else's daemon is ever signalled, and the endpoint is the
 	# daemon's to remove.
-	local socket
+	local socket channel_args=()
 	socket="$(cd "$ROOT" && pnpm exec tsx scripts/dev/paths.mts agent-socket)"
-	if "$AGENT_BIN" --stop --socket "$socket"; then
+	# The record is in the channel's state directory, which the agent finds only
+	# when told its channel (#1084).
+	if [ "$(cd "$ROOT" && pnpm exec tsx scripts/dev/paths.mts channel)" = dev ]; then
+		channel_args=(--channel dev)
+	fi
+	if "$AGENT_BIN" --stop --socket "$socket" "${channel_args[@]}"; then
 		echo "✓ Agent stopped ($socket)."
 	else
 		echo "Agent not stopped ($socket); see above."

@@ -69,8 +69,12 @@ function Stop-Agent {
     # (a desktop's, say) is ever signalled.
     Push-Location $Root
     $socket = (& pnpm exec tsx scripts/dev/paths.mts agent-socket | Out-String).Trim()
+    $channel = (& pnpm exec tsx scripts/dev/paths.mts channel | Out-String).Trim()
     Pop-Location
-    & $agentBin --stop --socket $socket
+    # The record is in the channel's state directory, which the agent finds only
+    # when told its channel (#1084).
+    $channelArgs = if ($channel -eq "dev") { @("--channel", "dev") } else { @() }
+    & $agentBin --stop --socket $socket @channelArgs
     if ($LASTEXITCODE -eq 0) {
         Write-Host "v Agent stopped ($socket)" -ForegroundColor Green
     } else {

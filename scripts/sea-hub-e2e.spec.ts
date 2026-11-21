@@ -114,10 +114,21 @@ const STOP_TIMEOUT_MS = 20_000;
 interface Sandbox {
 	readonly root: string;
 	readonly env: NodeJS.ProcessEnv;
-	/** Where the executable must put its state, config and cache: `<root>/…/lasterm`. */
+	/**
+	 * Where the executable must put its state, config and cache: `<root>/…/lasterm`,
+	 * or `lasterm-dev` for an executable built for the dev channel (#1084).
+	 */
 	readonly stateDir: string;
 	readonly configDir: string;
 	readonly cacheDir: string;
+}
+
+/**
+ * The channel the executable was built for, from the marker it carries, as
+ * pack-msix.ps1 reads it (#1084): what it names its directories after.
+ */
+function builtChannel(): "release" | "dev" {
+	return readFileSync(SEA_BINARY).includes("lasterm-build-channel:release") ? "release" : "dev";
 }
 
 function createSandbox(): Sandbox {
@@ -142,7 +153,7 @@ function createSandbox(): Sandbox {
 		if (!withheld.has(name.toUpperCase())) env[name] = value;
 	}
 	Object.assign(env, overrides);
-	const context = { platform: process.platform, env, homedir };
+	const context = { platform: process.platform, env, homedir, channel: builtChannel() };
 	return {
 		root,
 		env,

@@ -168,7 +168,7 @@ cd dist/sea && ./lasterm-hub start --port 4100   # serve PWA at https://127.0.0.
 - Its native addons are **installed beside it** too, never extracted (#889): it loads `lasterm_hub_lock.node` and `lasterm_tls_identity.node` from its own directory and refuses to start unless each holds the bytes recorded in the `addons.json` it embeds (SECURITY.md § 4.5). Move or copy the executable with them. The desktop bundles them as Tauri resources, and the release publishes the Windows hub as a zip of the three. Nothing is extracted at all: SQLite is `node:sqlite`, inside the embedded Node (#893).
 - Native SEA embeds the host Node — build cross-platform binaries on their target OS (Windows hub on Windows). Rust agent verify must include `cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings` (cfg(windows) lints invisible to Linux clippy).
 - Windows Rust builds link the C runtime statically (`.cargo/config.toml`, #924): a Windows without the Visual C++ Redistributable has no `VCRUNTIME140.dll`. A `RUSTFLAGS` in the environment replaces that flag. `build.yml` runs `node scripts/pe-imports.ts` on each Windows binary it builds and fails on such an import.
-- Config: `~/.config/lasterm` · State: `~/.local/state/lasterm`.
+- Config: `~/.config/lasterm` · State: `~/.local/state/lasterm`. A build not made by the release workflow uses `lasterm-dev` instead, and reads the release's `config.toml` under its own (SPEC.md § 7, Build channels).
 
 ### Desktop UI tests (Windows)
 

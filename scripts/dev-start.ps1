@@ -11,10 +11,19 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ScriptDir
 $LogDir = "$env:TEMP\lasterm-dev"
 $PidFile = "$LogDir\dev.pid"
-$PipeName = "lasterm-agent-$env:USERNAME"
-$PipePath = "\\.\pipe\$PipeName"
-$HubStateDir = Join-Path $env:LOCALAPPDATA "lasterm"
+# From the hub's own resolvers (#161), so the channel's names follow (#1084):
+# a hub run from source and this script both read LASTERM_CHANNEL.
+function Get-HubPath([string]$Which) {
+    Push-Location $Root
+    try { return (& pnpm exec tsx scripts/dev/paths.mts $Which | Out-String).Trim() }
+    finally { Pop-Location }
+}
+$PipePath = Get-HubPath agent-socket
+$PipeName = Split-Path -Leaf $PipePath
+$HubStateDir = Get-HubPath state-dir
 $HubRuntimePath = Join-Path $HubStateDir "runtime.json"
+# The agent's own names follow the hub's channel only when told (#1084).
+$AgentChannelArgs = if ((Get-HubPath channel) -eq "dev") { @("--channel", "dev") } else { @() }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -118,7 +127,7 @@ function Start-Agent {
     } else { Join-Path $Root "target" }
     $agentBin = Join-Path $targetDir "release\lasterm-agent.exe"
     $proc = Start-Process -FilePath $agentBin `
-        -ArgumentList "--daemon", "--socket", $PipePath `
+        -ArgumentList (@("--daemon", "--socket", $PipePath) + $AgentChannelArgs) `
         -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput "$LogDir\agent-stdout.log" `
         -RedirectStandardError "$LogDir\agent-stderr.log"

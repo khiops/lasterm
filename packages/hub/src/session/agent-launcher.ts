@@ -8,6 +8,7 @@ import {
 	AGENT_SOCKET_POLL_MS,
 	AGENT_SOCKET_TIMEOUT,
 	type AgentConfig,
+	buildChannel,
 	getSocketPath,
 } from "@lasterm/shared";
 import { lastermDir } from "@lasterm/shared/dist/platform-dirs.js";
@@ -67,6 +68,15 @@ export function isAgentBinary(agentPath: string): boolean {
 }
 
 /**
+ * The agent's channel argument: `--channel dev` from a dev hub, so its daemon
+ * keeps its records and reads `auth.json` in the dev directories; nothing from
+ * a release hub, whose agent argv stays as it was (#1084).
+ */
+function agentChannelArgs(): string[] {
+	return buildChannel() === "dev" ? ["--channel", "dev"] : [];
+}
+
+/**
  * Ask the identity-validating agent stopper to stop the exact daemon at socketPath.
  * This deliberately never signals an agent PID itself: only the agent can validate
  * its own process record before stopping it.
@@ -116,7 +126,7 @@ export function stopLocalAgent(
 		}, timeoutMs);
 
 		try {
-			child = spawnProcess(agentPath, ["--stop", "--socket", socketPath], {
+			child = spawnProcess(agentPath, ["--stop", "--socket", socketPath, ...agentChannelArgs()], {
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 				windowsHide: true,
@@ -262,6 +272,7 @@ function launchDaemon(agentPath: string, socketPath: string, config: AgentConfig
 		config.logFormat,
 		"--log-files-kept",
 		String(config.logFilesKept),
+		...agentChannelArgs(),
 	];
 
 	const isBin = isAgentBinary(agentPath);

@@ -1,12 +1,16 @@
 import { EventEmitter } from "node:events";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import net from "node:net";
+import os from "node:os";
 import { join } from "node:path";
 import { DEFAULT_AGENT_CONFIG, encodeFrame, type Host, PROTOCOL_VERSION } from "@lasterm/shared";
 import type { SFTPWrapper, Client as SshClient } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
+import { ConfigResolver } from "../config.js";
 import { type SecurityFields, SecurityLog } from "../logging/security-log.js";
+import { usePlatformDirs } from "../platform-dirs.fixture.js";
 import type { MetaDAL } from "../storage/meta.js";
 import type { SpoolDAL } from "../storage/spool.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
@@ -397,6 +401,54 @@ describe("quit-protected revival capabilities", () => {
 });
 
 describe("AgentConnectionManager local daemon socket", () => {
+	// AC5 (#1084). Mutation: the shared file's socket_path dropped only in the
+	// launcher, so a dev hub would still connect to the Store's agent. The attach
+	// is stopped at its first log line, which names the endpoint, before any
+	// connection is tried.
+	it("connects a dev hub to the dev default endpoint when only the shared config names a socket_path", async () => {
+		const root = makeTempDir("lasterm-acm-dev-");
+		const restore = usePlatformDirs({
+			state: join(root, "local"),
+			config: join(root, "roaming"),
+		});
+		try {
+			vi.stubEnv("XDG_RUNTIME_DIR", "/run/user/1000");
+			vi.stubEnv("LASTERM_CHANNEL", "dev");
+			mkdirSync(join(root, "roaming", "lasterm"), { recursive: true });
+			writeFileSync(
+				join(root, "roaming", "lasterm", "config.toml"),
+				String.raw`[agent]
+socket_path = '\\.\pipe\x'
+`,
+			);
+			const resolver = new ConfigResolver(null as never);
+			resolver.loadFromFile(join(root, "roaming", "lasterm-dev"));
+			const { ctx, manager } = makeHarness();
+			ctx.agentConfig = resolver.agentConfig;
+			let endpoint: unknown;
+			ctx.hubLogger = {
+				log: (_level: string, msg: string, fields?: { socketPath?: unknown }) => {
+					if (!msg.endsWith("attachDaemon")) return;
+					endpoint = fields?.socketPath;
+					throw new Error("stop before connecting");
+				},
+			} as never;
+
+			await expect(manager.connectDaemonAgent(HOST_ID, SESSION_ID)).rejects.toThrow(
+				"stop before connecting",
+			);
+			expect(endpoint).toBe(
+				process.platform === "win32"
+					? `\\\\.\\pipe\\lasterm-dev-agent-${os.userInfo().username}`
+					: "/run/user/1000/lasterm-dev/agent.sock",
+			);
+		} finally {
+			vi.unstubAllEnvs();
+			restore();
+			await removeTempDir(root);
+		}
+	});
+
 	it.skipIf(process.platform !== "win32")(
 		"fails an attach, naming [agent] socket_path, when it is not a pipe on Windows (#733)",
 		async () => {

@@ -20,6 +20,40 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// The build channel whose names this agent uses (#1084). A dev hub starts its
+/// local daemon with `--channel dev`, so the daemon keeps its records and reads
+/// `auth.json` in the dev hub's directories, never the Store build's. Absent,
+/// release: the names every earlier hub expects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum Channel {
+    Release,
+    Dev,
+}
+
+impl Channel {
+    /// The name every channel-specific directory and pipe is built from.
+    pub(crate) fn base_name(self) -> &'static str {
+        match self {
+            Channel::Release => "lasterm",
+            Channel::Dev => "lasterm-dev",
+        }
+    }
+}
+
+static CHANNEL: OnceLock<Channel> = OnceLock::new();
+
+/// Fix this process's channel, once, from its command line, before anything
+/// resolves a directory.
+pub(crate) fn set_channel(channel: Channel) {
+    let _ = CHANNEL.set(channel);
+}
+
+/// This process's channel: release unless `set_channel` said otherwise.
+pub(crate) fn channel() -> Channel {
+    CHANNEL.get().copied().unwrap_or(Channel::Release)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DirKind {
@@ -36,9 +70,24 @@ impl DirKind {
     }
 }
 
-/// lasterm's own directory for `kind`, from this process's environment.
+/// The agent's default Windows pipe on `channel`: `\\.\pipe\<base>-agent-<user>`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn default_pipe_name(channel: Channel, username: &str) -> String {
+    format!(r"\\.\pipe\{}-agent-{username}", channel.base_name())
+}
+
+/// lasterm's own directory for `kind`, from this process's environment and
+/// channel.
 pub(crate) fn lasterm_dir(kind: DirKind) -> io::Result<PathBuf> {
-    lasterm_dir_in(kind, cfg!(windows), |name| std::env::var_os(name))
+    lasterm_dir_for(kind, channel())
+}
+
+/// lasterm's own directory for `kind` on `channel`, from this process's
+/// environment.
+pub(crate) fn lasterm_dir_for(kind: DirKind, channel: Channel) -> io::Result<PathBuf> {
+    lasterm_dir_in(kind, cfg!(windows), channel.base_name(), |name| {
+        std::env::var_os(name)
+    })
 }
 
 /// The rule itself, with the platform and the environment passed in, so that
@@ -46,6 +95,7 @@ pub(crate) fn lasterm_dir(kind: DirKind) -> io::Result<PathBuf> {
 fn lasterm_dir_in(
     kind: DirKind,
     windows: bool,
+    base: &str,
     var: impl Fn(&str) -> Option<OsString>,
 ) -> io::Result<PathBuf> {
     if windows {
@@ -66,7 +116,7 @@ fn lasterm_dir_in(
                 kind.label()
             )));
         }
-        return Ok(PathBuf::from(value).join("lasterm"));
+        return Ok(PathBuf::from(value).join(base));
     }
 
     let (name, home_default): (&str, &[&str]) = match kind {
@@ -74,7 +124,7 @@ fn lasterm_dir_in(
         DirKind::Config => ("XDG_CONFIG_HOME", &[".config"]),
     };
     if let Some(value) = var(name).filter(|value| is_absolute(value, false)) {
-        return Ok(PathBuf::from(value).join("lasterm"));
+        return Ok(PathBuf::from(value).join(base));
     }
     let home = var("HOME")
         .filter(|home| is_absolute(home, false))
@@ -86,7 +136,7 @@ fn lasterm_dir_in(
         })?;
     let mut path = PathBuf::from(home);
     path.extend(home_default);
-    Ok(path.join("lasterm"))
+    Ok(path.join(base))
 }
 
 /// Absoluteness by the rules of the platform being resolved for, not the one
@@ -135,28 +185,32 @@ mod tests {
             ("XDG_STATE_HOME", "/ignored"),
         ]);
         assert_eq!(
-            lasterm_dir_in(DirKind::State, true, &vars).unwrap(),
+            lasterm_dir_in(DirKind::State, true, "lasterm", &vars).unwrap(),
             PathBuf::from(r"C:\Users\jane\AppData\Local").join("lasterm")
         );
         assert_eq!(
-            lasterm_dir_in(DirKind::Config, true, &vars).unwrap(),
+            lasterm_dir_in(DirKind::Config, true, "lasterm", &vars).unwrap(),
             PathBuf::from(r"C:\Users\jane\AppData\Roaming").join("lasterm")
         );
     }
 
     #[test]
     fn windows_refuses_an_absent_empty_or_relative_variable_naming_it() {
-        assert!(message(lasterm_dir_in(DirKind::State, true, env(&[])))
-            .contains("LOCALAPPDATA is absent or empty"));
+        assert!(
+            message(lasterm_dir_in(DirKind::State, true, "lasterm", env(&[])))
+                .contains("LOCALAPPDATA is absent or empty")
+        );
         assert!(message(lasterm_dir_in(
             DirKind::State,
             true,
+            "lasterm",
             env(&[("LOCALAPPDATA", "")])
         ))
         .contains("LOCALAPPDATA is absent or empty"));
         assert!(message(lasterm_dir_in(
             DirKind::State,
             true,
+            "lasterm",
             env(&[("LOCALAPPDATA", r"AppData\Local")])
         ))
         .contains(r"LOCALAPPDATA is not an absolute path (AppData\Local)"));
@@ -167,8 +221,10 @@ mod tests {
         // The previous rule read LOCALAPPDATA when APPDATA was unset, a
         // directory the hub would never have written auth.json to.
         let vars = env(&[("LOCALAPPDATA", r"C:\Local")]);
-        assert!(message(lasterm_dir_in(DirKind::Config, true, vars))
-            .contains("APPDATA is absent or empty"));
+        assert!(
+            message(lasterm_dir_in(DirKind::Config, true, "lasterm", vars))
+                .contains("APPDATA is absent or empty")
+        );
     }
 
     #[test]
@@ -179,11 +235,11 @@ mod tests {
             ("HOME", "/home/jane"),
         ]);
         assert_eq!(
-            lasterm_dir_in(DirKind::State, false, &vars).unwrap(),
+            lasterm_dir_in(DirKind::State, false, "lasterm", &vars).unwrap(),
             PathBuf::from("/xdg/state").join("lasterm")
         );
         assert_eq!(
-            lasterm_dir_in(DirKind::Config, false, &vars).unwrap(),
+            lasterm_dir_in(DirKind::Config, false, "lasterm", &vars).unwrap(),
             PathBuf::from("/xdg/config").join("lasterm")
         );
     }
@@ -197,11 +253,11 @@ mod tests {
                 ("HOME", "/home/jane"),
             ]);
             assert_eq!(
-                lasterm_dir_in(DirKind::State, false, &vars).unwrap(),
+                lasterm_dir_in(DirKind::State, false, "lasterm", &vars).unwrap(),
                 PathBuf::from("/home/jane/.local/state/lasterm")
             );
             assert_eq!(
-                lasterm_dir_in(DirKind::Config, false, &vars).unwrap(),
+                lasterm_dir_in(DirKind::Config, false, "lasterm", &vars).unwrap(),
                 PathBuf::from("/home/jane/.config/lasterm")
             );
         }
@@ -210,8 +266,78 @@ mod tests {
     #[test]
     fn elsewhere_refuses_without_an_absolute_home_instead_of_using_tmp() {
         for vars in [env(&[]), env(&[("HOME", "")]), env(&[("HOME", "jane")])] {
-            assert!(message(lasterm_dir_in(DirKind::Config, false, vars))
-                .contains("XDG_CONFIG_HOME is not an absolute path and neither is HOME"));
+            assert!(
+                message(lasterm_dir_in(DirKind::Config, false, "lasterm", vars))
+                    .contains("XDG_CONFIG_HOME is not an absolute path and neither is HOME")
+            );
+        }
+    }
+
+    // #1084. Mutations: a branch left joining `lasterm` (red on its dev case,
+    // the HOME fallback included); the channel ignored by the lookup.
+    #[test]
+    fn the_dev_channel_names_lasterm_dev_on_every_branch() {
+        let windows = env(&[("LOCALAPPDATA", r"C:\Local"), ("APPDATA", r"C:\Roaming")]);
+        assert_eq!(
+            lasterm_dir_in(DirKind::State, true, "lasterm-dev", &windows).unwrap(),
+            PathBuf::from(r"C:\Local").join("lasterm-dev")
+        );
+        assert_eq!(
+            lasterm_dir_in(DirKind::Config, true, "lasterm-dev", &windows).unwrap(),
+            PathBuf::from(r"C:\Roaming").join("lasterm-dev")
+        );
+        let xdg = env(&[
+            ("XDG_STATE_HOME", "/xdg/state"),
+            ("XDG_CONFIG_HOME", "/xdg/config"),
+        ]);
+        assert_eq!(
+            lasterm_dir_in(DirKind::State, false, "lasterm-dev", &xdg).unwrap(),
+            PathBuf::from("/xdg/state").join("lasterm-dev")
+        );
+        assert_eq!(
+            lasterm_dir_in(DirKind::Config, false, "lasterm-dev", &xdg).unwrap(),
+            PathBuf::from("/xdg/config").join("lasterm-dev")
+        );
+        let home = env(&[("HOME", "/home/jane")]);
+        assert_eq!(
+            lasterm_dir_in(DirKind::State, false, "lasterm-dev", &home).unwrap(),
+            PathBuf::from("/home/jane/.local/state/lasterm-dev")
+        );
+        assert_eq!(
+            lasterm_dir_in(DirKind::Config, false, "lasterm-dev", &home).unwrap(),
+            PathBuf::from("/home/jane/.config/lasterm-dev")
+        );
+    }
+
+    // Mutation: the default pipe left spelled `lasterm-agent-` (red on dev).
+    #[test]
+    fn the_default_pipe_follows_the_channel() {
+        assert_eq!(
+            default_pipe_name(Channel::Release, "alice"),
+            r"\\.\pipe\lasterm-agent-alice"
+        );
+        assert_eq!(
+            default_pipe_name(Channel::Dev, "alice"),
+            r"\\.\pipe\lasterm-dev-agent-alice"
+        );
+    }
+
+    #[test]
+    fn the_channel_base_names_are_lasterm_and_lasterm_dev() {
+        assert_eq!(Channel::Release.base_name(), "lasterm");
+        assert_eq!(Channel::Dev.base_name(), "lasterm-dev");
+    }
+
+    // The lookup this process makes follows the channel passed: the
+    // configuration directory, which holds the hub's auth.json, included.
+    #[test]
+    fn lasterm_dir_for_follows_the_channel() {
+        for kind in [DirKind::State, DirKind::Config] {
+            let release = lasterm_dir_for(kind, Channel::Release).unwrap();
+            let dev = lasterm_dir_for(kind, Channel::Dev).unwrap();
+            assert_eq!(release.file_name().unwrap(), "lasterm");
+            assert_eq!(dev.file_name().unwrap(), "lasterm-dev");
+            assert_eq!(release.parent(), dev.parent());
         }
     }
 }

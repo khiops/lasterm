@@ -1,6 +1,7 @@
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { type BuildChannel, buildChannel, channelBaseName } from "./build-channel.js";
 
 /** Timeout for waiting for agent daemon socket (ms) */
 export const AGENT_SOCKET_TIMEOUT = 5000;
@@ -16,12 +17,16 @@ export function isWindowsPipePath(value: string): boolean {
 /**
  * Get the platform-appropriate socket path for the agent daemon.
  *
- * - Linux/macOS: `$XDG_RUNTIME_DIR/lasterm/agent.sock` (fallback: `/tmp/lasterm-<UID>/agent.sock`)
- * - Windows: `\\.\pipe\lasterm-agent-<username>`
+ * - Linux/macOS: `$XDG_RUNTIME_DIR/<base>/agent.sock` (fallback: `/tmp/<base>-<UID>/agent.sock`)
+ * - Windows: `\\.\pipe\<base>-agent-<username>`
+ *
+ * `<base>` is `lasterm` on the release channel and `lasterm-dev` on the dev
+ * channel (#1084), so a development build never reaches the Store's agent.
  *
  * @param override Optional override path from config.toml [agent].socket_path
+ * @param channel The build channel; the running build's when absent
  */
-export function getSocketPath(override?: string): string {
+export function getSocketPath(override?: string, channel: BuildChannel = buildChannel()): string {
 	if (override) {
 		// A filesystem path names nothing a Windows agent can listen on (#733).
 		if (process.platform === "win32" && !isWindowsPipePath(override)) {
@@ -32,19 +37,20 @@ export function getSocketPath(override?: string): string {
 		return override;
 	}
 
+	const base = channelBaseName(channel);
 	if (process.platform === "win32") {
 		const username = os.userInfo().username;
-		return `\\\\.\\pipe\\lasterm-agent-${username}`;
+		return `\\\\.\\pipe\\${base}-agent-${username}`;
 	}
 
-	// Unix: prefer XDG_RUNTIME_DIR, fallback to /tmp/lasterm-<UID>
+	// Unix: prefer XDG_RUNTIME_DIR, fallback to /tmp/<base>-<UID>
 	const xdgRuntime = process.env.XDG_RUNTIME_DIR;
 	if (xdgRuntime) {
-		return path.join(xdgRuntime, "lasterm", "agent.sock");
+		return path.join(xdgRuntime, base, "agent.sock");
 	}
 
 	const uid = os.userInfo().uid;
-	return path.join("/tmp", `lasterm-${uid}`, "agent.sock");
+	return path.join("/tmp", `${base}-${uid}`, "agent.sock");
 }
 
 /**

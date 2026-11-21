@@ -410,6 +410,10 @@ jobs:
       matrix: ${{ fromJson(needs.matrix.outputs.hub) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
+    # The build channel (#1084): a release builds the release channel's hub, every
+    # other run a dev one, with its own names (empty is dev).
+    env:
+      LASTERM_CHANNEL: ${{ inputs.release && 'release' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -504,6 +508,14 @@ jobs:
         env:
           LASTERM_SEA_EXPECTED: "1"
         run: pnpm exec vitest run --project scripts scripts/sea-hub-e2e.spec.ts
+      # A release ships only a release-channel hub: the marker the build writes,
+      # and not the dev one's (#1084). The script prints the marker it found.
+      - name: Release channel marker
+        if: inputs.release
+        shell: pwsh
+        env:
+          EXE: ${{ matrix.os == 'windows' && 'lasterm-hub.exe' || 'lasterm-hub' }}
+        run: ./packages/clients/desktop/msix/assert-release-binary.ps1 -Path "dist/sea/$env:EXE"
       # The executable and the addons it loads from its own directory (#889),
       # which it does not start without; release-assets.ts publishes the three
       # as one zip. dist/sea also holds lasterm-hub.cjs and addons.json, the SEA
@@ -534,6 +546,9 @@ jobs:
       matrix: ${{ fromJson(needs.matrix.outputs.desktop) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    # The build channel (#1084), as in build-hub.
+    env:
+      LASTERM_CHANNEL: ${{ inputs.release && 'release' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -673,6 +688,11 @@ jobs:
             $packArgs.PublisherDisplayName = $env:MSIX_PUBLISHER_DISPLAY_NAME
           } elseif ($env:RELEASE -eq 'true') {
             throw "MSIX packaging was frozen on for this release, but its repository variables are now unset"
+          }
+          # A release packs only release-channel binaries (#1084). A dispatch packs
+          # its dev ones into a run artifact the store job never takes.
+          if ($env:RELEASE -eq 'true') {
+            $packArgs.Release = $true
           }
           .\packages\clients\desktop\msix\pack-msix.ps1 @packArgs
       # #304: the deliverables are the files the bundler writes directly into the

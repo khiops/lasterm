@@ -21,10 +21,11 @@ import {
 import { request as httpsRequest } from "node:https";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { sshPortFromText } from "@lasterm/shared";
+import { buildChannel, sshPortFromText } from "@lasterm/shared";
 import { lastermDir } from "@lasterm/shared/dist/platform-dirs.js";
 import { replaceFileSync } from "@lasterm/shared/dist/replace-file.js";
 import { createOwnerOnlyDirectory } from "./auth.js";
+import { configFilePath, readsSharedConfig } from "./config-sources.js";
 import {
 	buildDaemonSpawnPlan,
 	type ChildExitState,
@@ -497,6 +498,8 @@ export interface ParsedArgs {
 	daemon?: boolean;
 	/** Only the desktop passes it: stop when the launcher's stdin pipe closes (#188). */
 	exitWithStdin?: boolean;
+	/** The build channel the launcher expects; start refuses another (#1084). */
+	channel?: string;
 	// host add
 	label?: string;
 	host?: string;
@@ -563,6 +566,8 @@ export function parseArgs(argv: string[]): ParsedArgs | null {
 		if (port === null) result.portRefused = true;
 		else result.port = port;
 	}
+
+	if (args.includes("--channel")) result.channel = flagValue("--channel") ?? "";
 
 	const labelVal = flagValue("--label");
 	if (labelVal !== undefined) result.label = labelVal;
@@ -938,6 +943,14 @@ function printAgentStatusTable(
 // ─── Command handlers ──────────────────────────────────────────────────────────
 
 export async function cmdStart(args: ParsedArgs): Promise<number> {
+	// A desktop of one channel starting a hub of the other would mix the two
+	// builds' names: refuse before anything is created (#1084).
+	if (args.channel !== undefined && args.channel !== buildChannel()) {
+		console.error(
+			`This hub is a ${buildChannel()} build; its launcher asked for the ${JSON.stringify(args.channel)} channel. Start the hub built with the launcher.`,
+		);
+		return 1;
+	}
 	if (args.portRefused) {
 		console.error("--port must be a number from 1 to 65535, in digits only");
 		console.error("Usage: lasterm start [--port 4100] [--daemon] [--open]");
@@ -1761,14 +1774,28 @@ async function cmdPair(args: ParsedArgs): Promise<void> {
 	}
 }
 
-async function cmdConfigEdit(): Promise<void> {
-	const configPath = join(getConfigDir(), "config.toml");
+export interface ConfigEditCommandDeps {
+	readonly openEditor?: (editor: string, file: string) => void;
+}
+
+/**
+ * Open this build's `config.toml` in the editor. A development build opens its
+ * overlay, the file all its writes go to, and creates its directory first,
+ * owner-only; the Store's file it reads under it is never opened (#1084).
+ */
+export async function cmdConfigEdit(deps: ConfigEditCommandDeps = {}): Promise<void> {
+	const configDir = getConfigDir();
+	const configPath = configFilePath(configDir);
 	const editor =
 		process.env.VISUAL ?? process.env.EDITOR ?? (process.platform === "win32" ? "notepad" : "vi");
+	const openEditor =
+		deps.openEditor ??
+		((command: string, file: string) => execFileSync(command, [file], { stdio: "inherit" }));
 
+	if (readsSharedConfig()) createOwnerOnlyDirectory(configDir);
 	console.log(`Opening ${configPath} in ${editor}…`);
 	try {
-		execFileSync(editor, [configPath], { stdio: "inherit" });
+		openEditor(editor, configPath);
 	} catch (err) {
 		console.error(`Failed to open editor: ${(err as Error).message}`);
 		process.exit(1);

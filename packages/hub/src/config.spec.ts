@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { JsonMap } from "@iarna/toml";
 import type { CascadeResponse, ElevationMethod } from "@lasterm/shared";
 import {
@@ -11,6 +11,7 @@ import {
 	deepMerge,
 	generateId,
 } from "@lasterm/shared";
+import { lastermDir } from "@lasterm/shared/dist/platform-dirs.js";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -33,10 +34,13 @@ import {
 	extractLogConfig,
 	extractSshConfig,
 	extractUiConfig,
+	loadCorsOrigins,
 	loadGcConfig,
 	loadTlsConfig,
 	loadUiConfig,
 } from "./config.js";
+import { resetConfigWarnings, sharedConfigCandidates } from "./config-sources.js";
+import { usePlatformDirs } from "./platform-dirs.fixture.js";
 import { createServer } from "./server.fixture.js";
 import type { DatabaseManager } from "./storage/db.js";
 import { openTestDatabases } from "./storage/db.js";
@@ -2818,4 +2822,313 @@ describe("extractAgentConfig", () => {
 			expect(extractAgentConfig({ logging: { agent_files_kept: refused } }).logFilesKept).toBe(7);
 		}
 	});
+});
+
+// ─── Dev channel: the Store's config.toml under the dev overlay (#1084) ──────
+//
+// A development build reads the file the Store build reads (S) and writes only
+// its own overlay (O), applied on top. S is, on Windows, the Store package's
+// private copy when it exists, else the real %APPDATA%\lasterm\config.toml;
+// elsewhere <XDG_CONFIG_HOME>/lasterm/config.toml.
+
+describe("sharedConfigCandidates (#1084)", () => {
+	it("tries the Store package's private copy, then the real APPDATA file, on Windows", () => {
+		expect(
+			sharedConfigCandidates({
+				platform: "win32",
+				env: { LOCALAPPDATA: "C:\\L", APPDATA: "C:\\R" },
+				homedir: () => "C:\\Users\\jane",
+			}),
+		).toEqual([
+			"C:\\L\\Packages\\O2CSI.Lasterm_sx7tynvv0nmw4\\LocalCache\\Roaming\\lasterm\\config.toml",
+			"C:\\R\\lasterm\\config.toml",
+		]);
+	});
+
+	// AC8 f: S and O under an explicit XDG_CONFIG_HOME, written out.
+	it("reads the release channel's XDG file elsewhere, beside the dev overlay's directory", () => {
+		const context = {
+			platform: "linux" as const,
+			env: { XDG_CONFIG_HOME: "/x" },
+			homedir: () => "/h",
+		};
+		expect(sharedConfigCandidates(context)).toEqual(["/x/lasterm/config.toml"]);
+		expect(lastermDir("config", { ...context, channel: "dev" })).toBe("/x/lasterm-dev");
+	});
+});
+
+describe("ConfigResolver on the dev channel (#1084)", () => {
+	const windows = process.platform === "win32";
+	const PIPE_X = String.raw`\\.\pipe\x`;
+	const PIPE_MINE = String.raw`\\.\pipe\mine`;
+	let dbs: DatabaseManager;
+	let metaDal: MetaDAL;
+	let root: string;
+	let restoreDirs: () => void;
+	/** S as the real APPDATA file (Windows) or the XDG file (elsewhere). */
+	let shared: string;
+	/** S as the Store package's private copy (Windows only). */
+	let privateShared: string;
+	/** The dev overlay's directory, the dev hub's config dir. */
+	let devDir: string;
+	let overlay: string;
+
+	function put(file: string, text: string): void {
+		mkdirSync(dirname(file), { recursive: true });
+		writeFileSync(file, text);
+	}
+
+	function load(): ConfigResolver {
+		const resolver = new ConfigResolver(metaDal);
+		resolver.loadFromFile(devDir);
+		return resolver;
+	}
+
+	beforeEach(() => {
+		dbs = openTestDatabases();
+		metaDal = new MetaDAL(dbs.meta);
+		root = makeTempDir("lasterm-dev-config-");
+		restoreDirs = usePlatformDirs({ state: join(root, "local"), config: join(root, "roaming") });
+		vi.stubEnv("LASTERM_CHANNEL", "dev");
+		resetConfigWarnings();
+		shared = join(root, "roaming", "lasterm", "config.toml");
+		privateShared = join(
+			root,
+			"local",
+			"Packages",
+			"O2CSI.Lasterm_sx7tynvv0nmw4",
+			"LocalCache",
+			"Roaming",
+			"lasterm",
+			"config.toml",
+		);
+		devDir = join(root, "roaming", "lasterm-dev");
+		overlay = join(devDir, "config.toml");
+	});
+
+	afterEach(async () => {
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+		restoreDirs();
+		dbs.close();
+		await removeTempDir(root);
+	});
+
+	// AC8 a. Mutation: the private path never consulted.
+	it.skipIf(!windows)("reads the Store package's private copy before the real APPDATA file", () => {
+		put(privateShared, "[terminal]\nfont_size = 20\n");
+		put(shared, "[terminal]\nfont_size = 30\n");
+		expect(load().getGlobalTerminalOverrides()).toEqual({ fontSize: 20 });
+	});
+
+	// AC8 b (and f, where this file is the XDG one). Mutation: dev reads only O.
+	it("reads the shared file when there is no private copy", () => {
+		put(shared, "[terminal]\nfont_size = 30\n");
+		expect(load().getGlobalTerminalOverrides()).toEqual({ fontSize: 30 });
+	});
+
+	// AC8 c.
+	it("gives the defaults with neither file", () => {
+		const resolver = load();
+		expect(resolver.getGlobalTerminalOverrides()).toEqual({});
+		expect(resolver.resolve().fontSize).toBe(14);
+	});
+
+	// AC8 d. Mutation: O replaces whole tables.
+	it("lets a key in the overlay override the shared key, the table merging key by key", () => {
+		put(shared, '[terminal]\nfont_size = 20\ncursor_style = "bar"\n');
+		put(overlay, "[terminal]\nfont_size = 12\n");
+		expect(load().getGlobalTerminalOverrides()).toEqual({ fontSize: 12, cursorStyle: "bar" });
+	});
+
+	// AC8 e. Mutation: an unparsable private copy falls back to the real file.
+	it.skipIf(!windows)(
+		"takes an unparsable private copy as an empty shared file, not the real one",
+		() => {
+			put(privateShared, "[terminal\nfont_size = 20\n");
+			put(shared, "[terminal]\nfont_size = 30\n");
+			expect(load().getGlobalTerminalOverrides()).toEqual({});
+		},
+	);
+
+	// AC8 i. Mutation: an unreadable private copy falls back to the real file.
+	it.skipIf(!windows)(
+		"takes an unreadable private copy as an empty shared file, not the real one",
+		() => {
+			mkdirSync(privateShared, { recursive: true });
+			put(shared, "[terminal]\nfont_size = 30\n");
+			expect(load().getGlobalTerminalOverrides()).toEqual({});
+		},
+	);
+
+	// AC8 g. Mutation: arrays merged element by element.
+	it("replaces a shared array with the overlay's whole", () => {
+		put(shared, '[server]\ncors_origins = ["https://a", "https://b"]\n');
+		put(overlay, '[server]\ncors_origins = ["https://c"]\n');
+		expect(load().corsOrigins).toEqual(["https://c"]);
+		expect(loadCorsOrigins(devDir)).toEqual(["https://c"]);
+	});
+
+	// AC8 h. Mutation: a removed key kept from an earlier read.
+	it("shows the shared value again once the key is removed from the overlay", async () => {
+		put(shared, "[terminal]\nfont_size = 20\n");
+		put(overlay, "[terminal]\nfont_size = 12\n");
+		const resolver = load();
+		expect(resolver.resolve().fontSize).toBe(12);
+		await resolver.saveGlobalTerminal("fontSize", null);
+		expect(resolver.resolve().fontSize).toBe(20);
+	});
+
+	// AC8 j. Mutations: a save overwrites a malformed overlay; O read errors propagated.
+	it.each([
+		["unparsable", false],
+		["unreadable", true],
+	])(
+		"reads the shared values over an %s overlay, and refuses to save over it",
+		async (_kind, directory) => {
+			put(shared, "[terminal]\nfont_size = 20\n");
+			if (directory) mkdirSync(overlay, { recursive: true });
+			else put(overlay, "[terminal\nfont_size = 12\n");
+			const resolver = load();
+			expect(resolver.getGlobalTerminalOverrides()).toEqual({ fontSize: 20 });
+			await expect(resolver.saveGlobalUi("tabs", "closeButton", false)).rejects.toThrow(overlay);
+			if (directory) expect(statSync(overlay).isDirectory()).toBe(true);
+			else expect(readFileSync(overlay, "utf8")).toBe("[terminal\nfont_size = 12\n");
+		},
+	);
+
+	// AC8 o. Mutations: the previous file layer kept when S breaks, or when S is deleted.
+	it.each([
+		["stops parsing", false],
+		["is deleted", true],
+	])("forgets what the shared file gave once it %s", async (_how, deleted) => {
+		put(shared, "[terminal]\nfont_size = 20\n");
+		const resolver = load();
+		expect(resolver.resolve().fontSize).toBe(20);
+		if (deleted) rmSync(shared);
+		else put(shared, "[terminal\nfont_size = 20\n");
+		await resolver.saveGlobalUi("tabs", "closeButton", false);
+		expect(resolver.resolve().fontSize).toBe(14);
+		expect(resolver.getGlobalTerminalOverrides()).toEqual({});
+	});
+
+	// AC8 p. Mutation: a WARN at every read.
+	it("warns once per process for the ignored socket_path, the shared file and the overlay", () => {
+		const lines: string[] = [];
+		vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string | Uint8Array) => {
+			lines.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write);
+		put(shared, `[agent]\nsocket_path = '${PIPE_X}'\n`);
+		for (let i = 0; i < 3; i++) load();
+		put(shared, "[terminal\n");
+		put(overlay, "[terminal\n");
+		for (let i = 0; i < 3; i++) load();
+		const warnings = lines.filter((line) => line.includes("WARN"));
+		expect(warnings).toHaveLength(3);
+		expect(warnings.filter((line) => line.includes("socket_path"))).toHaveLength(1);
+		expect(warnings.filter((line) => line.includes(shared))).toHaveLength(1);
+		expect(warnings.filter((line) => line.includes(overlay))).toHaveLength(1);
+	});
+
+	// A parse error's message quotes the lines around it; a secret there must
+	// not reach the hub's log or the save error (CLAUDE.md, Logging). Mutation:
+	// the parse error's message written as it comes.
+	it("names a broken file's path and position, never its content", async () => {
+		const lines: string[] = [];
+		vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string | Uint8Array) => {
+			lines.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write);
+		const broken = '[terminal.env]\nAPI_TOKEN = "sk-secret-123"\nbroken = \n';
+		put(shared, broken);
+		put(overlay, broken);
+		const resolver = load();
+		const error = await resolver.saveGlobalUi("tabs", "closeButton", false).then(
+			() => undefined,
+			(caught: unknown) => String(caught),
+		);
+		const said = [...lines, error ?? ""].join("\n");
+		expect(said).not.toContain("sk-secret-123");
+		expect(lines.filter((line) => line.includes("line 3, column 10"))).toHaveLength(2);
+		expect(error).toContain(`${overlay} does not parse: TOML syntax error at line 3, column 10`);
+	});
+
+	// AC8 k. Mutation: every socket_path dropped in dev.
+	it("uses a socket_path the overlay sets, and drops the shared file's", () => {
+		put(shared, `[agent]\nsocket_path = '${PIPE_X}'\n`);
+		expect(load().agentConfig.socketPath).toBeUndefined();
+		put(overlay, `[agent]\nsocket_path = '${PIPE_MINE}'\n`);
+		expect(load().agentConfig.socketPath).toBe(PIPE_MINE);
+	});
+
+	// AC8 l. Mutation: terminal.env merged key by key (FOO comes back).
+	it("replaces terminal.env whole: a rename gives exactly the edited set, an empty map shows the shared one", async () => {
+		put(shared, '[terminal.env]\nFOO = "x"\n');
+		const resolver = load();
+		expect(resolver.getGlobalTerminalOverrides().env).toEqual({ FOO: "x" });
+		await resolver.saveGlobalTerminal("env", { BAR: "x" });
+		expect(resolver.getGlobalTerminalOverrides().env).toEqual({ BAR: "x" });
+		await resolver.saveGlobalTerminal("env", null);
+		expect(resolver.getGlobalTerminalOverrides().env).toEqual({ FOO: "x" });
+	});
+
+	// AC8 l, theme overrides.
+	it("replaces terminal.theme_overrides whole", () => {
+		put(shared, '[terminal.theme_overrides]\nbackground = "#000000"\nforeground = "#ffffff"\n');
+		put(overlay, '[terminal.theme_overrides]\nbackground = "#111111"\n');
+		expect(load().getGlobalTerminalOverrides().themeOverrides).toEqual({ background: "#111111" });
+	});
+
+	// AC8 m. Mutation: appearance sub-tables replaced whole.
+	it("merges [appearance.<key>] sub-tables key by key", () => {
+		put(shared, "[appearance.opacity]\nterminal = 80\nsidebar = 70\n");
+		put(overlay, "[appearance.opacity]\nterminal = 50\n");
+		expect(load().appearance.opacity).toMatchObject({ terminal: 50, sidebar: 70 });
+	});
+
+	// AC8 n. Mutation: loadTlsConfig parsing S unguarded.
+	it("lets a malformed shared file contribute nothing, no loader throwing", () => {
+		put(shared, "[server\ntls_certificate = 1\n");
+		expect(loadTlsConfig(devDir)).toEqual({});
+		expect(loadGcConfig(devDir)).toEqual(DEFAULT_GC_CONFIG);
+		expect(loadUiConfig(devDir)).toEqual(DEFAULT_UI_CONFIG);
+		expect(loadCorsOrigins(devDir)).toEqual(["tauri://localhost", "http://tauri.localhost"]);
+		expect(load().getGlobalTerminalOverrides()).toEqual({});
+	});
+
+	// AC8, release unchanged: the release channel reads its own file only.
+	it("reads only its own file on the release channel", () => {
+		vi.stubEnv("LASTERM_CHANNEL", "release");
+		put(shared, "[terminal]\nfont_size = 30\n");
+		put(overlay, "[terminal]\nfont_size = 12\n");
+		expect(load().getGlobalTerminalOverrides()).toEqual({ fontSize: 12 });
+		const elsewhere = new ConfigResolver(metaDal);
+		elsewhere.loadFromFile(join(root, "elsewhere"));
+		expect(elsewhere.getGlobalTerminalOverrides()).toEqual({});
+	});
+
+	// AC10 / R4. Mutation: the writer targets the resolved shared file.
+	it("writes a setting to the overlay and leaves the shared file byte-identical", async () => {
+		put(shared, "# the Store's\n[terminal]\nfont_size = 20\n");
+		const before = readFileSync(shared, "utf8");
+		const resolver = load();
+		await resolver.saveGlobalUi("tabs", "closeButton", false);
+		expect(readFileSync(shared, "utf8")).toBe(before);
+		expect(readFileSync(overlay, "utf8")).toContain("close_button = false");
+		expect(resolver.uiConfig.tabs.closeButton).toBe(false);
+		expect(resolver.resolve().fontSize).toBe(20);
+	});
+
+	// R5. Mutation: S read without the directory check.
+	it.skipIf(windows)(
+		"ignores a shared file in a group-writable directory, reads it in a 0700 one",
+		() => {
+			put(shared, "[terminal]\nfont_size = 30\n");
+			chmodSync(dirname(shared), 0o775);
+			expect(load().getGlobalTerminalOverrides()).toEqual({});
+			chmodSync(dirname(shared), 0o700);
+			expect(load().getGlobalTerminalOverrides()).toEqual({ fontSize: 30 });
+		},
+	);
 });

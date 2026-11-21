@@ -18,6 +18,11 @@ PID_FILE="$LOG_DIR/dev.pid"
 # Both come from the hub's own resolvers (#161): a shell copy of the rule drifted.
 AGENT_SOCK="$(cd "$ROOT" && pnpm exec tsx scripts/dev/paths.mts agent-socket)"
 HUB_STATE_DIR="$(cd "$ROOT" && pnpm exec tsx scripts/dev/paths.mts state-dir)"
+# The agent's own names follow the hub's channel only when told (#1084).
+AGENT_CHANNEL_ARGS=()
+if [ "$(cd "$ROOT" && pnpm exec tsx scripts/dev/paths.mts channel)" = dev ]; then
+	AGENT_CHANNEL_ARGS=(--channel dev)
+fi
 
 mkdir -p "$LOG_DIR"
 
@@ -103,7 +108,7 @@ start_agent() {
 
 	echo "Starting agent daemon…"
 	local AGENT_BIN="$TARGET_DIR/release/lasterm-agent"
-	setsid "$AGENT_BIN" --daemon --socket "$AGENT_SOCK" \
+	setsid "$AGENT_BIN" --daemon --socket "$AGENT_SOCK" "${AGENT_CHANNEL_ARGS[@]}" \
 		> "$LOG_DIR/agent.log" 2>&1 &
 
 	# Wait for socket to appear

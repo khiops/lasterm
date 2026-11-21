@@ -487,11 +487,11 @@ async fn run_daemon_impl_with_manager(
 
 /// Returns the named pipe path for this agent instance.
 ///
-/// Format: `\\.\pipe\lasterm-agent-<username>`
+/// Format: `\\.\pipe\<base>-agent-<username>`, `<base>` following the channel.
 #[cfg(windows)]
 fn get_pipe_name() -> String {
     let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
-    format!(r"\\.\pipe\lasterm-agent-{}", username)
+    crate::platform_dirs::default_pipe_name(crate::platform_dirs::channel(), &username)
 }
 
 /// Refuses a `--socket` that is not a named pipe (`\\.\pipe\<name>`).

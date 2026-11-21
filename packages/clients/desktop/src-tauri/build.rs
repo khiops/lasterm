@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 
+#[path = "build_channel.rs"]
+mod build_channel;
+
 /// The Windows manifest of the binaries this crate links: the executable, which
 /// tauri-build embeds it in, and the unit tests, which load Tauri's app too. It
 /// names Common Controls 6. This is tauri-build's own default, kept here so that
@@ -10,6 +13,7 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         write_test_manifest();
     }
+    apply_build_channel();
     let windows = tauri_build::WindowsAttributes::new().app_manifest(WINDOWS_MANIFEST);
     let attributes = tauri_build::Attributes::new().windows_attributes(windows);
     if let Err(error) = tauri_build::try_build(attributes) {
@@ -60,4 +64,34 @@ fn resource_entry(res: &mut Vec<u8>, kind: u16, name: u16, language: u16, data: 
     res.extend_from_slice(&0u32.to_le_bytes()); // characteristics
     res.extend_from_slice(data);
     res.resize(res.len().next_multiple_of(4), 0);
+}
+
+/// The build channel (#1084), from `LASTERM_CHANNEL`: compiled in as
+/// `LASTERM_BUILD_CHANNEL`, and merged into the Tauri configuration, so the
+/// identifier, product name and window title follow it on every build path, a
+/// plain `cargo build` and `tauri build --config ...` included.
+fn apply_build_channel() {
+    println!("cargo:rerun-if-env-changed=LASTERM_CHANNEL");
+    println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
+    let channel =
+        build_channel::channel_from_value(std::env::var("LASTERM_CHANNEL").ok().as_deref());
+    println!("cargo:rustc-env=LASTERM_BUILD_CHANNEL={channel}");
+
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
+    let base_path = manifest_dir.join("tauri.conf.json");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the crate's own tauri.conf.json, which is no protected file"
+    )]
+    let base_text = std::fs::read_to_string(&base_path).expect("read tauri.conf.json");
+    let base: serde_json::Value =
+        serde_json::from_str(&base_text).expect("tauri.conf.json is JSON");
+    let cli = std::env::var("TAURI_CONFIG").ok();
+    let merged = build_channel::merge_channel_config(cli.as_deref(), &base, channel)
+        .unwrap_or_else(|error| panic!("{error}"));
+    // tauri-build and the ACL build read it in this process; the context macro
+    // reads it while the crate compiles.
+    std::env::set_var("TAURI_CONFIG", &merged);
+    println!("cargo:rustc-env=TAURI_CONFIG={merged}");
 }

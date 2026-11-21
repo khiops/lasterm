@@ -9,7 +9,12 @@ param(
   # Stages the executable, the sidecars, the manifest and bundle.resources in
   # out\stage, then stops: no check of the binaries, no package, no Windows SDK.
   # pack-msix.spec.ts runs the staging this way.
-  [switch]$StageOnly
+  [switch]$StageOnly,
+  # A release package: refuses unless the desktop and the hub were both built
+  # for the release channel (assert-release-binary.ps1, #1084). The release
+  # workflow passes it; without it, a development build packs too, into a
+  # package that keeps the Store identity and is no side-by-side install.
+  [switch]$Release
 )
 
 $ErrorActionPreference = "Stop"
@@ -370,6 +375,10 @@ $mainExe = Resolve-DesktopExecutablePath `
 
 $hubSidecar = Join-Path $srcTauriDir "lasterm-hub-$windowsX64RustTarget.exe"
 $agentSidecar = Join-Path $srcTauriDir "lasterm-agent-$windowsX64RustTarget.exe"
+
+if ($Release) {
+  & (Join-Path $scriptDir "assert-release-binary.ps1") -Path @($mainExe, $hubSidecar)
+}
 
 Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $stageDir, $assetsDir -Force | Out-Null

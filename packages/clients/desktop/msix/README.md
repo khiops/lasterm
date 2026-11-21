@@ -65,6 +65,8 @@ packages\clients\desktop\msix\out\Lasterm_<version>_x64.msix
 
 If a locally installable smoke-test package is needed, sign the generated MSIX outside this script with a certificate-store or other non-argv secret workflow.
 
+A build is a development build unless it was built with `LASTERM_CHANNEL=release`, as only the release workflow does; the hub and the desktop then use their own `lasterm-dev` directories, pipes and app identity. Such an MSIX still carries the Store package identity: installed, it replaces the Store install rather than running beside it. To run a development build beside the Store install, run it unpackaged (`scripts\build-desktop.ps1`, `scripts\dev\desktop-ui.ps1`, `pnpm dev`). `pack-msix.ps1 -Release`, which the release workflow passes, refuses a desktop or hub not built for the release channel.
+
 ## CI Validation Checklist
 
 Validate these points on the next Windows CI dispatch or release run:

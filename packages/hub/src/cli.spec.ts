@@ -22,6 +22,7 @@ import {
 	cmdAgentFetch,
 	cmdAgentImport,
 	cmdAgentStatus,
+	cmdConfigEdit,
 	cmdQuit,
 	cmdStatus,
 	cmdStop,
@@ -2867,5 +2868,107 @@ describe("start --port (#902)", () => {
 		expect(startHub.mock.calls[0]?.[0]).toMatchObject({ port: 4100 });
 		expect(errors).toEqual([]);
 		expect(exits).toEqual([]);
+	});
+});
+
+// ─── start --channel (#1084) ─────────────────────────────────────────────────
+//
+// The desktop passes its build channel; a hub of the other channel refuses to
+// start, so the two builds' names never mix.
+
+describe("start --channel (#1084)", () => {
+	afterEach(() => {
+		vi.doUnmock("./hub-startup.js");
+		vi.unstubAllEnvs();
+	});
+
+	async function start(extra: string[]) {
+		const startHub = vi.fn(async () => {});
+		vi.doMock("./hub-startup.js", () => ({ startHub }));
+		vi.stubEnv("LASTERM_PORT", "");
+		const errors: string[] = [];
+		const exits: unknown[] = [];
+		const error = vi.spyOn(console, "error").mockImplementation((line: string) => {
+			errors.push(line);
+		});
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			exits.push(code);
+		}) as typeof process.exit);
+		try {
+			await main(["start", ...extra]);
+		} finally {
+			error.mockRestore();
+			exit.mockRestore();
+		}
+		return { startHub, errors, exits };
+	}
+
+	// R1. Mutation: the flag accepted and ignored.
+	it("refuses a channel other than its own, naming both", async () => {
+		vi.stubEnv("LASTERM_CHANNEL", "release");
+		const { startHub, errors, exits } = await start(["--channel", "dev"]);
+		expect(startHub).not.toHaveBeenCalled();
+		expect(exits).toEqual([1]);
+		expect(errors.join("\n")).toMatch(/release build.*"dev" channel/);
+	});
+
+	it("starts when the channel is its own", async () => {
+		vi.stubEnv("LASTERM_CHANNEL", "dev");
+		const { startHub, errors, exits } = await start(["--channel", "dev"]);
+		expect(startHub).toHaveBeenCalledOnce();
+		expect(errors).toEqual([]);
+		expect(exits).toEqual([]);
+	});
+});
+
+// ─── config edit on the dev channel (#1084) ──────────────────────────────────
+
+describe("config edit (#1084)", () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	// AC10. Mutations: the shared file opened; the overlay's directory not
+	// created; created with a plain mkdirSync (0775 under umask 002).
+	it("opens the dev overlay, its directory created owner-only first, and never the shared file", async () => {
+		const root = makeTempDir();
+		const restore = usePlatformDirs({
+			state: path.join(root, "local"),
+			config: path.join(root, "roaming"),
+		});
+		const umask = process.platform === "win32" ? undefined : process.umask(0o002);
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			vi.stubEnv("LASTERM_CHANNEL", "dev");
+			const shared = path.join(root, "roaming", "lasterm", "config.toml");
+			mkdirSync(path.dirname(shared), { recursive: true });
+			writeFileSync(shared, "[terminal]\nfont_size = 20\n");
+			const overlayDir = path.join(root, "roaming", "lasterm-dev");
+			expect(existsSync(overlayDir)).toBe(false);
+			const opened: { file: string; parentExists: boolean; mode: number | undefined }[] = [];
+			await cmdConfigEdit({
+				openEditor: (_editor, file) => {
+					const parent = path.dirname(file);
+					opened.push({
+						file,
+						parentExists: existsSync(parent),
+						mode: process.platform === "win32" ? undefined : statSync(parent).mode & 0o777,
+					});
+				},
+			});
+			expect(opened).toEqual([
+				{
+					file: path.join(overlayDir, "config.toml"),
+					parentExists: true,
+					mode: process.platform === "win32" ? undefined : 0o700,
+				},
+			]);
+			expect(readFileSync(shared, "utf8")).toBe("[terminal]\nfont_size = 20\n");
+		} finally {
+			log.mockRestore();
+			if (umask !== undefined) process.umask(umask);
+			restore();
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

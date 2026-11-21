@@ -66,21 +66,41 @@ runs:
           echo "::warning title=apt cache::The cached .deb files did not install; downloading them again."
         fi
 
-        # Bounded and named: a mirror that crawls fails here, saying so, instead
-        # of eating the job's whole timeout. Acquire:: covers a stalled
-        # connection, `timeout` a slow one.
+        # Bounded: a mirror that crawls fails here instead of eating the job's
+        # whole timeout. Acquire:: covers a stalled connection, `timeout` a
+        # slow one. Status 124 is `timeout` giving up.
         fetch() {
-          local limit="$1" status=0
+          local limit="$1"
           shift
-          timeout "$limit" sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@" || status=$?
-          if ((status == 124)); then
-            echo "::error title=Ubuntu mirror too slow::apt-get $1 did not finish within $limit: the Ubuntu mirror is slow. Re-run the job (#728)."
-          fi
-          return "$status"
+          timeout "$limit" sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"
         }
-        fetch 2m update
+        download() {
+          fetch 2m update && fetch 4m install -y --download-only "${packages[@]}"
+        }
+
+        # The runner's default mirror (azure.archive.ubuntu.com) is the one that
+        # slows down (#728, #1083). A first try that fails or is too slow fails over to the main
+        # archive instead of failing the job. The second try starts from an empty
+        # archive directory: a mirror that lags the first one must not leave two
+        # versions of a package side by side for the install below.
         sudo apt-get clean
-        fetch 4m install -y --download-only "${packages[@]}"
+        status=0
+        download || status=$?
+        if ((status != 0)); then
+          echo "::warning title=Ubuntu mirror failed::apt-get exited with status $status on the runner's Ubuntu mirror (124: too slow); trying archive.ubuntu.com."
+          # Ubuntu 26.04 images list the mirrors in a file, azure first; older
+          # ones name it in the sources.
+          sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt || true
+          { sudo grep -rlE 'azure\.archive\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true; } |
+            xargs -r sudo sed -i -E 's#https?://azure\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g'
+          sudo apt-get clean
+          status=0
+          download || status=$?
+          if ((status == 124)); then
+            echo "::error title=Ubuntu mirror too slow::apt-get did not finish on the runner's mirror or on archive.ubuntu.com (#728). Re-run the job."
+          fi
+        fi
+        ((status == 0)) || exit "$status"
 
         rm -rf "$DEBS"
         mkdir -p "$DEBS"
@@ -96,7 +116,10 @@ runs:
           echo "save=true" >> "$GITHUB_OUTPUT"
         fi
     - name: Save the .deb files
-      if: steps.install.outputs.save == 'true'
+      # Main only, as rust-cache's saves (#741): a pull request's cache serves
+      # that pull request alone, and each one saved here kept the repository
+      # nearer its cache limit (#748).
+      if: steps.install.outputs.save == 'true' && github.ref == 'refs/heads/main'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.key.outputs.dir }}

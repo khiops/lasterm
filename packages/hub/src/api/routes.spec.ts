@@ -3097,6 +3097,22 @@ describe("a host's terminals across its sessions (#911)", () => {
 		);
 	});
 
+	// Wrong implementation: the all-hosts branch answers no ids, or another host's (#1108).
+	it("DELETE /api/channels/dead without a host_id names every host's dead terminals (#1108)", async () => {
+		twoHosts({ c0: "dead", c1: "dead", c2: "live" });
+
+		const res = await server.inject({ method: "DELETE", url: "/api/channels/dead" });
+
+		expect(res.statusCode).toBe(200);
+		const body = res.json<{ purged_ids: string[] }>();
+		expect({ ...body, purged_ids: [...body.purged_ids].sort() }).toEqual({
+			ok: true,
+			purged: 3,
+			purged_ids: [C0, C1, C3],
+		});
+		expect(dal.getChannel(C2)?.status).toBe("live");
+	});
+
 	// Mutations: either route left on one channel query per session (H2's count
 	// 22 higher); a channel statement prepared once and run per session (22
 	// higher); the sessions that hold a channel, then one query each (2 higher).

@@ -3053,6 +3053,7 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		await fetching;
 
 		expect(store.channels.map((c) => [c.id, c.status])).toEqual([["ch-a", "live"]]);
+		expect(store.channelHostMap.get("ch-a")).toBe("host-1");
 	});
 
 	// Wrong implementation: tombstone only the ids that were dead before the DELETE.
@@ -3086,6 +3087,29 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		await fetching;
 
 		expect(store.channels.map((c) => c.id)).toEqual([]);
+		expect(store.channelHostMap.has("ch-a")).toBe(false);
+		expect(store.channelHostMap.has("ch-b")).toBe(false);
+	});
+
+	// Wrong implementation: with no ids in the answer, fall back to the ids read before the request.
+	it.each([
+		["an unreadable answer", () => Promise.reject(new Error("bad body"))],
+		["an answer without ids", () => Promise.resolve({ ok: true, purged: 1 })],
+	])("%s removes nothing and counts nothing", async (_name, body) => {
+		const { store, fetching, release } = await listedThenFetching([row("ch-a", "dead")]);
+		const held = mockFetch.getMockImplementation() as (
+			u: string,
+			i?: { method?: string },
+		) => unknown;
+		mockFetch.mockImplementation((url: string, init?: { method?: string }) =>
+			init?.method === "DELETE" ? Promise.resolve({ ok: true, json: body }) : held(url, init),
+		);
+
+		expect(await store.purgeDeadChannels()).toBe(0);
+		release();
+		await fetching;
+
+		expect(store.channels.map((c) => c.id)).toEqual(["ch-a"]);
 	});
 
 	it("a channel created again after its deletion is listed again", async () => {

@@ -186,7 +186,10 @@ function serveAgent(stream: Stream, remote?: MockHost): void {
 					stream.end();
 					continue;
 				}
-				if (remote.neverLists) continue;
+				if (remote.neverLists) {
+					remote.listStream = stream;
+					continue;
+				}
 				if (remote.holdsList) {
 					remote.listStream = stream;
 					remote.releaseList = () => listHeld(stream, remote);
@@ -1635,6 +1638,11 @@ describe("A daemon's own list and the stops (#701)", { timeout: 25_000 }, () => 
 		expect(await h.sm.replaceAgent(h.host.id, { force: true })).toMatchObject({
 			code: "AGENT_INVENTORY_UNKNOWN",
 		});
+		// A terminal of it ends: the retirement weighs it again, and still stops nothing.
+		h.remote.listStream?.write(
+			Buffer.from(encodeFrame({ type: "CHANNEL_EXIT", channelId: generateId(), exitCode: 0 })),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 300));
 		expect(h.remote.stops).toEqual([]);
 	});
 

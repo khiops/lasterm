@@ -1029,7 +1029,9 @@ describe("ChannelLifecycleManager — adoptWhatTheDaemonHolds", () => {
 			channelClock: 0,
 		} as unknown as SharedSessionContext;
 		const lifecycle = new ChannelLifecycleManager(ctx, broadcaster as StateBroadcaster);
-		const reconcile = vi.spyOn(lifecycle, "reconcileChannelState").mockImplementation(() => new Set());
+		const reconcile = vi
+			.spyOn(lifecycle, "reconcileChannelState")
+			.mockImplementation(() => new Set());
 		return { ctx, lifecycle, reconcile };
 	}
 

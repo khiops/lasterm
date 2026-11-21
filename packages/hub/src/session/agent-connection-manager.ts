@@ -422,6 +422,9 @@ export class AgentConnectionManager {
 					exitLogger.close();
 					this.ctx.loggerRegistry?.delete(exitMsg.channelId);
 				}
+				// No longer held there: the stops asked of this daemon count it no
+				// more (#701).
+				agent.daemonInventory?.listed.delete(exitMsg.channelId);
 				// Its last one here, perhaps: an agent older than this hub goes now (#805).
 				this.lifecycle.agentMayBeIdle(hostId);
 			} else if (msg.type === "TITLE_CHANGE") {

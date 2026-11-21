@@ -19,6 +19,7 @@ import {
 	encodeFrame,
 	FrameReader,
 	generateId,
+	type HelloMessage,
 	type Host,
 	type HostVerifyMessage,
 	PROTOCOL_VERSION,
@@ -29,6 +30,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
 import { openTestDatabases } from "../storage/db.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
+import { deployAgentIfNeeded } from "./agent-deployer.js";
 import type { SessionState, SharedSessionContext } from "./session-context.js";
 import { SessionManager, type WsClient } from "./session-manager.js";
 import { SshAgent } from "./ssh-agent.js";
@@ -102,18 +104,71 @@ interface MockHost {
 	/** Daemons launched, and stopped through `--stop`, where it refuses socket forwarding. */
 	daemonLaunches: number;
 	daemonStops: number;
+	/** Every command run over SSH, in order, before anything answers it (#701). */
+	execs: string[];
+	/**
+	 * A daemon host's socket, when no daemon answers on it: `silent`, nothing
+	 * listens; `unknown`, the host cannot say; `refusing`, it listens and the
+	 * channel still fails. `running` (the default) answers (#701).
+	 */
+	daemonSocket: "running" | "silent" | "unknown" | "refusing";
+	/** Its daemon says `stop-accepted`, and answers a STOP with STOP_ACCEPTED (#700). */
+	acknowledgesStop: boolean;
+	/** With `acknowledgesStop`: the link drops after STOP, before any STOP_ACCEPTED. */
+	dropsOnStop: boolean;
+	/** Its daemon refuses this hub's AUTH (#701). */
+	refusesAuth: boolean;
+	/** Its daemon's list waits for `releaseList` (#701). */
+	holdsList: boolean;
+	releaseList: () => void;
+	/** Its daemon never sends its list (#701). */
+	neverLists: boolean;
+	/** The daemon connection whose list is held, to say things before it. */
+	listStream: Stream | null;
+	/** The version its agent says in HELLO. */
+	agentVersion: string;
+	/** How many more socket channels fail before one opens (#701). */
+	rejectsOpens: number;
+	/** SPAWNs answered, and whether the next SPAWN_OK waits for `releaseSpawn`. */
+	spawns: number;
+	holdsSpawn: boolean;
+	releaseSpawn: () => void;
 	close: () => Promise<void>;
 }
 
-function hello(daemon = false): Buffer {
+function hello(daemon = false, acknowledgesStop = false, agentVersion = HUB_VERSION): Buffer {
 	return Buffer.from(
 		encodeFrame({
 			type: "HELLO",
 			version: PROTOCOL_VERSION,
-			agentVersion: HUB_VERSION,
-			capabilities: ["multiplex", "snapshot", "resize", ...(daemon ? ["hub-identity"] : [])],
+			agentVersion,
+			capabilities: [
+				"multiplex",
+				"snapshot",
+				"resize",
+				...(daemon ? ["hub-identity"] : []),
+				...(daemon && acknowledgesStop ? ["stop-accepted"] : []),
+			],
 		}),
 	);
+}
+
+/** What a daemon lists after AUTH: its terminals, then the end. */
+function listHeld(stream: Stream, remote: MockHost): void {
+	for (const channelId of remote.held) {
+		stream.write(
+			Buffer.from(
+				encodeFrame({
+					type: "AGENT_CHANNEL_STATE",
+					channelId,
+					title: "bash",
+					pid: 4242,
+					alive: true,
+				}),
+			),
+		);
+	}
+	stream.write(Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END", otherOwnerChannels: 0 })));
 }
 
 /** An agent: HELLO, then a SPAWN_OK for every SPAWN, under the id asked for or a new one. */
@@ -121,25 +176,57 @@ function serveAgent(stream: Stream, remote?: MockHost): void {
 	const reader = new FrameReader();
 	stream.on("data", (data: Buffer) => {
 		for (const msg of reader.push(data)) {
+			if (msg.type === "AUTH" && remote) {
+				if (remote.refusesAuth) {
+					stream.write(
+						Buffer.from(
+							encodeFrame({ type: "ERROR", code: "AUTH_INVALID", message: "not this hub" }),
+						),
+					);
+					stream.end();
+					continue;
+				}
+				if (remote.neverLists) continue;
+				if (remote.holdsList) {
+					remote.listStream = stream;
+					remote.releaseList = () => listHeld(stream, remote);
+					continue;
+				}
+				listHeld(stream, remote);
+				continue;
+			}
 			if (msg.type === "STOP" && remote) {
 				remote.stops.push(msg.force === true);
+				if (remote.acknowledgesStop && !remote.dropsOnStop) {
+					stream.write(Buffer.from(encodeFrame({ type: "STOP_ACCEPTED" })));
+				}
 				stream.end();
 				continue;
 			}
 			if (msg.type !== "SPAWN") continue;
 			const spawn = msg as AgentSpawnMessage;
-			stream.write(
-				Buffer.from(
-					encodeFrame({
-						type: "SPAWN_OK",
-						requestId: spawn.requestId,
-						channelId: spawn.channelId ?? generateId(),
-					}),
-				),
-			);
+			const answer = (): void => {
+				stream.write(
+					Buffer.from(
+						encodeFrame({
+							type: "SPAWN_OK",
+							requestId: spawn.requestId,
+							channelId: spawn.channelId ?? generateId(),
+						}),
+					),
+				);
+			};
+			if (remote) remote.spawns++;
+			if (remote?.holdsSpawn) {
+				remote.releaseSpawn = answer;
+				continue;
+			}
+			answer();
 		}
 	});
-	stream.write(hello(remote !== undefined));
+	stream.write(
+		hello(remote !== undefined, remote?.acknowledgesStop === true, remote?.agentVersion),
+	);
 }
 
 /**
@@ -161,6 +248,20 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 		stops: [],
 		daemonLaunches: 0,
 		daemonStops: 0,
+		execs: [],
+		daemonSocket: "running",
+		acknowledgesStop: false,
+		dropsOnStop: false,
+		refusesAuth: false,
+		holdsList: false,
+		releaseList: () => {},
+		neverLists: false,
+		listStream: null,
+		agentVersion: HUB_VERSION,
+		rejectsOpens: 0,
+		spawns: 0,
+		holdsSpawn: false,
+		releaseSpawn: () => {},
 		close: async () => {},
 	};
 	let listening = false;
@@ -197,16 +298,25 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 				session.on("sftp", (acceptSftp) => acceptSftp());
 				session.on("exec", (acceptExec, _reject, info) => {
 					const stream = acceptExec() as Stream;
+					result.execs.push(info.command);
 					if (refusesForwarding) {
 						answerRefusing(stream, info.command);
 						return;
 					}
-					if (!daemon) {
+					if (!daemon || info.command.includes("--stdio")) {
 						serveAgent(stream);
 						return;
 					}
 					if (info.command.includes("XDG_STATE_HOME")) {
 						stream.write("/home/pi/.local/state/lasterm");
+					} else if (info.command.includes("/proc/net/unix")) {
+						// The socket table: what a host that cannot read it prints is nothing.
+						if (result.daemonSocket === "silent") stream.write("lasterm-socket: silent\n");
+						if (result.daemonSocket === "refusing" || result.daemonSocket === "running")
+							stream.write("lasterm-socket: listening\n");
+					} else if (info.command.includes("--daemon")) {
+						result.daemonLaunches++;
+						result.daemonSocket = "running";
 					}
 					stream.exit?.(0);
 					stream.end();
@@ -220,29 +330,18 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 					) => void;
 				}
 			).on("openssh.streamlocal", (accept, reject) => {
-				if (!daemon || refusesForwarding) {
+				if (!daemon || refusesForwarding || result.daemonSocket !== "running") {
+					reject();
+					return;
+				}
+				if (result.rejectsOpens > 0) {
+					result.rejectsOpens--;
 					reject();
 					return;
 				}
 				result.socketOpens++;
-				const stream = accept();
-				serveAgent(stream, result);
-				for (const channelId of result.held) {
-					stream.write(
-						Buffer.from(
-							encodeFrame({
-								type: "AGENT_CHANNEL_STATE",
-								channelId,
-								title: "bash",
-								pid: 4242,
-								alive: true,
-							}),
-						),
-					);
-				}
-				stream.write(
-					Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END", otherOwnerChannels: 0 })),
-				);
+				// HELLO; what it holds once AUTH says who asks (#127).
+				serveAgent(accept(), result);
 			});
 		});
 	});
@@ -282,6 +381,8 @@ interface Harness {
 }
 
 const cleanups: Array<() => Promise<void> | void> = [];
+/** Every SSH agent a test started, in order. */
+const SshAgentsSeen = new Set<SshAgent>();
 
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -298,6 +399,10 @@ async function hubWith(
 		refusesForwarding?: boolean;
 		/** The key the hub signs in with; one that needs no passphrase by default. */
 		keyPath?: string;
+		/** The host's stored daemon setting, when not `daemon` (#701). */
+		stored?: boolean | null;
+		/** The host's stored OS; unknown by default. */
+		os?: "linux" | "darwin" | "windows" | null;
 	} = {
 		daemon: false,
 	},
@@ -314,7 +419,8 @@ async function hubWith(
 		sshPort: remote.port,
 		sshAuth: "key",
 		sshKeyPath: options.keyPath ?? CLIENT_KEY_PATH,
-		sshRemoteDaemon: options.daemon,
+		sshRemoteDaemon: options.stored === undefined ? options.daemon : options.stored,
+		...(options.os !== undefined && { os: options.os }),
 	});
 	if (options.pinned !== false)
 		ctx.metaDal.updateHostFingerprint(
@@ -354,6 +460,7 @@ async function hubWith(
 		...args: Parameters<SshAgent["start"]>
 	) {
 		closed.push(once(this, "close"));
+		SshAgentsSeen.add(this);
 		return start.apply(this, args);
 	});
 	cleanups.push(async () => {
@@ -1074,5 +1181,569 @@ describe("Stop keeping (#674)", { timeout: 20_000 }, () => {
 			expect(h.ctx.metaDal.getChannel(id)).toMatchObject({ status: "dead", endReason: "stopped" });
 		expect(sessionStates(h).at(-1)).toMatchObject({ status: "closed" });
 		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
+	});
+});
+
+// ─── A stop counts only once the daemon says it took it (#700) ───────────────
+
+describe("STOP_ACCEPTED over a remote daemon (#700)", { timeout: 20_000 }, () => {
+	it("Replace reads a link that drops after STOP, with no STOP_ACCEPTED, as not confirmed", async () => {
+		const h = await hubWith({ daemon: true });
+		h.remote.acknowledgesStop = true;
+		h.remote.dropsOnStop = true;
+		await connected(h);
+		const ids = terminalsOn(h, 1);
+		expect(await h.sm.replaceAgent(h.host.id, { force: true })).toEqual({
+			replaced: false,
+			message: "The connection ended without confirming the agent stopped.",
+		});
+		expect(h.remote.stops).toEqual([true]);
+		for (const id of ids) {
+			expect(endsOf(h, id)).toEqual([]);
+			expect(h.ctx.metaDal.getChannel(id)?.endReason).toBeUndefined();
+		}
+	});
+
+	it("stop-keeping reads it so too, and leaves the agent possibly running", async () => {
+		const h = await hubWith({ daemon: true });
+		h.remote.acknowledgesStop = true;
+		h.remote.dropsOnStop = true;
+		await connected(h);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: true, force: true }),
+		).toMatchObject({ kind: "done", response: { outcome: "disabled_not_stopped" } });
+	});
+
+	it("stop-keeping reads the close after STOP_ACCEPTED as the stop", async () => {
+		const h = await hubWith({ daemon: true });
+		h.remote.acknowledgesStop = true;
+		await connected(h);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: true, force: false }),
+		).toMatchObject({ kind: "done", response: { outcome: "stopped" } });
+	});
+});
+
+// ─── Keep the agent left here and connect (#701) ────────────────────────────
+
+/** A host stored No whose daemon a hub left running, with the OS known. */
+async function leftOn(
+	options: { os?: "linux" | "darwin" | "windows" | null; stored?: boolean | null } = {},
+): Promise<Harness> {
+	return hubWith({
+		daemon: true,
+		stored: options.stored === undefined ? false : options.stored,
+		os: options.os === undefined ? "linux" : options.os,
+	});
+}
+
+/** The menu's "Keep the agent left here and connect". */
+function keepAndConnect(h: Harness, onHostStored?: () => void) {
+	return h.sm.connectHost(h.host.id, {
+		clientId: h.window.id,
+		daemonOnly: true,
+		...(onHostStored !== undefined && { onHostStored }),
+	});
+}
+
+async function keptAndConnected(h: Harness): Promise<boolean> {
+	const outcome = keepAndConnect(h);
+	if (outcome.kind !== "connecting") throw new Error(`not connecting: ${outcome.kind}`);
+	return outcome.done;
+}
+
+function errorsHeard(h: Harness): Array<{ code?: string; message?: string; hostId?: string }> {
+	return h.heard
+		.filter((m) => m.type === "ERROR")
+		.map((m) => m as { code?: string; message?: string; hostId?: string });
+}
+
+/** Commands that would deploy, launch a daemon or run the agent on stdio. */
+function startingCommands(h: Harness): string[] {
+	return h.remote.execs.filter((c) => c.includes("--daemon") || c.includes("--stdio"));
+}
+
+const deployMock = vi.mocked(deployAgentIfNeeded);
+
+describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () => {
+	it("controls: a plain connect deploys, and on a Yes host with no daemon launches one", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		h.remote.daemonSocket = "silent";
+		const before = deployMock.mock.calls.length;
+		await connected(h);
+		expect(deployMock.mock.calls.length).toBeGreaterThan(before);
+		expect(h.remote.execs.some((c) => c.includes("--daemon"))).toBe(true);
+	});
+
+	it("says no agent runs where nothing listens, and starts, deploys and stores nothing", async () => {
+		const h = await leftOn();
+		h.remote.daemonSocket = "silent";
+		const before = deployMock.mock.calls.length;
+		expect(await keptAndConnected(h)).toBe(false);
+		expect(errorsHeard(h)).toContainEqual(
+			expect.objectContaining({
+				code: "NO_AGENT_RUNNING",
+				message: "No Lasterm agent is running on this host.",
+			}),
+		);
+		expect(deployMock.mock.calls.length).toBe(before);
+		expect(startingCommands(h)).toEqual([]);
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
+	});
+
+	it("says it cannot tell when the socket listens but cannot be reached, and runs nothing", async () => {
+		const h = await leftOn();
+		h.remote.daemonSocket = "refusing";
+		const before = deployMock.mock.calls.length;
+		expect(await keptAndConnected(h)).toBe(false);
+		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "DAEMON_UNREACHABLE" }));
+		expect(startingCommands(h)).toEqual([]);
+		expect(deployMock.mock.calls.length).toBe(before);
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
+	});
+
+	it("says it cannot tell when the host cannot say what listens", async () => {
+		const h = await leftOn();
+		h.remote.daemonSocket = "unknown";
+		expect(await keptAndConnected(h)).toBe(false);
+		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "DAEMON_UNREACHABLE" }));
+		expect(startingCommands(h)).toEqual([]);
+	});
+
+	it("reaches a daemon on the retry a listening socket earns", async () => {
+		const h = await leftOn();
+		h.remote.rejectsOpens = 1;
+		expect(await keptAndConnected(h)).toBe(true);
+		expect(errorsHeard(h)).toEqual([]);
+	});
+
+	it("takes up what the daemon holds, stores Yes and says so, then stops it with today's consent", async () => {
+		const h = await leftOn();
+		h.remote.held = [];
+		const stored = vi.fn();
+		const before = deployMock.mock.calls.length;
+		const outcome = keepAndConnect(h, stored);
+		if (outcome.kind !== "connecting") throw new Error(outcome.kind);
+		expect(await outcome.done).toBe(true);
+		expect(agentOf(h)?.usedRemoteDaemon).toBe(true);
+		expect(deployMock.mock.calls.length).toBe(before);
+		expect(startingCommands(h)).toEqual([]);
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(true);
+		expect(stored).toHaveBeenCalledOnce();
+		terminalsOn(h, 1);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: false, force: false }),
+		).toMatchObject({ code: "TERMINALS_WOULD_END", terminals: 1 });
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: true, force: false }),
+		).toMatchObject({
+			kind: "done",
+			response: { outcome: "stopped", host: { sshRemoteDaemon: false } },
+		});
+	});
+
+	it("is then a Yes host: a dropped link is dialled again through the daemon, not stdio", async () => {
+		const h = await leftOn();
+		expect(await keptAndConnected(h)).toBe(true);
+		const opens = h.remote.socketOpens;
+		await h.remote.close();
+		await until(
+			"the reconnect reaches the daemon again",
+			() => h.remote.socketOpens > opens,
+			15_000,
+		).catch(() => {});
+		expect(startingCommands(h).filter((c) => c.includes("--stdio"))).toEqual([]);
+	});
+
+	it("refuses a host connected over stdio", async () => {
+		// Connected on stdio, as a No host is.
+		const stdio = await hubWith({ daemon: false, os: "linux", stored: false });
+		await connected(stdio);
+		expect(keepAndConnect(stdio).kind).toBe("no-daemon-connection");
+	});
+
+	it("never joins another connect", async () => {
+		const h = await hubWith({ daemon: true, os: "linux", stored: true, pinned: false });
+		// The plain connect waits on a question nobody answers yet.
+		let verify: HostVerifyMessage | undefined;
+		h.window.send = (msg) => {
+			h.heard.push(msg);
+			if (msg.type === "HOST_VERIFY") verify = msg as HostVerifyMessage;
+		};
+		const plain = h.sm.connectHost(h.host.id, { clientId: h.window.id });
+		await until("the plain connect asks about the key", () => verify !== undefined);
+		const before = deployMock.mock.calls.length;
+		expect(keepAndConnect(h).kind).toBe("busy");
+		expect(deployMock.mock.calls.length).toBe(before);
+		if (verify !== undefined) h.sm.handleHostVerifyResponse(verify.promptId, "reject", h.window.id);
+		if (plain.kind === "connecting") await plain.done;
+	});
+
+	it("answers connected, storing nothing, when the daemon is already the way there", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		h.ctx.metaDal.updateHost(h.host.id, { sshRemoteDaemon: null });
+		const connections = h.remote.connections;
+		const write = vi.spyOn(h.ctx.metaDal, "updateHost");
+		expect(keepAndConnect(h).kind).toBe("connected");
+		expect(h.remote.connections).toBe(connections);
+		expect(write).not.toHaveBeenCalled();
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon ?? null).toBeNull();
+	});
+
+	it("stores nothing when the daemon refuses this hub", async () => {
+		const h = await leftOn();
+		h.remote.refusesAuth = true;
+		expect(await keptAndConnected(h)).toBe(false);
+		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "AGENT_REFUSED_HUB" }));
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
+	});
+
+	it("stores nothing and takes up nothing when the daemon never lists", async () => {
+		const h = await leftOn();
+		h.remote.neverLists = true;
+		expect(await keptAndConnected(h)).toBe(false);
+		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "DAEMON_UNREACHABLE" }));
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
+		expect(agentOf(h)).toBeUndefined();
+	});
+
+	it("closes and takes up nothing when the setting cannot be saved", async () => {
+		const h = await leftOn();
+		const update = h.ctx.metaDal.updateHost.bind(h.ctx.metaDal);
+		vi.spyOn(h.ctx.metaDal, "updateHost").mockImplementation((id, input) => {
+			if (input.sshRemoteDaemon === true) throw new Error("disk full");
+			return update(id, input);
+		});
+		expect(await keptAndConnected(h)).toBe(false);
+		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "INTERNAL_ERROR" }));
+		expect(agentOf(h)).toBeUndefined();
+	});
+
+	it("is nobody's until stored: a second connect is busy, and an open waits, then fails with it", async () => {
+		const h = await leftOn();
+		h.remote.holdsList = true;
+		const outcome = keepAndConnect(h);
+		if (outcome.kind !== "connecting") throw new Error(outcome.kind);
+		await until("the daemon is asked for its list", () => h.remote.listStream !== null);
+		expect(sessionStates(h).some((state) => state.status === "active")).toBe(false);
+		expect(h.sm.connectHost(h.host.id, { clientId: h.window.id }).kind).toBe("busy");
+		const opening = h.sm.handleSpawn(h.window.id, { type: "SPAWN", hostId: h.host.id });
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(h.remote.spawns).toBe(0);
+		// Moved meanwhile: the attempt fails, and so does the open.
+		h.ctx.metaDal.updateHost(h.host.id, { sshHost: "127.0.0.2" });
+		h.remote.releaseList();
+		expect(await outcome.done).toBe(false);
+		expect(await opening).toBeNull();
+		expect(h.remote.spawns).toBe(0);
+		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "HOST_CHANGED" }));
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
+	});
+
+	it.each(["close", "disconnect"] as const)(
+		"writes nothing for a connection that went (%s) before its list arrived",
+		async (how) => {
+			const h = await leftOn();
+			h.remote.holdsList = true;
+			const outcome = keepAndConnect(h);
+			if (outcome.kind !== "connecting") throw new Error(outcome.kind);
+			await until("the daemon is asked for its list", () => h.remote.listStream !== null);
+			if (how === "disconnect") {
+				h.sm.disconnectHost(h.host.id, { force: true });
+			} else {
+				const agent = [...SshAgentsSeen].at(-1);
+				if (agent === undefined) throw new Error("no agent");
+				Object.defineProperty(agent, "connected", { value: false, configurable: true });
+			}
+			h.remote.releaseList();
+			expect(await outcome.done).toBe(false);
+			expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
+			expect(sessionStates(h).some((state) => state.status === "active")).toBe(false);
+		},
+	);
+
+	it("lets a label change pass while connecting", async () => {
+		const h = await leftOn();
+		h.remote.holdsList = true;
+		const outcome = keepAndConnect(h);
+		if (outcome.kind !== "connecting") throw new Error(outcome.kind);
+		await until("the daemon is asked for its list", () => h.remote.listStream !== null);
+		h.ctx.metaDal.updateHost(h.host.id, { label: "renamed" });
+		h.remote.releaseList();
+		expect(await outcome.done).toBe(true);
+	});
+
+	it.each(["windows", null] as const)(
+		"refuses an OS a daemon is not reached on (%s)",
+		async (os) => {
+			const h = await leftOn({ os });
+			expect(keepAndConnect(h).kind).toBe("daemon-not-possible");
+			expect(h.remote.connections).toBe(0);
+		},
+	);
+
+	it("has no binary path for --stop: a forced stop it cannot send is not confirmed", async () => {
+		const h = await leftOn();
+		expect(await keptAndConnected(h)).toBe(true);
+		const agent = agentOf(h);
+		if (agent === undefined) throw new Error("no agent");
+		const send = agent.send.bind(agent);
+		vi.spyOn(agent, "send").mockImplementation((msg) => {
+			if (msg.type === "STOP") throw new Error("socket gone");
+			send(msg);
+		});
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: true, force: true }),
+		).toMatchObject({ kind: "done", response: { outcome: "disabled_not_stopped" } });
+		expect(h.remote.execs.filter((c) => c.includes("--stop"))).toEqual([]);
+	});
+
+	it("keeps to the daemon on the retry a first-seen host key causes", async () => {
+		const h = await hubWith({ daemon: true, pinned: false, stored: false, os: "linux" });
+		h.window.send = (msg) => {
+			h.heard.push(msg);
+			if (msg.type === "HOST_VERIFY") {
+				queueMicrotask(() =>
+					h.sm.handleHostVerifyResponse(
+						(msg as HostVerifyMessage).promptId,
+						"trust_permanent",
+						h.window.id,
+					),
+				);
+			}
+		};
+		h.remote.daemonSocket = "silent";
+		const before = deployMock.mock.calls.length;
+		expect(await keptAndConnected(h)).toBe(false);
+		expect(h.heard.filter((m) => m.type === "HOST_VERIFY")).toHaveLength(1);
+		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "NO_AGENT_RUNNING" }));
+		expect(deployMock.mock.calls.length).toBe(before);
+		expect(startingCommands(h)).toEqual([]);
+	});
+});
+
+// ─── What a daemon's own list forbids a stop (#701) ─────────────────────────
+
+/** A second host record of the same hub, reaching the same daemon. */
+function secondRecord(h: Harness): Host {
+	const b = h.ctx.metaDal.createHost({
+		type: "ssh",
+		label: "pi-again",
+		sshHost: "127.0.0.1",
+		sshPort: h.remote.port,
+		sshAuth: "key",
+		sshKeyPath: CLIENT_KEY_PATH,
+		sshRemoteDaemon: true,
+		os: "linux",
+	});
+	h.ctx.metaDal.updateHostFingerprint(
+		b.id,
+		HOST_FINGERPRINT,
+		targetRoute(b, (id) => sshAddress(h.ctx.metaDal.getHost(id))),
+	);
+	return b;
+}
+
+/** A terminal this hub tracks as ended, which the daemon still holds. */
+function shownEndedOn(h: Harness): string {
+	const session = h.ctx.sessions.get(h.host.id);
+	if (session === undefined) throw new Error("no session");
+	const id = generateId();
+	h.ctx.metaDal.createChannel({ id, sessionId: session.id, status: "dead", shell: "bash" });
+	h.ctx.channels.set(id, {
+		sessionId: session.id,
+		hostId: h.host.id,
+		status: "dead",
+		clients: new Set(),
+		shell: "bash",
+		cols: 80,
+		rows: 24,
+		dynamicTitle: null,
+		processTitle: null,
+		displayTitle: "bash",
+	});
+	return id;
+}
+
+/** Reconnect the host so that its daemon lists again. */
+async function relisted(h: Harness): Promise<void> {
+	const outcome = h.sm.reconnectHost(h.host.id, { force: true, clientId: h.window.id });
+	if (outcome.kind !== "connecting") throw new Error(`not reconnecting: ${outcome.kind}`);
+	await expect(outcome.done).resolves.toBe(true);
+}
+
+describe("A daemon's own list and the stops (#701)", { timeout: 25_000 }, () => {
+	it("refuses to stop, from another record, a daemon holding a record's live terminal", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		const [a] = terminalsOn(h, 1);
+		const b = secondRecord(h);
+		const outcome = h.sm.connectHost(b.id, { clientId: h.window.id });
+		if (outcome.kind !== "connecting") throw new Error(outcome.kind);
+		await expect(outcome.done).resolves.toBe(true);
+		expect(h.remote.held).toContain(a);
+		const stopsBefore = h.remote.stops.length;
+		expect(await h.sm.stopKeepingAgent(b.id, { endTerminals: true, force: true })).toMatchObject({
+			code: "OTHER_HOST_TERMINALS",
+			message: expect.stringContaining("pi"),
+		});
+		expect(await h.sm.replaceAgent(b.id, { force: true })).toMatchObject({
+			replaced: false,
+			code: "OTHER_HOST_TERMINALS",
+		});
+		expect(h.remote.stops.length).toBe(stopsBefore);
+	});
+
+	it("does not retire an older daemon holding another record's terminal", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		terminalsOn(h, 1);
+		// What B meets is older than this hub; it holds nothing B tracks.
+		h.remote.agentVersion = "0.0.1";
+		const b = secondRecord(h);
+		const outcome = h.sm.connectHost(b.id, { clientId: h.window.id });
+		if (outcome.kind !== "connecting") throw new Error(outcome.kind);
+		await outcome.done;
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(h.remote.stops).toEqual([]);
+	});
+
+	it("does not retire an older daemon before its list is complete", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		h.remote.agentVersion = "0.0.1";
+		h.remote.holdsList = true;
+		const outcome = h.sm.connectHost(h.host.id, { clientId: h.window.id });
+		await until("the daemon is asked for its list", () => h.remote.listStream !== null);
+		h.remote.listStream?.write(
+			Buffer.from(encodeFrame({ type: "CHANNEL_EXIT", channelId: generateId(), exitCode: 0 })),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(h.remote.stops).toEqual([]);
+		h.remote.releaseList();
+		if (outcome.kind === "connecting") await outcome.done;
+	});
+
+	it("decides no stop on a list that never came", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		h.remote.agentVersion = "0.0.1";
+		h.remote.neverLists = true;
+		await connected(h);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: true, force: true }),
+		).toMatchObject({ code: "AGENT_INVENTORY_UNKNOWN" });
+		expect(await h.sm.replaceAgent(h.host.id, { force: true })).toMatchObject({
+			code: "AGENT_INVENTORY_UNKNOWN",
+		});
+		expect(h.remote.stops).toEqual([]);
+	});
+
+	it("counts terminals shown as ended that the daemon holds, refuses Replace, and keeps an older daemon", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		const live = terminalsOn(h, 1);
+		const ended = shownEndedOn(h);
+		h.remote.held = [...live, ended];
+		h.remote.agentVersion = "0.0.1";
+		await relisted(h);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: false, force: false }),
+		).toMatchObject({ code: "TERMINALS_WOULD_END", terminals: 2 });
+		expect(await h.sm.replaceAgent(h.host.id, { force: true })).toMatchObject({
+			code: "TERMINALS_SHOWN_ENDED",
+		});
+		expect(h.remote.stops).toEqual([]);
+	});
+
+	it("counts it no more once it exits, and an older daemon then holding nothing is retired", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		const ended = shownEndedOn(h);
+		h.remote.held = [ended];
+		h.remote.holdsList = true;
+		await Promise.all([
+			relisted(h),
+			(async () => {
+				await until("listed", () => h.remote.listStream !== null);
+				h.remote.releaseList();
+			})(),
+		]);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: false, force: false }),
+		).toMatchObject({ code: "TERMINALS_WOULD_END", terminals: 1 });
+		h.remote.agentVersion = "0.0.1";
+		const agent = agentOf(h);
+		if (agent === undefined) throw new Error("no agent");
+		agent.helloMessage = { ...(agent.helloMessage as HelloMessage), agentVersion: "0.0.1" };
+		h.remote.listStream?.write(
+			Buffer.from(encodeFrame({ type: "CHANNEL_EXIT", channelId: ended, exitCode: 0 })),
+		);
+		await until("the older daemon, holding nothing, is retired", () => h.remote.stops.length > 0);
+	});
+
+	it("retires an older daemon that held only what its adoption destroyed", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		h.remote.agentVersion = "0.0.1";
+		h.remote.held = [generateId()];
+		await connected(h);
+		await until("the older daemon is retired", () => h.remote.stops.length > 0);
+	});
+
+	it("keeps an exit that came before a stale state out of the list", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		const ended = shownEndedOn(h);
+		h.remote.held = [ended];
+		h.remote.holdsList = true;
+		await Promise.all([
+			relisted(h),
+			(async () => {
+				await until("listed", () => h.remote.listStream !== null);
+				h.remote.listStream?.write(
+					Buffer.from(encodeFrame({ type: "CHANNEL_EXIT", channelId: ended, exitCode: 0 })),
+				);
+				h.remote.releaseList();
+			})(),
+		]);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: false, force: false }),
+		).toMatchObject({ kind: "done" });
+	});
+
+	it("waits for a terminal that is starting before a stop, and counts it then", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		h.remote.holdsSpawn = true;
+		const opening = h.sm.handleSpawn(h.window.id, { type: "SPAWN", hostId: h.host.id });
+		await until("the SPAWN is written", () => h.remote.spawns === 1);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: true, force: true }),
+		).toMatchObject({ code: "HOST_BUSY" });
+		expect(h.remote.stops).toEqual([]);
+		h.remote.releaseSpawn();
+		const channelId = await opening;
+		expect(channelId).not.toBeNull();
+		h.remote.holdsSpawn = false;
+		const stillHeld = agentOf(h)?.daemonInventory;
+		if (channelId) stillHeld?.listed.add(channelId);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: false, force: false }),
+		).toMatchObject({ code: "TERMINALS_WOULD_END", terminals: 1 });
+	});
+
+	it("waits for a Restart's replacement too", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		const [id] = terminalsOn(h, 1);
+		if (id === undefined) throw new Error("no terminal");
+		h.remote.holdsSpawn = true;
+		const restarting = h.sm.restartChannel(id, h.window.id);
+		await until("the replacement SPAWN is written", () => h.remote.spawns === 1);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: true, force: true }),
+		).toMatchObject({ code: "HOST_BUSY" });
+		expect(h.remote.stops).toEqual([]);
+		h.remote.releaseSpawn();
+		await restarting;
 	});
 });

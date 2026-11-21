@@ -185,6 +185,8 @@ function connectedAgent(othersHold = 0): FakeSshAgent {
 	const agent = new SshAgent({ id: hostId } as never) as FakeSshAgent;
 	agent.helloMessage = DAEMON_HELLO;
 	agent.othersHold = othersHold;
+	// Its list came, as an adoption leaves it: nothing held yet (#701).
+	agent.daemonInventory = { listed: new Set(), destroyed: new Set() };
 	(sm.agents as unknown as Map<string, unknown>).set(hostId, agent);
 	return agent;
 }
@@ -245,6 +247,8 @@ function liveTerminalsOn(
 			displayTitle: "bash",
 		});
 	}
+	// Held by its daemon, which said so (#701).
+	for (const channelId of channelIds) agent.daemonInventory?.listed.add(channelId);
 	internals.agentMgr.wireAgentEvents(hostId, sessionId, agent);
 	const heard: ProtocolMessage[] = [];
 	sm.addClient({ id: "c-window", send: (msg) => heard.push(msg), attachedChannels: new Set() });
@@ -522,11 +526,13 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		},
 	);
 
-	// A current daemon's connection is closed, an outdated one is stopped (#805):
-	// the DESTROYs go first either way (#923).
+	// A current daemon's connection is closed (#805), and so is an outdated
+	// one's while its list still names the terminals being destroyed: it is
+	// stopped only once it holds nothing (#701). The DESTROYs go first either
+	// way (#923).
 	it.each([
 		["at this hub's version", DAEMON_HELLO, "close"],
-		["older than this hub", OUTDATED_DAEMON_HELLO, "STOP"],
+		["older than this hub", OUTDATED_DAEMON_HELLO, "close"],
 	])("V3 session deletion sends DESTROY before ending a daemon %s", async (_, hello, end) => {
 		const agent = connectedAgent();
 		agent.helloMessage = hello;
@@ -932,6 +938,36 @@ describe("POST /api/hosts/:id/agent/replace, when no end is reported (#599)", ()
 	});
 });
 
+describe("POST /api/hosts/:id/agent/replace, refused by its daemon's own list (#701)", () => {
+	it.each(["AGENT_INVENTORY_UNKNOWN", "OTHER_HOST_TERMINALS", "TERMINALS_SHOWN_ENDED"])(
+		"answers %s with its own code, and sends no STOP",
+		async (code) => {
+			const agent = connectedAgent();
+			const { channelIds } = liveTerminalsOn(agent, 1);
+			const tracked = sm.channels.get(channelIds[0] ?? "");
+			if (tracked === undefined) throw new Error("no terminal");
+			if (code === "AGENT_INVENTORY_UNKNOWN") agent.daemonInventory = undefined;
+			if (code === "OTHER_HOST_TERMINALS") {
+				const other = new MetaDAL(dbs.meta).createHost({
+					type: "ssh",
+					label: "pi-again",
+					sshHost: "pi@pi.local",
+				});
+				sm.channels.set("01K701ELSEWHERE00000000000", { ...tracked, hostId: other.id });
+				agent.daemonInventory?.listed.add("01K701ELSEWHERE00000000000");
+			}
+			if (code === "TERMINALS_SHOWN_ENDED") {
+				sm.channels.set("01K701SHOWNENDED0000000000", { ...tracked, status: "dead" });
+				agent.daemonInventory?.listed.add("01K701SHOWNENDED0000000000");
+			}
+			const refused = await replace({ force: true });
+			expect(refused.statusCode).toBe(409);
+			expect(refused.json()).toMatchObject({ error: { code } });
+			expect(agent.sent.filter((msg) => msg.type === "STOP")).toEqual([]);
+		},
+	);
+});
+
 describe("POST /api/hosts/:id/agent/replace, on an agent other hubs use (#127)", () => {
 	it("answers 409 with the count, and a forced retry sends STOP { force: true }", async () => {
 		const agent = connectedAgent(2);
@@ -1188,6 +1224,9 @@ describe("#674 in-flight stop fences", () => {
 		const spawn = sm.handleSpawn("c-window", { type: "SPAWN", hostId });
 		await waiting;
 		const agent = sm.agents.get(hostId) as FakeSshAgent;
+		// What a Replace needs before it stops anything (#701), as the end of
+		// an earlier list would have left it; this one's is held back.
+		agent.daemonInventory = { listed: new Set(), destroyed: new Set() };
 		let stopped!: () => void;
 		const stopSent = new Promise<void>((resolve) => {
 			stopped = resolve;

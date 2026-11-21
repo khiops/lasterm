@@ -8,12 +8,24 @@ import type { AgentConnection } from "./agent-connection.js";
  */
 export const DAEMON_STOP_TIMEOUT_MS = 15_000;
 
+/**
+ * The capability of a daemon that answers a STOP it takes with
+ * STOP_ACCEPTED before its connection ends (#700).
+ */
+export const STOP_ACCEPTED_CAPABILITY = "stop-accepted";
+
 /** What came of asking a daemon to stop over its own connection (#127). */
 export type DaemonStopOutcome =
 	/** The connection ended: the daemon is shutting down, and its terminals with it. */
 	| { readonly kind: "stopped" }
 	| { readonly kind: "displaced" }
 	| { readonly kind: "closed_by_hub" }
+	/**
+	 * The connection ended without the STOP_ACCEPTED its daemon says it sends:
+	 * the link may have dropped before the daemon took the STOP, which may
+	 * still be running with its terminals (#700).
+	 */
+	| { readonly kind: "unconfirmed" }
 	/** Other hubs hold channels there, and the STOP was not forced: nothing stopped. */
 	| {
 			readonly kind: "refused";
@@ -45,17 +57,23 @@ export interface DaemonStopOptions {
  * Ask the daemon at the other end of `agent` to stop, over the hub's own
  * connection to it (#127).
  *
- * A daemon stopping says nothing before it goes: its connection ending is the
- * answer. Without `force` it refuses while other hubs hold channels there, and
- * its refusal states how many.
+ * A daemon that says `stop-accepted` answers a STOP it takes with
+ * STOP_ACCEPTED, then its connection ends: only that end counts as the stop,
+ * and an end without it is `unconfirmed`. An older daemon says nothing before
+ * it goes, and its connection ending is the answer (#700). Without `force` a
+ * daemon refuses while other hubs hold channels there, and its refusal states
+ * how many.
  */
 export function requestDaemonStop(
 	agent: AgentConnection & { closedByHub?: boolean },
 	options: DaemonStopOptions,
 ): Promise<DaemonStopOutcome> {
 	const timeoutMs = options.timeoutMs ?? DAEMON_STOP_TIMEOUT_MS;
+	const acknowledges =
+		agent.helloMessage?.capabilities?.includes(STOP_ACCEPTED_CAPABILITY) === true;
 	return new Promise<DaemonStopOutcome>((resolve) => {
 		let settled = false;
+		let accepted = false;
 		const finish = (outcome: DaemonStopOutcome): void => {
 			if (settled) return;
 			settled = true;
@@ -66,6 +84,10 @@ export function requestDaemonStop(
 		};
 
 		const onMessage = (msg: ProtocolMessage): void => {
+			if (msg.type === "STOP_ACCEPTED") {
+				accepted = true;
+				return;
+			}
 			if (msg.type !== "ERROR") return;
 			const error = msg as ErrorMessage;
 			if (error.channelId !== undefined) return;
@@ -89,6 +111,10 @@ export function requestDaemonStop(
 			if (settled) return;
 			if (agent.closedByHub || options.isHubQuitting?.()) {
 				finish({ kind: "closed_by_hub" });
+				return;
+			}
+			if (acknowledges && !accepted) {
+				finish({ kind: "unconfirmed" });
 				return;
 			}
 			options.onStopped?.();

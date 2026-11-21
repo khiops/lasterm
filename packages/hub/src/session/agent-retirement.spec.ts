@@ -833,6 +833,31 @@ describe("a remote daemon older than the hub (#805)", () => {
 		expect(heard.filter((m) => m.type === "ERROR")).toEqual([]);
 	});
 
+	it("is reached again when its link ends after STOP without STOP_ACCEPTED (#700)", async () => {
+		const old = daemons.make(OLD);
+		await connectHolding(old);
+		const agent = old.agents[0];
+		if (agent === undefined) throw new Error("no agent");
+		// It says it acknowledges a STOP it takes, and its link ends without it.
+		(
+			agent as unknown as { helloMessage: { capabilities: string[] } }
+		).helloMessage.capabilities.push("stop-accepted");
+		const internals = sm as unknown as {
+			ctx: {
+				reconnectTimers: Map<string, unknown>;
+				reconnectAbortControllers: Map<string, unknown>;
+			};
+		};
+		agent.exit("ch-remote");
+		await vi.waitFor(() => expect(stopsTo(old)).toEqual([{ type: "STOP", force: false }]));
+		await vi.waitFor(() =>
+			expect(
+				internals.ctx.reconnectTimers.has(hostId) ||
+					internals.ctx.reconnectAbortControllers.has(hostId),
+			).toBe(true),
+		);
+	});
+
 	it("is kept while other hubs hold terminals there", async () => {
 		const old = daemons.make(OLD);
 		old.othersHold = 1;

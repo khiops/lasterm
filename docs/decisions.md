@@ -7,6 +7,16 @@ heading, with a pointer to the section that replaced it. A section without one i
 
 ---
 
+## REMOTE-STOP-LEFT — a stop counts once the daemon says it took it, and an agent left on a host is reached without starting one (#700, #701, 2026-11-21)
+
+- A daemon that takes a STOP says STOP_ACCEPTED before its end of stream, under the capability `stop-accepted`, and its shutdown waits up to 2 seconds for its connections' writes. A close after STOP without it is not a stop: the link may have dropped first, and the hub handles it as a dropped link. Agents released before it never send it, and their close is still read as the stop: they are the agents Replace and the retirement exist to stop, and refusing their close would make every first Replace after the upgrade say "not confirmed".
+- No request id on STOP: one stop runs per host at a time (ONE-STOP-PER-HOST). A STOP still queued on a connection a newer one of the same hub displaced is dropped.
+- "Keep the agent left here and connect", on an SSH host stored No or unset whose OS is Linux or macOS, reaches a daemon already running and nothing else: no deploy, no launch, no stdio. Once the daemon has said what it holds, the host is stored Yes, so that every later path (reconnect, attach, restoration, expiry) treats it as the Yes host it now is; the person stops it with "Stop keeping an agent here", a second gesture. Rejected: a daemon-only mode on a host left at No, which every path reading the setting would break; one chained gesture, which needs a completion signal and a one-shot intent; VS Code's way, a kill over SSH that counts nothing.
+- Stops decided on a remote daemon read its own list, kept from its adoption: none while the list is missing; none from a host record while the daemon holds a live terminal another record tracks (refused, not counted); stop-keeping counts the terminals this hub shows as ended that the daemon still holds, and Replace, which counts nothing, refuses them; the retirement stops only a daemon holding nothing besides what its adoption destroyed. Stop-keeping also waits for a terminal start or Restart in flight.
+- Not done: terminals a hub restart marked ended on a No host are not revived when the daemon reports them; a daemon without `hub-identity` (v0.12.0) gets nothing more than Connect gave it.
+
+---
+
 ## HOST-DELETE — deleting a host ends its terminals once the person was told how many (#910, 2026-11-09)
 
 - **Refuse, count, force.** DELETE host accepts `force=true|false`. Admission is synchronous:
@@ -476,7 +486,7 @@ NODE-SQLITE (#893).
 - Requests that start while the host is marked are refused with `HOST_BUSY`: terminal opens, Restart, Connect, Reconnect, Disconnect, session and host deletion, and a host edit carrying `ssh_remote_daemon` or `os`.
 - A terminal open or Restart already under way checks the marker again just before it writes its SPAWN, and writes none if the host is marked at that moment: the terminal open is told `HOST_BUSY`, the Restart answers 503, as any Restart that did not start does. The check reads the marker as it is then: an operation that resumes after a Replace has released the host goes on as if no Replace had run. A SPAWN already written is not recalled.
 - Terminal opens are refused rather than queued, since a terminal opened on an agent being stopped would end with it. The STOP wait is capped at 15 seconds; an agent the STOP cannot reach is stopped with `--stop`, which takes two SSH commands of at most 10 seconds each.
-- For an agent stopped with STOP, the stop reads as done only when the daemon closes its connection by itself afterwards. A DISPLACED answer, a close the hub issued (`SshAgent.close()`), or a close while the hub quits does not count, and Replace answers that the agent was not replaced. With `--stop`, a zero exit status counts as done.
+- For an agent stopped with STOP, the stop reads as done only when the daemon closes its connection by itself afterwards, and, for a daemon that says `stop-accepted`, only after its STOP_ACCEPTED (REMOTE-STOP-LEFT). A DISPLACED answer, a close the hub issued (`SshAgent.close()`), or a close while the hub quits does not count, and Replace answers that the agent was not replaced. With `--stop`, a zero exit status counts as done.
 - A Replace that held the host's agent calls `scheduleReconnect` once when it releases the host, if the host is then disconnected with no agent, no pending timer, no reconnect attempt or acquisition running, and no user disconnect. This recovers a reconnect the marker held back. `scheduleReconnect` ignores the call while the hub quits.
 - A reconnect timer that fires while a connected agent serves its host builds no second one. Before this decision, an ATTACH that reconnected a host left the earlier timer armed, and that timer then replaced the adopted agent.
 

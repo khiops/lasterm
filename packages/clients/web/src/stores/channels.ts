@@ -2053,18 +2053,15 @@ export const useChannelsStore = defineStore("channels", () => {
 
 	/**
 	 * Bulk purge all dead channels for the active host.
-	 * Returns the number of channels purged.
-	 */
-	/**
-	 * Bulk purge all dead channels for the active host.
-	 * Returns the number of channels purged.
+	 * Removes exactly the ids the hub says it purged: it picks the dead channels
+	 * when it handles the request, which can differ from this window's list by
+	 * then (#1108). Returns the number of channels purged.
 	 */
 	async function purgeDeadChannels(): Promise<number> {
 		if (authStore.token === null || activeHostId.value === null) return 0;
-		// The channels this purge is about, read before the request: the list in
-		// view may be another host's by the time the hub answers (#1104).
+		// The host is read before the request: the list in view may be another
+		// host's by the time the hub answers (#1104).
 		const hostId = activeHostId.value;
-		const deadIds = new Set(channels.value.filter((c) => c.status === "dead").map((c) => c.id));
 		const res = await hubFetch(`${hubBaseUrl()}/api/channels/dead`, {
 			method: "DELETE",
 			headers: {
@@ -2074,19 +2071,20 @@ export const useChannelsStore = defineStore("channels", () => {
 			body: JSON.stringify({ host_id: hostId }),
 		});
 		if (!res.ok) return 0;
-		deletedDuringFetch(deadIds);
-		channels.value = channels.value.filter((c) => !deadIds.has(c.id));
-		const nextMap = new Map(channelHostMap.value);
-		for (const id of deadIds) {
-			nextMap.delete(id);
-		}
-		channelHostMap.value = nextMap;
-		// The purge is done on the hub; an unreadable count does not undo it.
+		// The purge is done on the hub; an unreadable answer names nothing to remove here.
+		let ids: string[];
 		try {
-			return ((await res.json()) as { purged: number }).purged;
+			ids = ((await res.json()) as { purged_ids?: string[] }).purged_ids ?? [];
 		} catch {
-			return deadIds.size;
+			return 0;
 		}
+		const purged = new Set(ids);
+		deletedDuringFetch(purged);
+		channels.value = channels.value.filter((c) => !purged.has(c.id));
+		const nextMap = new Map(channelHostMap.value);
+		for (const id of purged) nextMap.delete(id);
+		channelHostMap.value = nextMap;
+		return purged.size;
 	}
 
 	return {

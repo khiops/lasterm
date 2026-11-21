@@ -84,11 +84,14 @@ runs:
         # in apt's archive directory and are not fetched again.
         sudo apt-get clean
         status=0
-        timeout 1s sleep 5 || status=$?; cat /etc/apt/apt-mirrors.txt; grep -rn 'URIs\|^deb ' /etc/apt/sources.list /etc/apt/sources.list.d | head -20
+        timeout 1s sleep 5 || status=$?
         if ((status == 124)); then
           echo "::warning title=Ubuntu mirror too slow::The runner's Ubuntu mirror did not answer in time; trying archive.ubuntu.com."
-          sudo grep -rlE 'azure\.archive\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null |
-            xargs -r sudo sed -i -E 's#https?://azure\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' || true
+          # Ubuntu 26.04 images list the mirrors in a file, azure first; older
+          # ones name it in the sources.
+          sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt || true
+          { sudo grep -rlE 'azure\.archive\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true; } |
+            xargs -r sudo sed -i -E 's#https?://azure\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g'
           status=0
           download || status=$?
           if ((status == 124)); then

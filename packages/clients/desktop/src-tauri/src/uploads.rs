@@ -19,8 +19,11 @@
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
-/// The tray's text while no upload runs: the one it was built with.
-pub const TRAY_TEXT_IDLE: &str = "Lasterm";
+/// The tray's text while no upload runs: the one it was built with, this
+/// build's product name ("Lasterm", or "Lasterm Dev", #1084).
+pub fn tray_text_idle() -> &'static str {
+    crate::channel::product_name()
+}
 
 /// The longest tooltip a Windows notification-area icon shows: 128 UTF-16
 /// units, its terminating null included. [`tray_text`] stays within it.
@@ -249,8 +252,13 @@ fn plural(count: u32, one: &str, many: &str) -> String {
 /// · 1 failed", "Lasterm — 1 waiting for an answer", "Lasterm — quits when 2
 /// uploads finish · 64 %", or "Lasterm" when none runs.
 pub fn tray_text(uploads: &UploadsReport, pending: Option<Ending>) -> String {
+    tray_text_for(tray_text_idle(), uploads, pending)
+}
+
+/// [`tray_text`] for the product name `name`.
+fn tray_text_for(name: &str, uploads: &UploadsReport, pending: Option<Ending>) -> String {
     if uploads.in_progress == 0 {
-        return TRAY_TEXT_IDLE.to_string();
+        return name.to_string();
     }
     let mut parts = Vec::with_capacity(4);
     let all_waiting = uploads.moving() == 0;
@@ -280,7 +288,7 @@ pub fn tray_text(uploads: &UploadsReport, pending: Option<Ending>) -> String {
     if uploads.failed > 0 {
         parts.push(format!("{} failed", uploads.failed));
     }
-    format!("{TRAY_TEXT_IDLE} — {}", parts.join(" · "))
+    format!("{name} — {}", parts.join(" · "))
 }
 
 /// What to do with a new tray text.
@@ -309,7 +317,7 @@ pub struct TrayTextThrottle {
 impl Default for TrayTextThrottle {
     fn default() -> Self {
         Self {
-            shown: TRAY_TEXT_IDLE.to_string(),
+            shown: tray_text_idle().to_string(),
             shown_at: None,
             queued: None,
             timer_set: false,
@@ -368,7 +376,7 @@ pub struct TrayMenuTop {
 impl TrayMenuTop {
     pub fn for_state(shown: &str, pending: Option<Ending>) -> Self {
         Self {
-            status: shown != TRAY_TEXT_IDLE,
+            status: shown != tray_text_idle(),
             cancel: pending,
         }
     }
@@ -745,23 +753,29 @@ mod tests {
 
     #[test]
     fn the_tray_text_says_how_the_uploads_go() {
-        assert_eq!(tray_text(&UploadsReport::default(), None), "Lasterm");
-        // Failures alone keep nothing running, and the tray goes back to its name.
-        assert_eq!(tray_text(&report(0, 0, 3, None), None), "Lasterm");
         assert_eq!(
-            tray_text(&report(2, 0, 1, Some(64)), None),
+            tray_text_for("Lasterm", &UploadsReport::default(), None),
+            "Lasterm"
+        );
+        // Failures alone keep nothing running, and the tray goes back to its name.
+        assert_eq!(
+            tray_text_for("Lasterm", &report(0, 0, 3, None), None),
+            "Lasterm"
+        );
+        assert_eq!(
+            tray_text_for("Lasterm", &report(2, 0, 1, Some(64)), None),
             "Lasterm — 2 uploads · 64 % · 1 failed"
         );
         assert_eq!(
-            tray_text(&report(1, 0, 0, None), None),
+            tray_text_for("Lasterm", &report(1, 0, 0, None), None),
             "Lasterm — 1 upload"
         );
         assert_eq!(
-            tray_text(&report(1, 1, 0, Some(30)), None),
+            tray_text_for("Lasterm", &report(1, 1, 0, Some(30)), None),
             "Lasterm — 1 waiting for an answer"
         );
         assert_eq!(
-            tray_text(&report(3, 1, 2, Some(40)), None),
+            tray_text_for("Lasterm", &report(3, 1, 2, Some(40)), None),
             "Lasterm — 3 uploads · 40 % · 1 waiting for an answer · 2 failed"
         );
     }
@@ -769,19 +783,19 @@ mod tests {
     #[test]
     fn the_tray_text_says_the_quit_that_waits() {
         assert_eq!(
-            tray_text(&report(2, 0, 0, Some(64)), Some(Ending::Quit)),
+            tray_text_for("Lasterm", &report(2, 0, 0, Some(64)), Some(Ending::Quit)),
             "Lasterm — quits when 2 uploads finish · 64 %"
         );
         assert_eq!(
-            tray_text(&report(1, 0, 0, Some(5)), Some(Ending::Restart)),
+            tray_text_for("Lasterm", &report(1, 0, 0, Some(5)), Some(Ending::Restart)),
             "Lasterm — restarts when 1 upload finishes · 5 %"
         );
         assert_eq!(
-            tray_text(&report(1, 1, 0, Some(5)), Some(Ending::Quit)),
+            tray_text_for("Lasterm", &report(1, 1, 0, Some(5)), Some(Ending::Quit)),
             "Lasterm — quits when 1 upload finishes · 1 waiting for an answer"
         );
         assert_eq!(
-            tray_text(&report(0, 0, 1, None), Some(Ending::Quit)),
+            tray_text_for("Lasterm", &report(0, 0, 1, None), Some(Ending::Quit)),
             "Lasterm"
         );
     }
@@ -790,7 +804,11 @@ mod tests {
     fn the_longest_tray_text_fits_a_windows_tooltip() {
         for pending in [None, Some(Ending::Quit), Some(Ending::Restart)] {
             for waiting in [0, 1, u32::MAX - 1, u32::MAX] {
-                let text = tray_text(&report(u32::MAX, waiting, u32::MAX, Some(100)), pending);
+                let text = tray_text_for(
+                    "Lasterm",
+                    &report(u32::MAX, waiting, u32::MAX, Some(100)),
+                    pending,
+                );
                 let units = text.encode_utf16().count();
                 assert!(
                     units <= TRAY_TOOLTIP_MAX_UTF16,
@@ -804,7 +822,7 @@ mod tests {
     fn the_tray_text_changes_at_once_then_at_most_once_a_second() {
         let start = Instant::now();
         let mut throttle = TrayTextThrottle::default();
-        assert_eq!(throttle.shown(), "Lasterm");
+        assert_eq!(throttle.shown(), tray_text_idle());
 
         // The first change shows at once.
         assert_eq!(throttle.offer("A".into(), start), TrayTextStep::Show);
@@ -836,7 +854,10 @@ mod tests {
         let start = Instant::now();
         let mut throttle = TrayTextThrottle::default();
         // "Lasterm" again, as every report says while none runs: nothing to set.
-        assert_eq!(throttle.offer("Lasterm".into(), start), TrayTextStep::Keep);
+        assert_eq!(
+            throttle.offer(tray_text_idle().into(), start),
+            TrayTextStep::Keep
+        );
 
         assert_eq!(throttle.offer("A".into(), start), TrayTextStep::Show);
         let later = start + Duration::from_secs(5);
@@ -872,7 +893,7 @@ mod tests {
 
     #[test]
     fn the_tray_menu_gains_lines_only_while_there_is_something_to_say() {
-        assert!(TrayMenuTop::for_state("Lasterm", None).is_empty());
+        assert!(TrayMenuTop::for_state(tray_text_idle(), None).is_empty());
         assert_eq!(
             TrayMenuTop::for_state("Lasterm — 1 upload", None),
             TrayMenuTop {
@@ -938,19 +959,19 @@ mod tests {
     #[test]
     fn the_tray_text_counts_one_upload_and_several() {
         assert_eq!(
-            tray_text(&report(1, 0, 1, Some(10)), None),
+            tray_text_for("Lasterm", &report(1, 0, 1, Some(10)), None),
             "Lasterm — 1 upload · 10 % · 1 failed"
         );
         assert_eq!(
-            tray_text(&report(1, 0, 0, None), Some(Ending::Quit)),
+            tray_text_for("Lasterm", &report(1, 0, 0, None), Some(Ending::Quit)),
             "Lasterm — quits when 1 upload finishes"
         );
         assert_eq!(
-            tray_text(&report(2, 0, 0, None), Some(Ending::Restart)),
+            tray_text_for("Lasterm", &report(2, 0, 0, None), Some(Ending::Restart)),
             "Lasterm — restarts when 2 uploads finish"
         );
         assert_eq!(
-            tray_text(&report(2, 2, 0, None), None),
+            tray_text_for("Lasterm", &report(2, 2, 0, None), None),
             "Lasterm — 2 waiting for an answer"
         );
     }
@@ -968,6 +989,16 @@ mod tests {
             waiting_notice(2),
             "2 uploads are waiting for your answer. Lasterm will quit once they are answered and \
              any other uploads end."
+        );
+    }
+
+    // #1084. Mutation: the idle text left "Lasterm" on a dev build.
+    #[test]
+    fn the_idle_tray_text_is_the_build_channels_product_name() {
+        assert_eq!(tray_text_idle(), crate::channel::product_name());
+        assert_eq!(
+            tray_text(&report(1, 0, 0, None), None),
+            format!("{} — 1 upload", crate::channel::product_name())
         );
     }
 }

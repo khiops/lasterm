@@ -124,6 +124,12 @@ describe("replacing while uploads to the host run (#1090)", () => {
 		expect(post.mock.calls.at(-1)).toEqual([{ force: true, stop_transfers: true }]);
 	});
 
+	it("keeps force when the uploads ask after other hubs", async () => {
+		const post = mockedHub(otherHubsHold(2), uploadsRunning(1), replaced);
+		await replaceAgentWithConsent({ post, confirm: () => true });
+		expect(post.mock.calls.at(-1)).toEqual([{ force: true, stop_transfers: true }]);
+	});
+
 	it("does not ask again for the uploads once agreed", async () => {
 		const post = mockedHub(uploadsRunning(1), uploadsRunning(1));
 		const confirm = vi.fn(() => true);

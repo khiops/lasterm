@@ -20,12 +20,19 @@ const done: StopKeepingAgentAnswer = {
 	status: 200,
 	body: { outcome: "stopped", host, ended: 2 },
 };
-function refusal(code: string, status = 409): StopKeepingAgentAnswer {
+function refusal(code: string, status = 409, transfers?: number | null): StopKeepingAgentAnswer {
 	return {
 		ok: false,
 		status,
 		body: {
-			error: { code, message: "hub reason", terminals: 2, transfers: 4, other_owner_channels: 3 },
+			error: {
+				code,
+				message: "hub reason",
+				terminals: 2,
+				other_owner_channels: 3,
+				// 4 by default; null leaves the count out, as a hub that gave none.
+				...(transfers !== null && { transfers: transfers ?? 4 }),
+			},
 		},
 	};
 }
@@ -98,6 +105,40 @@ describe("stopAgentWithConsent", () => {
 		expect(post.mock.calls.at(-1)).toEqual([
 			{ end_terminals: true, stop_transfers: true, force: true },
 		]);
+	});
+
+	it.each([
+		[1, "1 upload to this host stop."],
+		[null, "Uploads to this host stop."],
+	])("words the uploads for a count of %s (#1090)", async (count, message) => {
+		const post = vi
+			.fn()
+			.mockResolvedValueOnce(refusal("TRANSFERS_WOULD_STOP", 409, count))
+			.mockResolvedValueOnce(done);
+		const confirm = vi.fn().mockResolvedValue(true);
+		await stopAgentWithConsent("pi", { post, confirm });
+		expect(confirm.mock.calls[0]?.[0].message).toBe(message);
+	});
+
+	it("keeps force when the uploads ask after other hubs (#1090)", async () => {
+		const post = vi
+			.fn()
+			.mockResolvedValueOnce(refusal("OTHER_HUBS_HOLD_CHANNELS"))
+			.mockResolvedValueOnce(refusal("TRANSFERS_WOULD_STOP"))
+			.mockResolvedValueOnce(done);
+		await stopAgentWithConsent("pi", { post, confirm: () => true });
+		expect(post.mock.calls.at(-1)).toEqual([{ force: true, stop_transfers: true }]);
+	});
+
+	it("does not ask again for the uploads once agreed (#1090)", async () => {
+		const post = vi.fn().mockResolvedValue(refusal("TRANSFERS_WOULD_STOP"));
+		const confirm = vi.fn().mockResolvedValue(true);
+		expect(await stopAgentWithConsent("pi", { post, confirm })).toEqual({
+			kind: "failed",
+			message: "hub reason",
+		});
+		expect(confirm).toHaveBeenCalledOnce();
+		expect(post).toHaveBeenCalledTimes(2);
 	});
 
 	it("declines OTHER_HUBS_HOLD_CHANNELS after terminal consent", async () => {

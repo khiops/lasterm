@@ -1,0 +1,2 @@
+en: Pasting several lines into cmd or PowerShell first shows them and asks, since each line would run as soon as it arrives. Settings › Terminal says when to ask, everywhere, per host or per terminal.
+fr: Coller plusieurs lignes dans cmd ou PowerShell les montre d'abord et demande confirmation, car chaque ligne s'exécuterait dès son arrivée. Settings › Terminal règle quand demander, partout, par hôte ou par terminal.

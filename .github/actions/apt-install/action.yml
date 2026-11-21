@@ -84,7 +84,7 @@ runs:
         # in apt's archive directory and are not fetched again.
         sudo apt-get clean
         status=0
-        timeout 1s sudo apt-get update || status=$?
+        timeout 1s sleep 5 || status=$?; cat /etc/apt/apt-mirrors.txt; grep -rn 'URIs\|^deb ' /etc/apt/sources.list /etc/apt/sources.list.d | head -20
         if ((status == 124)); then
           echo "::warning title=Ubuntu mirror too slow::The runner's Ubuntu mirror did not answer in time; trying archive.ubuntu.com."
           sudo grep -rlE 'azure\.archive\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null |

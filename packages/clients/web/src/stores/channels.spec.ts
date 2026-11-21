@@ -2866,6 +2866,35 @@ describe("useChannelsStore — a status heard while a list fetch is in flight (#
 		expect(listed).not.toHaveProperty("exitCode");
 	});
 
+	it("an end without an id heard after a run during a first load drops the older row's code", async () => {
+		let release!: () => void;
+		const held = new Promise<void>((r) => {
+			release = r;
+		});
+		mockFetch.mockImplementation((url: string) => {
+			if (url.includes("/api/groups")) {
+				return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+			}
+			return held.then(() => ({
+				ok: true,
+				json: () => Promise.resolve([{ ...row("dead"), exit_code: 9 }]),
+			}));
+		});
+		const store = useChannelsStore();
+		const fetching = store.fetchChannels("host-1");
+
+		store.updateChannelStatus("ch-race", "live");
+		store.applyStateSync([
+			{ channelId: "ch-race", sessionId: "sess-1", status: "dead", endReason: "killed" },
+		]);
+		release();
+		await fetching;
+
+		const listed = store.channels.find((c) => c.id === "ch-race");
+		expect(listed?.status).toBe("dead");
+		expect(listed).not.toHaveProperty("exitCode");
+	});
+
 	/** ch-race listed live, then two overlapping fetches whose rows read it live, each released by its own call. */
 	async function listedThenTwoFetches() {
 		mockFetch.mockImplementation((url: string) => {

@@ -1130,7 +1130,9 @@ export const useChannelsStore = defineStore("channels", () => {
 		if (knownIndex !== -1) {
 			const known = channels.value[knownIndex];
 			if (known !== undefined) {
-				// Its end, why it came and its exit code are over (#592, #932).
+				// Its end, why it came and its exit code are over (#592, #932), and
+				// over the rows of a fetch in flight too (#1091).
+				heardDuringFetch(msg.channelId, { status: msg.status, replacesEnd: true });
 				const rest = withoutEnd(known);
 				const revived: Channel = {
 					...rest,

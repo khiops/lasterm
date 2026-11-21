@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::time::Duration;
 
@@ -150,9 +150,6 @@ pub struct PtyManager {
     /// Channels whose program ended and whose exit has not reached its hub's
     /// route yet (#1089).
     ending: HashMap<String, Ending>,
-    /// Workloads the hub DESTROYed, by channel id and pid, whose reader has
-    /// not come for them yet: it sends no exit for them (#1113).
-    destroyed: HashSet<(String, u32)>,
     shutting_down: bool,
     teardown_wait_timeout: Duration,
     /// The most input a channel's queue holds (#740).
@@ -294,7 +291,6 @@ impl PtyManager {
         Self {
             channels: HashMap::new(),
             ending: HashMap::new(),
-            destroyed: HashSet::new(),
             shutting_down: false,
             teardown_wait_timeout: CHANNEL_TEARDOWN_WAIT_TIMEOUT,
             input_bound: INPUT_QUEUE_BYTES,
@@ -507,6 +503,33 @@ impl PtyManager {
         }
     }
 
+    /// The reader of `pid` is about to send the exit of `channel_id`, a
+    /// workload torn down (DESTROY, `destroy_all`) before it took it back.
+    /// Its exit holds the id until routed, as an ended one's does, so a
+    /// restart's SPAWN reusing it waits for it and is answered after it
+    /// (#1113). None when another workload holds the id: no exit is sent
+    /// for a workload whose id was taken over (PROTOCOL.md § 3.2).
+    pub(crate) fn send_torn_down(
+        &mut self,
+        channel_id: &str,
+        pid: u32,
+        owner: &OwnerId,
+    ) -> Option<watch::Sender<()>> {
+        if self.channels.contains_key(channel_id) || self.is_ending(channel_id) {
+            return None;
+        }
+        let (routed_tx, routed_rx) = watch::channel(());
+        self.ending.insert(
+            channel_id.to_owned(),
+            Ending {
+                owner: owner.clone(),
+                pid,
+                routed: Some(routed_rx),
+            },
+        );
+        Some(routed_tx)
+    }
+
     /// The exit of `pid` under `channel_id` has been routed: its id is free.
     pub(crate) fn release_ending(&mut self, channel_id: &str, pid: u32) {
         if self
@@ -531,23 +554,6 @@ impl PtyManager {
             self.ending.remove(channel_id);
         }
         withdrawn
-    }
-
-    /// Remove `channel_id` on the hub's DESTROY. The hub asked for its end and
-    /// records it itself; a restart's SPAWN may follow at once under the same
-    /// id. So its reader sends no exit, which could reach the hub after that
-    /// SPAWN's SPAWN_OK and mark the new run dead (#1113).
-    pub(crate) fn remove_destroyed(&mut self, channel_id: &str) -> Option<PtyProcess> {
-        let process = self.remove(channel_id)?;
-        self.destroyed
-            .insert((channel_id.to_owned(), process.pid()));
-        Some(process)
-    }
-
-    /// Whether the hub DESTROYed the workload `pid` under `channel_id`; its
-    /// reader asks once, as it comes for it.
-    pub(crate) fn take_destroyed(&mut self, channel_id: &str, pid: u32) -> bool {
-        self.destroyed.remove(&(channel_id.to_owned(), pid))
     }
 
     #[allow(dead_code)] // Used in tests

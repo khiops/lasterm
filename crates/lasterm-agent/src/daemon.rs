@@ -4891,11 +4891,11 @@ mod tests {
             }
 
             /// A live terminal restarted: DESTROY, then SPAWN under its id.
-            /// The exit of the shell it destroyed, sent before the SPAWN and
-            /// still on its way, must not reach the hub after the SPAWN_OK,
-            /// which would mark the new run dead (#1113).
+            /// The exit of the shell it destroyed, sent before the SPAWN, comes
+            /// before the SPAWN_OK, never after it, where it would mark the new
+            /// run dead (#1113).
             #[tokio::test]
-            async fn a_live_restart_gets_no_exit_of_the_shell_it_destroyed() {
+            async fn a_live_restart_gets_the_destroyed_shells_exit_before_its_spawn_ok() {
                 let daemon = TestDaemon::start("live-restart").await;
                 let (mut a, _) = daemon.connect_as(KEY_A).await;
                 spawned(&mut a, interactive("live-restarted")).await;
@@ -4906,9 +4906,16 @@ mod tests {
                     channel_id: "live-restarted".to_string(),
                 })
                 .await;
-                // Its shell ends, and its reader sends what it has left.
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                spawned(&mut a, interactive("live-restarted")).await;
+                // Its shell ends: its reader has seen its PTY close, and sends
+                // its exit, before the SPAWN is sent.
+                a.read_through(|frame| is_about(frame, "LOG", "live-restarted"))
+                    .await;
+                let answered = spawned(&mut a, interactive("live-restarted")).await;
+                assert!(
+                    mentions(&answered, "live-restarted").contains(&"CHANNEL_EXIT".to_string()),
+                    "the destroyed shell's exit must come before the SPAWN_OK; received {:?}",
+                    answered.iter().map(frame_type).collect::<Vec<_>>()
+                );
                 let later = a.frames_until_quiet(Duration::from_millis(4000)).await;
                 assert!(
                     !mentions(&later, "live-restarted").contains(&"CHANNEL_EXIT".to_string()),

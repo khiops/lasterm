@@ -398,7 +398,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * when it commits, as `pendingStatuses` does for channels not listed: the
 	 * hub may have read those rows before them (#1091).
 	 */
-	const statusesDuringFetch = new Map<number, Map<string, PendingStatus>>();
+	const statusesDuringFetch = new Map<number, Map<string, PendingStatus | "deleted">>();
 
 	/**
 	 * A run heard for a channel since the last STATE_SYNC says the hub has it:
@@ -413,7 +413,20 @@ export const useChannelsStore = defineStore("channels", () => {
 	/** Record a status heard for a listed channel for every fetch in flight (#1091). */
 	function heardDuringFetch(channelId: string, heard: PendingStatus): void {
 		for (const heardHere of statusesDuringFetch.values()) {
-			heardHere.set(channelId, bufferedStatus(heardHere.get(channelId), heard));
+			const held = heardHere.get(channelId);
+			// Heard for a channel in the list, so it was created again since a
+			// deletion recorded here: the deletion no longer stands.
+			heardHere.set(channelId, bufferedStatus(held === "deleted" ? undefined : held, heard));
+		}
+	}
+
+	/**
+	 * Record channels deleted here for every fetch in flight: the hub may have
+	 * listed them before the deletion, and they must not come back (#1104).
+	 */
+	function deletedDuringFetch(channelIds: Iterable<string>): void {
+		for (const heardHere of statusesDuringFetch.values()) {
+			for (const id of channelIds) heardHere.set(id, "deleted");
 		}
 	}
 
@@ -617,7 +630,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		wsAddedDuringFetch.value = new Map(wsAddedDuringFetch.value).set(myGeneration, myWsAdded);
 		// Older generations can no longer commit: stop recording for them.
 		statusesDuringFetch.clear();
-		const myHeard = new Map<string, PendingStatus>();
+		const myHeard = new Map<string, PendingStatus | "deleted">();
 		statusesDuringFetch.set(myGeneration, myHeard);
 
 		try {
@@ -658,7 +671,9 @@ export const useChannelsStore = defineStore("channels", () => {
 			const wsChannelsToKeep = [...channels.value].filter(
 				(c) => myWsAdded.has(c.id) && !dataIds.has(c.id),
 			);
-			let merged = [...data, ...wsChannelsToKeep];
+			// A channel deleted here is gone from `channels.value`, so only the rows
+			// the hub listed can bring one back.
+			let merged = [...data.filter((c) => myHeard.get(c.id) !== "deleted"), ...wsChannelsToKeep];
 
 			// Apply any WS status updates that arrived before the fetch completed.
 			// pendingStatuses accumulates CHANNEL_STATE and STATE_SYNC entries
@@ -685,7 +700,7 @@ export const useChannelsStore = defineStore("channels", () => {
 			if (myHeard.size > 0) {
 				merged = merged.map((ch) => {
 					const heard = myHeard.get(ch.id);
-					return heard === undefined ? ch : withHeard(ch, heard);
+					return heard === undefined || heard === "deleted" ? ch : withHeard(ch, heard);
 				});
 			}
 
@@ -2028,6 +2043,7 @@ export const useChannelsStore = defineStore("channels", () => {
 			headers: { Authorization: `Bearer ${authStore.token}` },
 		});
 		if (!res.ok) return false;
+		deletedDuringFetch([channelId]);
 		channels.value = channels.value.filter((c) => c.id !== channelId);
 		const nextMap = new Map(channelHostMap.value);
 		nextMap.delete(channelId);
@@ -2045,24 +2061,32 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	async function purgeDeadChannels(): Promise<number> {
 		if (authStore.token === null || activeHostId.value === null) return 0;
+		// The channels this purge is about, read before the request: the list in
+		// view may be another host's by the time the hub answers (#1104).
+		const hostId = activeHostId.value;
+		const deadIds = new Set(channels.value.filter((c) => c.status === "dead").map((c) => c.id));
 		const res = await hubFetch(`${hubBaseUrl()}/api/channels/dead`, {
 			method: "DELETE",
 			headers: {
 				Authorization: `Bearer ${authStore.token}`,
 				"Content-Type": "application/json",
 			},
-			body: JSON.stringify({ host_id: activeHostId.value }),
+			body: JSON.stringify({ host_id: hostId }),
 		});
 		if (!res.ok) return 0;
-		const data = (await res.json()) as { purged: number };
-		const deadIds = new Set(channels.value.filter((c) => c.status === "dead").map((c) => c.id));
-		channels.value = channels.value.filter((c) => c.status !== "dead");
+		deletedDuringFetch(deadIds);
+		channels.value = channels.value.filter((c) => !deadIds.has(c.id));
 		const nextMap = new Map(channelHostMap.value);
 		for (const id of deadIds) {
 			nextMap.delete(id);
 		}
 		channelHostMap.value = nextMap;
-		return data.purged;
+		// The purge is done on the hub; an unreadable count does not undo it.
+		try {
+			return ((await res.json()) as { purged: number }).purged;
+		} catch {
+			return deadIds.size;
+		}
 	}
 
 	return {

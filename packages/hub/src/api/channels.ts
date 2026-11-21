@@ -38,7 +38,8 @@ export function registerChannelRoutes(
 		},
 	);
 
-	// DELETE /api/channels/dead — bulk delete all dead channels (optionally scoped to a host)
+	// DELETE /api/channels/dead — bulk delete all dead channels (optionally scoped to a host).
+	// The answer names the ids it deleted: a client removes exactly those (#1108).
 	// MUST be registered before /:id routes to avoid matching as a channel ID param.
 	server.delete<{ Body: { host_id?: string } }>("/api/channels/dead", async (request, reply) => {
 		const { host_id } = request.body ?? {};
@@ -56,7 +57,11 @@ export function registerChannelRoutes(
 		// Their output follows in bounded batches, after the answer (#786).
 		if (deadChannelIds.length > 0) void sessionManager.purgeChannelOutput(deadChannelIds);
 
-		return reply.code(200).send({ ok: true, purged: deadChannelIds.length });
+		return reply.code(200).send({
+			ok: true,
+			purged: deadChannelIds.length,
+			purged_ids: deadChannelIds,
+		});
 	});
 
 	// GET /api/channels/:id

@@ -1548,7 +1548,12 @@ describe("purging a dead channel's output (#786)", () => {
 			payload: { host_id: hostId },
 		});
 		expect(res.statusCode).toBe(200);
-		expect(res.json()).toEqual({ ok: true, purged: 2 });
+		const body = res.json<{ purged_ids: string[] }>();
+		expect({ ...body, purged_ids: [...body.purged_ids].sort() }).toEqual({
+			ok: true,
+			purged: 2,
+			purged_ids: [deadA, deadB].sort(),
+		});
 
 		await vi.waitFor(
 			() => {
@@ -3070,7 +3075,13 @@ describe("a host's terminals across its sessions (#911)", () => {
 		});
 
 		expect(res.statusCode).toBe(200);
-		expect(res.json()).toEqual({ ok: true, purged: 2 });
+		// Exactly the channels the hub deleted (#1108).
+		const body = res.json<{ purged_ids: string[] }>();
+		expect({ ...body, purged_ids: [...body.purged_ids].sort() }).toEqual({
+			ok: true,
+			purged: 2,
+			purged_ids: [C0, C1],
+		});
 		expect([C0, C1, C2, C3].map((id) => dal.getChannel(id)?.status ?? "gone")).toEqual([
 			"gone",
 			"gone",
@@ -3127,7 +3138,7 @@ describe("a host's terminals across its sessions (#911)", () => {
 				url: "/api/channels/dead",
 				payload: { host_id: h },
 			});
-			expect(res.json()).toEqual({ ok: true, purged: 0 });
+			expect(res.json()).toEqual({ ok: true, purged: 0, purged_ids: [] });
 		};
 
 		expect(await executions(list(h2))).toBe(await executions(list(h1)));

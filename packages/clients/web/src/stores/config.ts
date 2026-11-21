@@ -429,6 +429,20 @@ export const useConfigStore = defineStore("config", () => {
 	}
 
 	/**
+	 * "Don't ask again" on a paste's card (#1015): `pasteWarning` set to
+	 * "never" for the terminal's host or everywhere, the overrides nearer to
+	 * that terminal dropped so that it holds there.
+	 */
+	async function savePasteNeverAsk(
+		scope: "host" | "global",
+		where: { hostId: string | null; channelId: string | null },
+	): Promise<boolean> {
+		const plan = planProfileWrite("pasteWarning", "never", scope, where);
+		if (plan === null) return false;
+		return saveProfileWrite(plan);
+	}
+
+	/**
 	 * List the fonts installed where the hub runs (#100). A browser also gets
 	 * their @font-face rules, since it may be on another machine. The desktop
 	 * shell only ever drives its own local hub, so those fonts are installed
@@ -471,6 +485,7 @@ export const useConfigStore = defineStore("config", () => {
 		readCascade,
 		saveProfileWrite,
 		saveWhenEnded,
+		savePasteNeverAsk,
 		onProfileChange,
 		emitProfileChange,
 		onAlwaysChoice,

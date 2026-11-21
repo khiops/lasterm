@@ -178,6 +178,8 @@ describe("TERMINAL_VALUE_VALIDATORS", () => {
 		["transferFallbackDir", "refuses", "x".repeat(1025)],
 		["transferVerify", "accepts", true],
 		["transferVerify", "refuses", "true"],
+		["pasteWarning", "accepts", "never"],
+		["pasteWarning", "refuses", "sometimes"],
 	];
 
 	it.each(cases)("%s %s %j", (key, verdict, value) => {
@@ -356,6 +358,20 @@ describe("terminal profile writes: value validation", () => {
 		expect(accepted.statusCode).toBe(200);
 		expect((await server.inject({ method: "GET", url })).json()).toEqual({
 			profile: { transferDrop: "off", transferVerify: false },
+		});
+	});
+
+	it("PATCH /api/hosts/:id/profile stores pasteWarning, a key of the profile (#1015)", async () => {
+		const { hostId } = await makeChannel();
+		const url = `/api/hosts/${hostId}/profile`;
+		const accepted = await server.inject({
+			method: "PATCH",
+			url,
+			payload: { profile: { pasteWarning: "never" } },
+		});
+		expect(accepted.statusCode).toBe(200);
+		expect((await server.inject({ method: "GET", url })).json()).toEqual({
+			profile: { pasteWarning: "never" },
 		});
 	});
 

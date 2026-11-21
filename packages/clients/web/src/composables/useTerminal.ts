@@ -13,10 +13,36 @@ import type { IWsClient } from "../services/ws-client.js";
 import { useChannelsStore } from "../stores/channels.js";
 import { useThemeStore } from "../stores/theme.js";
 import { useToastStore } from "../stores/toast.js";
+import { pasteFirstLines, pasteLineCount, pasteWarningAsks } from "../utils/paste-confirm.js";
 import { terminalScrollbarWidth } from "../utils/terminal-scrollbar.js";
 import { PasteStream, pasteInProgress } from "./paste-stream.js";
 import { awaitTerminalFont } from "./terminal-font.js";
 import { useTerminalSearch } from "./useTerminalSearch.js";
+
+/**
+ * A paste waiting on its card before anything of it is sent (#1015): how many
+ * lines, the first ones, and whether the program has bracketed paste on. A
+ * new `id` for each paste held, so that the card takes the keyboard again.
+ */
+export interface PendingPaste {
+	id: number;
+	lines: number;
+	preview: string[];
+	bracketed: boolean;
+}
+
+/**
+ * How much of each of a held paste's first lines the card is given, in UTF-16
+ * units: enough for the 80 code points it shows and one more to know it cuts,
+ * whatever the line's length (#1015).
+ */
+const PREVIEW_UNITS = 2 * 80 + 1;
+
+/** A paste in the form the pane's path sends it (#1012, #1014). */
+type PreparedPaste =
+	| { path: "stream"; bytes: Uint8Array }
+	| { path: "adapt"; form: string }
+	| { path: "plain"; text: string };
 
 /** Maximum number of entries in the title stack (SC-05). */
 const MAX_TITLE_STACK = 5;
@@ -119,6 +145,13 @@ export function useTerminal(
 	 * whenever it changes: the pane's host, or that host's profile (#997).
 	 */
 	hostThemeName?: MaybeRefOrGetter<string | undefined>,
+	options?: {
+		/**
+		 * The resolved `pasteWarning` of the pane's terminal, read at each paste
+		 * (#1015). A value other than "always" or "never" is "auto".
+		 */
+		pasteWarning?: MaybeRefOrGetter<unknown>;
+	},
 ) {
 	/**
 	 * The pane's xterm. Each one holds one terminal's output for its whole life:
@@ -155,6 +188,18 @@ export function useTerminal(
 	 * (#1014). The pane then streams its pastes, of any size up to the bound.
 	 */
 	let streamsPaste = false;
+	/**
+	 * The paste waiting on its card (#1015): its text, read once at the event,
+	 * since the clipboard cannot be read after it, and the terminal it was
+	 * pasted into. Only that terminal may get it.
+	 */
+	let heldPaste: { text: string; channelId: string } | null = null;
+	let pastesHeld = 0;
+	const pendingPaste = shallowRef<PendingPaste | null>(null);
+	function dropPendingPaste(): void {
+		heldPaste = null;
+		pendingPaste.value = null;
+	}
 	/** The profile applied last, which a new xterm is made with. */
 	let currentProfile = profile;
 	/** Stops following the host's theme, once the pane is closed. */
@@ -235,33 +280,98 @@ export function useTerminal(
 	});
 
 	/**
-	 * A paste to an agent that streams pastes (#1014): the text without
-	 * markers, line ends as xterm sends them, UTF-8, at most PASTE_MAX_BYTES,
-	 * one paste at a time.
+	 * A paste in the form the pane's path sends it, or null when that path
+	 * refuses it, with its toast. An agent that streams pastes (#1014) takes the
+	 * text without markers, line ends as xterm sends them, UTF-8, at most
+	 * PASTE_MAX_BYTES, one paste at a time. One that adapts input (#1012) takes
+	 * one INPUT frame, bracketed by the pane, its own markers taken out. Any
+	 * other gets xterm's own paste.
 	 */
-	function streamPaste(term: Terminal, clipboard: DataTransfer | null): void {
-		if (clipboard === null) return;
+	function preparePaste(text: string): PreparedPaste | null {
 		const toast = useToastStore();
-		if (pasteInProgress(channelId) !== null) {
-			toast.show("warning", "A paste is still being sent to this terminal.");
-			return;
+		if (streamsPaste) {
+			if (pasteInProgress(channelId) !== null) {
+				toast.show("warning", "A paste is still being sent to this terminal.");
+				return null;
+			}
+			const unmarked = text.includes("\u001b") ? withoutPasteMarkers(text) : text;
+			const bytes = new TextEncoder().encode(unmarked.replace(/\r?\n/g, "\r"));
+			if (bytes.byteLength > PASTE_MAX_BYTES) {
+				toast.show("warning", "This paste is too large to send (16 MiB at most).");
+				return null;
+			}
+			return { path: "stream", bytes };
 		}
-		const text = clipboard.getData("text/plain");
-		const unmarked = text.includes("\u001b") ? withoutPasteMarkers(text) : text;
-		const normalised = unmarked.replace(/\r?\n/g, "\r");
-		const bytes = new TextEncoder().encode(normalised);
-		if (bytes.byteLength > PASTE_MAX_BYTES) {
-			toast.show("warning", "This paste is too large to send (16 MiB at most).");
-			return;
+		if (adaptsInput) {
+			// Each UTF-16 unit left is at least one UTF-8 byte. A marker taken out
+			// is six units holding one ESC, and may join a CR to an LF, which then
+			// make one: a text too long even so is refused before any of it is copied.
+			let escapes = 0;
+			let crlfs = 0;
+			for (let at = 0; at < text.length; at++) {
+				const unit = text.charCodeAt(at);
+				if (unit === 0x1b) escapes++;
+				else if (unit === 0x0a && at > 0 && text.charCodeAt(at - 1) === 0x0d) crlfs++;
+			}
+			const tooLarge = () => {
+				toast.show("warning", "This paste is too large to send (64 KiB at most).");
+				return null;
+			};
+			if (
+				text.length - 7 * escapes - crlfs + PASTE_START.length + PASTE_END.length >
+				MAX_INPUT_SIZE
+			) {
+				return tooLarge();
+			}
+			const stripped = escapes > 0 ? withoutPasteMarkers(text) : text;
+			const form = `${PASTE_START}${stripped.replace(/\r?\n/g, "\r")}${PASTE_END}`;
+			if (new TextEncoder().encode(form).byteLength > MAX_INPUT_SIZE) return tooLarge();
+			return { path: "adapt", form };
 		}
-		if (bytes.byteLength === 0 || channelId === null || !wsClient.isConnected || !canWrite.value) {
-			return;
+		return { path: "plain", text };
+	}
+
+	/** Whether what the pane sends reaches a terminal now: one bound, the socket up, the write lock held. */
+	function canSendNow(): boolean {
+		return channelId !== null && wsClient.isConnected && canWrite.value;
+	}
+
+	function sendPreparedPaste(term: Terminal, paste: PreparedPaste): void {
+		if (paste.path === "stream") {
+			if (paste.bytes.byteLength === 0 || channelId === null || !canSendNow()) return;
+			// As xterm's own paste: the selection clears and the view goes down to
+			// where the text is typed.
+			term.clearSelection();
+			term.scrollToBottom();
+			pasteStream.start(channelId, paste.bytes);
+		} else if (paste.path === "adapt") {
+			// xterm's own user-input path: the view goes to the bottom and the
+			// selection clears, as for a paste xterm makes, and the gate below
+			// sends it.
+			term.input(paste.form, true);
+		} else {
+			term.paste(paste.text);
 		}
-		// As xterm's own paste: the selection clears and the view goes down to
-		// where the text is typed.
-		term.clearSelection();
-		term.scrollToBottom();
-		pasteStream.start(channelId, bytes);
+	}
+
+	/**
+	 * Paste was clicked on the card (#1015): the paste held goes by the path the
+	 * pane takes now, its refusals checked again, and only to the terminal it
+	 * was pasted into.
+	 */
+	function confirmPaste(): void {
+		const held = heldPaste;
+		dropPendingPaste();
+		const term = terminal.value;
+		if (held === null || term === null || held.channelId !== channelId) return;
+		const prepared = preparePaste(held.text);
+		if (prepared === null || !canSendNow()) return;
+		sendPreparedPaste(term, prepared);
+	}
+
+	/** Cancel on the card: the paste held goes, nothing of it sent. */
+	function cancelPaste(): void {
+		dropPendingPaste();
 	}
 
 	/**
@@ -552,51 +662,40 @@ export function useTerminal(
 		// says so, the pane brackets every paste itself, one frame, its own
 		// markers taken out, and xterm pastes nothing of its own. An agent that
 		// streams pastes (#1014) gets them as PASTE chunks instead, unbracketed:
-		// it writes the markers itself.
+		// it writes the markers itself. A paste of several lines its program
+		// would run one by one waits on a card first (#1015). Every paste is
+		// taken here, its text read once, and an older agent's handed to xterm's
+		// `paste()`. xterm's own handler ignores `defaultPrevented`, so each one
+		// is stopped too.
 		term.element?.addEventListener(
 			"paste",
 			(event) => {
-				if (streamsPaste) {
-					event.stopPropagation();
-					event.preventDefault();
-					streamPaste(term, event.clipboardData);
-					return;
-				}
-				if (!adaptsInput) return;
+				// A paste reaching the terminal replaces one waiting on its card.
+				dropPendingPaste();
 				event.stopPropagation();
 				event.preventDefault();
 				// No clipboard data: nothing to paste, as xterm sends nothing then.
 				if (event.clipboardData === null) return;
 				const text = event.clipboardData.getData("text/plain");
-				// Each UTF-16 unit left is at least one UTF-8 byte. A marker taken out
-				// is six units holding one ESC, and may join a CR to an LF, which then
-				// make one: a text too long even so is refused before any of it is copied.
-				let escapes = 0;
-				let crlfs = 0;
-				for (let at = 0; at < text.length; at++) {
-					const unit = text.charCodeAt(at);
-					if (unit === 0x1b) escapes++;
-					else if (unit === 0x0a && at > 0 && text.charCodeAt(at - 1) === 0x0d) crlfs++;
-				}
-				const tooLarge = () =>
-					useToastStore().show("warning", "This paste is too large to send (64 KiB at most).");
+				const bracketed = term.modes.bracketedPasteMode;
 				if (
-					text.length - 7 * escapes - crlfs + PASTE_START.length + PASTE_END.length >
-					MAX_INPUT_SIZE
+					pasteLineCount(text, 2) >= 2 &&
+					pasteWarningAsks(toValue(options?.pasteWarning), bracketed)
 				) {
-					tooLarge();
+					// As an unasked paste: the path's refusals with their toast, then
+					// nothing at all while the pane cannot send.
+					if (preparePaste(text) === null || !canSendNow() || channelId === null) return;
+					heldPaste = { text, channelId };
+					pendingPaste.value = {
+						id: ++pastesHeld,
+						lines: pasteLineCount(text),
+						preview: pasteFirstLines(text, 3, PREVIEW_UNITS),
+						bracketed,
+					};
 					return;
 				}
-				const stripped = escapes > 0 ? withoutPasteMarkers(text) : text;
-				const form = `${PASTE_START}${stripped.replace(/\r?\n/g, "\r")}${PASTE_END}`;
-				if (new TextEncoder().encode(form).byteLength > MAX_INPUT_SIZE) {
-					tooLarge();
-					return;
-				}
-				// xterm's own user-input path: the view goes to the bottom and the
-				// selection clears, as for a paste xterm makes, and the gate below
-				// sends it.
-				term.input(form, true);
+				const prepared = preparePaste(text);
+				if (prepared !== null) sendPreparedPaste(term, prepared);
 			},
 			{ capture: true },
 		);
@@ -804,6 +903,8 @@ export function useTerminal(
 		// A spawn that completes after the pane closed: nothing to bind, and
 		// nothing may listen for a pane that is gone (#971).
 		if (disposed) return;
+		// A paste waiting on its card was for the terminal shown before (#1015).
+		dropPendingPaste();
 		channelId = id;
 		shownId = id;
 		// As the SPAWN_OK that made it said (#1012, #1014).
@@ -1098,6 +1199,9 @@ export function useTerminal(
 				Object.assign(new Error("The pane is closed"), { code: ATTACH_SUPERSEDED }),
 			);
 		}
+		// A paste waiting on its card goes with any attach, of this terminal too:
+		// what it was asked about may no longer hold (#1015).
+		dropPendingPaste();
 		const request = ++attachRequests;
 		supersede(pendingAttaches.filter((entry) => entry.channelId !== id));
 		// Asking for another terminal: what is typed, what xterm answers by
@@ -1366,6 +1470,7 @@ export function useTerminal(
 		pasteStream.interrupt();
 		pasteUnsubscribe?.();
 		pasteUnsubscribe = null;
+		dropPendingPaste();
 		sizeUnsubscribe?.();
 		sizeUnsubscribe = null;
 		ptySize = null;
@@ -1411,6 +1516,9 @@ export function useTerminal(
 		init,
 		attachChannel,
 		reattachChannel,
+		pendingPaste,
+		confirmPaste,
+		cancelPaste,
 		isBoundTo,
 		turnMouseReportingOff,
 		bellMuted,

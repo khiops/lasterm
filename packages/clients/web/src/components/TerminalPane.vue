@@ -67,6 +67,15 @@
 			:style="{ '--upload-drop-top': `${terminalTop}px` }"
 		/>
 		<UploadConfirm place="pane" :pane-id="paneId" @done="onUploadCardDone" />
+		<!-- A paste of several lines its program would run one by one, held until Paste (#1015). -->
+		<PasteConfirm
+			v-if="pendingPaste"
+			ref="pasteCard"
+			:pending="pendingPaste"
+			:host-label="paneHost?.label ?? 'this host'"
+			@paste="onPasteConfirmed"
+			@cancel="onPasteCancelled"
+		/>
 
 		<!-- Exit overlay for a dead channel whose pane asks what to do, and for one
 		     the hub has never heard of. While "When a terminal ends" acts, or waits
@@ -286,6 +295,7 @@ import EnvironmentBanner from './EnvironmentBanner.vue';
 import FilesButton from './files/FilesButton.vue';
 import TransferChip from './files/TransferChip.vue';
 import UploadConfirm from './files/UploadConfirm.vue';
+import PasteConfirm from './PasteConfirm.vue';
 import UploadDropOverlay from './files/UploadDropOverlay.vue';
 import SearchOverlay from './SearchOverlay.vue';
 import UnreadLinesBar from './UnreadLinesBar.vue';
@@ -460,7 +470,56 @@ const {
 	currentDynamicTitle,
 	search,
 	terminal,
-} = useTerminal(terminalContainer, sessionStore.wsClient, resolvedProfile.value, hostThemeName);
+	pendingPaste,
+	confirmPaste,
+	cancelPaste,
+} = useTerminal(terminalContainer, sessionStore.wsClient, resolvedProfile.value, hostThemeName, {
+	pasteWarning: () => resolvedProfile.value.pasteWarning,
+});
+
+// ---------------------------------------------------------------------------
+// A paste waiting on its card (#1015)
+// ---------------------------------------------------------------------------
+
+const pasteCard = ref<{ card: HTMLElement | null } | null>(null);
+
+/** Paste on the card: sent at once; "Don't ask again" is written beside it, never waited for. */
+function onPasteConfirmed(dontAskAgain: 'host' | 'global' | null): void {
+	confirmPaste();
+	if (dontAskAgain === null) return;
+	void configStore
+		.savePasteNeverAsk(dontAskAgain, {
+			hostId: paneHostId.value ?? null,
+			channelId: effectiveChannelId.value,
+		})
+		.then((saved) => {
+			if (!saved) useToastStore().show('error', 'Could not save "Don\'t ask again".');
+		});
+}
+
+function onPasteCancelled(): void {
+	cancelPaste();
+}
+
+// The card going while it holds the keyboard, by Paste, Cancel, Esc or an
+// attach, gives the keyboard back to the terminal. Checked before the card
+// leaves the page, while the focus is still in it. Not when its terminal ended:
+// the ended card takes the keyboard then.
+watch(
+	pendingPaste,
+	(now, before) => {
+		if (now !== null || before === null) return;
+		const card = pasteCard.value?.card ?? null;
+		const held = card !== null && card.contains(document.activeElement);
+		if (held && !isDead.value && !hasEnded.value) void nextTick(() => terminal.value?.focus());
+	},
+	{ flush: 'pre' },
+);
+
+/** The keyboard for this pane: a paste's card, else an ended terminal's card, else the terminal. */
+function focusPaneKeyboard(): void {
+	(pasteCard.value?.card ?? exitCard.value ?? terminal.value)?.focus();
+}
 
 // ---------------------------------------------------------------------------
 // Search config from config store
@@ -893,6 +952,14 @@ const isDetached = ref(false);
 // there, and the pane offered "No lock" over a shell that no longer exists
 // while the overlay said it had exited.
 const hasEnded = ref(false);
+
+// A paste held for a terminal that has ended goes, nothing of it sent.
+watch(
+	() => isDead.value || hasEnded.value,
+	(ended) => {
+		if (ended) cancelPaste();
+	},
+);
 const goneMessage = 'This terminal no longer exists.';
 
 /**
@@ -1736,9 +1803,9 @@ function onUploadHere(): void {
 	});
 }
 
-/** The confirmation went: the keyboard goes back to the terminal. */
+/** The confirmation went: the keyboard goes back to the pane. */
 function onUploadCardDone(): void {
-	void nextTick(() => terminal.value?.focus());
+	void nextTick(focusPaneKeyboard);
 }
 
 /** "Files": the panel opens on this pane's terminal, with the keyboard in it (#836). */
@@ -1868,8 +1935,8 @@ function onSearchClose(): void {
 		multiPaneSearch.clearAll();
 		multiPaneSearch.setScope('pane');
 	}
-	// Refocus the terminal so keyboard input resumes
-	terminal.value?.focus();
+	// Refocus the pane so keyboard input resumes, on a paste's card if one waits
+	focusPaneKeyboard();
 }
 
 function onSearchOptionsUpdate(opts: import('../composables/useTerminalSearch.js').SearchOptions): void {
@@ -1965,7 +2032,7 @@ watch(
 	[isActiveTab, () => terminal.value !== null],
 	([active, present]) => {
 		// Over a terminal that has ended, the keyboard goes to the overlay's card.
-		if (active && present) void nextTick(() => (exitCard.value ?? terminal.value)?.focus());
+		if (active && present) void nextTick(focusPaneKeyboard);
 	},
 	{ immediate: true },
 );

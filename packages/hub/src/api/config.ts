@@ -14,8 +14,8 @@ import {
 	LOGGING_SETTINGS_VALIDATORS,
 	SSH_CONFIG_KEYS,
 	TERMINAL_PROFILE_KEYS,
+	TERMINAL_PROFILE_VALIDATORS,
 	TRANSFER_CONFIG_VALIDATORS,
-	TRANSFER_PROFILE_VALIDATORS,
 	UI_CONFIG_SECTIONS,
 	UI_SECTION_KEYS,
 } from "@lasterm/shared";
@@ -95,7 +95,7 @@ export const UI_VALUE_VALIDATORS: Record<string, Record<string, (v: unknown) => 
  * keeps one test proving it consults this table.
  */
 export const TERMINAL_VALUE_VALIDATORS: Record<string, (v: unknown) => boolean> = {
-	...TRANSFER_PROFILE_VALIDATORS,
+	...TERMINAL_PROFILE_VALIDATORS,
 };
 
 type ProfileScope = "global" | "host" | "channel";

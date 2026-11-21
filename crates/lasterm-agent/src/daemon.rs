@@ -1499,6 +1499,12 @@ fn spawn_output_router(mut batched_rx: mpsc::UnboundedReceiver<BatchedEvent>, ro
         while let Some(event) = batched_rx.recv().await {
             match event.into_delivery() {
                 Ok(Delivery::Owner(routed)) => {
+                    #[cfg(test)]
+                    if routed.routed.is_some() {
+                        if let Some(delay) = crate::pty::route_delay_of(&routed.channel_id) {
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
                     routes.lock().await.route(
                         &routed.owner,
                         &routed.channel_id,
@@ -4793,6 +4799,73 @@ mod tests {
                 assert!(
                     !mentions(&later, "held-restarted").contains(&"CHANNEL_EXIT".to_string()),
                     "an exit after the SPAWN_OK marks the restarted terminal dead"
+                );
+
+                daemon.stop().await;
+            }
+
+            /// While its exit is not sent, an ended terminal is still there:
+            /// its hub, connecting again, is told so and then gets its exit,
+            /// and a SPAWN reusing its id is refused (#1089).
+            #[tokio::test]
+            async fn an_ended_terminal_keeps_its_id_until_its_exit_is_sent() {
+                crate::pty::delay_exit_of("held-id", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("held-id").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, spawn("held-id", "exit 5")).await;
+                a.read_through(|frame| is_about(frame, "LOG", "held-id"))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                let (mut a2, listed) = daemon.connect_as(KEY_A).await;
+                assert!(
+                    listed
+                        .iter()
+                        .any(|frame| is_about(frame, "AGENT_CHANNEL_STATE", "held-id")
+                            && frame["alive"].as_bool() == Some(true)),
+                    "the ended terminal is not listed; received {:?}",
+                    listed.iter().map(frame_type).collect::<Vec<_>>()
+                );
+                a2.send(&interactive("held-id")).await;
+                let answer = a2
+                    .read_through(|frame| {
+                        frame["request_id"].as_str() == Some("request-held-id")
+                            || is_about(frame, "CHANNEL_EXIT", "held-id")
+                    })
+                    .await;
+                assert_eq!(
+                    answer.last().map(frame_type),
+                    Some("SPAWN_ERR"),
+                    "{:?}",
+                    answer.iter().map(frame_type).collect::<Vec<_>>()
+                );
+                let exit = a2
+                    .read_through(|frame| is_about(frame, "CHANNEL_EXIT", "held-id"))
+                    .await;
+                assert_eq!(exit.last().unwrap()["exit_code"].as_i64(), Some(5));
+
+                daemon.stop().await;
+            }
+
+            /// A SPAWN reusing the id of a terminal whose exit is on its way
+            /// waits for it: the exit comes before its SPAWN_OK (#1089).
+            #[tokio::test]
+            async fn a_spawn_waits_for_an_exit_on_its_way() {
+                crate::pty::delay_route_of("routed-id", Duration::from_millis(800));
+                let daemon = TestDaemon::start("routed-id").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, spawn("routed-id", "exit 5")).await;
+                a.read_through(|frame| is_about(frame, "LOG", "routed-id"))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                let frames = spawned(&mut a, interactive("routed-id")).await;
+                assert!(
+                    frames
+                        .iter()
+                        .any(|frame| is_about(frame, "CHANNEL_EXIT", "routed-id")),
+                    "the exit must come before the SPAWN_OK; received {:?}",
+                    frames.iter().map(frame_type).collect::<Vec<_>>()
                 );
 
                 daemon.stop().await;

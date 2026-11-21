@@ -91,6 +91,32 @@ pub(crate) fn exit_delay_of(channel_id: &str) -> Option<Duration> {
         .map(|(_, delay)| *delay)
 }
 
+/// The channels whose exit the output router holds before routing it: the
+/// window where a SPAWN waits for an exit on its way (#1089).
+#[cfg(test)]
+static DELAYED_ROUTES: std::sync::Mutex<Vec<(String, Duration)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Have the router hold the exit of `channel_id` for `delay` before routing it.
+#[cfg(test)]
+pub(crate) fn delay_route_of(channel_id: &str, delay: Duration) {
+    DELAYED_ROUTES
+        .lock()
+        .expect("delayed routes")
+        .push((channel_id.to_owned(), delay));
+}
+
+/// How long the router holds the exit of `channel_id` before routing it.
+#[cfg(test)]
+pub(crate) fn route_delay_of(channel_id: &str) -> Option<Duration> {
+    DELAYED_ROUTES
+        .lock()
+        .expect("delayed routes")
+        .iter()
+        .find(|(id, _)| id == channel_id)
+        .map(|(_, delay)| *delay)
+}
+
 pub struct PtyManager {
     pub(crate) channels: HashMap<String, PtyChannelState>,
     /// Channels whose program ended and whose exit has not reached its hub's

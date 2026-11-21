@@ -5,9 +5,9 @@
 	"description": "Lasterm desktop app (Tauri v2)",
 	"license": "AGPL-3.0-only",
 	"scripts": {
-		"tauri": "tauri",
+		"tauri": "node tauri-channel.mjs",
 		"dev": "tauri dev",
-		"build": "tauri build",
+		"build": "node tauri-channel.mjs build",
 		"test": "pnpm -w exec vitest run --project desktop",
 		"test:e2e": "tsx e2e/run.ts",
 		"typecheck": "tsc --noEmit -p e2e/tsconfig.json && tsc -p tsconfig.typecheck.json"

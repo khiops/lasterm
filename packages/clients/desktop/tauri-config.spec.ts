@@ -280,3 +280,41 @@ describe("package.json", () => {
 		expect(devDeps).toHaveProperty("@tauri-apps/cli");
 	});
 });
+
+// The build channel's identity on what the Tauri CLI bundles (#1084): this
+// package runs the CLI through tauri-channel.mjs, which adds the dev identity
+// when a dev build bundles. Mutations: the scripts calling the CLI directly
+// again; the channel compared without case; the identity added to `tauri dev`.
+describe("tauri-channel.mjs", () => {
+	const DEV_CONFIG = resolve(DESKTOP_DIR, "tauri.dev.conf.json");
+
+	it("is what this package's tauri and build scripts run", () => {
+		const scripts = (readJson("package.json") as { scripts: Record<string, string> }).scripts;
+		expect(scripts.tauri).toBe("node tauri-channel.mjs");
+		expect(scripts.build).toBe("node tauri-channel.mjs build");
+	});
+
+	it("adds the dev identity when a dev build bundles", async () => {
+		const { channelArgs } = await import("./tauri-channel.mjs");
+		for (const env of [{}, { LASTERM_CHANNEL: "" }, { LASTERM_CHANNEL: "Release" }]) {
+			expect(channelArgs(["build", "--config", "x.json"], env)).toEqual([
+				"build",
+				"--config",
+				"x.json",
+				"--config",
+				DEV_CONFIG,
+			]);
+			expect(channelArgs(["bundle"], env)).toEqual(["bundle", "--config", DEV_CONFIG]);
+		}
+	});
+
+	it("leaves a release build and every other command as they are", async () => {
+		const { channelArgs } = await import("./tauri-channel.mjs");
+		expect(channelArgs(["build", "--no-bundle"], { LASTERM_CHANNEL: "release" })).toEqual([
+			"build",
+			"--no-bundle",
+		]);
+		expect(channelArgs(["dev"], {})).toEqual(["dev"]);
+		expect(channelArgs(["info"], {})).toEqual(["info"]);
+	});
+});

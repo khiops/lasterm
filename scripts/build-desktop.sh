@@ -46,12 +46,8 @@ cp "$LASTERM_DIST_DIR/lasterm_hub_lock.node" "$LASTERM_DIST_DIR/lasterm_tls_iden
 echo "  → Sidecars and the hub's addons placed in src-tauri/"
 
 cd "$ROOT"
-# A development build's installers carry its own name and identifier, as its
-# executable does (build.rs, #1084): the CLI's bundler reads only --config.
-channel_config=()
-[ "${LASTERM_CHANNEL:-}" = release ] || channel_config=(--config tauri.dev.conf.json)
 pnpm -F @lasterm/desktop tauri build \
-  --config '{"build":{"beforeBuildCommand":""}}' "${channel_config[@]}"
+  --config '{"build":{"beforeBuildCommand":""}}'
 
 echo ""
 echo "✅ Desktop built for $LASTERM_TARGET_TRIPLE"

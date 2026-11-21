@@ -26,10 +26,11 @@ pub struct EventFrame {
     pub owner: OwnerId,
     pub channel_id: String,
     pub frame: Vec<u8>,
-    /// The channel's last frame: its CHANNEL_EXIT. Nothing of it follows.
-    pub ends_channel: bool,
     /// What this frame counts against its hub's connection (#553).
     pub charge: InTransit,
+    /// Held while the frame is on its way, dropped once it is routed: the
+    /// exit of a channel whose id stays taken until then (#1089).
+    pub routed: Option<tokio::sync::watch::Sender<()>>,
 }
 
 /// A channel's ATTACH_OK or SNAPSHOT_RES, rendered by its reader (#931).
@@ -136,12 +137,14 @@ impl BatchedEvent {
                 owner: b.owner,
                 channel_id: b.channel_id,
                 charge: b.charge,
+                routed: None,
             })),
             BatchedEvent::Frame(event) => Ok(Delivery::Owner(RoutedFrame {
                 owner: event.owner,
                 channel_id: event.channel_id,
                 frame: event.frame,
                 charge: Some(event.charge),
+                routed: event.routed,
             })),
         }
     }
@@ -154,6 +157,8 @@ pub struct RoutedFrame {
     pub frame: Vec<u8>,
     /// What it counts against that hub's connection until it is written.
     pub charge: Option<InTransit>,
+    /// Dropped once it is routed (`EventFrame::routed`).
+    pub routed: Option<tokio::sync::watch::Sender<()>>,
 }
 
 const BATCH_INTERVAL_MS: u64 = 16;
@@ -222,12 +227,10 @@ impl Batcher {
                 }
             }
             ChannelEvent::Frame(event) => {
+                // Its buffer goes too: an exit is a channel's last word, and
+                // keeping an empty buffer would grow the map by one per
+                // terminal ever run.
                 self.release(&event.channel_id, tx);
-                // Its exit is a channel's last word: keeping an empty buffer
-                // for it would grow the map by one per terminal ever run.
-                if event.ends_channel {
-                    self.buffers.remove(&event.channel_id);
-                }
                 let _ = tx.send(BatchedEvent::Frame(event));
             }
             // The output its screen holds goes first; what the reader reads
@@ -239,12 +242,14 @@ impl Batcher {
         }
     }
 
-    /// Send what `channel_id` has buffered, now.
+    /// Send what `channel_id` has buffered, now, and keep no buffer for it:
+    /// its next output makes a new one. A channel whose exit is never sent,
+    /// withdrawn by a DESTROY (#1089), leaves none behind either.
     fn release(&mut self, channel_id: &str, tx: &mpsc::UnboundedSender<BatchedEvent>) {
         let held = self
             .buffers
-            .get_mut(channel_id)
-            .and_then(|buf| buf.take(channel_id));
+            .remove(channel_id)
+            .and_then(|mut buf| buf.take(channel_id));
         if let Some(batch) = held {
             let _ = tx.send(BatchedEvent::Output(batch));
         }
@@ -311,8 +316,8 @@ mod tests {
             owner: OwnerId::stdio(),
             channel_id: channel_id.into(),
             frame: frame.to_vec(),
-            ends_channel: false,
             charge: charge(frame.len()),
+            routed: None,
         })
     }
 
@@ -321,8 +326,8 @@ mod tests {
             owner: OwnerId::stdio(),
             channel_id: channel_id.into(),
             frame: b"exit".to_vec(),
-            ends_channel: true,
             charge: charge(4),
+            routed: None,
         })
     }
 
@@ -419,6 +424,25 @@ mod tests {
         assert_eq!(after.frame, b"after");
     }
 
+    /// An event about a channel takes its buffer with it, its output first:
+    /// a channel whose exit is withdrawn sends its LOG last, and keeps no
+    /// buffer for the daemon's lifetime (#1089).
+    #[test]
+    fn an_event_leaves_no_buffer_behind() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<BatchedEvent>();
+        let mut batcher = Batcher::default();
+        batcher.accept(output("withdrawn", 1, b"bye"), &tx);
+
+        batcher.accept(event("withdrawn", b"PTY closed"), &tx);
+
+        assert_eq!(expect_output(rx.try_recv().ok()).data, b"bye");
+        assert_eq!(expect_event(rx.try_recv().ok()).frame, b"PTY closed");
+        assert!(
+            !batcher.buffers.contains_key("withdrawn"),
+            "the channel's buffer must go with its last event"
+        );
+    }
+
     /// A channel that ended keeps no buffer: the loop used to hold an empty
     /// one for every terminal it had ever carried, for the daemon's lifetime.
     /// What the channel had buffered still goes out, before its exit.
@@ -432,7 +456,7 @@ mod tests {
         batcher.accept(exit("ended"), &tx);
 
         assert_eq!(expect_output(rx.try_recv().ok()).data, b"bye");
-        assert!(expect_event(rx.try_recv().ok()).ends_channel);
+        assert_eq!(expect_event(rx.try_recv().ok()).frame, b"exit");
         assert!(
             !batcher.buffers.contains_key("ended"),
             "the ended channel's buffer must go with it"

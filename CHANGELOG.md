@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.20.0](https://github.com/khiops/lasterm/compare/v0.19.1...v0.20.0) (2026-11-21)
+
+
+### Features
+
+* count a stop only after STOP_ACCEPTED, and reach the agent left on a host ([#700](https://github.com/khiops/lasterm/issues/700), [#701](https://github.com/khiops/lasterm/issues/701)) ([#1096](https://github.com/khiops/lasterm/issues/1096)) ([9f5618c](https://github.com/khiops/lasterm/commit/9f5618c300865b467b21e349fc00d062164272de))
+* **hub:** an ended terminal shows its exact last screen and its latest end ([#1093](https://github.com/khiops/lasterm/issues/1093)) ([52061eb](https://github.com/khiops/lasterm/commit/52061ebb5694e3df9056dcc8727b5984e630d08d)), closes [#933](https://github.com/khiops/lasterm/issues/933) [#932](https://github.com/khiops/lasterm/issues/932)
+* **root:** run a development build beside the Store install ([#1085](https://github.com/khiops/lasterm/issues/1085)) ([1125082](https://github.com/khiops/lasterm/commit/112508245d2fcf44b61a5fa4aa4eb67176e9769a)), closes [#1084](https://github.com/khiops/lasterm/issues/1084)
+* **web:** ask before a multi-line paste that would run line by line ([#1092](https://github.com/khiops/lasterm/issues/1092)) ([db1e54d](https://github.com/khiops/lasterm/commit/db1e54d5258cb183dfff6756f3d37d5543f1dfe5)), closes [#1015](https://github.com/khiops/lasterm/issues/1015)
+
+
+### Bug Fixes
+
+* **agent:** apply a terminal's end only to its own run around a restart ([#1103](https://github.com/khiops/lasterm/issues/1103)) ([8db8817](https://github.com/khiops/lasterm/commit/8db8817572d7bf98c1a0559d194488af3ba7e204)), closes [#1089](https://github.com/khiops/lasterm/issues/1089)
+* **hub,web:** the dead-channel purge answers the ids it deleted ([#1116](https://github.com/khiops/lasterm/issues/1116)) ([9f76504](https://github.com/khiops/lasterm/commit/9f76504b06d36b6655a7043802fc074d5e9fbbe8))
+* **hub:** a failing spool write no longer throws out of CHANNEL_EXIT handling ([#1101](https://github.com/khiops/lasterm/issues/1101)) ([c2224fd](https://github.com/khiops/lasterm/commit/c2224fd7d9fbb8b83128ff7491c1e840197bb150)), closes [#1098](https://github.com/khiops/lasterm/issues/1098)
+* **hub:** a refused stop leaves the uploads it asked about running ([#1107](https://github.com/khiops/lasterm/issues/1107)) ([6ed5939](https://github.com/khiops/lasterm/commit/6ed59394047d2c8bd0940c36034f626968775b17)), closes [#1102](https://github.com/khiops/lasterm/issues/1102)
+* **web:** a channel deleted during a list fetch stays out of its result ([#1105](https://github.com/khiops/lasterm/issues/1105)) ([51c193a](https://github.com/khiops/lasterm/commit/51c193afc0e78767b59e9b7ac025054f9fd4dd67))
+* **web:** ask before stopping uploads when stopping or replacing an agent ([#1090](https://github.com/khiops/lasterm/issues/1090)) ([#1100](https://github.com/khiops/lasterm/issues/1100)) ([f144038](https://github.com/khiops/lasterm/commit/f1440385d2be2f42656855bb7b1247ac02dd7fc8))
+* **web:** keep a status heard during a list fetch over its older rows ([#1099](https://github.com/khiops/lasterm/issues/1099)) ([dcb0449](https://github.com/khiops/lasterm/commit/dcb0449e4ef3a506a7719dd60897cb614d3defd1))
+
+
+### Tests
+
+* **hub,web:** cover [#910](https://github.com/khiops/lasterm/issues/910)'s untested decisions from its unit list ([#957](https://github.com/khiops/lasterm/issues/957)) ([#1114](https://github.com/khiops/lasterm/issues/1114)) ([01881d5](https://github.com/khiops/lasterm/commit/01881d596deaafa537a254d75eccbf346d6f0b96))
+
+
+### Documentation
+
+* **root:** Store news for an ended terminal's exact last screen and latest end ([#1095](https://github.com/khiops/lasterm/issues/1095)) ([1f090e5](https://github.com/khiops/lasterm/commit/1f090e5bcb63d3a465e1bcbf852278fd5b5df748))
+* **root:** Store news for asking before a multi-line paste ([#1094](https://github.com/khiops/lasterm/issues/1094)) ([1f6ea3b](https://github.com/khiops/lasterm/commit/1f6ea3be52b68c027eec47cfae19b2e9f56146ac))
+* **root:** Store news for reaching the agent left on a host and confirmed stops ([#700](https://github.com/khiops/lasterm/issues/700), [#701](https://github.com/khiops/lasterm/issues/701)) ([#1097](https://github.com/khiops/lasterm/issues/1097)) ([bd4b59e](https://github.com/khiops/lasterm/commit/bd4b59ea9ec6e1ec9de7cb3cd625a9dceaccc007))
+
+
+### CI/CD
+
+* **apt-install:** fail over to archive.ubuntu.com when the runner's mirror is too slow ([#1087](https://github.com/khiops/lasterm/issues/1087)) ([0f70238](https://github.com/khiops/lasterm/commit/0f70238b3a0762c738f28c8511308a209936cda7)), closes [#1083](https://github.com/khiops/lasterm/issues/1083)
+* key the Rust caches on rust-toolchain.toml only, save apt caches from main only ([#1088](https://github.com/khiops/lasterm/issues/1088)) ([a5d9e48](https://github.com/khiops/lasterm/commit/a5d9e48fdf6556e439a034117ca8579d64c1eeff)), closes [#748](https://github.com/khiops/lasterm/issues/748)
+
 ## [0.19.1](https://github.com/khiops/lasterm/compare/v0.19.0...v0.19.1) (2026-11-19)
 
 

@@ -2598,11 +2598,12 @@ export class SessionManager {
 					transfers,
 				};
 			}
-			if (transfers > 0) this.transfers?.interruptOn(hostId);
+			const interruptUploads = this.uploadsInterrupter(hostId, transfers);
 			const stop = await requestDaemonStop(agent, {
 				force: options.force,
 				isHubQuitting: () => this.isQuitting(),
 				onStopped: () => {
+					interruptUploads();
 					agent.closedByHub = true;
 					this.releaseAgent(hostId, agent);
 				},
@@ -2618,6 +2619,7 @@ export class SessionManager {
 					}),
 				};
 			}
+			interruptUploads();
 			let stopped = stop.kind === "stopped";
 			// A STOP with no connection to say it on cannot be refused, so it
 			// cannot say whether other hubs hold terminals there: only a forced
@@ -2865,8 +2867,12 @@ export class SessionManager {
 					transfers,
 				};
 			}
-			if (transfers > 0) this.transfers?.interruptOn(hostId);
-			const outcome = await this.stopAgentToReplace(hostId, agent, options);
+			const outcome = await this.stopAgentToReplace(
+				hostId,
+				agent,
+				options,
+				this.uploadsInterrupter(hostId, transfers),
+			);
 			if (outcome.replaced) this.lifecycle.endChannelsOfStoppedAgent(hostId);
 			return outcome;
 		} finally {
@@ -2886,11 +2892,15 @@ export class SessionManager {
 		}
 	}
 
-	/** Stop the daemon `agent` reaches, and let go of the connection once it has. */
+	/**
+	 * Stop the daemon `agent` reaches, and let go of the connection once it has.
+	 * `interruptUploads` runs once the daemon's answer is not a refusal.
+	 */
 	private async stopAgentToReplace(
 		hostId: string,
 		agent: SshAgent,
 		options: { readonly force?: boolean },
+		interruptUploads: () => void,
 	): Promise<ReplaceAgentOutcome> {
 		const stop = await requestDaemonStop(agent, {
 			force: options.force === true,
@@ -2899,10 +2909,12 @@ export class SessionManager {
 			// dial again, which is what the close handling would otherwise read,
 			// and the security log records the disconnect as this hub's doing.
 			onStopped: () => {
+				interruptUploads();
 				agent.closedByHub = true;
 				this.releaseAgent(hostId, agent);
 			},
 		});
+		if (stop.kind !== "refused") interruptUploads();
 		switch (stop.kind) {
 			case "displaced":
 			case "closed_by_hub":
@@ -2970,6 +2982,21 @@ export class SessionManager {
 		return {
 			replaced: true,
 			message: "The agent was stopped. The next terminal on this host starts the current one.",
+		};
+	}
+
+	/**
+	 * Interrupt the uploads to `hostId`, once, when the stop they were
+	 * consented for goes ahead (#833). Called only past the daemon's answer, so
+	 * that its refusal, which stops nothing, leaves them running (#1102); and
+	 * from `onStopped` too, before the hub lets go of the connection they use.
+	 */
+	private uploadsInterrupter(hostId: string, transfers: number): () => void {
+		let done = transfers === 0;
+		return () => {
+			if (done) return;
+			done = true;
+			this.transfers?.interruptOn(hostId);
 		};
 	}
 

@@ -1719,6 +1719,42 @@ describe("POST stop-keeping", () => {
 		expect(f.agent.sent).toContainEqual({ type: "STOP", force: true });
 	});
 
+	it("leaves the uploads running when the daemon refuses a stop consented for them, and interrupts them once it stops (#1102)", async () => {
+		const f = fixture();
+		f.agent.othersHold = 3;
+		const interrupted: string[] = [];
+		// Whether the hub still held the connection the uploads run over.
+		const heldWhenInterrupted: boolean[] = [];
+		sm.setTransfers({
+			activeOn: (id) => (id === hostId && interrupted.length === 0 ? 1 : 0),
+			interruptOn: (id) => {
+				heldWhenInterrupted.push(sm.agents.get(hostId) === f.agent);
+				interrupted.push(id);
+			},
+		});
+		const declined = await stop({ end_terminals: true, stop_transfers: true });
+		expect(declined.statusCode).toBe(409);
+		expect(declined.json()).toMatchObject({
+			error: { code: "OTHER_HUBS_HOLD_CHANNELS", other_owner_channels: 3 },
+		});
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(409);
+		expect(replace.json()).toMatchObject({
+			error: { code: "OTHER_HUBS_HOLD_CHANNELS", other_owner_channels: 3 },
+		});
+		expect(interrupted).toEqual([]);
+		unchanged(f);
+
+		const forced = await stop({ end_terminals: true, stop_transfers: true, force: true });
+		expect(forced.json()).toMatchObject({ outcome: "stopped", ended: 2 });
+		expect(interrupted).toEqual([hostId]);
+		expect(heldWhenInterrupted).toEqual([true]);
+	});
+
 	// A STOP with no connection to say it on: only a forced request goes on to
 	// the agent's own --stop, over SSH.
 	function stopCannotBeSent(f: ReturnType<typeof fixture>): void {

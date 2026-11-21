@@ -3045,6 +3045,51 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		expect(store.statusOf("ch-a")).toBe("live");
 	});
 
+	it("a purge answered after another host's list was fetched leaves that host's channels alone", async () => {
+		const ok = (body: unknown) => Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		const rowsOf: Record<string, Record<string, unknown>[]> = {
+			"host-1": [row("ch-a", "dead")],
+			"host-2": [row("ch-b", "dead")],
+		};
+		mockFetch.mockImplementation((url: string) => {
+			if (url.includes("/api/groups")) return ok([]);
+			return ok(rowsOf[new URL(url, "http://hub.test").searchParams.get("host_id") ?? ""]);
+		});
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+
+		let answer!: () => void;
+		const purgeAnswer = new Promise<void>((r) => {
+			answer = r;
+		});
+		let release!: () => void;
+		const held = new Promise<void>((r) => {
+			release = r;
+		});
+		mockFetch.mockImplementation((url: string, init?: { method?: string }) => {
+			if (init?.method === "DELETE") {
+				return purgeAnswer.then(() => ({ ok: true, json: () => Promise.resolve({ purged: 1 }) }));
+			}
+			if (url.includes("/api/groups")) return ok([]);
+			const hostId = new URL(url, "http://hub.test").searchParams.get("host_id") ?? "";
+			return hostId === "host-2" && holdHost2
+				? held.then(() => ({ ok: true, json: () => Promise.resolve(rowsOf[hostId]) }))
+				: ok(rowsOf[hostId]);
+		});
+		let holdHost2 = false;
+		const purging = store.purgeDeadChannels();
+		// Host 2 is in view, with a refresh of its list in flight, when host 1's purge is answered.
+		await store.fetchChannels("host-2");
+		holdHost2 = true;
+		const refreshing = store.fetchChannels("host-2");
+		answer();
+		await purging;
+		release();
+		await refreshing;
+
+		expect(store.channels.map((c) => c.id)).toEqual(["ch-b"]);
+	});
+
 	it("a deletion before the fetch started does not affect it", async () => {
 		const { store, fetching, release } = await listedThenFetching([row("ch-a", "dead")]);
 		release();

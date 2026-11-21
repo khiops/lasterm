@@ -2061,25 +2061,32 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	async function purgeDeadChannels(): Promise<number> {
 		if (authStore.token === null || activeHostId.value === null) return 0;
+		// The channels this purge is about, read before the request: the list in
+		// view may be another host's by the time the hub answers (#1104).
+		const hostId = activeHostId.value;
+		const deadIds = new Set(channels.value.filter((c) => c.status === "dead").map((c) => c.id));
 		const res = await hubFetch(`${hubBaseUrl()}/api/channels/dead`, {
 			method: "DELETE",
 			headers: {
 				Authorization: `Bearer ${authStore.token}`,
 				"Content-Type": "application/json",
 			},
-			body: JSON.stringify({ host_id: activeHostId.value }),
+			body: JSON.stringify({ host_id: hostId }),
 		});
 		if (!res.ok) return 0;
-		const data = (await res.json()) as { purged: number };
-		const deadIds = new Set(channels.value.filter((c) => c.status === "dead").map((c) => c.id));
 		deletedDuringFetch(deadIds);
-		channels.value = channels.value.filter((c) => c.status !== "dead");
+		channels.value = channels.value.filter((c) => !deadIds.has(c.id));
 		const nextMap = new Map(channelHostMap.value);
 		for (const id of deadIds) {
 			nextMap.delete(id);
 		}
 		channelHostMap.value = nextMap;
-		return data.purged;
+		// The purge is done on the hub; an unreadable count does not undo it.
+		try {
+			return ((await res.json()) as { purged: number }).purged;
+		} catch {
+			return deadIds.size;
+		}
 	}
 
 	return {

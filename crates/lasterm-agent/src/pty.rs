@@ -36,8 +36,9 @@ impl PtyChannelState {
 /// workload back until its CHANNEL_EXIT has been routed to its hub (#1089).
 ///
 /// The id stays taken all that time: a SPAWN reusing it is refused, or, once
-/// the exit is on its way, waits for it, and a hub connecting meanwhile is
-/// told the channel is still there, then gets its exit. A SPAWN accepted in
+/// the exit is on its way, waits for it, and a hub connecting meanwhile may
+/// be told the channel is still there, and gets its exit, before or after
+/// that state. A SPAWN accepted in
 /// between got its SPAWN_OK first, and the hub read the late exit as the end
 /// of the terminal that took its place.
 pub(crate) struct Ending {

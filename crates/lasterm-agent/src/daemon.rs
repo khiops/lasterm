@@ -1078,8 +1078,8 @@ where
                 pid: channel.process.pid(),
                 alive: true,
             })
-            // Ended, its exit still on its way: listed, and its exit follows
-            // (#1089).
+            // Ended, its exit still on its way: listed. Its exit reaches this
+            // connection too, before or after this state (#1089).
             .chain(mgr.ending_of(&owner).into_iter().map(|(channel_id, pid)| {
                 AgentToHub::AgentChannelState {
                     channel_id,

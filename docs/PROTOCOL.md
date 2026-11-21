@@ -270,6 +270,16 @@ id held wedged the agent for good (#432). No CHANNEL_EXIT is sent for a
 workload whose id has already been taken over: the hub asked for it to end and
 has the SPAWN_OK that says what replaced it.
 
+A workload whose program ended by itself keeps its id until its CHANNEL_EXIT
+has been routed to its hub's connection or away queue (#1089). Until then a
+hub that connects may be told the channel is there (`AGENT_CHANNEL_STATE`), and
+it gets the CHANNEL_EXIT too, before or after that state (§ 3.16 allows an exit
+before CHANNEL_STATE_END). A SPAWN reusing the id is refused while the exit is not
+sent yet, and once the exit is sent it waits until the exit is routed, so the
+exit always comes before that SPAWN's SPAWN_OK. A DESTROY of the channel while
+its exit is not sent yet withdraws that exit and frees the id for the restart's
+SPAWN that follows.
+
 **The environment a terminal starts with (`env-modes`, #576).** The agent builds it whole and
 starts the PTY from a cleared environment, in this order:
 

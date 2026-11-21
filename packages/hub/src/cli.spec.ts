@@ -2073,6 +2073,38 @@ describe("host remove consent (#910)", () => {
 		}
 	});
 
+	// D10 (#957): the whole help line, not only where it ends, and the usage.
+	it("prints the host remove help line in full", async () => {
+		const output = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			await main(["--help"]);
+			const lines = output.mock.calls.flat().join("\n").split("\n");
+			expect(lines.filter((line) => line.includes("lasterm host remove"))).toEqual([
+				"  lasterm host remove <label> [--force]         Remove a host (--force: even with terminals open)",
+			]);
+		} finally {
+			output.mockRestore();
+		}
+	});
+
+	it("prints its usage and exits 1 when no label follows host remove", async () => {
+		const errors: unknown[][] = [];
+		const error = vi.spyOn(console, "error").mockImplementation((...args) => {
+			errors.push(args);
+		});
+		const exit = vi.spyOn(process, "exit").mockImplementation(((code: number) => {
+			throw new Error(`exit ${code}`);
+		}) as typeof process.exit);
+		try {
+			await main(["host", "remove"]).catch(() => {});
+			expect(errors[0]).toEqual(["Usage: lasterm host remove <label> [--force]"]);
+			expect(exit).toHaveBeenCalledWith(1);
+		} finally {
+			error.mockRestore();
+			exit.mockRestore();
+		}
+	});
+
 	/**
 	 * `lasterm host remove pi` with `argv` after it, against a hub that lists
 	 * `host-id` as pi and answers its DELETE with `answer`.

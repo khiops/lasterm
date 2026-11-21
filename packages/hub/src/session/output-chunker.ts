@@ -55,7 +55,9 @@ export class OutputChunker {
 
 	/**
 	 * Force-flush buffered data to spool.db. A failed write throws and leaves
-	 * the bytes buffered: the callers that ask for it log it themselves.
+	 * the bytes buffered: the callers that ask for it log it themselves. They
+	 * stay only until the timer, a size flush or the end of the channel
+	 * drops them (`flushOrDrop`).
 	 */
 	flush(channelId: string): void {
 		const buf = this.channels.get(channelId);
@@ -90,7 +92,8 @@ export class OutputChunker {
 	 * is the attach tail and the screen snapshot covers what it misses; kept,
 	 * the bytes would grow without bound while the disk stays full (a live
 	 * terminal) or never be retried (an ended one). The failed write took no
-	 * seq, so the spool has no gap.
+	 * seq, so the spool's seq numbers have no gap; the bytes themselves are
+	 * lost, and the screen may show it until the next snapshot.
 	 */
 	private flushOrDrop(channelId: string): void {
 		try {

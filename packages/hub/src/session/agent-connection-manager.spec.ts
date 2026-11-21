@@ -399,6 +399,8 @@ describe("quit-protected revival capabilities", () => {
 				// The failure is told, by its code.
 				expect(error.mock.calls.flat().join(" ")).toContain("SQLITE_FULL");
 				// The ended terminal is no longer tracked.
+				// Only an untracked channel ignores bumpSeq.
+				chunker.bumpSeq("chan-1", 5);
 				expect(chunker.getNextSeq("chan-1")).toBe(1);
 			} finally {
 				error.mockRestore();

@@ -488,9 +488,26 @@ holds, before every OUTPUT it does not, with `last_seq` the `seq` of the last re
   type: "CHANNEL_EXIT",
   channel_id: string,
   exit_code: number,
-  signal?: string        // "SIGTERM", "SIGKILL"
+  signal?: string,       // "SIGTERM", "SIGKILL"
+  screen?: { serialized: string, cols: number, rows: number,
+             cursor_x: number, cursor_y: number,
+             alternate_screen?: boolean, input_modes?: string }  // as on ATTACH_OK (§ 3.3)
 }
 ```
+
+`screen` is the terminal's final screen, from its `vt100` mirror after the last output of its PTY
+(#933). The agent sends it when the terminal's program ended by itself: not for one the hub
+destroyed (DESTROY), and not when `serialized` and `input_modes` together exceed 256 KiB, a bound
+on the frame a daemon keeps for its hub while it is away (§ 2.1b). An older agent sends none.
+
+The hub takes it before it records the end (§ 4.2, `last_output`): when the last output it would
+answer with is complete and the screen's redraw still fits in its 128 KiB tail, it appends the
+redraw to the terminal's stored output; otherwise it stores the screen as the terminal's newest
+snapshot. The redraw is the whole screen as the scroll region, origin and insert modes off,
+autowrap on and US ASCII in G0 to G3 with G0 shifted in (`ESC[r ESC[?6l ESC[4l ESC[?7h ESC(B
+ESC)B ESC*B ESC+B SI`), then `serialized`, which starts by clearing the visible screen. A screen
+whose JSON would exceed the 256 KiB a stored snapshot is sent at is not taken. Storing it never
+stops the end from being recorded: a storage error is logged by its code, and the end goes on.
 
 ### 3.9 DESTROY (Hub → Agent)
 
@@ -939,18 +956,25 @@ connected or not. One the hub has no record of is answered `CHANNEL_NOT_FOUND`, 
 lock: bringing an ended one back is a SPAWN that names it, which is the user's Restart (#559).
 
 ```typescript
+// on ERROR CHANNEL_DEAD answering an ATTACH only; absent from a hub older than #932
+end_id?: string,        // the end it is about, as CHANNEL_STATE names it (§ 4.7); absent for an end recorded before end ids
+exit_code?: number,     // that end's exit code, when it has one
+end_reason?: "killed" | "stopped",  // as on CHANNEL_STATE (§ 4.7)
+
 // on ERROR CHANNEL_DEAD answering an ATTACH only (#927); absent from a hub older than that
 last_output: {
   snapshot: { serialized, cols, rows, cursor_x, cursor_y } | null,
   tail: Uint8Array[],   // the output after the snapshot, as one element; [] when none is sent
   truncated?: true,     // a snapshot or output was not sent (rules below)
-  cols: number,         // the terminal's last size, which the pane draws them at (resizes are not stored)
+  cols: number,         // the size meta.db last recorded; the spool keeps no resize, so output before one is drawn at this size
   rows: number
 }
 ```
 
 `last_output` is what the terminal last printed, as far as spool.db still holds it: the newest
 snapshot and the output stored after it, or, with no snapshot, the whole stream from its first seq.
+For an end whose CHANNEL_EXIT carried the final screen (§ 3.8), that output ends on the screen's
+redraw, or the screen is the snapshot and nothing follows it.
 Only output that continues where it starts is sent, since a piece of a terminal stream drawn on a
 screen it was not written for shows something wrong without saying so:
 
@@ -987,6 +1011,15 @@ and `CHANNEL_DEAD` shows it has ended, whatever the pane showed before.
 - **No focus report from a replay:** a focus report xterm makes for the `?1004h` of a replay is not
   sent.
 - **An ended terminal's last output** (`last_output`) applies neither field.
+- **A newer end (#932).** A pane keeps the `end_id` of the ending its screen holds: the end it saw
+  live (CHANNEL_STATE `dead`), or the one whose `last_output` it drew. It keeps it through a Restart
+  over that screen and a cached ATTACH_OK that leaves the screen, and drops it when an answer
+  replaces the screen or the pane's terminal changes. A CHANNEL_DEAD naming another `end_id` than
+  that one, both present, resets the screen and draws its `last_output`, or nothing, whatever the
+  attach kept, and the pane answers it as an end found, forgetting what it held about the earlier
+  one. Whichever pane asked, the window takes the answer's end, its `exit_code` and `end_reason`
+  (removed when absent), wherever it keeps a channel's end, when the `end_id` differs from the one
+  it last heard. An answer or an ending without an `end_id` keeps the screen as before.
 - **While `adapts_input` is true** for the terminal it shows, from the ATTACH_OK or SPAWN_OK that bound
   it:
   - the pane brackets every paste itself: its text without any paste marker (removed until none is
@@ -1319,7 +1352,12 @@ absent from `channels` has ended, or is unknown.
   // its shell or command exited, or when the hub found it gone. Stored with the
   // end in channels.end_reason and cleared when the terminal runs again, so
   // the channel list (§ 6) carries it too, and STATE_SYNC (§ 4.6) a "killed" (#592).
-  end_reason?: "killed" | "stopped"
+  end_reason?: "killed" | "stopped",
+  // Only with "dead": the ULID the hub gave this end, new at each end and the same when the end is
+  // told again (#932). Absent for an end recorded before end ids. A window hearing a "dead" with
+  // another end_id than the one it holds for that channel takes that end's exit_code and
+  // end_reason, removed when absent; any other status, and CHANNEL_CREATED, clear the end it held.
+  end_id?: string
 }
 
 // end_reason "killed": that terminal, or its session, was stopped on purpose.

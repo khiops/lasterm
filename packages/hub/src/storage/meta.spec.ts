@@ -1,7 +1,8 @@
 import type { Host, HostGroup } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { DatabaseManager } from "./db.js";
-import { openTestDatabases } from "./db.js";
+import { openDatabases, openTestDatabases } from "./db.js";
 import type { PairingCodeRow } from "./meta.js";
 import { MetaDAL } from "./meta.js";
 
@@ -747,6 +748,64 @@ describe("MetaDAL — why a terminal ended (#592)", () => {
 		dbs.meta.prepare("UPDATE channels SET end_reason = 'something-else' WHERE id = ?").run(id);
 		expect(dal.getChannel(id)).not.toHaveProperty("endReason");
 		expect(dal.listKilledChannels()).toEqual([]);
+	});
+});
+
+describe("MetaDAL — each end of a terminal (#932)", () => {
+	let dir: string;
+	let dbs: DatabaseManager;
+	let dal: MetaDAL;
+	let sessionId: string;
+	const id = "ENDID01AAAAAAAAAAAAAAAAAAAAA";
+	const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+
+	beforeEach(() => {
+		dir = makeTempDir("lasterm-end-id-");
+		dbs = openDatabases(dir);
+		dal = new MetaDAL(dbs.meta);
+		const host = dal.createHost({ type: "local", label: "end-id-host" });
+		sessionId = "ENDIDSESS01AAAAAAAAAAAAAAAAA";
+		dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+		dal.createChannel({ id, sessionId, status: "live" });
+	});
+
+	afterEach(async () => {
+		await dbs.close();
+		await removeTempDir(dir);
+	});
+
+	it("each end of a channel gets its own end id", async () => {
+		expect(dal.getChannel(id)).not.toHaveProperty("endId");
+
+		dal.updateChannelStatus(id, "dead", 3);
+		const first = dal.getChannel(id)?.endId;
+		expect(first).toMatch(ULID);
+
+		// The same end told again keeps its id.
+		dal.updateChannelStatus(id, "dead", undefined, "killed");
+		expect(dal.getChannel(id)?.endId).toBe(first);
+
+		// Running again: no end, and no exit code, whichever way it runs again.
+		dal.updateChannelStatus(id, "live");
+		expect(dal.getChannel(id)).not.toHaveProperty("endId");
+		expect(dal.getChannel(id)).not.toHaveProperty("exitCode");
+
+		dal.updateChannelStatus(id, "dead", 0);
+		const second = dal.getChannel(id)?.endId;
+		expect(second).toMatch(ULID);
+		expect(second).not.toBe(first);
+		dal.reviveChannel(id, sessionId, 80, 24);
+		expect(dal.getChannel(id)).not.toHaveProperty("endId");
+
+		dal.updateChannelStatus(id, "dead", 1);
+		const third = dal.getChannel(id)?.endId;
+		expect(third).toMatch(ULID);
+		expect([first, second]).not.toContain(third);
+
+		// What the row holds is what is read after the database is opened again.
+		await dbs.close();
+		dbs = openDatabases(dir);
+		expect(new MetaDAL(dbs.meta).getChannel(id)?.endId).toBe(third);
 	});
 });
 

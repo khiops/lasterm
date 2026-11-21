@@ -84,3 +84,53 @@ describe("POST /api/channels/:id/restart", () => {
 		expect(res.json<{ error: { code: string } }>().error.code).toBe("RESTART_FAILED");
 	});
 });
+
+// ─── The REST routes carry no end id (#932) ─────────────────────────────────
+//
+// The hub sends an end's id with CHANNEL_STATE and CHANNEL_DEAD only.
+
+describe("GET /api/channels and /api/channels/:id", () => {
+	let dbs: DatabaseManager;
+	let server: FastifyInstance;
+	let sessionManager: SessionManager;
+
+	beforeEach(async () => {
+		dbs = openTestDatabases();
+		sessionManager = new SessionManager(dbs);
+		server = Fastify({ logger: false });
+		registerChannelRoutes(server, new MetaDAL(dbs.meta), sessionManager);
+		await server.ready();
+	});
+
+	afterEach(async () => {
+		await server.close();
+		await sessionManager.shutdown();
+		dbs.close();
+	});
+
+	it("lists an ended terminal without its end id", async () => {
+		const dal = new MetaDAL(dbs.meta);
+		const host = dal.createHost({ type: "local", label: "here" });
+		const sessionId = "01K932SESS0000000000000000";
+		const channelId = "01K932CHAN0000000000000000";
+		dal.createSession({ id: sessionId, hostId: host.id, status: "active" });
+		dal.createChannel({ id: channelId, sessionId, status: "live", cols: 80, rows: 24 });
+		dal.updateChannelStatus(channelId, "dead", 2);
+		expect(dal.getChannel(channelId)?.endId).toBeDefined();
+
+		const list = (
+			await server.inject({ method: "GET", url: `/api/channels?host_id=${host.id}` })
+		).json() as Array<Record<string, unknown>>;
+		const one = (
+			await server.inject({ method: "GET", url: `/api/channels/${channelId}` })
+		).json() as Record<string, unknown>;
+
+		expect(list.find((row) => row.id === channelId)).toMatchObject({
+			status: "dead",
+			exit_code: 2,
+		});
+		expect(list.find((row) => row.id === channelId)).not.toHaveProperty("end_id");
+		expect(one).toMatchObject({ status: "dead", exit_code: 2 });
+		expect(one).not.toHaveProperty("end_id");
+	});
+});

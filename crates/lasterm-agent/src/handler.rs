@@ -1227,6 +1227,9 @@ fn spawn_reader_task(
         // The directory it starts in, before anything is read (#834).
         send_cwd(&mut cwd, false, &channel_events, &flow, &owner, &channel_id);
 
+        // Whether the loop ended at the PTY's end, after its last output went
+        // through the mirror: only then is the mirror the final screen (#933).
+        let mut at_pty_end = false;
         loop {
             tokio::select! {
                 // PTY output, unless its hub's connection is full
@@ -1258,6 +1261,7 @@ fn spawn_reader_task(
                             send_channel_event(
                                 &channel_events, &flow, &owner, &channel_id, &log_msg,
                             );
+                            at_pty_end = true;
                             break;
                         }
                         Ok(n) => {
@@ -1349,8 +1353,15 @@ fn spawn_reader_task(
             }
         }
 
+        // The final screen goes with the exit of a program that ended by
+        // itself. One the hub destroyed is a terminal it deleted or is
+        // restarting, whose screen nobody reads (#933).
+        let mut ended_by_itself = false;
         let exit_status = match take_own_workload(&pty_manager, &channel_id, pty_pid).await {
-            ReaderWorkload::Own(mut process) => process.wait().await.ok(),
+            ReaderWorkload::Own(mut process) => {
+                ended_by_itself = true;
+                process.wait().await.ok()
+            }
             ReaderWorkload::Gone => None,
             // The hub asked for this workload to end and already knows it did:
             // an exit reported now would be read against the terminal that took
@@ -1370,11 +1381,12 @@ fn spawn_reader_task(
             "PTY process exited"
         );
 
-        let msg = AgentToHub::ChannelExit {
-            channel_id: channel_id.clone(),
+        let msg = exit_message(
+            &channel_id,
             exit_code,
             signal,
-        };
+            (at_pty_end && ended_by_itself).then_some(&mirror),
+        );
         send_channel_event(&channel_events, &flow, &owner, &channel_id, &msg);
     });
 }
@@ -1560,6 +1572,46 @@ async fn ask_reader(
         Ok(()) => Asked::Taken,
         Err(_) => Asked::Dropped,
     }
+}
+
+/// The largest final screen a CHANNEL_EXIT carries, in raw bytes of
+/// `serialized` and `input_modes` together: a bound on the frame, which a
+/// daemon keeps for its hub while it is away however large it is (#933).
+const FINAL_SCREEN_MAX_BYTES: usize = 256 * 1024;
+
+/// The CHANNEL_EXIT of a terminal, with the final screen of `mirror` when it
+/// is given (a program that ended by itself, read to its PTY's end) and fits
+/// [`FINAL_SCREEN_MAX_BYTES`] (#933).
+fn exit_message(
+    channel_id: &str,
+    exit_code: i32,
+    signal: Option<String>,
+    mirror: Option<&HeadlessMirror>,
+) -> AgentToHub {
+    AgentToHub::ChannelExit {
+        channel_id: channel_id.to_owned(),
+        exit_code,
+        signal,
+        screen: mirror.and_then(final_screen),
+    }
+}
+
+/// The mirror's screen, for the CHANNEL_EXIT of a terminal whose program
+/// ended by itself; `None` above [`FINAL_SCREEN_MAX_BYTES`] (#933).
+fn final_screen(mirror: &HeadlessMirror) -> Option<SnapshotData> {
+    let info = mirror.snapshot();
+    if info.serialized.len() + info.input_modes.len() > FINAL_SCREEN_MAX_BYTES {
+        return None;
+    }
+    Some(SnapshotData {
+        serialized: info.serialized,
+        cols: info.cols,
+        rows: info.rows,
+        cursor_x: info.cursor_x,
+        cursor_y: info.cursor_y,
+        alternate_screen: info.alternate_screen,
+        input_modes: info.input_modes,
+    })
 }
 
 /// Answer `request` with the screen as the output sent with seqs
@@ -2426,6 +2478,115 @@ mod stdio_tests {
             .as_str()
             .expect("input_modes");
         assert!(modes.contains("\x1b[?2004h"), "{modes:?}");
+    }
+
+    /// The CHANNEL_EXIT a terminal sends, decoded.
+    async fn exit_of(events: &mut mpsc::UnboundedReceiver<ChannelEvent>) -> serde_json::Value {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while let Some(event) = events.recv().await {
+                if let ChannelEvent::Frame(event) = event {
+                    let frame: serde_json::Value =
+                        rmp_serde::from_slice(&event.frame[4..]).unwrap();
+                    if frame["type"] == "CHANNEL_EXIT" {
+                        return frame;
+                    }
+                }
+            }
+            panic!("the terminal's events ended without a CHANNEL_EXIT");
+        })
+        .await
+        .expect("the terminal exits")
+    }
+
+    /// A program that ends by itself sends its final screen with its exit,
+    /// at the mirror's size, as the channel's last frame (#933).
+    #[tokio::test]
+    async fn the_exit_carries_the_final_screen() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let (shell, args) = if cfg!(windows) {
+            (
+                "cmd.exe",
+                vec!["/c".to_owned(), "echo final-line".to_owned()],
+            )
+        } else {
+            (
+                "/bin/sh",
+                vec!["-c".to_owned(), "printf final-line".to_owned()],
+            )
+        };
+        let mut events = start_shell_in("ends", shell, args, None, false, &manager, &senders).await;
+        let exit = exit_of(&mut events).await;
+
+        let screen = &exit["screen"];
+        assert!(
+            screen["serialized"]
+                .as_str()
+                .is_some_and(|s| s.contains("final-line")),
+            "{exit}"
+        );
+        assert_eq!(screen["cols"], 80, "{exit}");
+        assert_eq!(screen["rows"], 24, "{exit}");
+        // Nothing of that terminal follows its exit.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), events.recv())
+                .await
+                .map_or(true, |event| event.is_none()),
+            "a frame after the exit"
+        );
+    }
+
+    /// A screen above the frame bound is left out of the exit (#933).
+    #[test]
+    fn a_screen_too_large_leaves_the_exit_without_it() {
+        let mut mirror = HeadlessMirror::new(500, 500, 0);
+        // A colour change before every cell: far more bytes than cells.
+        let mut cells = String::new();
+        for i in 0..(500 * 500) {
+            cells.push_str(&format!("\x1b[3{}m#", i % 8));
+        }
+        mirror.process(cells.as_bytes());
+        assert!(mirror.snapshot().serialized.len() > FINAL_SCREEN_MAX_BYTES);
+        let exit = serde_json::to_value(exit_message("big", 7, None, Some(&mirror))).unwrap();
+        assert_eq!(exit["type"], "CHANNEL_EXIT", "{exit}");
+        assert_eq!(exit["exit_code"], 7, "{exit}");
+        assert!(exit.get("screen").is_none(), "{exit}");
+
+        let mut small = HeadlessMirror::new(80, 24, 0);
+        small.process(b"small");
+        let exit = serde_json::to_value(exit_message("small", 0, None, Some(&small))).unwrap();
+        assert!(
+            exit["screen"]["serialized"]
+                .as_str()
+                .is_some_and(|s| s.contains("small")),
+            "{exit}"
+        );
+    }
+
+    /// A terminal the hub destroyed sends its exit without a screen (#933).
+    #[tokio::test]
+    async fn an_exit_after_destroy_carries_no_screen() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let mut events = start_terminal_in("destroyed", None, &manager, &senders).await;
+        let (frame_tx, _frame_rx) = mpsc::unbounded_channel();
+        let (channel_events, _channel_events_rx) = ChannelEventSender::new(Flows::default());
+        handle_message(
+            crate::protocol::HubToAgent::Destroy {
+                channel_id: "destroyed".to_owned(),
+            },
+            &OwnerId::stdio(),
+            &crate::handler::ConnectionRef::stdio(),
+            Arc::clone(&manager),
+            frame_tx,
+            channel_events,
+            Arc::clone(&senders),
+        )
+        .await
+        .expect("DESTROY");
+
+        let exit = exit_of(&mut events).await;
+        assert!(exit.get("screen").is_none(), "{exit}");
     }
 
     /// The events of one terminal until its LOG `PTY closed`: each OUTPUT's

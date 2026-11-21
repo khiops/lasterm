@@ -733,6 +733,22 @@ describe("useSessionStore — a pane over another host's terminal, after Reconne
 		expect(piPane(channels)).toBe("not-connected");
 	});
 
+	// A pane keeps the end it saw by its id, which only the report carries (#932).
+	it("hands the pane the id of each end the hub reports", async () => {
+		const { ws, channels } = await pageLoaded();
+
+		ws?.emit({
+			type: "CHANNEL_STATE",
+			channelId: PI_CHANNEL,
+			sessionId: "s-pi",
+			status: "dead",
+			exitCode: 3,
+			endId: "E1",
+		});
+
+		expect(channels.reportOf(PI_CHANNEL)).toEqual({ status: "dead", exitCode: 3, endId: "E1" });
+	});
+
 	// The pane must not bring back a terminal that was stopped from elsewhere,
 	// and only the report says it was (#580).
 	it("hands the pane why the hub ended a terminal, when the hub ended it", async () => {

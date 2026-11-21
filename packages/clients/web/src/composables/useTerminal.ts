@@ -1,4 +1,9 @@
-import type { EndedOutput, TerminalProfile, UiAttachOkMessage } from "@lasterm/shared";
+import type {
+	ChannelEndReason,
+	EndedOutput,
+	TerminalProfile,
+	UiAttachOkMessage,
+} from "@lasterm/shared";
 import { MAX_INPUT_SIZE, PASTE_MAX_BYTES, sanitizeTitle } from "@lasterm/shared";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -123,6 +128,8 @@ interface PendingAttach {
 	replaceIfLive: boolean;
 	/** Keep the screen if the hub answers that the terminal has ended. */
 	keepScreenIfEnded: boolean;
+	/** The end id of the ending the screen holds, when the pane knows one (#932). */
+	endShown?: string;
 	stillWanted: () => boolean;
 	timer: ReturnType<typeof setTimeout>;
 	resolve: (answer: AttachAnswer) => void;
@@ -1092,6 +1099,9 @@ export function useTerminal(
 		message?: string;
 		channelId?: string;
 		lastOutput?: EndedOutput;
+		endId?: string;
+		exitCode?: number;
+		endReason?: ChannelEndReason;
 	}): void {
 		const waiting = answeredBy(msg.channelId);
 		const first = waiting[0];
@@ -1099,7 +1109,13 @@ export function useTerminal(
 		stopListening();
 		// The code travels with it: what a pane does about this is not a
 		// decision to make by reading a sentence, which changes.
-		const refusal = Object.assign(new Error(msg.message ?? msg.code), { code: msg.code });
+		// With it, the end it names, for the pane and its card (#932).
+		const refusal = Object.assign(new Error(msg.message ?? msg.code), {
+			code: msg.code,
+			...(msg.endId !== undefined && { endId: msg.endId }),
+			...(msg.exitCode !== undefined && { exitCode: msg.exitCode }),
+			...(msg.endReason !== undefined && { endReason: msg.endReason }),
+		});
 		try {
 			// An answer about another terminal than the one the xterm holds: a new
 			// xterm, so that nothing of the one left stays under this one's card
@@ -1107,10 +1123,14 @@ export function useTerminal(
 			// waiting keeps the screen (`reattachChannel`).
 			if (shownId !== null && shownId !== first.channelId) replaceXterm();
 			if (msg.code === "CHANNEL_DEAD") {
-				const keepScreen = waiting.every(
-					(entry) => entry.preserveContent || entry.keepScreenIfEnded,
-				);
-				showEnded(first.channelId, msg.lastOutput, keepScreen);
+				// A newer end than the one the screen holds: the screen is that
+				// end's last output, or nothing, whatever the attach kept (#932).
+				const newerEnd =
+					msg.endId !== undefined &&
+					waiting.some((entry) => entry.endShown !== undefined && entry.endShown !== msg.endId);
+				const keepScreen =
+					!newerEnd && waiting.every((entry) => entry.preserveContent || entry.keepScreenIfEnded);
+				showEnded(first.channelId, msg.lastOutput, keepScreen, newerEnd);
 			}
 		} finally {
 			// Settled whatever the writes did: the timers are gone.
@@ -1165,6 +1185,11 @@ export function useTerminal(
 			 * ATTACH_OK replaces it as usual. For a pane over an ending it watched.
 			 */
 			keepScreenIfEnded?: boolean;
+			/**
+			 * The end id of the ending the screen holds. A CHANNEL_DEAD naming
+			 * another end replaces the screen whatever the options above (#932).
+			 */
+			endShown?: string;
 			/** Whether the pane still shows `id` when the answer comes; true when absent. */
 			stillWanted?: () => boolean;
 		},
@@ -1211,6 +1236,7 @@ export function useTerminal(
 				preserveContent,
 				replaceIfLive: opts?.replaceIfLive === true,
 				keepScreenIfEnded: opts?.keepScreenIfEnded === true && !elsewhere,
+				...(opts?.endShown !== undefined && { endShown: opts.endShown }),
 				stillWanted: opts?.stillWanted ?? (() => true),
 				timer: setTimeout(() => onDeadline(entry), 10_000),
 				resolve,
@@ -1242,22 +1268,39 @@ export function useTerminal(
 	 * no last output, and none is written either. Whatever it shows, the pane
 	 * then turns mouse reporting off: that changes nothing on screen.
 	 */
-	function showEnded(id: string, last: EndedOutput | undefined, keepScreen: boolean): void {
+	function showEnded(
+		id: string,
+		last: EndedOutput | undefined,
+		keepScreen: boolean,
+		newerEnd = false,
+	): void {
 		channelId = null;
 		const term = terminal.value;
+		// A newer end than the screen's: nothing of the earlier end stays, even
+		// when this one has nothing to draw (#932). The reset goes in the write
+		// queue, after output still waiting there for the earlier screen.
+		if (term && newerEnd) {
+			term.write(FULL_RESET);
+			shownId = id;
+		}
 		if (last !== undefined) {
 			endedSize = { cols: last.cols, rows: last.rows };
 			layout();
-			if (term && !keepScreen) showLastOutput(term, id, last);
+			if (term && !keepScreen) showLastOutput(term, id, last, newerEnd);
 		}
 		term?.write(MOUSE_REPORTING_OFF);
 	}
 
 	/** Write what an ended terminal last printed, as `showEnded` decides. */
-	function showLastOutput(term: Terminal, id: string, last: EndedOutput): void {
+	function showLastOutput(
+		term: Terminal,
+		id: string,
+		last: EndedOutput,
+		resetQueued = false,
+	): void {
 		const somethingToDraw = last.snapshot !== null || last.tail.some((part) => part.byteLength > 0);
 		if (somethingToDraw) {
-			term.reset();
+			if (!resetQueued) term.reset();
 			replay(() => {
 				if (last.snapshot?.serialized) term.write(last.snapshot.serialized);
 				for (const part of last.tail) term.write(part);
@@ -1266,8 +1309,8 @@ export function useTerminal(
 				writeNotice("output between this screen and now was dropped");
 			}
 			shownId = id;
-		} else if (shownId !== id) {
-			term.reset();
+		} else if (shownId !== id || resetQueued) {
+			if (!resetQueued) term.reset();
 			if (last.truncated === true) writeNotice("its last output was too long to show");
 			shownId = id;
 		}

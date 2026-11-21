@@ -5,6 +5,7 @@
  * with a hub the test speaks for.
  */
 import type { ProtocolMessage, SnapshotData, UiAttachOkMessage } from "@lasterm/shared";
+import { FINAL_SCREEN_REDRAW_PREFIX } from "@lasterm/shared";
 import "@xterm/xterm/css/xterm.css";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -330,6 +331,29 @@ describe("the character sets a snapshot carries (#1013)", () => {
 		await parsed();
 
 		expect(row(0)).toBe("┌──┐─q");
+	});
+
+	// The hub appends a final screen's redraw to an ended terminal's output
+	// (#933): drawn after a tail that left DEC graphics in G0, its text is
+	// still text.
+	it("the final screen's redraw draws in ASCII whatever the tail left", async () => {
+		const ended = pane.reattachChannel(T).catch((error: unknown) => error);
+		hear({
+			type: "ERROR",
+			code: "CHANNEL_DEAD",
+			message: "This terminal has ended.",
+			channelId: T,
+			lastOutput: {
+				snapshot: { serialized: `${CLEAR}before`, cols: 80, rows: 10, cursorX: 6, cursorY: 0 },
+				tail: [bytes(`${ESC}(0q`), bytes(`${FINAL_SCREEN_REDRAW_PREFIX}${CLEAR}quit`)],
+				cols: 80,
+				rows: 10,
+			},
+		} as unknown as ProtocolMessage);
+		await ended;
+		await parsed();
+
+		expect(row(0)).toBe("quit");
 	});
 });
 

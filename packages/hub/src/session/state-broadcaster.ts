@@ -284,6 +284,8 @@ export class StateBroadcaster {
 				? undefined
 				: (endReason ?? (this.ctx.quitState === "QUITTING" ? "stopped" : undefined));
 		this.ctx.metaDal.updateChannelStatus(channelId, status, exitCode, reason);
+		// The id meta.db gave this end, or kept for an end told again (#932).
+		const endId = status === "dead" ? this.ctx.metaDal.getChannel(channelId)?.endId : undefined;
 
 		const stateMsg: ChannelStateMessage = {
 			type: "CHANNEL_STATE",
@@ -293,6 +295,7 @@ export class StateBroadcaster {
 			...(exitCode !== undefined && { exitCode }),
 			// Said with the end only.
 			...(reason !== undefined && { endReason: reason }),
+			...(endId !== undefined && { endId }),
 		};
 		// Every client, as STATE_SYNC and CHANNEL_CREATED go: each of them holds
 		// every channel in its state, and a window can show a terminal without

@@ -2,16 +2,7 @@ import { type Channel, isValidUlid, toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
-
-/**
- * A channel as the REST routes give it: without its end id, which the hub
- * sends only with the end (CHANNEL_STATE) and with the refusal of an attach
- * (CHANNEL_DEAD) (#932).
- */
-function listedChannel(channel: Channel): Omit<Channel, "endId"> {
-	const { endId: _end, ...listed } = channel;
-	return listed;
-}
+import { listedChannel } from "./listed-channel.js";
 
 export function registerChannelRoutes(
 	server: FastifyInstance,

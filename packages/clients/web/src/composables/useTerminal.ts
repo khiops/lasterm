@@ -1205,7 +1205,7 @@ export function useTerminal(
 				writeNotice("output between this screen and now was dropped");
 			}
 			shownId = id;
-		} else if (shownId !== id) {
+		} else if (shownId !== id || resetQueued) {
 			if (!resetQueued) term.reset();
 			if (last.truncated === true) writeNotice("its last output was too long to show");
 			shownId = id;

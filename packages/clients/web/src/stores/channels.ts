@@ -741,8 +741,10 @@ export const useChannelsStore = defineStore("channels", () => {
 	/**
 	 * What the hub says of a channel's status. A report of another end than
 	 * the one this window recorded, and a report of the terminal running again,
-	 * replace what the previous end said, its exit code and reason gone when
-	 * the report has none; the same end told again adds to it (#932).
+	 * remove what the previous end said from the listed entry, its exit code
+	 * and reason gone when the report has none (#932). The report itself is
+	 * each time what the hub said last, as before; told again, the same end
+	 * keeps its id there.
 	 */
 	function updateChannelStatus(
 		channelId: string,

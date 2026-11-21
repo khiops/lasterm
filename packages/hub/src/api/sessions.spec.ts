@@ -2341,3 +2341,22 @@ describe("connect and disconnect, then a hub start (#911)", () => {
 		}
 	});
 });
+
+describe("GET /api/sessions/:id (#932)", () => {
+	it("lists the session's ended terminals without their end id", async () => {
+		const metaDal = new MetaDAL(dbs.meta);
+		const sessionId = "01K932SESSAPI0000000000000";
+		const channelId = "01K932CHANAPI0000000000000";
+		metaDal.createSession({ id: sessionId, hostId, status: "active" });
+		metaDal.createChannel({ id: channelId, sessionId, status: "live", cols: 80, rows: 24 });
+		metaDal.updateChannelStatus(channelId, "dead", 2);
+		expect(metaDal.getChannel(channelId)?.endId).toBeDefined();
+
+		const res = await server.inject({ method: "GET", url: `/api/sessions/${sessionId}` });
+
+		const body = res.json() as { channels: Array<Record<string, unknown>> };
+		expect(body.channels).toHaveLength(1);
+		expect(body.channels[0]).toMatchObject({ id: channelId, status: "dead", exit_code: 2 });
+		expect(body.channels[0]).not.toHaveProperty("end_id");
+	});
+});

@@ -438,7 +438,7 @@ describe("TerminalPane over a newer ending than the one it shows (#932)", () => 
 		);
 
 		// The reset goes in the write queue, after what waited for the kept screen.
-		expect(xterm.events.slice(0, 2)).toEqual(["c", "NEWER"]);
+		expect(xterm.events.slice(0, 2)).toEqual(["\u001bc", "NEWER"]);
 		expect(paneText()).toContain("exited (code 5)");
 		expect(paneText()).not.toContain("stopped from elsewhere");
 		expect(useChannelsStore().reportOf(T)).not.toHaveProperty("endReason");
@@ -453,7 +453,7 @@ describe("TerminalPane over a newer ending than the one it shows (#932)", () => 
 
 		await socketComesBack(() => refuseEnd({ endId: "E2" }));
 
-		expect(xterm.events).toEqual(["c", MOUSE_OFF]);
+		expect(xterm.events).toEqual(["\u001bc", MOUSE_OFF]);
 		expect(paneText()).toContain("exited");
 		expect(paneText()).not.toContain("(code");
 	});
@@ -490,9 +490,21 @@ describe("TerminalPane over a newer ending than the one it shows (#932)", () => 
 
 			await socketComesBack(() => refuseEnd({ endId: "E2" }, last));
 
-			expect(xterm.events).toEqual(["c", MOUSE_OFF]);
+			expect(xterm.events).toEqual(["\u001bc", MOUSE_OFF]);
 		});
 	}
+
+	it("a newer ending cut short says so over the cleared screen", async () => {
+		await watchE1End();
+		xterm.events.length = 0;
+
+		await socketComesBack(() =>
+			refuseEnd({ endId: "E2" }, lastOutput({ snapshot: null, tail: [], truncated: true })),
+		);
+
+		expect(xterm.events[0]).toBe("\u001bc");
+		expect(xterm.events.some((event) => event.includes("too long to show"))).toBe(true);
+	});
 
 	it("a first open takes the newer end's code", async () => {
 		mountPane(ref(T), "dead", {
@@ -516,7 +528,7 @@ describe("TerminalPane over a newer ending than the one it shows (#932)", () => 
 		refuseEnd({ endId: "E2" }, lastOutput({ snapshot: null, tail: [bytes("QUICK-END")] }));
 		await settle();
 
-		expect(xterm.events.slice(0, 2)).toEqual(["c", "QUICK-END"]);
+		expect(xterm.events.slice(0, 2)).toEqual(["\u001bc", "QUICK-END"]);
 	});
 
 	it("a cached answer keeps the end its screen holds", async () => {
@@ -536,7 +548,7 @@ describe("TerminalPane over a newer ending than the one it shows (#932)", () => 
 		refuseEnd({ endId: "E2" }, lastOutput({ snapshot: null, tail: [bytes("AFTER-CACHE")] }));
 		await settle();
 
-		expect(xterm.events.slice(0, 2)).toEqual(["c", "AFTER-CACHE"]);
+		expect(xterm.events.slice(0, 2)).toEqual(["\u001bc", "AFTER-CACHE"]);
 	});
 
 	it("a newer ending follows the setting as a new end", async () => {

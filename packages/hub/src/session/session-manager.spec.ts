@@ -4199,6 +4199,23 @@ describe("SessionManager", () => {
 				expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
 			});
 
+			it("an exit screen whose write keeps failing leaves nothing to fail again", async () => {
+				const heard: ProtocolMessage[] = [];
+				const { channelId, emit } = await liveTerminal(heard);
+				emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+				// Every write from here on fails: the redraw's, and any flush after it.
+				spies.push(
+					vi.spyOn(SpoolDAL.prototype, "insertChunk").mockImplementation(() => {
+						throw Object.assign(new Error("disk I/O error"), { code: "ERR_SQLITE_IOERR" });
+					}),
+				);
+
+				expect(() => emit(exitWith(channelId, FINAL))).not.toThrow();
+				expect(heard).toContainEqual(
+					expect.objectContaining({ type: "CHANNEL_STATE", channelId, status: "dead" }),
+				);
+			});
+
 			it("an exit's screen for an unknown terminal is not stored", async () => {
 				const { emit } = await liveTerminal();
 				emit(exitWith("NOTHELDHERE", FINAL));
@@ -4271,7 +4288,7 @@ describe("SessionManager", () => {
 					exitCode: 1,
 				});
 				const row = new MetaDAL(dbManager.meta).getChannel(channelId);
-				if (row === undefined) return;
+				if (row === undefined) throw new Error("expected the killed terminal's row");
 
 				const { received } = await attachFresh(channelId, "reader");
 

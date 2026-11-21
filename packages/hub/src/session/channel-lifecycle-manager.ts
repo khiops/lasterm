@@ -1293,8 +1293,20 @@ export class ChannelLifecycleManager {
 				complete &&
 				tailBytes + redraw.byteLength <= ChannelLifecycleManager.MAX_ATTACH_TAIL_BYTES
 			) {
-				this.ctx.chunker.onOutput(channelId, redraw);
-				this.ctx.chunker.flush(channelId);
+				// Written as one output row after every seq used, as a snapshot is:
+				// a write that fails leaves nothing buffered for a later flush.
+				const seq = Math.max(
+					this.ctx.chunker.getNextSeq(channelId),
+					this.ctx.spoolDal.getMaxSeq(channelId) + 1,
+				);
+				this.ctx.spoolDal.insertChunk({
+					channelId,
+					seq,
+					kind: "output",
+					dataBlob: redraw,
+					uncompressedLen: redraw.byteLength,
+				});
+				this.ctx.chunker.bumpSeq(channelId, seq + 1);
 				return;
 			}
 		} catch (err) {

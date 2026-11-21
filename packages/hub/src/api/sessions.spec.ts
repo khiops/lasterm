@@ -1825,6 +1825,58 @@ describe("POST stop-keeping", () => {
 		},
 	);
 
+	it.each([
+		["timeout", true],
+		["unconfirmed", true],
+		["closed_by_hub", true],
+		["displaced", false],
+	] as const)(
+		"Replace whose STOP ends %s: the uploads are interrupted only when the agent may be ending or its connection ended (#1102)",
+		async (mode, interrupts) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const f = fixture();
+				if (mode === "unconfirmed") {
+					f.agent.helloMessage = {
+						...DAEMON_HELLO,
+						capabilities: [...(DAEMON_HELLO.capabilities ?? []), "stop-accepted"],
+					};
+				}
+				f.agent.send.mockImplementation((msg: ProtocolMessage) => {
+					if (msg.type !== "STOP" || mode === "timeout") return;
+					queueMicrotask(() => {
+						if (mode === "closed_by_hub") void f.agent.close();
+						else if (mode === "unconfirmed") {
+							f.agent.connected = false;
+							f.agent.emit("close");
+						} else {
+							f.agent.emit("message", {
+								type: "ERROR",
+								code: "DISPLACED",
+								message: "displaced",
+							});
+						}
+					});
+				});
+				const uploads = recordUploads(f);
+				const replace = server.inject({
+					method: "POST",
+					url: `/api/hosts/${hostId}/agent/replace`,
+					payload: { stop_transfers: true },
+				});
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				await vi.advanceTimersByTimeAsync(15_001);
+				const response = await replace;
+				expect(response.statusCode).toBe(409);
+				expect(response.json()).toMatchObject({ error: { code: "AGENT_NOT_REPLACED" } });
+				expect(uploads.interrupted).toEqual(interrupts ? [hostId] : []);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
 	it("Replace whose STOP cannot be sent interrupts the uploads before its own --stop lets go (#1102)", async () => {
 		const f = fixture();
 		stopCannotBeSent(f);
@@ -1881,12 +1933,15 @@ describe("POST stop-keeping", () => {
 							});
 					});
 				});
-				const result = disabled(f, { end_terminals: true });
+				const uploads = recordUploads(f);
+				const result = disabled(f, { end_terminals: true, stop_transfers: true });
 				await new Promise<void>((resolve) => setImmediate(resolve));
 				await new Promise<void>((resolve) => setImmediate(resolve));
 				await vi.advanceTimersByTimeAsync(15_001);
 				await result;
 				expect(f.agent.execOnHost).not.toHaveBeenCalled();
+				// The connection is dropped whatever the answer: the uploads stop (#1102).
+				expect(uploads.interrupted).toEqual([hostId]);
 			} finally {
 				vi.useRealTimers();
 			}

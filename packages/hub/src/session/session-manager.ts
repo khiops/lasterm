@@ -2894,9 +2894,10 @@ export class SessionManager {
 
 	/**
 	 * Stop the daemon `agent` reaches, and let go of the connection once it has.
-	 * `interruptUploads` runs when the agent stops or its connection ends, never
-	 * on an answer that leaves both as they were: a refusal, an error, a
-	 * displaced connection, a `--stop` that failed (#1102).
+	 * `interruptUploads` runs when the agent stops, its connection ends, or the
+	 * wait ends with no answer while it may be ending; never on a refusal, an
+	 * error answer, a `--stop` that failed, which stop nothing, nor on a
+	 * connection displaced by a newer one of this hub, which carries on (#1102).
 	 */
 	private async stopAgentToReplace(
 		hostId: string,
@@ -2992,8 +2993,9 @@ export class SessionManager {
 
 	/**
 	 * Interrupt the uploads to `hostId`, once, when the stop they were
-	 * consented for goes ahead (#833). Called only past the daemon's answer, so
-	 * that its refusal, which stops nothing, leaves them running (#1102); and
+	 * consented for goes ahead (#833). Called only past the daemon's answer, or
+	 * the end of the wait for it, so that its refusal, which stops nothing,
+	 * leaves them running (#1102); and
 	 * from `onStopped` too, before the hub lets go of the connection they use.
 	 */
 	private uploadsInterrupter(hostId: string, transfers: number): () => void {

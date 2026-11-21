@@ -2990,7 +2990,7 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 			release = r;
 		});
 		mockFetch.mockImplementation((url: string, init?: { method?: string }) => {
-			if (init?.method === "DELETE") return ok({ purged: 1 });
+			if (init?.method === "DELETE") return ok({ purged: 1, purged_ids: ["ch-a"] });
 			if (url.includes("/api/groups")) return ok([]);
 			return held.then(() => ({ ok: true, json: () => Promise.resolve(listed) }));
 		});
@@ -3022,6 +3022,94 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		await fetching;
 
 		expect(store.channels.map((c) => c.id)).toEqual(["ch-b"]);
+	});
+
+	// The purge removes what the hub says it purged, not the ids read before the request (#1108).
+	// Wrong implementation: remove and tombstone the ids captured before the DELETE.
+	it("a channel revived while the purge was in flight stays listed", async () => {
+		const { store, fetching, release } = await listedThenFetching([row("ch-a", "dead")]);
+		let answer!: () => void;
+		const hubAnswer = new Promise<void>((r) => {
+			answer = r;
+		});
+		const held = mockFetch.getMockImplementation() as (
+			u: string,
+			i?: { method?: string },
+		) => unknown;
+		mockFetch.mockImplementation((url: string, init?: { method?: string }) =>
+			init?.method === "DELETE"
+				? hubAnswer.then(() => ({
+						ok: true,
+						json: () => Promise.resolve({ ok: true, purged: 0, purged_ids: [] }),
+					}))
+				: held(url, init),
+		);
+
+		const purging = store.purgeDeadChannels();
+		store.updateChannelStatus("ch-a", "live");
+		answer();
+		expect(await purging).toBe(0);
+		release();
+		await fetching;
+
+		expect(store.channels.map((c) => [c.id, c.status])).toEqual([["ch-a", "live"]]);
+		expect(store.channelHostMap.get("ch-a")).toBe("host-1");
+	});
+
+	// Wrong implementation: tombstone only the ids that were dead before the DELETE.
+	it("a channel that ended while the purge was in flight goes with it", async () => {
+		const { store, fetching, release } = await listedThenFetching([
+			row("ch-a", "dead"),
+			row("ch-b", "live"),
+		]);
+		const held = mockFetch.getMockImplementation() as (
+			u: string,
+			i?: { method?: string },
+		) => unknown;
+		let answer!: () => void;
+		const hubAnswer = new Promise<void>((r) => {
+			answer = r;
+		});
+		mockFetch.mockImplementation((url: string, init?: { method?: string }) =>
+			init?.method === "DELETE"
+				? hubAnswer.then(() => ({
+						ok: true,
+						json: () => Promise.resolve({ ok: true, purged: 2, purged_ids: ["ch-a", "ch-b"] }),
+					}))
+				: held(url, init),
+		);
+
+		const purging = store.purgeDeadChannels();
+		store.updateChannelStatus("ch-b", "dead", 0);
+		answer();
+		expect(await purging).toBe(2);
+		release();
+		await fetching;
+
+		expect(store.channels.map((c) => c.id)).toEqual([]);
+		expect(store.channelHostMap.has("ch-a")).toBe(false);
+		expect(store.channelHostMap.has("ch-b")).toBe(false);
+	});
+
+	// Wrong implementation: with no ids in the answer, fall back to the ids read before the request.
+	it.each([
+		["an unreadable answer", () => Promise.reject(new Error("bad body"))],
+		["an answer without ids", () => Promise.resolve({ ok: true, purged: 1 })],
+	])("%s removes nothing and counts nothing", async (_name, body) => {
+		const { store, fetching, release } = await listedThenFetching([row("ch-a", "dead")]);
+		const held = mockFetch.getMockImplementation() as (
+			u: string,
+			i?: { method?: string },
+		) => unknown;
+		mockFetch.mockImplementation((url: string, init?: { method?: string }) =>
+			init?.method === "DELETE" ? Promise.resolve({ ok: true, json: body }) : held(url, init),
+		);
+
+		expect(await store.purgeDeadChannels()).toBe(0);
+		release();
+		await fetching;
+
+		expect(store.channels.map((c) => c.id)).toEqual(["ch-a"]);
 	});
 
 	it("a channel created again after its deletion is listed again", async () => {
@@ -3163,7 +3251,10 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		});
 		mockFetch.mockImplementation((url: string, init?: { method?: string }) => {
 			if (init?.method === "DELETE") {
-				return purgeAnswer.then(() => ({ ok: true, json: () => Promise.resolve({ purged: 1 }) }));
+				return purgeAnswer.then(() => ({
+					ok: true,
+					json: () => Promise.resolve({ purged: 1, purged_ids: ["ch-a"] }),
+				}));
 			}
 			if (url.includes("/api/groups")) return ok([]);
 			const hostId = new URL(url, "http://hub.test").searchParams.get("host_id") ?? "";

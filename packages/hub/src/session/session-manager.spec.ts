@@ -4093,6 +4093,21 @@ describe("SessionManager", () => {
 				expect(last).not.toHaveProperty("truncated");
 			});
 
+			it("an exit screen ends the last output of a terminal stopped with its agent", async () => {
+				const { channelId, emit } = await liveTerminal();
+				emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+				const hostId = ctxOf().channels.get(channelId)?.hostId;
+				if (hostId === undefined) throw new Error("expected the terminal's host");
+				// The hub is stopping this host's agent: its ends are "stopped".
+				ctxOf().stoppingAgents.add(hostId);
+				emit(exitWith(channelId, FINAL));
+				ctxOf().stoppingAgents.delete(hostId);
+
+				expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.endReason).toBe("stopped");
+				const last = lastOutputOf((await attachFresh(channelId, "reader")).received);
+				expect(text(last.tail)).toEqual([REDRAW]);
+			});
+
 			it("an exit screen redraws a snapshot nothing followed", async () => {
 				const { channelId, emit } = await liveTerminal();
 				emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });

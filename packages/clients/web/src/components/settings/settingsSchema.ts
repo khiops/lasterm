@@ -161,7 +161,7 @@ export const settingsSchema: SettingDefinition[] = [
 			{ label: "Never ask", value: "never" },
 		],
 		description:
-			"Before pasting two or more lines, show how many and the first ones, with Paste and Cancel. Ask when it would run at once: only when the program has not turned bracketed paste on, as cmd and PowerShell do not, so that each line would run as it arrives. One line ending in a line break does not ask.",
+			"Before pasting two or more lines, show how many and the first ones, with Paste and Cancel. Ask when it would run at once: only when the program has not turned bracketed paste on, as cmd leaves it, so that each line would run as it arrives. One line ending in a line break does not ask.",
 	},
 
 	// ─── Terminal category — when a terminal ends (#574) ───────────────

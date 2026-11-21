@@ -19,18 +19,28 @@ export function pasteLineCount(text: string, limit = Number.POSITIVE_INFINITY): 
 	return lines;
 }
 
-/** The first `count` lines of `text`, without their line breaks. */
-export function pasteFirstLines(text: string, count: number): string[] {
+/**
+ * The first `count` lines of `text`, without their line breaks, each kept to
+ * its first `maxUnits` UTF-16 units: a card shows a prefix, and a line of a
+ * 16 MiB paste is not copied whole for it.
+ */
+export function pasteFirstLines(
+	text: string,
+	count: number,
+	maxUnits = Number.POSITIVE_INFINITY,
+): string[] {
 	const lines: string[] = [];
+	const take = (start: number, end: number) =>
+		lines.push(text.slice(start, Math.min(end, start + maxUnits)));
 	let start = 0;
 	for (let at = 0; at < text.length && lines.length < count; at++) {
 		const unit = text.charCodeAt(at);
 		if (unit !== 0x0d && unit !== 0x0a) continue;
-		lines.push(text.slice(start, at));
+		take(start, at);
 		if (unit === 0x0d && text.charCodeAt(at + 1) === 0x0a) at++;
 		start = at + 1;
 	}
-	if (lines.length < count && start < text.length) lines.push(text.slice(start));
+	if (lines.length < count && start < text.length) take(start, text.length);
 	return lines;
 }
 

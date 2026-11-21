@@ -24,6 +24,10 @@ describe("pasteFirstLines (#1015)", () => {
 		expect(pasteFirstLines("a\nb\n", 3)).toEqual(["a", "b"]);
 		expect(pasteFirstLines("a\n\n", 3)).toEqual(["a", ""]);
 	});
+
+	it("keeps each line to the units it is asked for", () => {
+		expect(pasteFirstLines(`${"x".repeat(10)}\n${"y".repeat(3)}`, 3, 4)).toEqual(["xxxx", "yyy"]);
+	});
 });
 
 describe("pasteWarningAsks (#1015)", () => {

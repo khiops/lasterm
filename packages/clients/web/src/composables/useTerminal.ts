@@ -26,6 +26,13 @@ export interface PendingPaste {
 	bracketed: boolean;
 }
 
+/**
+ * How much of each of a held paste's first lines the card is given, in UTF-16
+ * units: enough for the 80 code points it shows and one more to know it cuts,
+ * whatever the line's length (#1015).
+ */
+const PREVIEW_UNITS = 2 * 80 + 1;
+
 /** A paste in the form the pane's path sends it (#1012, #1014). */
 type PreparedPaste =
 	| { path: "stream"; bytes: Uint8Array }
@@ -649,29 +656,25 @@ export function useTerminal(
 		// markers taken out, and xterm pastes nothing of its own. An agent that
 		// streams pastes (#1014) gets them as PASTE chunks instead, unbracketed:
 		// it writes the markers itself. A paste of several lines its program
-		// would run one by one waits on a card first (#1015). xterm's own
-		// handler ignores `defaultPrevented`, so each one taken here is stopped.
+		// would run one by one waits on a card first (#1015). Every paste is
+		// taken here, its text read once, and an older agent's handed to xterm's
+		// `paste()`. xterm's own handler ignores `defaultPrevented`, so each one
+		// is stopped too.
 		term.element?.addEventListener(
 			"paste",
 			(event) => {
-				// No clipboard data: nothing to paste, as xterm sends nothing then.
-				if (event.clipboardData === null) {
-					if (streamsPaste || adaptsInput) {
-						event.stopPropagation();
-						event.preventDefault();
-					}
-					return;
-				}
-				const text = event.clipboardData.getData("text/plain");
 				// A paste reaching the terminal replaces one waiting on its card.
 				dropPendingPaste();
+				event.stopPropagation();
+				event.preventDefault();
+				// No clipboard data: nothing to paste, as xterm sends nothing then.
+				if (event.clipboardData === null) return;
+				const text = event.clipboardData.getData("text/plain");
 				const bracketed = term.modes.bracketedPasteMode;
 				if (
 					pasteLineCount(text, 2) >= 2 &&
 					pasteWarningAsks(toValue(options?.pasteWarning), bracketed)
 				) {
-					event.stopPropagation();
-					event.preventDefault();
 					// As an unasked paste: the path's refusals with their toast, then
 					// nothing at all while the pane cannot send.
 					if (preparePaste(text) === null || !canSendNow() || channelId === null) return;
@@ -679,14 +682,11 @@ export function useTerminal(
 					pendingPaste.value = {
 						id: ++pastesHeld,
 						lines: pasteLineCount(text),
-						preview: pasteFirstLines(text, 3),
+						preview: pasteFirstLines(text, 3, PREVIEW_UNITS),
 						bracketed,
 					};
 					return;
 				}
-				if (!streamsPaste && !adaptsInput) return;
-				event.stopPropagation();
-				event.preventDefault();
 				const prepared = preparePaste(text);
 				if (prepared !== null) sendPreparedPaste(term, prepared);
 			},

@@ -1408,7 +1408,7 @@ A paste of two or more lines can ask first (#1015), through one more key of the 
 
 | TOML key | Profile key | Values | Default | Notes |
 |----------|-------------|--------|---------|-------|
-| `paste_warning` | `pasteWarning` | `auto`, `always`, `never` | `auto` | When a paste of two or more lines waits on a card over the pane (how many lines, the first three, Paste and Cancel) before any of it is sent. `auto` asks only while the program has bracketed paste off, as the pane's xterm last parsed it, so that each line would run as it arrives (cmd and PowerShell never turn it on). A single line ending in one line break does not count. "Don't ask again" on the card writes `never` for the terminal's host or everywhere, through `planProfileWrite`. |
+| `paste_warning` | `pasteWarning` | `auto`, `always`, `never` | `auto` | When a paste of two or more lines waits on a card over the pane (how many lines, the first three, Paste and Cancel) before any of it is sent. `auto` asks only while the program has bracketed paste off, as the pane's xterm last parsed it, so that each line would run as it arrives: cmd, and PowerShell with PSReadLine as measured (#1015), leave it off. A single line ending in one line break does not count. "Don't ask again" on the card writes `never` for the terminal's host or everywhere, through `planProfileWrite`. |
 
 A terminal's profile refuses the two host keys (`HOST_ONLY_PROFILE_KEYS`). Every value is checked
 where it is written, by `TERMINAL_PROFILE_VALIDATORS` (`@lasterm/shared`: the tables of

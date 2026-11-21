@@ -5430,9 +5430,12 @@ describe("TerminalPane asking before a paste of several lines (#1015)", () => {
 		);
 		dontAsk()?.click();
 		pasteButton("Paste")?.click();
-		await settle();
-		expect(inputs()).toEqual(["a\rb"]);
-		release();
+		try {
+			await settle();
+			expect(inputs()).toEqual(["a\rb"]);
+		} finally {
+			release();
+		}
 	});
 
 	it("says so when Don't ask again could not be saved, and pastes all the same", async () => {

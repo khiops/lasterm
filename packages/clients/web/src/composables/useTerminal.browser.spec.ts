@@ -648,6 +648,36 @@ describe("a paste of several lines asks first (#1015)", () => {
 		expect(pane.pendingPaste.value).toBeNull();
 	});
 
+	it("reads the clipboard once for a paste it does not ask about, to an older agent too", async () => {
+		warning = "never";
+		await attachedWith(OFF);
+		const data = new DataTransfer();
+		const read = data.getData.bind(data);
+		let reads = 0;
+		data.getData = (format: string) => {
+			reads++;
+			return read(format);
+		};
+		pasteEvent("a\nb", data);
+		expect(reads).toBe(1);
+		expect(inputs()).toEqual(["a\rb"]);
+	});
+
+	it("gives the card a bounded prefix of a very long first line", async () => {
+		await attachedWith({ adaptsInput: true, streamsPaste: true, ...OFF });
+		paste(`${"x".repeat(100_000)}\nb`);
+		expect(pane.pendingPaste.value?.preview.map((line) => line.length)).toEqual([161, 1]);
+	});
+
+	it("drops a held paste on a paste event that carries no clipboard data", async () => {
+		await attachedWith({ adaptsInput: true, ...OFF });
+		paste("a\nb");
+		xterm().textarea?.dispatchEvent(
+			new ClipboardEvent("paste", { bubbles: true, cancelable: true }),
+		);
+		expect(pane.pendingPaste.value).toBeNull();
+	});
+
 	it("says a paste is too large before it says nothing for want of the write lock", async () => {
 		await attachedWith({ adaptsInput: true, ...OFF });
 		pane.canWrite.value = false;

@@ -10466,9 +10466,10 @@ mod tests {
         assert_eq!(config.app.windows[0].title, product_name);
     }
 
-    // The installers' identity: tauri.dev.conf.json, which the build scripts pass
-    // the Tauri CLI on a dev build, names what build.rs compiles in. Mutation:
-    // the file's identifier or name drifting from the build script's.
+    // The installers' identity: tauri.dev.conf.json, which tauri-channel.mjs
+    // passes the Tauri CLI when a dev build bundles, names what build.rs
+    // compiles in. Mutation: the file's identifier or name drifting from the
+    // build script's.
     #[test]
     fn the_dev_installer_config_names_the_dev_identity() {
         let file: serde_json::Value =

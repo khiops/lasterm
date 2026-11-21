@@ -2598,11 +2598,12 @@ export class SessionManager {
 					transfers,
 				};
 			}
-			if (transfers > 0) this.transfers?.interruptOn(hostId);
+			const interruptUploads = this.uploadsInterrupter(hostId, transfers);
 			const stop = await requestDaemonStop(agent, {
 				force: options.force,
 				isHubQuitting: () => this.isQuitting(),
 				onStopped: () => {
+					interruptUploads();
 					agent.closedByHub = true;
 					this.releaseAgent(hostId, agent);
 				},
@@ -2618,6 +2619,7 @@ export class SessionManager {
 					}),
 				};
 			}
+			interruptUploads();
 			let stopped = stop.kind === "stopped";
 			// A STOP with no connection to say it on cannot be refused, so it
 			// cannot say whether other hubs hold terminals there: only a forced
@@ -2865,8 +2867,12 @@ export class SessionManager {
 					transfers,
 				};
 			}
-			if (transfers > 0) this.transfers?.interruptOn(hostId);
-			const outcome = await this.stopAgentToReplace(hostId, agent, options);
+			const outcome = await this.stopAgentToReplace(
+				hostId,
+				agent,
+				options,
+				this.uploadsInterrupter(hostId, transfers),
+			);
 			if (outcome.replaced) this.lifecycle.endChannelsOfStoppedAgent(hostId);
 			return outcome;
 		} finally {
@@ -2886,11 +2892,19 @@ export class SessionManager {
 		}
 	}
 
-	/** Stop the daemon `agent` reaches, and let go of the connection once it has. */
+	/**
+	 * Stop the daemon `agent` reaches, and let go of the connection once it has.
+	 * `interruptUploads` runs on every answer but a refusal or an error, which
+	 * stop nothing and keep the connection: the agent stopped, its connection
+	 * ended (a displaced one included, which this hub closes), the wait ended
+	 * with no answer while it may be ending, or the STOP could not be sent,
+	 * the link being gone already (#1102).
+	 */
 	private async stopAgentToReplace(
 		hostId: string,
 		agent: SshAgent,
 		options: { readonly force?: boolean },
+		interruptUploads: () => void,
 	): Promise<ReplaceAgentOutcome> {
 		const stop = await requestDaemonStop(agent, {
 			force: options.force === true,
@@ -2899,10 +2913,12 @@ export class SessionManager {
 			// dial again, which is what the close handling would otherwise read,
 			// and the security log records the disconnect as this hub's doing.
 			onStopped: () => {
+				interruptUploads();
 				agent.closedByHub = true;
 				this.releaseAgent(hostId, agent);
 			},
 		});
+		if (stop.kind !== "refused" && stop.kind !== "error") interruptUploads();
 		switch (stop.kind) {
 			case "displaced":
 			case "closed_by_hub":
@@ -2937,8 +2953,8 @@ export class SessionManager {
 						"The agent did not say it had stopped. Its terminals may be ending; look again before asking twice.",
 				};
 			case "unsent":
-				// No connection to say it on: the out-of-band stop below still
-				// has the SSH connection, which is what it runs over.
+				// No connection to say it on, so the link the uploads used is
+				// gone: the out-of-band stop below runs over SSH.
 				break;
 		}
 
@@ -2959,7 +2975,7 @@ export class SessionManager {
 		if (stopCommand.exitCode !== 0) {
 			return {
 				replaced: false,
-				message: `The agent would not stop (exit ${stopCommand.exitCode}). Nothing was changed.`,
+				message: `The agent would not stop (exit ${stopCommand.exitCode}).`,
 			};
 		}
 
@@ -2970,6 +2986,23 @@ export class SessionManager {
 		return {
 			replaced: true,
 			message: "The agent was stopped. The next terminal on this host starts the current one.",
+		};
+	}
+
+	/**
+	 * Interrupt the uploads to `hostId`, once, when the stop they were
+	 * consented for goes ahead (#833): never before the STOP is answered,
+	 * unanswered in time, or could not be sent, so that a refusal, which stops
+	 * nothing, leaves them running (#1102). Each caller says which outcomes
+	 * interrupt them; `onStopped` calls it before the hub lets go of the
+	 * connection they use.
+	 */
+	private uploadsInterrupter(hostId: string, transfers: number): () => void {
+		let done = transfers === 0;
+		return () => {
+			if (done) return;
+			done = true;
+			this.transfers?.interruptOn(hostId);
 		};
 	}
 

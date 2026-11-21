@@ -267,8 +267,13 @@ the same id can briefly cover the shell that is ending and the one that is
 starting. Inside the agent only the pid tells them apart, and the reader of the
 ending shell must speak for its own pid alone — one that waited on whatever the
 id held wedged the agent for good (#432). No CHANNEL_EXIT is sent for a
-workload whose id has already been taken over: the hub asked for it to end and
-has the SPAWN_OK that says what replaced it.
+workload the hub DESTROYed, nor for one whose id has already been taken over:
+the hub asked for it to end, records that end itself, and has the SPAWN_OK that
+says what replaced it. Such an exit, even one sent before the restart's SPAWN,
+could reach the hub after that SPAWN_OK and be read as the new run's end
+(#1113). A workload the agent tears down because it is ending itself
+(`destroy_all`) still gets its CHANNEL_EXIT. An older agent may send one after a
+DESTROY; the hub has forgotten the terminal by then, or reads it as above.
 
 A workload whose program ended by itself keeps its id until its CHANNEL_EXIT
 has been routed to its hub's connection or away queue (#1089). Until then a
@@ -524,6 +529,8 @@ stops the end from being recorded: a storage error is logged by its code, and th
 ```typescript
 { type: "DESTROY", channel_id: string }
 ```
+
+No CHANNEL_EXIT follows for the workload it ends (§ 3.2, #1113).
 
 ### 3.10 HEARTBEAT
 

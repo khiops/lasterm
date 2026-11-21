@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::Duration;
 
@@ -118,11 +118,41 @@ pub(crate) fn route_delay_of(channel_id: &str) -> Option<Duration> {
         .map(|(_, delay)| *delay)
 }
 
+/// The channels every event of which the output router holds before routing
+/// it, the exit of a workload the hub destroyed included: the window where
+/// that exit, sent before a restart's SPAWN, would reach the hub after its
+/// SPAWN_OK (#1113).
+#[cfg(test)]
+static HELD_ROUTES: std::sync::Mutex<Vec<(String, Duration)>> = std::sync::Mutex::new(Vec::new());
+
+/// Have the router hold every event of `channel_id` for `delay` before routing it.
+#[cfg(test)]
+pub(crate) fn hold_routes_of(channel_id: &str, delay: Duration) {
+    HELD_ROUTES
+        .lock()
+        .expect("held routes")
+        .push((channel_id.to_owned(), delay));
+}
+
+/// How long the router holds every event of `channel_id` before routing it.
+#[cfg(test)]
+pub(crate) fn held_route_of(channel_id: &str) -> Option<Duration> {
+    HELD_ROUTES
+        .lock()
+        .expect("held routes")
+        .iter()
+        .find(|(id, _)| id == channel_id)
+        .map(|(_, delay)| *delay)
+}
+
 pub struct PtyManager {
     pub(crate) channels: HashMap<String, PtyChannelState>,
     /// Channels whose program ended and whose exit has not reached its hub's
     /// route yet (#1089).
     ending: HashMap<String, Ending>,
+    /// Workloads the hub DESTROYed, by channel id and pid, whose reader has
+    /// not come for them yet: it sends no exit for them (#1113).
+    destroyed: HashSet<(String, u32)>,
     shutting_down: bool,
     teardown_wait_timeout: Duration,
     /// The most input a channel's queue holds (#740).
@@ -264,6 +294,7 @@ impl PtyManager {
         Self {
             channels: HashMap::new(),
             ending: HashMap::new(),
+            destroyed: HashSet::new(),
             shutting_down: false,
             teardown_wait_timeout: CHANNEL_TEARDOWN_WAIT_TIMEOUT,
             input_bound: INPUT_QUEUE_BYTES,
@@ -500,6 +531,23 @@ impl PtyManager {
             self.ending.remove(channel_id);
         }
         withdrawn
+    }
+
+    /// Remove `channel_id` on the hub's DESTROY. The hub asked for its end and
+    /// records it itself; a restart's SPAWN may follow at once under the same
+    /// id. So its reader sends no exit, which could reach the hub after that
+    /// SPAWN's SPAWN_OK and mark the new run dead (#1113).
+    pub(crate) fn remove_destroyed(&mut self, channel_id: &str) -> Option<PtyProcess> {
+        let process = self.remove(channel_id)?;
+        self.destroyed
+            .insert((channel_id.to_owned(), process.pid()));
+        Some(process)
+    }
+
+    /// Whether the hub DESTROYed the workload `pid` under `channel_id`; its
+    /// reader asks once, as it comes for it.
+    pub(crate) fn take_destroyed(&mut self, channel_id: &str, pid: u32) -> bool {
+        self.destroyed.remove(&(channel_id.to_owned(), pid))
     }
 
     #[allow(dead_code)] // Used in tests

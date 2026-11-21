@@ -1500,10 +1500,11 @@ fn spawn_output_router(mut batched_rx: mpsc::UnboundedReceiver<BatchedEvent>, ro
             match event.into_delivery() {
                 Ok(Delivery::Owner(routed)) => {
                     #[cfg(test)]
-                    if routed.routed.is_some() {
-                        if let Some(delay) = crate::pty::route_delay_of(&routed.channel_id) {
-                            tokio::time::sleep(delay).await;
-                        }
+                    if let Some(delay) = crate::pty::route_delay_of(&routed.channel_id)
+                        .filter(|_| routed.routed.is_some())
+                        .or_else(|| crate::pty::held_route_of(&routed.channel_id))
+                    {
+                        tokio::time::sleep(delay).await;
                     }
                     routes.lock().await.route(
                         &routed.owner,
@@ -4884,6 +4885,34 @@ mod tests {
                         .any(|frame| is_about(frame, "CHANNEL_EXIT", "routed-id")),
                     "the exit must come before the SPAWN_OK; received {:?}",
                     frames.iter().map(frame_type).collect::<Vec<_>>()
+                );
+
+                daemon.stop().await;
+            }
+
+            /// A live terminal restarted: DESTROY, then SPAWN under its id.
+            /// The exit of the shell it destroyed, sent before the SPAWN and
+            /// still on its way, must not reach the hub after the SPAWN_OK,
+            /// which would mark the new run dead (#1113).
+            #[tokio::test]
+            async fn a_live_restart_gets_no_exit_of_the_shell_it_destroyed() {
+                let daemon = TestDaemon::start("live-restart").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("live-restarted")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+                crate::pty::hold_routes_of("live-restarted", Duration::from_millis(1500));
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "live-restarted".to_string(),
+                })
+                .await;
+                // Its shell ends, and its reader sends what it has left.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                spawned(&mut a, interactive("live-restarted")).await;
+                let later = a.frames_until_quiet(Duration::from_millis(4000)).await;
+                assert!(
+                    !mentions(&later, "live-restarted").contains(&"CHANNEL_EXIT".to_string()),
+                    "an exit after the SPAWN_OK marks the restarted terminal dead"
                 );
 
                 daemon.stop().await;

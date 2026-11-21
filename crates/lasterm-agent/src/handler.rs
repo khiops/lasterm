@@ -159,11 +159,16 @@ pub(crate) type SnapshotSenders =
 pub(crate) enum ReaderWorkload {
     /// The workload this reader was started for, taken back for its exit status.
     Own(Box<async_xpty::PtyProcess>),
-    /// Nothing is registered under this channel any more: it was destroyed.
+    /// Nothing is registered under this channel any more: the agent tore it
+    /// down as it ends (`destroy_all`), and its hub learns of its end from
+    /// this reader's exit.
     Gone,
     /// A restart put another workload under this channel id. This reader speaks
     /// for a shell that has already ended, and for nothing that is registered.
     Replaced,
+    /// The hub DESTROYed it: it asked for its end and records it itself, and a
+    /// restart's SPAWN may already reuse the id (#1113).
+    Destroyed,
 }
 
 /// Take back the workload a reader was started for, once its PTY has closed.
@@ -183,6 +188,9 @@ pub(crate) async fn take_own_workload(
     pty_pid: u32,
 ) -> ReaderWorkload {
     let mut mgr = pty_manager.lock().await;
+    if mgr.take_destroyed(channel_id, pty_pid) {
+        return ReaderWorkload::Destroyed;
+    }
     match mgr.channels.get(channel_id) {
         None => ReaderWorkload::Gone,
         Some(channel) if channel.process.pid() != pty_pid => ReaderWorkload::Replaced,
@@ -680,7 +688,7 @@ pub(crate) async fn handle_message(
                     true => match mgr.start_teardown(&channel_id) {
                         Ok(TeardownStart::Signalled { pid }) => {
                             let process = mgr
-                                .remove(&channel_id)
+                                .remove_destroyed(&channel_id)
                                 .expect("signalled channel must remain registered until removal");
                             let confirmation =
                                 TeardownConfirmation::new(channel_id.clone(), pid, process);
@@ -688,7 +696,7 @@ pub(crate) async fn handle_message(
                             Some(confirmation)
                         }
                         Ok(TeardownStart::AlreadyExited(outcome)) => {
-                            mgr.remove(&channel_id);
+                            mgr.remove_destroyed(&channel_id);
                             log_teardown_outcome(outcome, "DESTROY");
                             None
                         }
@@ -1370,8 +1378,8 @@ fn spawn_reader_task(
         }
 
         // The final screen goes with the exit of a program that ended by
-        // itself. One the hub destroyed is a terminal it deleted or is
-        // restarting, whose screen nobody reads (#933).
+        // itself (#933). One the agent tore down as it ends gets an exit
+        // without it; one the hub destroyed gets no exit at all (#1113).
         let mut ended_by_itself = false;
         let exit_status = match take_own_workload(&pty_manager, &channel_id, pty_pid).await {
             ReaderWorkload::Own(mut process) => {
@@ -1384,10 +1392,10 @@ fn spawn_reader_task(
                 status
             }
             ReaderWorkload::Gone => None,
-            // The hub asked for this workload to end and already knows it did:
-            // an exit reported now would be read against the terminal that took
-            // its place.
-            ReaderWorkload::Replaced => return,
+            // The hub asked for this workload to end (DESTROY) and records its
+            // end itself, or another workload took its id: an exit reported now
+            // could be read against the terminal that took its place.
+            ReaderWorkload::Replaced | ReaderWorkload::Destroyed => return,
         };
 
         let (exit_code, signal) = match exit_status {
@@ -2633,9 +2641,29 @@ mod stdio_tests {
         );
     }
 
-    /// A terminal the hub destroyed sends its exit without a screen (#933).
+    /// The type of every frame a terminal sends, until its reader is done.
+    async fn frame_types_until_done(
+        events: &mut mpsc::UnboundedReceiver<ChannelEvent>,
+    ) -> Vec<String> {
+        let mut types = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while let Some(event) = events.recv().await {
+                if let ChannelEvent::Frame(event) = event {
+                    let frame: serde_json::Value =
+                        rmp_serde::from_slice(&event.frame[4..]).unwrap();
+                    types.push(frame["type"].as_str().unwrap_or_default().to_owned());
+                }
+            }
+        })
+        .await
+        .expect("the terminal's reader ends");
+        types
+    }
+
+    /// A terminal the hub destroyed sends no exit: the hub records its end
+    /// itself, and a restart's SPAWN may already reuse its id (#1113).
     #[tokio::test]
-    async fn an_exit_after_destroy_carries_no_screen() {
+    async fn a_terminal_the_hub_destroyed_sends_no_exit() {
         let manager = Arc::new(Mutex::new(PtyManager::new()));
         let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
         let mut events = start_terminal_in("destroyed", None, &manager, &senders).await;
@@ -2654,6 +2682,20 @@ mod stdio_tests {
         )
         .await
         .expect("DESTROY");
+
+        let types = frame_types_until_done(&mut events).await;
+        assert!(types.contains(&"LOG".to_owned()), "{types:?}");
+        assert!(!types.contains(&"CHANNEL_EXIT".to_owned()), "{types:?}");
+    }
+
+    /// A terminal the agent tears down as it ends still sends its exit, for
+    /// its hub to record, without a screen (#933, #1113).
+    #[tokio::test]
+    async fn a_terminal_torn_down_as_the_agent_ends_sends_its_exit_without_a_screen() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let mut events = start_terminal_in("torn-down", None, &manager, &senders).await;
+        manager.lock().await.destroy_all().await;
 
         let exit = exit_of(&mut events).await;
         assert!(exit.get("screen").is_none(), "{exit}");

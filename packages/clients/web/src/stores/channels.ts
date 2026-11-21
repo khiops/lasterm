@@ -306,6 +306,17 @@ function bufferedStatus(held: PendingStatus | undefined, heard: PendingStatus): 
 	return { ...held, ...heard, ...(held.replacesEnd === true && { replacesEnd: true as const }) };
 }
 
+/** A channel with a status heard for it over what it held (#932). */
+function withHeard(channel: Channel, heard: PendingStatus): Channel {
+	return {
+		...(heard.replacesEnd === true ? withoutEnd(channel) : channel),
+		status: heard.status,
+		...(heard.exitCode !== undefined && { exitCode: heard.exitCode }),
+		...(heard.endReason !== undefined && { endReason: heard.endReason }),
+		...(heard.endId !== undefined && { endId: heard.endId }),
+	};
+}
+
 /** A channel without what an end says of it: its exit code, reason and end id (#932). */
 function withoutEnd(channel: Channel): Channel {
 	const { exitCode: _code, endReason: _reason, endId: _id, ...rest } = channel;
@@ -373,6 +384,21 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Cleared when the owning fetch resolves.
 	 */
 	const wsAddedDuringFetch = ref<Map<number, Set<string>>>(new Map());
+
+	/**
+	 * Statuses heard for listed channels DURING each in-flight fetch, keyed by
+	 * fetch generation. The fetch's rows were read before them, so they win
+	 * over those rows when it commits, as `pendingStatuses` does for channels
+	 * not listed (#1091).
+	 */
+	const statusesDuringFetch = new Map<number, Map<string, PendingStatus>>();
+
+	/** Record a status heard for a listed channel for every fetch in flight (#1091). */
+	function heardDuringFetch(channelId: string, heard: PendingStatus): void {
+		for (const heardHere of statusesDuringFetch.values()) {
+			heardHere.set(channelId, bufferedStatus(heardHere.get(channelId), heard));
+		}
+	}
 
 	/**
 	 * Persistent channelId → hostId mapping.
@@ -572,6 +598,8 @@ export const useChannelsStore = defineStore("channels", () => {
 		// Register a tracking set for WS-added channels during this fetch.
 		const myWsAdded = new Set<string>();
 		wsAddedDuringFetch.value = new Map(wsAddedDuringFetch.value).set(myGeneration, myWsAdded);
+		const myHeard = new Map<string, PendingStatus>();
+		statusesDuringFetch.set(myGeneration, myHeard);
 
 		try {
 			// ── 2. ALL I/O — no state commits in this section ────────────────
@@ -624,19 +652,23 @@ export const useChannelsStore = defineStore("channels", () => {
 					const p = pending.get(ch.id);
 					if (p) {
 						statusUpdated = true;
-						return {
-							...(p.replacesEnd === true ? withoutEnd(ch) : ch),
-							status: p.status,
-							...(p.exitCode !== undefined && { exitCode: p.exitCode }),
-							...(p.endReason !== undefined && { endReason: p.endReason }),
-							...(p.endId !== undefined && { endId: p.endId }),
-						};
+						return withHeard(ch, p);
 					}
 					return ch;
 				});
 				if (statusUpdated) {
 					merged = reconciled;
 				}
+			}
+
+			// Statuses heard for listed channels since this fetch started are
+			// newer than its rows: an end heard meanwhile must not read live
+			// again (#1091).
+			if (myHeard.size > 0) {
+				merged = merged.map((ch) => {
+					const heard = myHeard.get(ch.id);
+					return heard === undefined ? ch : withHeard(ch, heard);
+				});
 			}
 
 			// Mark channels absent from last STATE_SYNC as dead (hub restarted, lost track).
@@ -691,6 +723,7 @@ export const useChannelsStore = defineStore("channels", () => {
 			const next = new Map(wsAddedDuringFetch.value);
 			next.delete(myGeneration);
 			wsAddedDuringFetch.value = next;
+			statusesDuringFetch.delete(myGeneration);
 			// ── 6. Guarded finally — because generation is captured before loading
 			// is set, the loading lifecycle is fully consistent per-generation.
 			if (fetchGeneration.value === myGeneration) {
@@ -781,6 +814,13 @@ export const useChannelsStore = defineStore("channels", () => {
 		}
 		const existing = channels.value[idx];
 		if (existing === undefined) return;
+		heardDuringFetch(channelId, {
+			status,
+			...(exitCode !== undefined && { exitCode }),
+			...(status === "dead" && endReason !== undefined && { endReason }),
+			...(keptEnd !== undefined && { endId: keptEnd }),
+			...(replacesEnd && { replacesEnd: true as const }),
+		});
 		// Why it ended goes with this end only: a terminal running again, or one
 		// that ended by itself, has none (#592). A newer end, or a run, takes
 		// the previous end's exit code and id with it (#932).
@@ -975,6 +1015,14 @@ export const useChannelsStore = defineStore("channels", () => {
 		let changed = false;
 		const updated = channels.value.map((ch) => {
 			const sc = syncChannels.find((s) => s.channelId === ch.id);
+			if (sc) {
+				heardDuringFetch(sc.channelId, {
+					status: sc.status,
+					...(sc.exitCode !== undefined && { exitCode: sc.exitCode }),
+					...(sc.status === "dead" && sc.endReason !== undefined && { endReason: sc.endReason }),
+					...(sc.status !== "dead" && { replacesEnd: true as const }),
+				});
+			}
 			if (sc && (ch.status !== sc.status || ch.endReason !== sc.endReason)) {
 				changed = true;
 				const { endReason: _before, ...rest } = ch;

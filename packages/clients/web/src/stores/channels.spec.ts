@@ -2615,3 +2615,99 @@ describe("useChannelsStore — the end a window holds, kept and cleared (#932)",
 		expect(store.reportOf("ch-other")).toEqual({ status: "dead", exitCode: 3, endId: "E1" });
 	});
 });
+
+describe("useChannelsStore — a status heard while a list fetch is in flight (#1091)", () => {
+	function row(status: "live" | "dead"): Record<string, unknown> {
+		return {
+			id: "ch-race",
+			session_id: "sess-1",
+			shell: "/bin/bash",
+			cols: 80,
+			rows: 24,
+			status,
+			created_at: "2026-11-21T00:00:00Z",
+			updated_at: "2026-11-21T00:00:00Z",
+		};
+	}
+
+	/** The store with ch-race listed live, and a list fetch whose rows wait for `release`. */
+	async function listedThenFetching(heldRow: Record<string, unknown>) {
+		mockFetch.mockImplementation((url: string) => {
+			const body = url.includes("/api/groups") ? [] : [row("live")];
+			return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		});
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+		expect(store.statusOf("ch-race")).toBe("live");
+
+		let release!: () => void;
+		const held = new Promise<void>((r) => {
+			release = r;
+		});
+		mockFetch.mockImplementation((url: string) => {
+			if (url.includes("/api/groups")) {
+				return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+			}
+			return held.then(() => ({ ok: true, json: () => Promise.resolve([heldRow]) }));
+		});
+		const fetching = store.fetchChannels("host-1");
+		return { store, fetching, release };
+	}
+
+	it("an end heard for a listed terminal outlives the older row the fetch read", async () => {
+		const { store, fetching, release } = await listedThenFetching(row("live"));
+
+		store.updateChannelStatus("ch-race", "dead", 0, undefined, "E1");
+		release();
+		await fetching;
+
+		expect(store.statusOf("ch-race")).toBe("dead");
+		expect(store.channels.find((c) => c.id === "ch-race")).toMatchObject({
+			status: "dead",
+			exitCode: 0,
+			endId: "E1",
+		});
+	});
+
+	it("an end a STATE_SYNC names for a listed terminal outlives the older row", async () => {
+		const { store, fetching, release } = await listedThenFetching(row("live"));
+
+		store.applyStateSync([
+			{ channelId: "ch-race", sessionId: "sess-1", status: "dead", exitCode: 2 },
+		]);
+		release();
+		await fetching;
+
+		expect(store.channels.find((c) => c.id === "ch-race")).toMatchObject({
+			status: "dead",
+			exitCode: 2,
+		});
+	});
+
+	it("a run heard for a listed terminal outlives an older row that had it ended", async () => {
+		const { store, fetching, release } = await listedThenFetching({ ...row("dead"), exit_code: 1 });
+
+		store.updateChannelStatus("ch-race", "live");
+		release();
+		await fetching;
+
+		const listed = store.channels.find((c) => c.id === "ch-race");
+		expect(listed?.status).toBe("live");
+		expect(listed).not.toHaveProperty("exitCode");
+	});
+
+	it("a status heard before the fetch started gives way to the fetch's rows", async () => {
+		mockFetch.mockImplementation((url: string) => {
+			const body = url.includes("/api/groups") ? [] : [row("live")];
+			return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		});
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+		store.updateChannelStatus("ch-race", "dead", 0, undefined, "E1");
+
+		// Brought back since: the hub's list now reads it live.
+		await store.fetchChannels("host-1");
+
+		expect(store.statusOf("ch-race")).toBe("live");
+	});
+});

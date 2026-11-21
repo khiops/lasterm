@@ -66,21 +66,36 @@ runs:
           echo "::warning title=apt cache::The cached .deb files did not install; downloading them again."
         fi
 
-        # Bounded and named: a mirror that crawls fails here, saying so, instead
-        # of eating the job's whole timeout. Acquire:: covers a stalled
-        # connection, `timeout` a slow one.
+        # Bounded: a mirror that crawls fails here instead of eating the job's
+        # whole timeout. Acquire:: covers a stalled connection, `timeout` a
+        # slow one. Status 124 is `timeout` giving up.
         fetch() {
-          local limit="$1" status=0
+          local limit="$1"
           shift
-          timeout "$limit" sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@" || status=$?
-          if ((status == 124)); then
-            echo "::error title=Ubuntu mirror too slow::apt-get $1 did not finish within $limit: the Ubuntu mirror is slow. Re-run the job (#728)."
-          fi
-          return "$status"
+          timeout "$limit" sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"
         }
-        fetch 2m update
+        download() {
+          fetch 2m update && fetch 4m install -y --download-only "${packages[@]}"
+        }
+
+        # The runner's default mirror (azure.archive.ubuntu.com) is the one that
+        # slows down (#728, #1083). A slow first try fails over to the main
+        # archive instead of failing the job; the files already downloaded stay
+        # in apt's archive directory and are not fetched again.
         sudo apt-get clean
-        fetch 4m install -y --download-only "${packages[@]}"
+        status=0
+        download || status=$?
+        if ((status == 124)); then
+          echo "::warning title=Ubuntu mirror too slow::The runner's Ubuntu mirror did not answer in time; trying archive.ubuntu.com."
+          sudo grep -rlE 'azure\.archive\.ubuntu\.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null |
+            xargs -r sudo sed -i -E 's#https?://azure\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' || true
+          status=0
+          download || status=$?
+          if ((status == 124)); then
+            echo "::error title=Ubuntu mirror too slow::apt-get did not finish on the runner's mirror or on archive.ubuntu.com (#728). Re-run the job."
+          fi
+        fi
+        ((status == 0)) || exit "$status"
 
         rm -rf "$DEBS"
         mkdir -p "$DEBS"

@@ -2963,3 +2963,97 @@ describe("useChannelsStore — a status heard while a list fetch is in flight (#
 		expect(store.statusOf("ch-race")).toBe("live");
 	});
 });
+
+describe("useChannelsStore — a channel deleted while a list fetch is in flight (#1104)", () => {
+	function row(id: string, status: "live" | "dead"): Record<string, unknown> {
+		return {
+			id,
+			session_id: `sess-${id}`,
+			shell: "/bin/bash",
+			cols: 80,
+			rows: 24,
+			status,
+			created_at: "2026-11-21T00:00:00Z",
+			updated_at: "2026-11-21T00:00:00Z",
+		};
+	}
+
+	/** Listed rows, then a list fetch whose (older) rows wait for `release`; DELETEs succeed. */
+	async function listedThenFetching(listed: Record<string, unknown>[]) {
+		const ok = (body: unknown) => Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		mockFetch.mockImplementation((url: string) => ok(url.includes("/api/groups") ? [] : listed));
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+
+		let release!: () => void;
+		const held = new Promise<void>((r) => {
+			release = r;
+		});
+		mockFetch.mockImplementation((url: string, init?: { method?: string }) => {
+			if (init?.method === "DELETE") return ok({ purged: 1 });
+			if (url.includes("/api/groups")) return ok([]);
+			return held.then(() => ({ ok: true, json: () => Promise.resolve(listed) }));
+		});
+		const fetching = store.fetchChannels("host-1");
+		return { store, fetching, release };
+	}
+
+	it("a channel deleted after the fetch started stays out of its result", async () => {
+		const { store, fetching, release } = await listedThenFetching([
+			row("ch-a", "dead"),
+			row("ch-b", "live"),
+		]);
+
+		expect(await store.deleteChannel("ch-a")).toBe(true);
+		release();
+		await fetching;
+
+		expect(store.channels.map((c) => c.id)).toEqual(["ch-b"]);
+	});
+
+	it("dead channels purged after the fetch started stay out of its result", async () => {
+		const { store, fetching, release } = await listedThenFetching([
+			row("ch-a", "dead"),
+			row("ch-b", "live"),
+		]);
+
+		expect(await store.purgeDeadChannels()).toBe(1);
+		release();
+		await fetching;
+
+		expect(store.channels.map((c) => c.id)).toEqual(["ch-b"]);
+	});
+
+	it("a channel created again after its deletion is listed again", async () => {
+		const { store, fetching, release } = await listedThenFetching([row("ch-a", "dead")]);
+
+		await store.deleteChannel("ch-a");
+		store.handleChannelCreated({
+			type: "CHANNEL_CREATED",
+			channelId: "ch-a",
+			sessionId: "sess-new",
+			hostId: "host-1",
+			cols: 80,
+			rows: 24,
+			status: "live",
+			createdAt: "2026-11-21T00:01:00Z",
+			updatedAt: "2026-11-21T00:01:00Z",
+		} as Parameters<typeof store.handleChannelCreated>[0]);
+		release();
+		await fetching;
+
+		expect(store.statusOf("ch-a")).toBe("live");
+	});
+
+	it("a deletion before the fetch started does not affect it", async () => {
+		const { store, fetching, release } = await listedThenFetching([row("ch-a", "dead")]);
+		release();
+		await fetching;
+		await store.deleteChannel("ch-a");
+
+		// The hub lists it again (e.g. the delete was not applied there).
+		await store.fetchChannels("host-1");
+
+		expect(store.channels.map((c) => c.id)).toEqual(["ch-a"]);
+	});
+});

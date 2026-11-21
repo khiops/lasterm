@@ -1829,9 +1829,9 @@ describe("POST stop-keeping", () => {
 		["timeout", true],
 		["unconfirmed", true],
 		["closed_by_hub", true],
-		["displaced", false],
+		["displaced", true],
 	] as const)(
-		"Replace whose STOP ends %s: the uploads are interrupted only when the agent may be ending or its connection ended (#1102)",
+		"Replace whose STOP ends %s: the uploads are interrupted, the agent may be ending or its connection ended (#1102)",
 		async (mode, interrupts) => {
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 			try {
@@ -1876,6 +1876,26 @@ describe("POST stop-keeping", () => {
 			}
 		},
 	);
+
+	it("Replace whose --stop ends the connection before saying how it went still interrupts the uploads (#1102)", async () => {
+		const f = fixture();
+		stopCannotBeSent(f);
+		f.agent.execOnHost.mockImplementation(async (command: string) => {
+			if (command === REMOTE_STATE_DIR_COMMAND) return { stdout: "/state", exitCode: 0 };
+			f.agent.connected = false;
+			f.agent.emit("close");
+			return { stdout: "", exitCode: 1 };
+		});
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(409);
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
 
 	it("Replace whose STOP cannot be sent interrupts the uploads before its own --stop lets go (#1102)", async () => {
 		const f = fixture();

@@ -2894,10 +2894,11 @@ export class SessionManager {
 
 	/**
 	 * Stop the daemon `agent` reaches, and let go of the connection once it has.
-	 * `interruptUploads` runs when the agent stops, its connection ends, or the
-	 * wait ends with no answer while it may be ending; never on a refusal, an
-	 * error answer, a `--stop` that failed, which stop nothing, nor on a
-	 * connection displaced by a newer one of this hub, which carries on (#1102).
+	 * `interruptUploads` runs when the agent stops, its connection ends (a
+	 * displaced one included, which this hub closes), or the wait ends with no
+	 * answer while it may be ending; never on a refusal, an error answer or a
+	 * `--stop` that failed with the connection still up, which stop nothing
+	 * (#1102).
 	 */
 	private async stopAgentToReplace(
 		hostId: string,
@@ -2917,7 +2918,7 @@ export class SessionManager {
 				this.releaseAgent(hostId, agent);
 			},
 		});
-		if (stop.kind === "unconfirmed" || stop.kind === "closed_by_hub" || stop.kind === "timeout") {
+		if (stop.kind !== "refused" && stop.kind !== "error" && stop.kind !== "unsent") {
 			interruptUploads();
 		}
 		switch (stop.kind) {
@@ -2970,9 +2971,18 @@ export class SessionManager {
 			return { replaced: false, message: "The host could not say where its agent's socket is." };
 		}
 
-		const stopCommand = await agent.execOnHost(
-			remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir)),
-		);
+		// The daemon stopping can end the SSH connection before `--stop` says
+		// how it went: the uploads end with that connection, so they are
+		// interrupted when it closes, whatever the exit code says.
+		agent.prependListener("close", interruptUploads);
+		let stopCommand: Awaited<ReturnType<SshAgent["execOnHost"]>>;
+		try {
+			stopCommand = await agent.execOnHost(
+				remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir)),
+			);
+		} finally {
+			agent.off("close", interruptUploads);
+		}
 		if (stopCommand.exitCode !== 0) {
 			return {
 				replaced: false,
@@ -2993,9 +3003,9 @@ export class SessionManager {
 
 	/**
 	 * Interrupt the uploads to `hostId`, once, when the stop they were
-	 * consented for goes ahead (#833). Called only past the daemon's answer, or
-	 * the end of the wait for it, so that its refusal, which stops nothing,
-	 * leaves them running (#1102); and
+	 * consented for goes ahead (#833). Called only past the daemon's answer,
+	 * the end of the wait for it, or the connection closing under `--stop`, so
+	 * that its refusal, which stops nothing, leaves them running (#1102); and
 	 * from `onStopped` too, before the hub lets go of the connection they use.
 	 */
 	private uploadsInterrupter(hostId: string, transfers: number): () => void {

@@ -18,7 +18,7 @@ import { AgentConnectionManager, AgentVersionMismatchError } from "./agent-conne
 import { deployAgentIfNeeded } from "./agent-deployer.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { LastermAgent } from "./lasterm-agent.js";
-import type { OutputChunker } from "./output-chunker.js";
+import { OutputChunker } from "./output-chunker.js";
 import type {
 	CommitProtectedMap,
 	SessionMetaDAL,
@@ -353,6 +353,76 @@ describe("quit-protected revival capabilities", () => {
 		// way to reach this host (#127).
 		expect(ctx.agents.has(HOST_ID)).toBe(false);
 		expect((agent as unknown as { close: () => void }).close).toHaveBeenCalled();
+	});
+
+	describe("a spool write that keeps failing (#1098)", () => {
+		function diskFull(): Error {
+			return Object.assign(new Error("database or disk is full"), { code: "SQLITE_FULL" });
+		}
+
+		function setup() {
+			const built = makeHarness();
+			const insertChunk = vi.fn(() => {
+				throw diskFull();
+			});
+			const chunker = new OutputChunker({ insertChunk, getMaxSeq: () => 0 } as unknown as SpoolDAL);
+			(built.ctx as unknown as Record<string, unknown>).chunker = chunker;
+			const logger = { log: vi.fn(), close: vi.fn() };
+			const registry = new Map([["chan-1", logger]]);
+			(built.ctx as unknown as Record<string, unknown>).loggerRegistry = registry;
+			(built.lifecycle as unknown as Record<string, unknown>).agentMayBeIdle = vi.fn();
+			const agent = new EventEmitter() as unknown as LastermAgent & EventEmitter;
+			built.manager.wireAgentEvents(HOST_ID, SESSION_ID, agent);
+			chunker.trackChannel("chan-1");
+			return { ...built, chunker, logger, registry, agent, insertChunk };
+		}
+
+		it("still finishes an ended terminal's cleanup, and nothing reaches the listener", () => {
+			const { agent, chunker, broadcaster, lifecycle, logger, registry } = setup();
+			const error = vi.spyOn(console, "error").mockImplementation(() => {});
+			try {
+				agent.emit("message", {
+					type: "OUTPUT",
+					channelId: "chan-1",
+					data: new Uint8Array([1, 2, 3]),
+				});
+
+				expect(() =>
+					agent.emit("message", { type: "CHANNEL_EXIT", channelId: "chan-1", exitCode: 0 }),
+				).not.toThrow();
+
+				expect(broadcaster.clearTitleDebounce).toHaveBeenCalledWith("chan-1");
+				expect(broadcaster.clearProcessTitleDebounce).toHaveBeenCalledWith("chan-1");
+				expect(logger.close).toHaveBeenCalled();
+				expect(registry.has("chan-1")).toBe(false);
+				expect(lifecycle.agentMayBeIdle).toHaveBeenCalledWith(HOST_ID);
+				// The failure is told, by its code.
+				expect(error.mock.calls.flat().join(" ")).toContain("SQLITE_FULL");
+				// The ended terminal is no longer tracked.
+				// Only an untracked channel ignores bumpSeq.
+				chunker.bumpSeq("chan-1", 5);
+				expect(chunker.getNextSeq("chan-1")).toBe(1);
+			} finally {
+				error.mockRestore();
+			}
+		});
+
+		it("keeps a size-triggered flush that fails from reaching the listener", () => {
+			const { agent, insertChunk } = setup();
+			const error = vi.spyOn(console, "error").mockImplementation(() => {});
+			try {
+				expect(() =>
+					agent.emit("message", {
+						type: "OUTPUT",
+						channelId: "chan-1",
+						data: new Uint8Array(256 * 1024),
+					}),
+				).not.toThrow();
+				expect(insertChunk).toHaveBeenCalledTimes(1);
+			} finally {
+				error.mockRestore();
+			}
+		});
 	});
 
 	// A daemon replaces only a connection of the same hub (#127): this hub

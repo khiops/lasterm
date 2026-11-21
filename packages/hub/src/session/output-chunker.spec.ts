@@ -250,4 +250,96 @@ describe("OutputChunker", () => {
 		const blob = getMockCall(vi.mocked(dal.insertChunk), 0).dataBlob;
 		expect(Array.from(blob)).toEqual([1, 2, 3, 4]);
 	});
+	it("drops the bytes a failed write could not store, and writes only newer output afterwards (#1098)", () => {
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			(dal.insertChunk as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+				throw Object.assign(new Error("disk full"), { code: "SQLITE_FULL" });
+			});
+			chunker.trackChannel("ch1");
+			chunker.onOutput("ch1", new Uint8Array([1, 2, 3]));
+			expect(() => vi.advanceTimersByTime(1_000)).not.toThrow();
+
+			chunker.onOutput("ch1", new Uint8Array([4, 5]));
+			vi.advanceTimersByTime(1_000);
+
+			expect(dal.insertChunk).toHaveBeenCalledTimes(2);
+			const retry = getMockCall(dal.insertChunk as ReturnType<typeof vi.fn>, 1);
+			expect([...(retry.dataBlob as Uint8Array)]).toEqual([4, 5]);
+			// The failed write took no sequence number.
+			expect(retry.seq).toBe(1);
+		} finally {
+			error.mockRestore();
+		}
+	});
+	it("drops the bytes of a failed size-triggered flush, and clears its timer (#1098)", () => {
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			(dal.insertChunk as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+				throw Object.assign(new Error("disk full"), { code: "SQLITE_FULL" });
+			});
+			chunker.trackChannel("ch1");
+			expect(() => chunker.onOutput("ch1", new Uint8Array(256 * 1024))).not.toThrow();
+			chunker.onOutput("ch1", new Uint8Array([4, 5]));
+			vi.advanceTimersByTime(1_000);
+
+			expect(dal.insertChunk).toHaveBeenCalledTimes(2);
+			const second = getMockCall(dal.insertChunk as ReturnType<typeof vi.fn>, 1);
+			expect([...(second.dataBlob as Uint8Array)]).toEqual([4, 5]);
+			expect(second.seq).toBe(1);
+			// Told by its code, with the channel and what was dropped.
+			const logged = error.mock.calls.flat().join(" ");
+			expect(logged).toContain("SQLITE_FULL");
+			expect(logged).toContain("ch1");
+			expect(logged).toContain(String(256 * 1024));
+		} finally {
+			error.mockRestore();
+		}
+	});
+
+	it("tells an error without a code as such (#1098)", () => {
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			(dal.insertChunk as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+				throw new Error("boom");
+			});
+			chunker.trackChannel("ch1");
+			chunker.onOutput("ch1", new Uint8Array([1]));
+			chunker.untrackChannel("ch1");
+			expect(error.mock.calls.flat().join(" ")).toContain("no code");
+		} finally {
+			error.mockRestore();
+		}
+	});
+
+	it("shutdown goes on to the other channels when one write fails (#1098)", () => {
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			(dal.insertChunk as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+				throw new Error("boom");
+			});
+			chunker.trackChannel("ch1");
+			chunker.trackChannel("ch2");
+			chunker.onOutput("ch1", new Uint8Array([1]));
+			chunker.onOutput("ch2", new Uint8Array([2]));
+			expect(() => chunker.shutdown()).not.toThrow();
+			expect(dal.insertChunk).toHaveBeenCalledTimes(2);
+			expect(getMockCall(dal.insertChunk as ReturnType<typeof vi.fn>, 1).channelId).toBe("ch2");
+		} finally {
+			error.mockRestore();
+		}
+	});
+
+	it("flush itself still throws and keeps the bytes, for the callers that log it (#1098)", () => {
+		(dal.insertChunk as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+			throw new Error("boom");
+		});
+		chunker.trackChannel("ch1");
+		chunker.onOutput("ch1", new Uint8Array([1, 2]));
+		expect(() => chunker.flush("ch1")).toThrow("boom");
+
+		chunker.flush("ch1");
+		const retry = getMockCall(dal.insertChunk as ReturnType<typeof vi.fn>, 1);
+		expect([...(retry.dataBlob as Uint8Array)]).toEqual([1, 2]);
+	});
 });

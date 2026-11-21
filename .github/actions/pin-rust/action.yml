@@ -12,6 +12,7 @@ runs:
         set -euo pipefail
         rustup toolchain install
         active="$(rustup show active-toolchain | cut -d' ' -f1 | tr -d '\r')"
+        [[ -n "$active" ]] || { echo "No active toolchain"; exit 1; }
         echo "Keeping $active"
         rustup toolchain list --quiet | tr -d '\r' | while read -r toolchain; do
           if [[ -n "$toolchain" && "$toolchain" != "$active" ]]; then

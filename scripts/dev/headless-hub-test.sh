@@ -24,6 +24,8 @@ PIDF="$TT/hub.pid"
 
 ensure_dirs() {
 	mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$RUNTIME_DIR"
+	# The hub refuses an agent endpoint whose directory others can reach.
+	chmod 700 "$RUNTIME_DIR"
 }
 
 write_debug_config() {

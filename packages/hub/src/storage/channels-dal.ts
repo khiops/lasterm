@@ -1,4 +1,9 @@
-import type { Channel, ChannelEndReason, ChannelStatus } from "@lasterm/shared";
+import {
+	type Channel,
+	type ChannelEndReason,
+	type ChannelStatus,
+	generateId,
+} from "@lasterm/shared";
 import type { CreateChannelInput } from "./meta-types.js";
 import type { Database } from "./sqlite.js";
 
@@ -27,6 +32,7 @@ interface ChannelRow {
 	elevated: number;
 	elevation_method: string | null;
 	end_reason: string | null;
+	end_id: string | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -70,6 +76,7 @@ function rowToChannel(row: ChannelRow): Channel {
 	if (row.elevation_method != null) ch.elevationMethod = row.elevation_method;
 	// Only a reason this hub knows: anything else says nothing it can act on.
 	if (row.end_reason === "killed" || row.end_reason === "stopped") ch.endReason = row.end_reason;
+	if (row.end_id != null) ch.endId = row.end_id;
 	if (row.args && row.args !== "[]") {
 		try {
 			const parsed = JSON.parse(row.args) as string[];
@@ -206,6 +213,10 @@ export class ChannelsDAL {
 	 * to explain, so any other status clears it. One already dead keeps what
 	 * its end said when told again without a reason: a repeat of an end is not
 	 * a new one. A reason given replaces the one there.
+	 *
+	 * The exit code and the end id go the same way: any other status clears
+	 * them. `dead` over a row that was not dead gives the end a new id; told
+	 * again, the end keeps the id it has (#932).
 	 */
 	updateChannelStatus(
 		id: string,
@@ -221,22 +232,33 @@ export class ChannelsDAL {
 				WHEN status = 'dead' THEN end_reason
 				ELSE NULL
 			END`;
-		const params = { id, status, endReason: endReason ?? null, updatedAt: now };
-		if (exitCode !== undefined) {
-			this.db
-				.prepare(
-					`UPDATE channels SET status = @status, exit_code = @exitCode, ${endReasonSql},
-					 updated_at = @updatedAt WHERE id = @id`,
-				)
-				.run({ ...params, exitCode });
-		} else {
-			this.db
-				.prepare(
-					`UPDATE channels SET status = @status, ${endReasonSql}, updated_at = @updatedAt
-					 WHERE id = @id`,
-				)
-				.run(params);
-		}
+		// An end gets an id of its own, kept while it is told again and gone
+		// once the terminal runs again (#932).
+		const endIdSql = `end_id = CASE
+				WHEN @status <> 'dead' THEN NULL
+				WHEN status = 'dead' THEN end_id
+				ELSE @endId
+			END`;
+		// An exit code is an end's: a terminal running again has none, whether
+		// it was brought back by a revive or a restart that writes `live` (#932).
+		const exitCodeSql =
+			exitCode !== undefined
+				? "exit_code = CASE WHEN @status <> 'dead' THEN NULL ELSE @exitCode END"
+				: "exit_code = CASE WHEN @status <> 'dead' THEN NULL ELSE exit_code END";
+		const params = {
+			id,
+			status,
+			endReason: endReason ?? null,
+			endId: generateId(),
+			updatedAt: now,
+			...(exitCode !== undefined && { exitCode }),
+		};
+		this.db
+			.prepare(
+				`UPDATE channels SET status = @status, ${exitCodeSql}, ${endReasonSql}, ${endIdSql},
+				 updated_at = @updatedAt WHERE id = @id`,
+			)
+			.run(params);
 	}
 
 	/**
@@ -278,7 +300,7 @@ export class ChannelsDAL {
 		const result = this.db
 			.prepare(
 				`UPDATE channels
-				 SET session_id = @sessionId, status = 'born', exit_code = NULL, end_reason = NULL,
+				 SET session_id = @sessionId, status = 'born', exit_code = NULL, end_reason = NULL, end_id = NULL,
 				     cols = @cols, rows = @rows, updated_at = @updatedAt
 				 WHERE id = @id`,
 			)

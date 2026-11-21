@@ -5,6 +5,7 @@ import type {
 	AgentSpawnMessage,
 	AuthPromptMessage,
 	ChannelCreatedMessage,
+	ChannelStateMessage,
 	EndedOutput,
 	ErrorMessage,
 	ProtocolMessage,
@@ -4045,6 +4046,302 @@ describe("SessionManager", () => {
 			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
 		});
 
+		describe("the final screen an exit carries (#933)", () => {
+			const FINAL = {
+				serialized: "\u001b[?25h\u001b[m\u001b[H\u001b[Jfinal screen",
+				cols: 120,
+				rows: 40,
+				cursorX: 12,
+				cursorY: 0,
+				alternateScreen: false,
+				inputModes: "",
+			};
+			const PREFIX = "\u001b[r\u001b[?6l\u001b[4l\u001b[?7h\u001b(B\u001b)B\u001b*B\u001b+B\u000f";
+			const REDRAW = PREFIX + FINAL.serialized;
+			const ctxOf = () =>
+				(sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+
+			/** A live local terminal, and a way to send what its agent sends. */
+			async function liveTerminal(heard: ProtocolMessage[] = []) {
+				sm.addClient(makeClient("writer", heard));
+				const channelId = await sm.handleSpawn("writer", { type: "SPAWN", hostId: "local" });
+				if (channelId === null) throw new Error("expected a local channel");
+				const agent = mockLocalAgents.at(-1);
+				if (agent === undefined) throw new Error("expected the local agent");
+				const emit = (msg: unknown) => (agent as unknown as EventEmitter).emit("message", msg);
+				return { channelId, emit };
+			}
+
+			const exitWith = (channelId: string, screen: unknown) => ({
+				type: "CHANNEL_EXIT",
+				channelId,
+				exitCode: 0,
+				screen,
+			});
+
+			it("an exit screen ends a complete last output", async () => {
+				const { channelId, emit } = await liveTerminal();
+				emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+				const after = "a".repeat(10 * KIB);
+				emit({ type: "OUTPUT", channelId, seq: 1, ts: "", data: Buffer.from(after) });
+				emit(exitWith(channelId, FINAL));
+
+				const last = lastOutputOf((await attachFresh(channelId, "reader")).received);
+
+				expect(last.snapshot).toEqual(SCREEN);
+				expect(text(last.tail)).toEqual([after + REDRAW]);
+				expect(last).not.toHaveProperty("truncated");
+			});
+
+			it("an exit screen ends the last output of a terminal stopped with its agent", async () => {
+				const { channelId, emit } = await liveTerminal();
+				emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+				const hostId = ctxOf().channels.get(channelId)?.hostId;
+				if (hostId === undefined) throw new Error("expected the terminal's host");
+				// The hub is stopping this host's agent: its ends are "stopped".
+				ctxOf().stoppingAgents.add(hostId);
+				emit(exitWith(channelId, FINAL));
+				ctxOf().stoppingAgents.delete(hostId);
+
+				expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.endReason).toBe("stopped");
+				const last = lastOutputOf((await attachFresh(channelId, "reader")).received);
+				expect(text(last.tail)).toEqual([REDRAW]);
+			});
+
+			it("an exit screen redraws a snapshot nothing followed", async () => {
+				const { channelId, emit } = await liveTerminal();
+				emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+				emit(exitWith(channelId, FINAL));
+
+				const last = lastOutputOf((await attachFresh(channelId, "reader")).received);
+
+				expect(last.snapshot).toEqual(SCREEN);
+				expect(text(last.tail)).toEqual([REDRAW]);
+			});
+
+			it("an exit screen ends a stream that has no snapshot", async () => {
+				const { channelId, emit } = await liveTerminal();
+				emit({ type: "OUTPUT", channelId, seq: 1, ts: "", data: Buffer.from("from the start") });
+				emit(exitWith(channelId, FINAL));
+
+				const last = lastOutputOf((await attachFresh(channelId, "reader")).received);
+
+				expect(last.snapshot).toBeNull();
+				expect(text(last.tail)).toEqual([`from the start${REDRAW}`]);
+			});
+
+			it("an exit screen that does not fit becomes the snapshot", async () => {
+				const { channelId, emit } = await liveTerminal();
+				emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+				const fill = "b".repeat(128 * KIB - Math.floor(Buffer.byteLength(REDRAW) / 2));
+				emit({ type: "OUTPUT", channelId, seq: 1, ts: "", data: Buffer.from(fill) });
+				emit(exitWith(channelId, FINAL));
+
+				const last = lastOutputOf((await attachFresh(channelId, "reader")).received);
+
+				expect(last.snapshot).toEqual(FINAL);
+				expect(last.tail).toEqual([]);
+				expect(last).not.toHaveProperty("truncated");
+			});
+
+			it("an exit screen replaces a last output cut short", async () => {
+				const { channelId, emit } = await liveTerminal();
+				emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+				const burst = "c".repeat(130 * KIB);
+				emit({ type: "OUTPUT", channelId, seq: 1, ts: "", data: Buffer.from(burst) });
+				emit(exitWith(channelId, FINAL));
+
+				const last = lastOutputOf((await attachFresh(channelId, "reader")).received);
+
+				expect(last.snapshot).toEqual(FINAL);
+				expect(last.tail).toEqual([]);
+				expect(last).not.toHaveProperty("truncated");
+			});
+
+			it("an exit screen stands in for a stream that lost its start", async () => {
+				const { channelId, emit } = await liveTerminal();
+				// The GC took seqs 1 to 99.
+				store(channelId, 100, "output", "middle");
+				emit(exitWith(channelId, FINAL));
+
+				const last = lastOutputOf((await attachFresh(channelId, "reader")).received);
+
+				expect(last.snapshot).toEqual(FINAL);
+				expect(last.tail).toEqual([]);
+			});
+
+			it("an exit screen too large to send is not stored", async () => {
+				const { channelId, emit } = await liveTerminal();
+				emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+				const burst = "d".repeat(130 * KIB);
+				emit({ type: "OUTPUT", channelId, seq: 1, ts: "", data: Buffer.from(burst) });
+				// Under the agent's raw bound, over the hub's once JSON escapes it.
+				const huge = { ...FINAL, serialized: "\u001b".repeat(50 * KIB) };
+				emit(exitWith(channelId, huge));
+
+				const last = lastOutputOf((await attachFresh(channelId, "reader")).received);
+
+				expect(last.snapshot).toEqual(SCREEN);
+				expect(last.tail).toEqual([]);
+				expect(last.truncated).toBe(true);
+			});
+
+			it("an exit screen too large to send is not appended either", async () => {
+				const { channelId, emit } = await liveTerminal();
+				emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+				emit({ type: "OUTPUT", channelId, seq: 1, ts: "", data: Buffer.from("few") });
+				// A complete answer, which a screen that fits would end with its redraw.
+				const huge = { ...FINAL, serialized: "\u001b".repeat(50 * KIB) };
+				emit(exitWith(channelId, huge));
+
+				const last = lastOutputOf((await attachFresh(channelId, "reader")).received);
+
+				expect(last.snapshot).toEqual(SCREEN);
+				expect(text(last.tail)).toEqual(["few"]);
+				expect(last).not.toHaveProperty("truncated");
+			});
+
+			it("an exit's screen frees no snapshot slot", async () => {
+				const { channelId, emit } = await liveTerminal();
+				const scheduler = ctxOf().scheduler as unknown as { _inFlightSnapshots: number };
+				// Another terminal's SNAPSHOT_REQ is in flight.
+				scheduler._inFlightSnapshots = 1;
+				emit(exitWith(channelId, FINAL));
+
+				expect(ctxOf().scheduler.inFlightSnapshots).toBe(1);
+			});
+
+			it("an exit screen that cannot be stored still ends the terminal", async () => {
+				const heard: ProtocolMessage[] = [];
+				const { channelId, emit } = await liveTerminal(heard);
+				// Output the chunker holds, whose write at the exit fails.
+				emit({ type: "OUTPUT", channelId, seq: 1, ts: "", data: Buffer.from("held") });
+				spies.push(
+					vi.spyOn(SpoolDAL.prototype, "insertChunk").mockImplementationOnce(() => {
+						throw Object.assign(new Error("disk I/O error"), { code: "ERR_SQLITE_IOERR" });
+					}),
+				);
+				emit(exitWith(channelId, FINAL));
+
+				expect(heard).toContainEqual(
+					expect.objectContaining({ type: "CHANNEL_STATE", channelId, status: "dead" }),
+				);
+				expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
+			});
+
+			it("an exit screen whose write keeps failing leaves nothing to fail again", async () => {
+				const heard: ProtocolMessage[] = [];
+				const { channelId, emit } = await liveTerminal(heard);
+				emit({ type: "SNAPSHOT_RES", channelId, snapshot: SCREEN, lastSeq: 0 });
+				// Every write from here on fails: the redraw's, and any flush after it.
+				spies.push(
+					vi.spyOn(SpoolDAL.prototype, "insertChunk").mockImplementation(() => {
+						throw Object.assign(new Error("disk I/O error"), { code: "ERR_SQLITE_IOERR" });
+					}),
+				);
+
+				expect(() => emit(exitWith(channelId, FINAL))).not.toThrow();
+				expect(heard).toContainEqual(
+					expect.objectContaining({ type: "CHANNEL_STATE", channelId, status: "dead" }),
+				);
+			});
+
+			it("an exit's screen for an unknown terminal is not stored", async () => {
+				const { emit } = await liveTerminal();
+				// A stream complete from its first seq, as a terminal the hub let go of leaves.
+				store("NOTHELDHERE", 1, "output", "x");
+				emit(exitWith("NOTHELDHERE", FINAL));
+
+				const spool = new SpoolDAL(dbManager.spool);
+				expect(spool.getNewestSnapshotRef("NOTHELDHERE")).toBeUndefined();
+				expect(spool.getMaxSeq("NOTHELDHERE")).toBe(1);
+			});
+		});
+
+		describe("the end a refusal names (#932)", () => {
+			it("the end and the refusal name the same end", async () => {
+				const heard: ProtocolMessage[] = [];
+				sm.addClient(makeClient("writer", heard));
+				const channelId = await sm.handleSpawn("writer", { type: "SPAWN", hostId: "local" });
+				if (channelId === null) throw new Error("expected a local channel");
+				const agent = mockLocalAgents.at(-1);
+				if (agent === undefined) throw new Error("expected the local agent");
+				(agent as unknown as EventEmitter).emit("message", {
+					type: "CHANNEL_EXIT",
+					channelId,
+					exitCode: 4,
+				});
+				const row = new MetaDAL(dbManager.meta).getChannel(channelId);
+				expect(row?.endId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+				const told = heard.find(
+					(m): m is ChannelStateMessage => m.type === "CHANNEL_STATE" && m.status === "dead",
+				);
+				expect(told?.endId).toBe(row?.endId);
+
+				const { received } = await attachFresh(channelId, "reader");
+
+				expect(received.find((m) => m.type === "ERROR")).toMatchObject({
+					code: "CHANNEL_DEAD",
+					endId: row?.endId,
+					exitCode: 4,
+				});
+			});
+
+			it("a terminal its agent no longer has names its end", async () => {
+				sm.addClient(makeClient("first", []));
+				const channelId = await sm.handleSpawn("first", { type: "SPAWN", hostId: "local" });
+				if (channelId === null) throw new Error("expected a local channel");
+				nextLocalAttachNotFoundChannelId = channelId;
+
+				const { received } = await attachFresh(channelId, "second");
+
+				const row = new MetaDAL(dbManager.meta).getChannel(channelId);
+				expect(row?.endId).toBeDefined();
+				const refusal = received.find((m): m is ErrorMessage => m.type === "ERROR");
+				expect(refusal).toMatchObject({
+					code: "CHANNEL_DEAD",
+					message: "This terminal is no longer running on its host.",
+					endId: row?.endId,
+				});
+				expect(refusal).not.toHaveProperty("exitCode");
+			});
+
+			it("the refusal names a killed end's reason", async () => {
+				const heard: ProtocolMessage[] = [];
+				sm.addClient(makeClient("writer", heard));
+				const channelId = await sm.handleSpawn("writer", { type: "SPAWN", hostId: "local" });
+				if (channelId === null) throw new Error("expected a local channel");
+				const agent = mockLocalAgents.at(-1);
+				if (agent === undefined) throw new Error("expected the local agent");
+				expect(sm.destroyChannel(channelId)).toBe(true);
+				(agent as unknown as EventEmitter).emit("message", {
+					type: "CHANNEL_EXIT",
+					channelId,
+					exitCode: 1,
+				});
+				const row = new MetaDAL(dbManager.meta).getChannel(channelId);
+				if (row === undefined) throw new Error("expected the killed terminal's row");
+
+				const { received } = await attachFresh(channelId, "reader");
+
+				expect(received.find((m) => m.type === "ERROR")).toMatchObject({
+					code: "CHANNEL_DEAD",
+					endId: row.endId,
+					endReason: "killed",
+				});
+			});
+
+			it("a terminal ended before end ids names none", async () => {
+				endedTerminal("ended-old");
+
+				const { received } = await attachFresh("ended-old");
+
+				const refusal = received.find((m) => m.type === "ERROR");
+				expect(refusal).toMatchObject({ code: "CHANNEL_DEAD" });
+				expect(refusal).not.toHaveProperty("endId");
+			});
+		});
+
 		// Delivering the refusal depends on nothing it did not depend on before: a
 		// spool that cannot be read leaves the answer an older hub's.
 		describe("refuses an ended terminal without its last output when the spool cannot be read", () => {
@@ -4145,6 +4442,8 @@ describe("SessionManager", () => {
 							code: "CHANNEL_DEAD",
 							message: "This terminal is no longer running on its host.",
 							channelId,
+							// The end meta.db recorded, read without the spool (#932).
+							endId: expect.any(String),
 						},
 					]);
 					expect(logged.filter(([level]) => level === "warn")).toEqual([
@@ -4176,6 +4475,7 @@ describe("SessionManager", () => {
 						code: "CHANNEL_DEAD",
 						message: "This terminal is no longer running on its host.",
 						channelId,
+						endId: expect.any(String),
 					},
 				]);
 				const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext })
@@ -10128,7 +10428,14 @@ describe("SessionManager — an end the hub caused says so (#580)", () => {
 		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 1 });
 
 		expect(endsOf(heard, channelId)).toEqual([
-			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", endReason: "killed" },
+			{
+				type: "CHANNEL_STATE",
+				channelId,
+				sessionId,
+				status: "dead",
+				endReason: "killed",
+				endId: expect.any(String),
+			},
 		]);
 	});
 
@@ -10138,7 +10445,14 @@ describe("SessionManager — an end the hub caused says so (#580)", () => {
 		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
 
 		expect(endsOf(heard, channelId)).toEqual([
-			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", exitCode: 0 },
+			{
+				type: "CHANNEL_STATE",
+				channelId,
+				sessionId,
+				status: "dead",
+				exitCode: 0,
+				endId: expect.any(String),
+			},
 		]);
 	});
 
@@ -10148,7 +10462,14 @@ describe("SessionManager — an end the hub caused says so (#580)", () => {
 		await sm.closeSession(sessionId);
 
 		expect(endsOf(heard, channelId)).toEqual([
-			{ type: "CHANNEL_STATE", channelId, sessionId, status: "dead", endReason: "killed" },
+			{
+				type: "CHANNEL_STATE",
+				channelId,
+				sessionId,
+				status: "dead",
+				endReason: "killed",
+				endId: expect.any(String),
+			},
 		]);
 	});
 

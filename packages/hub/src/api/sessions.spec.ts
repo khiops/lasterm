@@ -331,6 +331,8 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 							sessionId: index === 0 ? SESSION_ID : olderSession,
 							status: "dead",
 							endReason: "killed",
+							// Each end has an id of its own (#932).
+							endId: expect.any(String),
 						},
 					]);
 				}
@@ -881,6 +883,7 @@ describe("POST /api/hosts/:id/agent/replace, when no end is reported (#599)", ()
 					sessionId: SESSION_ID,
 					status: "dead",
 					endReason: "stopped",
+					endId: expect.any(String),
 				},
 			]);
 			// Kept with the end: found at the next launch, it follows its setting (#592).
@@ -2336,5 +2339,24 @@ describe("connect and disconnect, then a hub start (#911)", () => {
 			await restarted.shutdown();
 			await new Promise<void>((resolve) => setImmediate(resolve));
 		}
+	});
+});
+
+describe("GET /api/sessions/:id (#932)", () => {
+	it("lists the session's ended terminals without their end id", async () => {
+		const metaDal = new MetaDAL(dbs.meta);
+		const sessionId = "01K932SESSAPI0000000000000";
+		const channelId = "01K932CHANAPI0000000000000";
+		metaDal.createSession({ id: sessionId, hostId, status: "active" });
+		metaDal.createChannel({ id: channelId, sessionId, status: "live", cols: 80, rows: 24 });
+		metaDal.updateChannelStatus(channelId, "dead", 2);
+		expect(metaDal.getChannel(channelId)?.endId).toBeDefined();
+
+		const res = await server.inject({ method: "GET", url: `/api/sessions/${sessionId}` });
+
+		const body = res.json() as { channels: Array<Record<string, unknown>> };
+		expect(body.channels).toHaveLength(1);
+		expect(body.channels[0]).toMatchObject({ id: channelId, status: "dead", exit_code: 2 });
+		expect(body.channels[0]).not.toHaveProperty("end_id");
 	});
 });

@@ -395,6 +395,10 @@ export class AgentConnectionManager {
 				this.lifecycle.storeSnapshot(res.channelId, res.snapshot);
 			} else if (msg.type === "CHANNEL_EXIT") {
 				const exitMsg = msg as ChannelExitMessage;
+				// Its final screen first, while its output is still tracked (#933).
+				if (exitMsg.screen !== undefined) {
+					this.lifecycle.takeFinalScreen(exitMsg.channelId, exitMsg.screen);
+				}
 				const channel = this.ctx.channels.get(exitMsg.channelId);
 				if (channel) {
 					// An ended terminal has no directory any more (#834).

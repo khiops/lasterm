@@ -67,6 +67,12 @@ struct Cli {
     /// all (daemon mode). The hub passes `[logging] agent_files_kept`.
     #[arg(long = "log-files-kept", value_name = "COUNT", default_value_t = logging::DEFAULT_FILES_KEPT)]
     log_files_kept: u32,
+
+    /// The build channel whose directories and default pipe this agent uses:
+    /// `dev` for the local daemon of a development hub, so it never meets the
+    /// Store build's. Absent, release.
+    #[arg(long, value_enum, default_value = "release")]
+    channel: platform_dirs::Channel,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -217,6 +223,8 @@ fn main() -> std::io::Result<()> {
 async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
     // Parse CLI args
     let cli = Cli::parse();
+    // Before anything resolves a directory: the log, the records, auth.json.
+    platform_dirs::set_channel(cli.channel);
     let logging_config = LoggingConfig::from(&cli);
 
     init_tracing(logging_config, cli.daemon)?;
@@ -495,7 +503,10 @@ fn default_socket_path() -> std::io::Result<String> {
     #[cfg(windows)]
     {
         let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
-        Ok(format!(r"\\.\pipe\lasterm-agent-{username}"))
+        Ok(platform_dirs::default_pipe_name(
+            platform_dirs::channel(),
+            &username,
+        ))
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -663,6 +674,17 @@ mod tests {
         assert_eq!(config.level, LogLevel::Info);
         assert_eq!(config.format, LogFormat::Jsonl);
         assert_eq!(config.files_kept, logging::DEFAULT_FILES_KEPT);
+    }
+
+    // #1084: what the dev hub passes, and what an argv without it means.
+    #[test]
+    fn the_channel_flag_selects_dev_and_defaults_to_release() {
+        let dev = Cli::try_parse_from(["lasterm-agent", "--daemon", "--channel", "dev"]).unwrap();
+        assert_eq!(dev.channel, platform_dirs::Channel::Dev);
+        let stop = Cli::try_parse_from(["lasterm-agent", "--stop", "--channel", "dev"]).unwrap();
+        assert_eq!(stop.channel, platform_dirs::Channel::Dev);
+        let none = Cli::try_parse_from(["lasterm-agent", "--daemon"]).unwrap();
+        assert_eq!(none.channel, platform_dirs::Channel::Release);
     }
 
     #[test]

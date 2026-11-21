@@ -1598,3 +1598,77 @@ async fn a_hub_that_stops_reading_stdout_holds_its_terminal_back() {
     agent.kill().await.ok();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #1084: a dev hub starts its daemon with `--channel dev`, and the daemon then
+/// keeps its state (its log, its records) and reads its configuration
+/// (`auth.json`) in the lasterm-dev directories, not the Store build's. Without
+/// the flag, the names are lasterm, as every earlier hub expects.
+#[tokio::test]
+async fn the_channel_flag_picks_the_daemons_directories() {
+    for (channel_args, expected, other) in [
+        (&["--channel", "dev"][..], "lasterm-dev", "lasterm"),
+        (&[][..], "lasterm", "lasterm-dev"),
+    ] {
+        let root =
+            std::env::temp_dir().join(format!("lasterm-agent-channel-{}", ulid::Ulid::generate()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&root)
+                .expect("create private fixture directory");
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(&root).expect("create fixture directory");
+        #[cfg(unix)]
+        let socket = root.join("agent.socket").to_string_lossy().into_owned();
+        #[cfg(not(unix))]
+        let socket = format!(
+            r"\.\pipe\lasterm-agent-channel-test-{}",
+            ulid::Ulid::generate().to_string().to_lowercase()
+        );
+        // The state root as each platform names it.
+        let state_root = if cfg!(windows) {
+            root.join("local")
+        } else {
+            root.join("state")
+        };
+
+        let mut daemon = DaemonGuard(
+            Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
+                .args(["--daemon", "--socket", &socket])
+                .args(channel_args)
+                .env("XDG_STATE_HOME", root.join("state"))
+                .env("XDG_CONFIG_HOME", root.join("config"))
+                .env("LOCALAPPDATA", root.join("local"))
+                .env("APPDATA", root.join("roaming"))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn daemon"),
+        );
+
+        let logs = state_root.join(expected).join("logs");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !logs.is_dir() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no daemon log directory at {}",
+                logs.display()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !state_root.join(other).exists(),
+            "the daemon touched {}",
+            state_root.join(other).display()
+        );
+
+        daemon.start_kill().ok();
+        daemon.wait().await.ok();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

@@ -106,7 +106,16 @@ function isAbsent(error: unknown): boolean {
 	return code === "ENOENT" || code === "ENOTDIR";
 }
 
+/**
+ * What went wrong, without the file's content: a TOML parse error's message
+ * quotes the lines around the error, which can hold a secret (an env token),
+ * so only its position is kept. A file system error says nothing of the content.
+ */
 function describe(error: unknown): string {
+	const toml = error as { fromTOML?: unknown; line?: unknown; col?: unknown };
+	if (toml?.fromTOML === true && typeof toml.line === "number" && typeof toml.col === "number") {
+		return `TOML syntax error at line ${toml.line + 1}, column ${toml.col + 1}`;
+	}
 	return error instanceof Error ? error.message : String(error);
 }
 

@@ -3031,6 +3031,29 @@ describe("ConfigResolver on the dev channel (#1084)", () => {
 		expect(warnings.filter((line) => line.includes(overlay))).toHaveLength(1);
 	});
 
+	// A parse error's message quotes the lines around it; a secret there must
+	// not reach the hub's log or the save error (CLAUDE.md, Logging). Mutation:
+	// the parse error's message written as it comes.
+	it("names a broken file's path and position, never its content", async () => {
+		const lines: string[] = [];
+		vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string | Uint8Array) => {
+			lines.push(String(chunk));
+			return true;
+		}) as typeof process.stderr.write);
+		const broken = '[terminal.env]\nAPI_TOKEN = "sk-secret-123"\nbroken = \n';
+		put(shared, broken);
+		put(overlay, broken);
+		const resolver = load();
+		const error = await resolver.saveGlobalUi("tabs", "closeButton", false).then(
+			() => undefined,
+			(caught: unknown) => String(caught),
+		);
+		const said = [...lines, error ?? ""].join("\n");
+		expect(said).not.toContain("sk-secret-123");
+		expect(lines.filter((line) => line.includes("line 3, column 10"))).toHaveLength(2);
+		expect(error).toContain(`${overlay} does not parse: TOML syntax error at line 3, column 10`);
+	});
+
 	// AC8 k. Mutation: every socket_path dropped in dev.
 	it("uses a socket_path the overlay sets, and drops the shared file's", () => {
 		put(shared, `[agent]\nsocket_path = '${PIPE_X}'\n`);

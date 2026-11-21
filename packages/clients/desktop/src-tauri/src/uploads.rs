@@ -995,10 +995,16 @@ mod tests {
     // #1084. Mutation: the idle text left "Lasterm" on a dev build.
     #[test]
     fn the_idle_tray_text_is_the_build_channels_product_name() {
-        assert_eq!(tray_text_idle(), crate::channel::product_name());
+        // Written out for the channel these tests were built with.
+        let name = if env!("LASTERM_BUILD_CHANNEL") == "release" {
+            "Lasterm"
+        } else {
+            "Lasterm Dev"
+        };
+        assert_eq!(tray_text_idle(), name);
         assert_eq!(
             tray_text(&report(1, 0, 0, None), None),
-            format!("{} — 1 upload", crate::channel::product_name())
+            format!("{name} — 1 upload")
         );
     }
 }

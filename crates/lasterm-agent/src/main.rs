@@ -486,10 +486,16 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
 }
 
 fn default_socket_path() -> std::io::Result<String> {
+    default_socket_path_for(platform_dirs::channel())
+}
+
+/// The default endpoint of `channel`'s daemon: its pipe on Windows, its state
+/// directory's `agent.socket` elsewhere (#1084).
+fn default_socket_path_for(channel: platform_dirs::Channel) -> std::io::Result<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
-        let state_dir = identity::state_dir_for_socket("")?;
+        let state_dir = platform_dirs::lasterm_dir_for(platform_dirs::DirKind::State, channel)?;
         // Owner-only, as the daemon requires of its socket's directory.
         let _ = std::fs::DirBuilder::new()
             .recursive(true)
@@ -503,13 +509,11 @@ fn default_socket_path() -> std::io::Result<String> {
     #[cfg(windows)]
     {
         let username = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
-        Ok(platform_dirs::default_pipe_name(
-            platform_dirs::channel(),
-            &username,
-        ))
+        Ok(platform_dirs::default_pipe_name(channel, &username))
     }
     #[cfg(not(any(unix, windows)))]
     {
+        let _ = channel;
         Ok("/tmp/lasterm-agent.socket".into())
     }
 }
@@ -674,6 +678,23 @@ mod tests {
         assert_eq!(config.level, LogLevel::Info);
         assert_eq!(config.format, LogFormat::Jsonl);
         assert_eq!(config.files_kept, logging::DEFAULT_FILES_KEPT);
+    }
+
+    // #1084. Mutation: the default endpoint left spelled `lasterm`.
+    #[test]
+    fn the_default_endpoint_follows_the_channel() {
+        let dev = default_socket_path_for(platform_dirs::Channel::Dev).unwrap();
+        let release = default_socket_path_for(platform_dirs::Channel::Release).unwrap();
+        #[cfg(windows)]
+        {
+            assert!(dev.starts_with(r"\\.\pipe\lasterm-dev-agent-"), "{dev}");
+            assert!(release.starts_with(r"\\.\pipe\lasterm-agent-"), "{release}");
+        }
+        #[cfg(unix)]
+        {
+            assert!(dev.ends_with("/lasterm-dev/agent.socket"), "{dev}");
+            assert!(release.ends_with("/lasterm/agent.socket"), "{release}");
+        }
     }
 
     // #1084: what the dev hub passes, and what an argv without it means.

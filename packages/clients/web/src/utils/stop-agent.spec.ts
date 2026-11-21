@@ -144,3 +144,19 @@ describe("stopAgentWithConsent", () => {
 		).toEqual({ kind: "failed", message: "The hub answered 502." });
 	});
 });
+
+describe("what a daemon's own list refuses (#701)", () => {
+	it.each(["OTHER_HOST_TERMINALS", "AGENT_INVENTORY_UNKNOWN"])(
+		"shows %s as a failure with its message, asking nothing",
+		async (code) => {
+			const post = vi.fn().mockResolvedValue(refusal(code));
+			const confirm = vi.fn();
+			expect(await stopAgentWithConsent("pi", { post, confirm })).toEqual({
+				kind: "failed",
+				message: "hub reason",
+			});
+			expect(confirm).not.toHaveBeenCalled();
+			expect(post).toHaveBeenCalledOnce();
+		},
+	);
+});

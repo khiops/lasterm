@@ -942,6 +942,25 @@ describe("useSessionStore — a host coming back (#605)", () => {
 	});
 });
 
+describe("what keeping the agent left on a host says (#701)", () => {
+	it.each([
+		["NO_AGENT_RUNNING", "No Lasterm agent is running on this host."],
+		[
+			"DAEMON_UNREACHABLE",
+			"Lasterm could not reach an agent on this host, and cannot tell whether one is running.",
+		],
+		["AGENT_REFUSED_HUB", "The agent on this host refused this hub."],
+	])("shows %s with its message", async (code, message) => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const toastStore = useToastStore();
+		wsHarness.instances[0]?.emit({ type: "ERROR", code, message, hostId: "pi" });
+		expect(toastStore.messages).toContainEqual(
+			expect.objectContaining({ level: "error", text: message }),
+		);
+	});
+});
+
 // ─── A host its user disconnected (#648) ─────────────────────────────────────
 //
 // The hub says it in each SESSION_STATE of that host, and lists every such

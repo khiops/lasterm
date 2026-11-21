@@ -85,6 +85,7 @@
 			@reconnect="onReconnectHost"
 			@disconnect="onDisconnectHost"
 			@stop-agent="onStopAgent"
+			@keep-agent="onKeepAgent"
 			@new-group="onNewGroupForHost"
 		/>
 
@@ -2003,6 +2004,19 @@ function onDeleteHost(hostId: string): void {
 async function onConnectHost(hostId: string): Promise<void> {
 	try {
 		const answer = await hostsStore.connectHost(hostId);
+		if (!answer.ok) toastStore.show('error', hostConnectionFailure(answer));
+	} catch (err) {
+		toastStore.show('error', hubUnreachable(err));
+	}
+}
+
+/**
+ * "Keep the agent left here and connect" (#701): what comes of it arrives as
+ * any Connect's does, a failure as an ERROR toast.
+ */
+async function onKeepAgent(hostId: string): Promise<void> {
+	try {
+		const answer = await hostsStore.connectHost(hostId, { daemonOnly: true });
 		if (!answer.ok) toastStore.show('error', hostConnectionFailure(answer));
 	} catch (err) {
 		toastStore.show('error', hubUnreachable(err));

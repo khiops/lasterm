@@ -95,3 +95,20 @@ describe("otherHubsQuestion", () => {
 		);
 	});
 });
+
+describe("what a daemon's own list refuses a Replace (#701)", () => {
+	it.each(["OTHER_HOST_TERMINALS", "AGENT_INVENTORY_UNKNOWN", "TERMINALS_SHOWN_ENDED"])(
+		"says %s's message and asks nothing",
+		async (code) => {
+			const post = mockedHub({
+				ok: false,
+				status: 409,
+				body: { error: { code, message: `the hub says ${code}` } },
+			});
+			const confirm = vi.fn();
+			expect(await replaceAgentWithConsent({ post, confirm })).toBe(`the hub says ${code}`);
+			expect(confirm).not.toHaveBeenCalled();
+			expect(post).toHaveBeenCalledOnce();
+		},
+	);
+});

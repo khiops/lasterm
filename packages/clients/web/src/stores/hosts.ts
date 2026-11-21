@@ -518,8 +518,15 @@ export const useHostsStore = defineStore("hosts", () => {
 	}
 
 	/** Connect the host, without opening a terminal (#648). */
-	function connectHost(hostId: string): Promise<HostConnectionAnswer> {
-		return postHostConnection(hostId, "connect", {});
+	/**
+	 * Connect the host. `daemonOnly`: reach the agent a hub left there and
+	 * nothing else, storing Yes once reached (#701).
+	 */
+	function connectHost(
+		hostId: string,
+		options: { readonly daemonOnly?: boolean } = {},
+	): Promise<HostConnectionAnswer> {
+		return postHostConnection(hostId, "connect", options.daemonOnly ? { daemon_only: true } : {});
 	}
 
 	/** Close the host's connection and open it again; `force` ends what that ends (#648). */

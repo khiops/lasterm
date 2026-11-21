@@ -42,6 +42,15 @@
 				>
 					Disconnect
 				</button>
+				<!-- An agent a hub left there, reached and kept without starting one (#701). -->
+				<button
+					v-if="canKeepAgent"
+					class="ctx-item"
+					data-action="keep-agent"
+					@click="onKeepAgent"
+				>
+					Keep the agent left here and connect
+				</button>
 
 				<div class="ctx-sep" />
 
@@ -113,6 +122,7 @@ const emit = defineEmits<{
 	(e: "reconnect", hostId: string): void;
 	(e: "disconnect", hostId: string): void;
 	(e: "stop-agent", hostId: string): void;
+	(e: "keep-agent", hostId: string): void;
 	(e: "new-group", hostId: string): void;
 }>();
 
@@ -135,6 +145,18 @@ const canReconnect = computed(
 );
 
 const canStopAgent = computed(() => host.value?.type === "ssh" && status.value === "live" && hostsStore.isConnectedThroughRemoteDaemon(props.hostId));
+
+/**
+ * A host not set to keep an agent, whose system's agent a socket reaches,
+ * with nothing connected: a daemon a hub left there may still run (#701).
+ */
+const canKeepAgent = computed(
+	() =>
+		host.value?.type === "ssh" &&
+		(host.value.os === "linux" || host.value.os === "darwin") &&
+		host.value.sshRemoteDaemon !== true &&
+		canConnect.value,
+);
 
 const groups = computed(() => hostsStore.getHostGroups());
 
@@ -186,6 +208,11 @@ function onReconnect(): void {
 
 function onStopAgent(): void {
 	if (host.value) emit("stop-agent", host.value.id);
+	emit("close");
+}
+
+function onKeepAgent(): void {
+	if (host.value) emit("keep-agent", host.value.id);
 	emit("close");
 }
 

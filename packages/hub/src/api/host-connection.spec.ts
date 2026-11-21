@@ -276,3 +276,32 @@ describe("connect's daemon_only (#701)", () => {
 		expect(stdio.json()).toMatchObject({ error: { code: "NO_DAEMON_CONNECTION" } });
 	});
 });
+
+describe("connect's daemon_only, once Yes is stored (#701)", () => {
+	it("announces HOSTS_CHANGED for the hosts when the hub says it stored Yes", async () => {
+		const announce = vi.fn();
+		const own = Fastify({ logger: false });
+		registerHostConnectionRoutes(own, new MetaDAL(dbs.meta), manager, announce);
+		await own.ready();
+		try {
+			manager.connectHost.mockReturnValue({
+				kind: "connecting",
+				ended: 0,
+				done: Promise.resolve(true),
+			});
+			await own.inject({
+				method: "POST",
+				url: `/api/hosts/${sshHostId}/connect`,
+				payload: { daemon_only: true },
+			});
+			const options = manager.connectHost.mock.calls.at(-1)?.[1] as
+				| { onHostStored?: () => void }
+				| undefined;
+			expect(announce).not.toHaveBeenCalled();
+			options?.onHostStored?.();
+			expect(announce).toHaveBeenCalledWith("hosts");
+		} finally {
+			await own.close();
+		}
+	});
+});

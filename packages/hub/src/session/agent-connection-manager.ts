@@ -695,6 +695,8 @@ export class AgentConnectionManager {
 				count: states.length,
 			});
 			this.lifecycle.reconcileChannelState(hostId, states, agent, askedAt);
+			// The local agent keeps no list for its stops (#701).
+			agent.exitedSinceList = undefined;
 
 			assertQuitFence(this.ctx, quitEpoch);
 			this.ctx.commits.adoptAgent(quitEpoch, hostId, agent);

@@ -65,10 +65,24 @@ export abstract class AgentConnection extends EventEmitter {
 	 */
 	daemonInventory: DaemonInventory | undefined;
 
+	/**
+	 * The channels that exited after the daemon's list ended and before that
+	 * list was kept as `daemonInventory`: a batch of frames can carry the end
+	 * of the list and an exit together, and the exit must not be lost between
+	 * the two (#701). Undefined outside that window.
+	 */
+	exitedSinceList: Set<string> | undefined;
+
 	constructor() {
 		super();
+		this.on("message", (msg: ProtocolMessage) => {
+			if (msg.type !== "CHANNEL_EXIT" || this.exitedSinceList === undefined) return;
+			const channelId = (msg as { channelId?: unknown }).channelId;
+			if (typeof channelId === "string") this.exitedSinceList.add(channelId);
+		});
 		this.channelStatePromise = new Promise<AgentChannelStateMessage[]>((resolve, reject) => {
-			const states: AgentChannelStateMessage[] = [];
+			// By channel: an exit removes its state at once, whatever the count (#701).
+			const states = new Map<string, AgentChannelStateMessage>();
 			// A terminal can end between the daemon's snapshot of its channels and
 			// the states it sends from it: its exit then comes first, and the state
 			// after it is stale (#701).
@@ -91,13 +105,12 @@ export abstract class AgentConnection extends EventEmitter {
 			const onMessage = (msg: ProtocolMessage): void => {
 				if (msg.type === "AGENT_CHANNEL_STATE") {
 					const state = msg as AgentChannelStateMessage;
-					if (!exited.has(state.channelId)) states.push(state);
+					if (!exited.has(state.channelId)) states.set(state.channelId, state);
 				} else if (msg.type === "CHANNEL_EXIT") {
 					const channelId = (msg as { channelId?: unknown }).channelId;
 					if (typeof channelId === "string") {
 						exited.add(channelId);
-						const at = states.findIndex((state) => state.channelId === channelId);
-						if (at >= 0) states.splice(at, 1);
+						states.delete(channelId);
 					}
 				} else if (msg.type === "ERROR" && isAuthRefusal(msg)) {
 					settle(() => reject(new AgentRefusedHub((msg as { message?: string }).message ?? "")));
@@ -106,7 +119,8 @@ export abstract class AgentConnection extends EventEmitter {
 					if (typeof others === "number" && Number.isSafeInteger(others) && others >= 0) {
 						this.otherOwnerChannels = others;
 					}
-					settle(() => resolve(states));
+					this.exitedSinceList = new Set();
+					settle(() => resolve([...states.values()]));
 				}
 			};
 

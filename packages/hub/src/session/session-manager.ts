@@ -3626,10 +3626,21 @@ export class SessionManager {
 			client.send({ type: "ERROR", code, message, hostId } satisfies ErrorMessage);
 			throw new Error(message);
 		};
+		const stillThisAttempt = (): boolean =>
+			this.ctx.acquisitions.get(hostId) === acq &&
+			acq.state === "CONNECTING" &&
+			!acq.controller.signal.aborted &&
+			this.ctx.sessions.get(hostId)?.id === sessionId;
 		let listed: { readonly states: AgentChannelStateMessage[]; readonly askedAt: number };
 		try {
 			listed = await this.lifecycle.listDaemonChannels(agent);
 		} catch (err) {
+			// Disconnected or quitting meanwhile: ended as any attempt aborted is,
+			// with nothing to say.
+			if (!stillThisAttempt()) {
+				void agent.close();
+				throw new Error("SSH connect aborted");
+			}
 			if (err instanceof AgentRefusedHub) return fail(ErrorCode.AGENT_REFUSED_HUB, err.message);
 			return fail(
 				ErrorCode.DAEMON_UNREACHABLE,
@@ -3638,13 +3649,7 @@ export class SessionManager {
 		}
 		// One synchronous stretch from here to the write: nothing can change
 		// in between.
-		if (
-			this.ctx.acquisitions.get(hostId) !== acq ||
-			acq.state !== "CONNECTING" ||
-			acq.controller.signal.aborted ||
-			this.ctx.sessions.get(hostId)?.id !== sessionId ||
-			!agent.connected
-		) {
+		if (!stillThisAttempt() || !agent.connected) {
 			void agent.close();
 			throw new Error("SSH connect aborted");
 		}
@@ -3664,6 +3669,8 @@ export class SessionManager {
 		if (stored === undefined) {
 			return fail("INTERNAL_ERROR", "The agent was reached, but the setting could not be saved.");
 		}
+		// A socket that answered proves the server forwards it now.
+		this.askServerAgain(hostId);
 		return listed;
 	}
 

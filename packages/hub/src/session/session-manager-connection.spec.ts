@@ -133,6 +133,10 @@ interface MockHost {
 	spawns: number;
 	holdsSpawn: boolean;
 	releaseSpawn: () => void;
+	/** The channels its daemon was told to DESTROY. */
+	destroys: string[];
+	/** End every SSH connection it holds, leaving it listening. */
+	dropLinks: () => void;
 	close: () => Promise<void>;
 }
 
@@ -206,6 +210,10 @@ function serveAgent(stream: Stream, remote?: MockHost): void {
 				stream.end();
 				continue;
 			}
+			if (msg.type === "DESTROY" && remote) {
+				remote.destroys.push((msg as { channelId: string }).channelId);
+				continue;
+			}
 			if (msg.type !== "SPAWN") continue;
 			const spawn = msg as AgentSpawnMessage;
 			const answer = (): void => {
@@ -265,6 +273,10 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 		spawns: 0,
 		holdsSpawn: false,
 		releaseSpawn: () => {},
+		destroys: [],
+		dropLinks: () => {
+			for (const end of ends.splice(0)) end();
+		},
 		close: async () => {},
 	};
 	let listening = false;
@@ -1299,7 +1311,13 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		h.remote.daemonSocket = "refusing";
 		const before = deployMock.mock.calls.length;
 		expect(await keptAndConnected(h)).toBe(false);
-		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "DAEMON_UNREACHABLE" }));
+		expect(errorsHeard(h)).toContainEqual(
+			expect.objectContaining({
+				code: "DAEMON_UNREACHABLE",
+				message:
+					"Lasterm could not reach an agent on this host, and cannot tell whether one is running.",
+			}),
+		);
 		expect(startingCommands(h)).toEqual([]);
 		expect(deployMock.mock.calls.length).toBe(before);
 		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
@@ -1345,16 +1363,38 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		});
 	});
 
+	it("takes up the terminals this hub records there, and destroys what it has no record of", async () => {
+		const h = await leftOn();
+		expect(await keptAndConnected(h)).toBe(true);
+		const [recorded] = terminalsOn(h, 1);
+		if (recorded === undefined) throw new Error("no terminal");
+		h.sm.disconnectHost(h.host.id, { force: true });
+		await until("disconnected", () => agentOf(h) === undefined);
+		const unknown = generateId();
+		h.remote.held = [recorded, unknown];
+		expect(await keptAndConnected(h)).toBe(true);
+		expect(h.ctx.channels.get(recorded)?.status).not.toBe("dead");
+		await until("the unknown terminal is destroyed", () => h.remote.destroys.includes(unknown));
+		expect(h.remote.destroys).not.toContain(recorded);
+	});
+
+	it("forgets an earlier forwarding refusal once the socket answered", async () => {
+		const h = await leftOn();
+		h.ctx.socketForwardingRefusals.set(h.host.id, "seen refused");
+		expect(await keptAndConnected(h)).toBe(true);
+		expect(h.ctx.socketForwardingRefusals.has(h.host.id)).toBe(false);
+	});
+
 	it("is then a Yes host: a dropped link is dialled again through the daemon, not stdio", async () => {
 		const h = await leftOn();
 		expect(await keptAndConnected(h)).toBe(true);
 		const opens = h.remote.socketOpens;
-		await h.remote.close();
+		h.remote.dropLinks();
 		await until(
 			"the reconnect reaches the daemon again",
 			() => h.remote.socketOpens > opens,
 			15_000,
-		).catch(() => {});
+		);
 		expect(startingCommands(h).filter((c) => c.includes("--stdio"))).toEqual([]);
 	});
 
@@ -1398,7 +1438,12 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		const h = await leftOn();
 		h.remote.refusesAuth = true;
 		expect(await keptAndConnected(h)).toBe(false);
-		expect(errorsHeard(h)).toContainEqual(expect.objectContaining({ code: "AGENT_REFUSED_HUB" }));
+		expect(errorsHeard(h)).toContainEqual(
+			expect.objectContaining({
+				code: "AGENT_REFUSED_HUB",
+				message: expect.stringMatching(/^The agent on this host refused this hub\./),
+			}),
+		);
 		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
 	});
 
@@ -1463,6 +1508,8 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 			expect(await outcome.done).toBe(false);
 			expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
 			expect(sessionStates(h).some((state) => state.status === "active")).toBe(false);
+			// Ended as an aborted attempt is, with nothing to tell anyone.
+			if (how === "disconnect") expect(errorsHeard(h)).toEqual([]);
 		},
 	);
 
@@ -1587,13 +1634,15 @@ describe("A daemon's own list and the stops (#701)", { timeout: 25_000 }, () => 
 		await expect(outcome.done).resolves.toBe(true);
 		expect(h.remote.held).toContain(a);
 		const stopsBefore = h.remote.stops.length;
+		const message = "Terminals of pi run on this agent. Stop it from that host, or end them first.";
 		expect(await h.sm.stopKeepingAgent(b.id, { endTerminals: true, force: true })).toMatchObject({
 			code: "OTHER_HOST_TERMINALS",
-			message: expect.stringContaining("pi"),
+			message,
 		});
 		expect(await h.sm.replaceAgent(b.id, { force: true })).toMatchObject({
 			replaced: false,
 			code: "OTHER_HOST_TERMINALS",
+			message,
 		});
 		expect(h.remote.stops.length).toBe(stopsBefore);
 	});
@@ -1753,5 +1802,90 @@ describe("A daemon's own list and the stops (#701)", { timeout: 25_000 }, () => 
 		expect(h.remote.stops).toEqual([]);
 		h.remote.releaseSpawn();
 		await restarting;
+	});
+});
+
+describe("A daemon's own list, as it changes (#701)", { timeout: 30_000 }, () => {
+	it("keeps an older daemon holding only a terminal shown as ended", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		const ended = shownEndedOn(h);
+		h.remote.held = [ended];
+		h.remote.agentVersion = "0.0.1";
+		await relisted(h);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(h.remote.stops).toEqual([]);
+	});
+
+	it("counts a terminal shown as ended no more once it exits", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		const live = terminalsOn(h, 1);
+		const ended = shownEndedOn(h);
+		h.remote.held = [...live, ended];
+		h.remote.holdsList = true;
+		await Promise.all([
+			relisted(h),
+			(async () => {
+				await until("listed", () => h.remote.listStream !== null);
+				h.remote.releaseList();
+			})(),
+		]);
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: false, force: false }),
+		).toMatchObject({ code: "TERMINALS_WOULD_END", terminals: 2 });
+		h.remote.listStream?.write(
+			Buffer.from(encodeFrame({ type: "CHANNEL_EXIT", channelId: ended, exitCode: 0 })),
+		);
+		await until("the exit is heard", () => !agentOf(h)?.daemonInventory?.listed.has(ended));
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: false, force: false }),
+		).toMatchObject({ code: "TERMINALS_WOULD_END", terminals: 1 });
+	});
+
+	it("loses no exit that comes in the same frames as the end of the list", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		const ended = shownEndedOn(h);
+		h.remote.held = [];
+		h.remote.holdsList = true;
+		await Promise.all([
+			relisted(h),
+			(async () => {
+				await until("listed", () => h.remote.listStream !== null);
+				// One write: the state, the end of the list, then the exit.
+				h.remote.listStream?.write(
+					Buffer.concat([
+						Buffer.from(
+							encodeFrame({
+								type: "AGENT_CHANNEL_STATE",
+								channelId: ended,
+								title: "bash",
+								pid: 4242,
+								alive: true,
+							}),
+						),
+						Buffer.from(encodeFrame({ type: "CHANNEL_STATE_END", otherOwnerChannels: 0 })),
+						Buffer.from(encodeFrame({ type: "CHANNEL_EXIT", channelId: ended, exitCode: 0 })),
+					]),
+				);
+			})(),
+		]);
+		expect(agentOf(h)?.daemonInventory?.listed.has(ended)).toBe(false);
+		expect(await h.sm.replaceAgent(h.host.id, { force: true })).not.toMatchObject({
+			code: "TERMINALS_SHOWN_ENDED",
+		});
+	});
+
+	it("decides no stop on a daemon a SPAWN went unanswered on", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		h.remote.holdsSpawn = true;
+		const opening = h.sm.handleSpawn(h.window.id, { type: "SPAWN", hostId: h.host.id });
+		expect(await opening.catch(() => null)).toBeNull();
+		expect(
+			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: true, force: true }),
+		).toMatchObject({ code: "AGENT_INVENTORY_UNKNOWN" });
+		expect(h.remote.stops).toEqual([]);
 	});
 });

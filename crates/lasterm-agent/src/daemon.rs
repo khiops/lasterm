@@ -267,11 +267,17 @@ const WRITER_DRAIN_BOUND: Duration = Duration::from_secs(2);
 /// already has queued goes out first, STOP_ACCEPTED included: the shutdown
 /// waits for every writer to finish, within one bound for all of them, and
 /// abandons those still writing at the bound (#700).
-async fn disconnect_all(routes: &Routes) {
-    disconnect_all_within(routes, WRITER_DRAIN_BOUND).await;
+/// How a daemon ends, once its shutdown is asked for: its terminals torn
+/// down, then every hub connection ended, what each had queued written first
+/// within `WRITER_DRAIN_BOUND` (#700). The caller exits the process after it.
+async fn end_daemon(pty_manager: &Arc<Mutex<PtyManager>>, routes: &Routes) -> DestroyAllSummary {
+    let summary = teardown_daemon_terminals(pty_manager).await;
+    disconnect_all(routes).await;
+    summary
 }
 
-async fn disconnect_all_within(routes: &Routes, bound: Duration) {
+async fn disconnect_all(routes: &Routes) {
+    let bound = WRITER_DRAIN_BOUND;
     let mut writers = Vec::new();
     {
         let mut routes = routes.lock().await;
@@ -468,9 +474,7 @@ async fn run_daemon_impl_with_manager(
                 // terminal. Existing connection handlers may finish their own
                 // cancellation paths while the manager is swept.
                 drop(listener.take());
-                let summary = teardown_daemon_terminals(&pty_manager).await;
-                disconnect_all(&daemon.routes).await;
-                break Ok(summary);
+                break Ok(end_daemon(&pty_manager, &daemon.routes).await);
             }
             _ = idle_check.tick(), if idle_timeout.is_some() => {
                 if !daemon.unused().await {
@@ -653,8 +657,7 @@ async fn run_daemon_impl(
 
     // Every loop exit, including a replacement pipe creation failure, sweeps
     // the manager before this daemon reports its result to the caller.
-    let summary = teardown_daemon_terminals(&pty_manager).await;
-    disconnect_all(&daemon.routes).await;
+    let summary = end_daemon(&pty_manager, &daemon.routes).await;
     result?;
     Ok(summary)
 }
@@ -2875,11 +2878,8 @@ mod tests {
             .unwrap();
         until_shutdown_requested(&daemon).await;
 
-        let routes = Arc::clone(&daemon.routes);
-        let disconnected =
-            tokio::spawn(
-                async move { disconnect_all_within(&routes, Duration::from_secs(5)).await },
-            );
+        let (manager, routes) = (Arc::clone(&daemon.pty_manager), Arc::clone(&daemon.routes));
+        let disconnected = tokio::spawn(async move { end_daemon(&manager, &routes).await });
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
             !disconnected.is_finished(),
@@ -2897,8 +2897,14 @@ mod tests {
             .unwrap();
     }
 
-    /// Two writers that stay blocked: one bound covers both, and the
-    /// shutdown goes on without them (#700).
+    /// The bound the shutdown waits for writers within, as decided (#700).
+    #[test]
+    fn writers_are_waited_for_two_seconds_in_all() {
+        assert_eq!(WRITER_DRAIN_BOUND, Duration::from_secs(2));
+    }
+
+    /// Two writers that stay blocked: one bound of two seconds covers both,
+    /// and the shutdown goes on without them (#700).
     #[tokio::test]
     async fn the_shutdown_abandons_blocked_writers_after_one_bound() {
         let daemon = in_memory_daemon(None);
@@ -2910,11 +2916,11 @@ mod tests {
             clients.push(client);
         }
         let started = std::time::Instant::now();
-        disconnect_all_within(&daemon.routes, Duration::from_millis(600)).await;
+        end_daemon(&daemon.pty_manager, &daemon.routes).await;
         let took = started.elapsed();
-        assert!(took >= Duration::from_millis(550), "{took:?}");
+        assert!(took >= Duration::from_millis(1900), "{took:?}");
         assert!(
-            took < Duration::from_millis(1100),
+            took < Duration::from_millis(3500),
             "a bound per writer: {took:?}"
         );
         drop(clients);
@@ -2935,11 +2941,8 @@ mod tests {
         let owed = encode_frame(&AgentToHub::StopAccepted {}).unwrap();
         queue_frame(&daemon, &slow_hub, owed).await;
 
-        let routes = Arc::clone(&daemon.routes);
-        let disconnected =
-            tokio::spawn(
-                async move { disconnect_all_within(&routes, Duration::from_secs(5)).await },
-            );
+        let (manager, routes) = (Arc::clone(&daemon.pty_manager), Arc::clone(&daemon.routes));
+        let disconnected = tokio::spawn(async move { end_daemon(&manager, &routes).await });
         let _ = frames_until_closed(&mut quick).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(

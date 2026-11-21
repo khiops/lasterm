@@ -255,6 +255,9 @@ export class ChannelLifecycleManager {
 		return new Promise<{ channelId: string | null; errCode: string | null }>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.ctx.pendingRequests.delete(spawnMsg.requestId);
+				// Unanswered, the terminal may still start: what the daemon holds is
+				// no longer known, and no stop is decided on it (#701).
+				agent.daemonInventory = undefined;
 				// The connection it went over went down meanwhile: the host is away,
 				// which says nothing about the terminal (#605).
 				const hostStatus = hostAwayDuringSpawn(this.ctx, hostId, agent);
@@ -894,6 +897,8 @@ export class ChannelLifecycleManager {
 		return new Promise<RestartSpawnResult>((resolve) => {
 			const timer = setTimeout(() => {
 				this.ctx.pendingRequests.delete(spawnMsg.requestId);
+				// Unanswered, the replacement may still start (#701).
+				agent.daemonInventory = undefined;
 				resolve({ ok: false, channelId: null, errCode: null });
 			}, SPAWN_TIMEOUT_MS);
 
@@ -1338,6 +1343,8 @@ export class ChannelLifecycleManager {
 				this.ctx.channels.get(channelId) === ch && this.ctx.agents.get(hostId) === agent;
 			const timeout = setTimeout(() => {
 				this.ctx.pendingRequests.delete(requestId);
+				// Unanswered, the terminal may still start (#701).
+				agent.daemonInventory = undefined;
 				if (!stillCurrent()) {
 					settle();
 					return;
@@ -1442,8 +1449,12 @@ export class ChannelLifecycleManager {
 		listed: { readonly states: AgentChannelStateMessage[]; readonly askedAt: number },
 	): void {
 		const destroyed = this.reconcileChannelState(hostId, listed.states, agent, listed.askedAt);
+		const exited = agent.exitedSinceList ?? new Set<string>();
+		agent.exitedSinceList = undefined;
 		agent.daemonInventory = {
-			listed: new Set(listed.states.map((state) => state.channelId)),
+			listed: new Set(
+				listed.states.map((state) => state.channelId).filter((id) => !exited.has(id)),
+			),
 			destroyed,
 		};
 		// The session was announced active before the daemon had said what

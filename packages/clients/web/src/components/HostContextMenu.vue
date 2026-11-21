@@ -148,14 +148,15 @@ const canStopAgent = computed(() => host.value?.type === "ssh" && status.value =
 
 /**
  * A host not set to keep an agent, whose system's agent a socket reaches,
- * with nothing connected: a daemon a hub left there may still run (#701).
+ * with no agent connected (never, disconnected, lost or being reached): a
+ * daemon a hub left there may still run (#701).
  */
 const canKeepAgent = computed(
 	() =>
 		host.value?.type === "ssh" &&
 		(host.value.os === "linux" || host.value.os === "darwin") &&
 		host.value.sshRemoteDaemon !== true &&
-		canConnect.value,
+		!hostsStore.isHostConnected(props.hostId),
 );
 
 const groups = computed(() => hostsStore.getHostGroups());

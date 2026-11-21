@@ -328,3 +328,18 @@ describe("Keep the agent left here and connect (#701)", () => {
 		expect(offered()).not.toContain("keep-agent");
 	});
 });
+
+describe("Keep the agent left here and connect on a host the hub lost (#701)", () => {
+	it.each(["disconnected", "starting"] as const)(
+		"offers it while no agent is connected (session %s)",
+		async (status) => {
+			const store = useHostsStore();
+			store.hosts = store.hosts.map((h) =>
+				h.id === "pi" ? { ...h, os: "linux", sshRemoteDaemon: false } : h,
+			);
+			sessionIs(status);
+			await openMenu("pi");
+			expect(offered()).toContain("keep-agent");
+		},
+	);
+});

@@ -2615,3 +2615,351 @@ describe("useChannelsStore — the end a window holds, kept and cleared (#932)",
 		expect(store.reportOf("ch-other")).toEqual({ status: "dead", exitCode: 3, endId: "E1" });
 	});
 });
+
+describe("useChannelsStore — a status heard while a list fetch is in flight (#1091)", () => {
+	function row(status: "live" | "dead"): Record<string, unknown> {
+		return {
+			id: "ch-race",
+			session_id: "sess-1",
+			shell: "/bin/bash",
+			cols: 80,
+			rows: 24,
+			status,
+			created_at: "2026-11-21T00:00:00Z",
+			updated_at: "2026-11-21T00:00:00Z",
+		};
+	}
+
+	/** The store with ch-race listed live, and a list fetch whose rows wait for `release`. */
+	async function listedThenFetching(heldRow: Record<string, unknown>) {
+		mockFetch.mockImplementation((url: string) => {
+			const body = url.includes("/api/groups") ? [] : [row("live")];
+			return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		});
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+		expect(store.statusOf("ch-race")).toBe("live");
+
+		let release!: () => void;
+		const held = new Promise<void>((r) => {
+			release = r;
+		});
+		mockFetch.mockImplementation((url: string) => {
+			if (url.includes("/api/groups")) {
+				return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+			}
+			return held.then(() => ({ ok: true, json: () => Promise.resolve([heldRow]) }));
+		});
+		const fetching = store.fetchChannels("host-1");
+		return { store, fetching, release };
+	}
+
+	it("an end heard for a listed terminal outlives the older row the fetch read", async () => {
+		const { store, fetching, release } = await listedThenFetching(row("live"));
+
+		store.updateChannelStatus("ch-race", "dead", 0, undefined, "E1");
+		release();
+		await fetching;
+
+		expect(store.statusOf("ch-race")).toBe("dead");
+		expect(store.channels.find((c) => c.id === "ch-race")).toMatchObject({
+			status: "dead",
+			exitCode: 0,
+			endId: "E1",
+		});
+	});
+
+	it("an end a STATE_SYNC names for a listed terminal outlives the older row", async () => {
+		const { store, fetching, release } = await listedThenFetching(row("live"));
+
+		store.applyStateSync([
+			{ channelId: "ch-race", sessionId: "sess-1", status: "dead", exitCode: 2 },
+		]);
+		release();
+		await fetching;
+
+		expect(store.channels.find((c) => c.id === "ch-race")).toMatchObject({
+			status: "dead",
+			exitCode: 2,
+		});
+	});
+
+	it("a run heard for a listed terminal outlives an older row that had it ended", async () => {
+		const { store, fetching, release } = await listedThenFetching({ ...row("dead"), exit_code: 1 });
+
+		store.updateChannelStatus("ch-race", "live");
+		release();
+		await fetching;
+
+		const listed = store.channels.find((c) => c.id === "ch-race");
+		expect(listed?.status).toBe("live");
+		expect(listed).not.toHaveProperty("exitCode");
+	});
+
+	it("a run a STATE_SYNC names for a listed terminal outlives an older row that had it ended", async () => {
+		const { store, fetching, release } = await listedThenFetching({ ...row("dead"), exit_code: 1 });
+
+		store.applyStateSync([{ channelId: "ch-race", sessionId: "sess-1", status: "live" }]);
+		release();
+		await fetching;
+
+		const listed = store.channels.find((c) => c.id === "ch-race");
+		expect(listed?.status).toBe("live");
+		expect(listed).not.toHaveProperty("exitCode");
+	});
+
+	it("a terminal brought back during the fetch outlives an end heard earlier in it", async () => {
+		const { store, fetching, release } = await listedThenFetching(row("live"));
+
+		store.updateChannelStatus("ch-race", "dead", 0, undefined, "E1");
+		store.handleChannelCreated(makeCreatedMsg({ channelId: "ch-race", status: "live" }));
+		release();
+		await fetching;
+
+		const listed = store.channels.find((c) => c.id === "ch-race");
+		expect(listed?.status).toBe("live");
+		expect(listed).not.toHaveProperty("exitCode");
+		expect(listed).not.toHaveProperty("endId");
+	});
+
+	it("a run heard after a STATE_SYNC that left the terminal out outlives that sync", async () => {
+		const { store, fetching, release } = await listedThenFetching(row("live"));
+
+		store.applyStateSync([]);
+		store.updateChannelStatus("ch-race", "live");
+		release();
+		await fetching;
+
+		expect(store.statusOf("ch-race")).toBe("live");
+	});
+
+	it("a STATE_SYNC that leaves the terminal out after a run still marks it dead", async () => {
+		const { store, fetching, release } = await listedThenFetching(row("live"));
+
+		store.updateChannelStatus("ch-race", "live");
+		store.applyStateSync([]);
+		release();
+		await fetching;
+
+		expect(store.statusOf("ch-race")).toBe("dead");
+	});
+
+	it("why a listed terminal ended, heard during the fetch, outlives the older row", async () => {
+		const { store, fetching, release } = await listedThenFetching(row("live"));
+
+		store.updateChannelStatus("ch-race", "dead", 0, "killed", "E1");
+		release();
+		await fetching;
+
+		expect(store.channels.find((c) => c.id === "ch-race")).toMatchObject({
+			status: "dead",
+			endReason: "killed",
+		});
+		expect(store.channelIndex.get("ch-race")?.endReason).toBe("killed");
+	});
+
+	it("why a STATE_SYNC says a listed terminal ended outlives the older row", async () => {
+		const { store, fetching, release } = await listedThenFetching(row("live"));
+
+		store.applyStateSync([
+			{ channelId: "ch-race", sessionId: "sess-1", status: "dead", endReason: "stopped" },
+		]);
+		release();
+		await fetching;
+
+		expect(store.channels.find((c) => c.id === "ch-race")).toMatchObject({
+			status: "dead",
+			endReason: "stopped",
+		});
+	});
+
+	it("a terminal brought back after a STATE_SYNC that left it out outlives that sync", async () => {
+		const { store, fetching, release } = await listedThenFetching(row("live"));
+
+		store.applyStateSync([]);
+		store.handleChannelCreated(makeCreatedMsg({ channelId: "ch-race", status: "live" }));
+		release();
+		await fetching;
+
+		expect(store.statusOf("ch-race")).toBe("live");
+	});
+
+	it("a run heard for an unlisted terminal after a STATE_SYNC that left it out outlives that sync", async () => {
+		let release!: () => void;
+		const held = new Promise<void>((r) => {
+			release = r;
+		});
+		mockFetch.mockImplementation((url: string) => {
+			if (url.includes("/api/groups")) {
+				return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+			}
+			return held.then(() => ({
+				ok: true,
+				json: () => Promise.resolve([row("live"), { ...row("live"), id: "ch-other" }]),
+			}));
+		});
+		const store = useChannelsStore();
+		const fetching = store.fetchChannels("host-1");
+
+		store.applyStateSync([{ channelId: "ch-other", sessionId: "sess-1", status: "live" }]);
+		store.updateChannelStatus("ch-race", "live");
+		release();
+		await fetching;
+
+		expect(store.statusOf("ch-race")).toBe("live");
+	});
+
+	it("an end heard after a STATE_SYNC that left the terminal out keeps the next fetch marking it dead", async () => {
+		mockFetch.mockImplementation((url: string) => {
+			const body = url.includes("/api/groups") ? [] : [row("live")];
+			return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		});
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+		store.applyStateSync([]);
+		store.updateChannelStatus("ch-race", "dead", 0, undefined, "E1");
+
+		// A later fetch whose row still reads it live.
+		await store.fetchChannels("host-1");
+
+		expect(store.statusOf("ch-race")).toBe("dead");
+	});
+
+	it("an end without an id heard after a run during the fetch drops the older row's code", async () => {
+		const { store, fetching, release } = await listedThenFetching({ ...row("dead"), exit_code: 9 });
+
+		store.updateChannelStatus("ch-race", "live");
+		store.applyStateSync([
+			{ channelId: "ch-race", sessionId: "sess-1", status: "dead", endReason: "killed" },
+		]);
+		release();
+		await fetching;
+
+		const listed = store.channels.find((c) => c.id === "ch-race");
+		expect(listed).toMatchObject({ status: "dead", endReason: "killed" });
+		expect(listed).not.toHaveProperty("exitCode");
+	});
+
+	it("a terminal created during a first load outlives an older ended row of the same id", async () => {
+		let release!: () => void;
+		const held = new Promise<void>((r) => {
+			release = r;
+		});
+		mockFetch.mockImplementation((url: string) => {
+			if (url.includes("/api/groups")) {
+				return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+			}
+			return held.then(() => ({
+				ok: true,
+				json: () => Promise.resolve([{ ...row("dead"), exit_code: 1 }]),
+			}));
+		});
+		const store = useChannelsStore();
+		const fetching = store.fetchChannels("host-1");
+
+		store.handleChannelCreated(makeCreatedMsg({ channelId: "ch-race", status: "live" }));
+		release();
+		await fetching;
+
+		const listed = store.channels.find((c) => c.id === "ch-race");
+		expect(listed?.status).toBe("live");
+		expect(listed).not.toHaveProperty("exitCode");
+	});
+
+	it("an end without an id heard after a run during a first load drops the older row's code", async () => {
+		let release!: () => void;
+		const held = new Promise<void>((r) => {
+			release = r;
+		});
+		mockFetch.mockImplementation((url: string) => {
+			if (url.includes("/api/groups")) {
+				return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+			}
+			return held.then(() => ({
+				ok: true,
+				json: () => Promise.resolve([{ ...row("dead"), exit_code: 9 }]),
+			}));
+		});
+		const store = useChannelsStore();
+		const fetching = store.fetchChannels("host-1");
+
+		store.updateChannelStatus("ch-race", "live");
+		store.applyStateSync([
+			{ channelId: "ch-race", sessionId: "sess-1", status: "dead", endReason: "killed" },
+		]);
+		release();
+		await fetching;
+
+		const listed = store.channels.find((c) => c.id === "ch-race");
+		expect(listed?.status).toBe("dead");
+		expect(listed).not.toHaveProperty("exitCode");
+	});
+
+	/** ch-race listed live, then two overlapping fetches whose rows read it live, each released by its own call. */
+	async function listedThenTwoFetches() {
+		mockFetch.mockImplementation((url: string) => {
+			const body = url.includes("/api/groups") ? [] : [row("live")];
+			return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		});
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+
+		const releases: Array<() => void> = [];
+		mockFetch.mockImplementation((url: string) => {
+			if (url.includes("/api/groups")) {
+				return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+			}
+			const held = new Promise<void>((r) => {
+				releases.push(r);
+			});
+			return held.then(() => ({ ok: true, json: () => Promise.resolve([row("live")]) }));
+		});
+		return { store, releases };
+	}
+
+	it("of two overlapping fetches, the newer keeps an end heard after it started", async () => {
+		const { store, releases } = await listedThenTwoFetches();
+		const first = store.fetchChannels("host-1");
+		store.updateChannelStatus("ch-race", "dead", 0, undefined, "E1");
+		const second = store.fetchChannels("host-1");
+		store.updateChannelStatus("ch-race", "dead", 7, undefined, "E2");
+
+		releases[0]?.();
+		releases[1]?.();
+		await Promise.all([first, second]);
+
+		expect(store.channels.find((c) => c.id === "ch-race")).toMatchObject({
+			status: "dead",
+			exitCode: 7,
+			endId: "E2",
+		});
+	});
+
+	it("of two overlapping fetches, an end heard before the newer started gives way to its rows", async () => {
+		const { store, releases } = await listedThenTwoFetches();
+		const first = store.fetchChannels("host-1");
+		store.updateChannelStatus("ch-race", "dead", 0, undefined, "E1");
+		const second = store.fetchChannels("host-1");
+
+		releases[0]?.();
+		releases[1]?.();
+		await Promise.all([first, second]);
+
+		expect(store.statusOf("ch-race")).toBe("live");
+	});
+
+	it("a status heard before the fetch started gives way to the fetch's rows", async () => {
+		mockFetch.mockImplementation((url: string) => {
+			const body = url.includes("/api/groups") ? [] : [row("live")];
+			return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		});
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+		store.updateChannelStatus("ch-race", "dead", 0, undefined, "E1");
+
+		// Brought back since: the hub's list now reads it live.
+		await store.fetchChannels("host-1");
+
+		expect(store.statusOf("ch-race")).toBe("live");
+	});
+});

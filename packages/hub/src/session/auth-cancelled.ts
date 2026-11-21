@@ -1,4 +1,5 @@
 import { ErrorCode, type TransferNotResumedReason } from "@lasterm/shared";
+import { DaemonUnreachable, NoRunningDaemon } from "./remote-daemon.js";
 
 /**
  * No password or passphrase was given when one was asked for: the person
@@ -32,7 +33,11 @@ export class HostKeyRejectedError extends Error {
  * person's cancel, or `SSH_CONNECT_FAILED`.
  */
 export function sshConnectErrorCode(err: unknown): string {
-	return err instanceof AuthCancelledError ? err.code : "SSH_CONNECT_FAILED";
+	if (err instanceof AuthCancelledError) return err.code;
+	// A connection that only reaches a daemon already running (#701).
+	if (err instanceof NoRunningDaemon) return ErrorCode.NO_AGENT_RUNNING;
+	if (err instanceof DaemonUnreachable) return ErrorCode.DAEMON_UNREACHABLE;
+	return "SSH_CONNECT_FAILED";
 }
 
 /**

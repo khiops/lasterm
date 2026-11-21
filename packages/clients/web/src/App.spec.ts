@@ -21,7 +21,13 @@ vi.mock("@xterm/addon-search", () =>
 vi.mock("./composables/terminal-font.js", () => ({ awaitTerminalFont: () => Promise.resolve() }));
 vi.mock("./composables/useBellSound.js", () => ({ playBellSound: vi.fn() }));
 
-import { type ChannelRow, type FakeHub, type HostRow, json } from "./App.doubles.fixture.js";
+import {
+	type ChannelRow,
+	CLIENT_HERE,
+	type FakeHub,
+	type HostRow,
+	json,
+} from "./App.doubles.fixture.js";
 import {
 	asking,
 	click,
@@ -2485,6 +2491,25 @@ describe("the window wallpaper's fade (#194)", () => {
 			return found;
 		});
 		expect(layer.style.transitionDuration).toBe(`${WALLPAPER_FADE_MS}ms`);
+	});
+});
+
+describe("keeping the agent left on a host, from its menu (#701)", () => {
+	const LEFT: HostRow = {
+		id: "01HZZZZZZZZZZZZZZZZZZZZK01",
+		label: "kilo",
+		type: "ssh",
+		os: "linux",
+		ssh_remote_daemon: false,
+	};
+
+	it("posts connect with daemon_only and this window's id", async () => {
+		const { hub } = await mountWindow({ hosts: [ALPHA, LEFT] });
+		await rightClick(document.querySelector(`.badge-wrapper[data-host-id="${LEFT.id}"]`));
+		await click("Keep the agent left here and connect");
+		expect(
+			hub.rest.filter((c) => c.method === "POST" && c.path === `/api/hosts/${LEFT.id}/connect`),
+		).toEqual([expect.objectContaining({ body: { daemon_only: true, client_id: CLIENT_HERE } })]);
 	});
 });
 

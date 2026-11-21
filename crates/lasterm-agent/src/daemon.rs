@@ -142,6 +142,12 @@ struct HubRoutes {
     connections: HashMap<OwnerId, ActiveConnection>,
     queues: HashMap<OwnerId, AwayQueue>,
     flows: Flows,
+    /// Every authenticated connection's writer still running, current or
+    /// not (displaced, or its hub gone, with frames still to write): each
+    /// closes when its writer task ends, and the shutdown waits on all of
+    /// them, so that what was queued, STOP_ACCEPTED included, is written
+    /// before the process exits (#700).
+    writers: Vec<watch::Receiver<()>>,
 }
 
 type Routes = Arc<Mutex<HubRoutes>>;
@@ -152,6 +158,7 @@ impl HubRoutes {
             connections: HashMap::new(),
             queues: HashMap::new(),
             flows,
+            writers: Vec::new(),
         }
     }
 
@@ -254,15 +261,45 @@ impl DaemonShared {
     }
 }
 
+/// How long the shutdown waits, in all, for the hub connections' writers to
+/// write what they had queued (#700).
+const WRITER_DRAIN_BOUND: Duration = Duration::from_secs(2);
+
 /// End every hub connection, once the terminals are torn down. What each
-/// already has queued goes out first; a hub reads the close that follows as
-/// the acknowledgement of its STOP.
+/// already has queued goes out first, STOP_ACCEPTED included: the shutdown
+/// waits for every writer to finish, within one bound for all of them, and
+/// abandons those still writing at the bound (#700).
+/// How a daemon ends, once its shutdown is asked for: its terminals torn
+/// down, then every hub connection ended, what each had queued written first
+/// within `WRITER_DRAIN_BOUND` (#700). The caller exits the process after it.
+async fn end_daemon(pty_manager: &Arc<Mutex<PtyManager>>, routes: &Routes) -> DestroyAllSummary {
+    let summary = teardown_daemon_terminals(pty_manager).await;
+    disconnect_all(routes).await;
+    summary
+}
+
 async fn disconnect_all(routes: &Routes) {
-    let mut routes = routes.lock().await;
-    let ended: Vec<(OwnerId, ActiveConnection)> = routes.connections.drain().collect();
-    for (owner, active) in ended {
-        routes.flows.of(&owner).detach(active.connection_id);
-        active.cancel.send_replace(true);
+    let bound = WRITER_DRAIN_BOUND;
+    let writers = {
+        let mut routes = routes.lock().await;
+        let ended: Vec<(OwnerId, ActiveConnection)> = routes.connections.drain().collect();
+        for (owner, active) in ended {
+            routes.flows.of(&owner).detach(active.connection_id);
+            active.cancel.send_replace(true);
+        }
+        std::mem::take(&mut routes.writers)
+    };
+    let all_written = async {
+        for mut done in writers {
+            // Err once the writer task has ended and dropped its sender.
+            while done.changed().await.is_ok() {}
+        }
+    };
+    if tokio::time::timeout(bound, all_written).await.is_err() {
+        tracing::warn!(
+            bound_ms = bound.as_millis() as u64,
+            "hub connection writers still writing at shutdown; abandoned"
+        );
     }
 }
 
@@ -436,9 +473,7 @@ async fn run_daemon_impl_with_manager(
                 // terminal. Existing connection handlers may finish their own
                 // cancellation paths while the manager is swept.
                 drop(listener.take());
-                let summary = teardown_daemon_terminals(&pty_manager).await;
-                disconnect_all(&daemon.routes).await;
-                break Ok(summary);
+                break Ok(end_daemon(&pty_manager, &daemon.routes).await);
             }
             _ = idle_check.tick(), if idle_timeout.is_some() => {
                 if !daemon.unused().await {
@@ -621,8 +656,7 @@ async fn run_daemon_impl(
 
     // Every loop exit, including a replacement pipe creation failure, sweeps
     // the manager before this daemon reports its result to the caller.
-    let summary = teardown_daemon_terminals(&pty_manager).await;
-    disconnect_all(&daemon.routes).await;
+    let summary = end_daemon(&pty_manager, &daemon.routes).await;
     result?;
     Ok(summary)
 }
@@ -928,12 +962,15 @@ where
     let (mut read_half, mut write_half) = tokio::io::split(stream);
     let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Outgoing>();
     let (cancel, _) = watch::channel(false);
+    // Dropped with the writer task: what the shutdown waits on (#700).
+    let (writer_alive, writer_done) = watch::channel(());
 
     // Spawn writer task — drains frame_rx to the write half. A terminal's
     // frame stays charged to its hub until written: a hub that stops reading
     // holds its terminals back here, and only them (#553).
     let mut cancel_rx = cancel.subscribe();
     tokio::spawn(async move {
+        let _writer_alive = writer_alive;
         loop {
             tokio::select! {
                 _ = cancelled(&mut cancel_rx) => {
@@ -1011,8 +1048,15 @@ where
         owner = owner.short(),
         "auth handshake succeeded"
     );
-    let displaced =
-        register_active(&daemon.routes, &owner, connection_id, &cancel, &frame_tx).await;
+    let displaced = register_active(
+        &daemon.routes,
+        &owner,
+        connection_id,
+        &cancel,
+        &frame_tx,
+        Some(writer_done.clone()),
+    )
+    .await;
     if let Some(displaced) = displaced {
         // Its cancel is set: what it still dispatches is dropped (#1014). Its
         // pastes close now, before this connection dispatches anything, so
@@ -1129,7 +1173,7 @@ async fn dispatch(
 ) -> std::io::Result<()> {
     match msg {
         HubToAgent::Stop { force } => {
-            handle_stop(daemon, owner, force, frame_tx, connection.id).await;
+            handle_stop(daemon, owner, force, frame_tx, connection).await;
             Ok(())
         }
         msg => {
@@ -1148,17 +1192,33 @@ async fn dispatch(
 }
 
 /// STOP from a hub (#127). Without `force`, the daemon refuses while other
-/// hubs hold channels, and nothing stops. Otherwise it asks for the shutdown a
-/// signal asks for; the connection closes once the terminals are torn down,
-/// which is the hub's acknowledgement.
+/// hubs hold channels, and nothing stops. Otherwise it says STOP_ACCEPTED and
+/// asks for the shutdown a signal asks for; the connection closes once the
+/// terminals are torn down (#700).
+///
+/// A STOP still queued on a connection that a newer one of the same hub has
+/// displaced is dropped, as that connection's INPUT is: it was decided before
+/// the newer connection, which may have started terminals since. The check is
+/// made under the manager lock `begin_shutdown` takes, so no terminal can
+/// start between it and the shutdown.
 async fn handle_stop(
     daemon: &DaemonShared,
     owner: &OwnerId,
     force: bool,
     frame_tx: &FrameSender,
-    connection_id: u64,
+    connection: &ConnectionRef,
 ) {
+    let connection_id = connection.id;
     let mut mgr = daemon.pty_manager.lock().await;
+    if connection.is_displaced() {
+        drop(mgr);
+        tracing::info!(
+            connection_id,
+            owner = owner.short(),
+            "STOP dropped: its connection was displaced"
+        );
+        return;
+    }
     let others = mgr.held_by_others(owner);
     if !force && others > 0 {
         drop(mgr);
@@ -1175,6 +1235,10 @@ async fn handle_stop(
     // under: none can start between the count and the teardown, and be ended
     // by a STOP that was only allowed because it was not there yet.
     mgr.begin_shutdown();
+    // Queued still under the lock, before the shutdown is asked for: the
+    // writer drains it before the end of stream, and the shutdown waits for
+    // the writers (#700).
+    let _ = send_encoded(frame_tx, &AgentToHub::StopAccepted {});
     drop(mgr);
     tracing::info!(
         connection_id,
@@ -1322,8 +1386,15 @@ async fn register_active(
     connection_id: u64,
     cancel: &Cancel,
     frame_tx: &FrameSender,
+    writer_done: Option<watch::Receiver<()>>,
 ) -> Option<u64> {
     let mut routes = routes.lock().await;
+    if let Some(done) = writer_done {
+        // Kept until its writer ends, whatever becomes of the connection;
+        // writers already ended are let go of here (#700).
+        routes.writers.retain(|writer| writer.has_changed().is_ok());
+        routes.writers.push(done);
+    }
     let mut displaced = None;
     if let Some(old) = routes.connections.remove(owner) {
         tracing::info!(
@@ -2537,7 +2608,15 @@ mod tests {
     async fn incumbent(daemon: &DaemonShared, owner: &OwnerId, connection_id: u64) -> Incumbent {
         let (cancel, cancelled) = watch::channel(false);
         let (frame_tx, frames) = mpsc::unbounded_channel::<Outgoing>();
-        register_active(&daemon.routes, owner, connection_id, &cancel, &frame_tx).await;
+        register_active(
+            &daemon.routes,
+            owner,
+            connection_id,
+            &cancel,
+            &frame_tx,
+            None,
+        )
+        .await;
         Incumbent { cancelled, frames }
     }
 
@@ -2666,6 +2745,254 @@ mod tests {
                 .expect("handler does not panic");
             assert!(daemon.routes.lock().await.connections.is_empty());
         }
+    }
+
+    /// Like `connect_in_memory`, over a stream that buffers only `buffer`
+    /// bytes: a writer the client does not read stays blocked.
+    async fn connect_in_memory_buffered(
+        daemon: &DaemonShared,
+        first: &HubToAgent,
+        connection_id: u64,
+        buffer: usize,
+    ) -> tokio::io::DuplexStream {
+        let (mut client, server) = tokio::io::duplex(buffer);
+        tokio::spawn(handle_connection_inner(
+            server,
+            daemon.clone(),
+            connection_id,
+        ));
+        client
+            .write_all(&encode_frame(first).expect("encode the first frame"))
+            .await
+            .expect("send the first frame");
+        client
+    }
+
+    /// Read whole frames from `client` until one of type `kind`, decoded.
+    async fn frames_until_type(
+        client: &mut tokio::io::DuplexStream,
+        kind: &str,
+    ) -> Vec<serde_json::Value> {
+        let mut frames = Vec::new();
+        loop {
+            let mut len = [0u8; 4];
+            tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut len))
+                .await
+                .unwrap_or_else(|_| panic!("a {kind} frame arrives; got {frames:?}"))
+                .expect("read a frame length");
+            let mut body = vec![0u8; u32::from_le_bytes(len) as usize];
+            client.read_exact(&mut body).await.expect("read a frame");
+            let frame: serde_json::Value = rmp_serde::from_slice(&body).expect("decode a frame");
+            let done = frame["type"] == kind;
+            frames.push(frame);
+            if done {
+                return frames;
+            }
+        }
+    }
+
+    fn frame_types(frames: &[serde_json::Value]) -> Vec<String> {
+        frames
+            .iter()
+            .map(|frame| frame["type"].as_str().unwrap_or("").to_string())
+            .collect()
+    }
+
+    /// Queue `frame` for `owner`'s current connection.
+    async fn queue_frame(daemon: &DaemonShared, owner: &OwnerId, frame: Vec<u8>) {
+        let routes = daemon.routes.lock().await;
+        let active = routes.connections.get(owner).expect("a current connection");
+        let _ = active.frame_tx.send(Outgoing::reply(frame));
+    }
+
+    /// Queue more than a small stream buffers for `owner`'s connection, so
+    /// that its writer blocks until the client reads.
+    async fn block_writer(daemon: &DaemonShared, owner: &OwnerId) {
+        let filler = encode_frame(&AgentToHub::Log {
+            channel_id: "filler".to_string(),
+            level: "debug".to_string(),
+            msg: "x".repeat(4096),
+        })
+        .unwrap();
+        queue_frame(daemon, owner, filler).await;
+    }
+
+    async fn until_shutdown_requested(daemon: &DaemonShared) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !*daemon.shutdown.requested.borrow() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the STOP is taken");
+    }
+
+    /// A STOP still waiting for the terminal manager while a newer connection
+    /// of the same hub displaces its own is dropped: no shutdown, no
+    /// STOP_ACCEPTED. It was decided before the newer connection, which may
+    /// start terminals of its own (#700). A check made only before waiting
+    /// for the manager would pass it on.
+    #[tokio::test]
+    async fn a_stop_whose_connection_is_displaced_while_it_waits_is_dropped() {
+        let daemon = in_memory_daemon(None);
+        let hub = OwnerId::from_hub_key("hub-key");
+        let (mut old, _old_handler) = connect_in_memory(&daemon, &auth("", "hub-key"), 1).await;
+        frames_until_type(&mut old, "CHANNEL_STATE_END").await;
+
+        let manager = daemon.pty_manager.lock().await;
+        old.write_all(&encode_frame(&HubToAgent::Stop { force: false }).unwrap())
+            .await
+            .unwrap();
+        // Let the STOP reach the manager lock and wait there.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (_newer, _newer_handler) = connect_in_memory(&daemon, &auth("", "hub-key"), 2).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while current_connection(&daemon, &hub).await != Some(2) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the newer connection displaces the old one");
+        drop(manager);
+
+        let seen = frames_until_closed(&mut old).await;
+        assert!(
+            !frame_types(&seen).contains(&"STOP_ACCEPTED".to_string()),
+            "{seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !*daemon.shutdown.requested.borrow(),
+            "a displaced STOP asked for the shutdown"
+        );
+    }
+
+    /// The writer of the connection a STOP came on, blocked: the shutdown
+    /// waits for it within its bound, and the hub then reads STOP_ACCEPTED
+    /// whole (#700).
+    #[tokio::test]
+    async fn the_shutdown_waits_for_a_blocked_writer_within_its_bound() {
+        let daemon = in_memory_daemon(None);
+        let hub = OwnerId::from_hub_key("hub-key");
+        let mut client = connect_in_memory_buffered(&daemon, &auth("", "hub-key"), 1, 64).await;
+        frames_until_type(&mut client, "CHANNEL_STATE_END").await;
+        block_writer(&daemon, &hub).await;
+        client
+            .write_all(&encode_frame(&HubToAgent::Stop { force: false }).unwrap())
+            .await
+            .unwrap();
+        until_shutdown_requested(&daemon).await;
+
+        let (manager, routes) = (Arc::clone(&daemon.pty_manager), Arc::clone(&daemon.routes));
+        let disconnected = tokio::spawn(async move { end_daemon(&manager, &routes).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !disconnected.is_finished(),
+            "returned while the writer was blocked"
+        );
+
+        let rest = frames_until_closed(&mut client).await;
+        assert!(
+            frame_types(&rest).contains(&"STOP_ACCEPTED".to_string()),
+            "{rest:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(5), disconnected)
+            .await
+            .expect("returns once the writer is done")
+            .unwrap();
+    }
+
+    /// The bound the shutdown waits for writers within, as decided (#700).
+    #[test]
+    fn writers_are_waited_for_two_seconds_in_all() {
+        assert_eq!(WRITER_DRAIN_BOUND, Duration::from_secs(2));
+    }
+
+    /// A connection displaced while its writer is still held is waited for
+    /// too: it is no longer its hub's current one, and its frames are still
+    /// owed (#700).
+    #[tokio::test]
+    async fn the_shutdown_waits_for_a_displaced_connections_writer() {
+        let daemon = in_memory_daemon(None);
+        let hub = OwnerId::from_hub_key("hub-key");
+        let mut old = connect_in_memory_buffered(&daemon, &auth("", "hub-key"), 1, 64).await;
+        frames_until_type(&mut old, "CHANNEL_STATE_END").await;
+        block_writer(&daemon, &hub).await;
+        let (mut newer, _newer_handler) = connect_in_memory(&daemon, &auth("", "hub-key"), 2).await;
+        frames_until_type(&mut newer, "CHANNEL_STATE_END").await;
+        assert_eq!(current_connection(&daemon, &hub).await, Some(2));
+
+        let (manager, routes) = (Arc::clone(&daemon.pty_manager), Arc::clone(&daemon.routes));
+        let disconnected = tokio::spawn(async move { end_daemon(&manager, &routes).await });
+        let _ = frames_until_closed(&mut newer).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !disconnected.is_finished(),
+            "returned with the displaced connection's writer still held"
+        );
+        let _ = frames_until_closed(&mut old).await;
+        tokio::time::timeout(Duration::from_secs(5), disconnected)
+            .await
+            .expect("returns once that writer is done")
+            .unwrap();
+    }
+
+    /// Two writers that stay blocked: one bound of two seconds covers both,
+    /// and the shutdown goes on without them (#700).
+    #[tokio::test]
+    async fn the_shutdown_abandons_blocked_writers_after_one_bound() {
+        let daemon = in_memory_daemon(None);
+        let mut clients = Vec::new();
+        for (id, key) in [(1, "hub-a"), (2, "hub-b")] {
+            let mut client = connect_in_memory_buffered(&daemon, &auth("", key), id, 64).await;
+            frames_until_type(&mut client, "CHANNEL_STATE_END").await;
+            block_writer(&daemon, &OwnerId::from_hub_key(key)).await;
+            clients.push(client);
+        }
+        let started = std::time::Instant::now();
+        end_daemon(&daemon.pty_manager, &daemon.routes).await;
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(1900), "{took:?}");
+        assert!(
+            took < Duration::from_millis(3500),
+            "a bound per writer: {took:?}"
+        );
+        drop(clients);
+    }
+
+    /// Two writers, the first done at once, the second blocked then let go
+    /// within the bound: the shutdown waits for the second, whose hub reads
+    /// what it was owed (#700).
+    #[tokio::test]
+    async fn the_shutdown_waits_for_every_writer_not_only_the_first() {
+        let daemon = in_memory_daemon(None);
+        let mut quick = connect_in_memory_buffered(&daemon, &auth("", "hub-a"), 1, 64 * 1024).await;
+        frames_until_type(&mut quick, "CHANNEL_STATE_END").await;
+        let mut slow = connect_in_memory_buffered(&daemon, &auth("", "hub-b"), 2, 64).await;
+        frames_until_type(&mut slow, "CHANNEL_STATE_END").await;
+        let slow_hub = OwnerId::from_hub_key("hub-b");
+        block_writer(&daemon, &slow_hub).await;
+        let owed = encode_frame(&AgentToHub::StopAccepted {}).unwrap();
+        queue_frame(&daemon, &slow_hub, owed).await;
+
+        let (manager, routes) = (Arc::clone(&daemon.pty_manager), Arc::clone(&daemon.routes));
+        let disconnected = tokio::spawn(async move { end_daemon(&manager, &routes).await });
+        let _ = frames_until_closed(&mut quick).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !disconnected.is_finished(),
+            "returned after the first writer only"
+        );
+
+        let rest = frames_until_closed(&mut slow).await;
+        assert!(
+            frame_types(&rest).contains(&"STOP_ACCEPTED".to_string()),
+            "{rest:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(5), disconnected)
+            .await
+            .expect("returns once every writer is done")
+            .unwrap();
     }
 
     /// An authenticated connection of the same hub takes over from the
@@ -4442,7 +4769,10 @@ mod tests {
                 assert_eq!(refusal["other_owner_channels"].as_u64(), Some(1));
                 let message = refusal["message"].as_str().unwrap_or("");
                 assert!(message.starts_with("1 "), "{message:?}");
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                // A refusal is not an acceptance (#700).
+                let quiet = a.frames_until_quiet(Duration::from_millis(300)).await;
+                let types: Vec<&str> = frames.iter().chain(&quiet).map(frame_type).collect();
+                assert!(!types.contains(&"STOP_ACCEPTED"), "{types:?}");
                 assert!(
                     !daemon.task.is_finished(),
                     "a refused STOP stopped the daemon"
@@ -4450,8 +4780,10 @@ mod tests {
                 print(&mut b, "stop-ch-b", "still-here").await;
 
                 a.send(&stop(true)).await;
-                // Closing the connection is the acknowledgement.
-                a.frames_until_closed().await;
+                // A forced STOP is accepted, said before the connection ends.
+                let frames = a.frames_until_closed().await;
+                let types: Vec<&str> = frames.iter().map(frame_type).collect();
+                assert!(types.contains(&"STOP_ACCEPTED"), "{types:?}");
                 let summary = daemon.finished().await.expect("a clean stop");
                 assert_eq!(summary.confirmed_shell_exits, 1);
             }
@@ -4468,8 +4800,99 @@ mod tests {
                 a.send(&stop(false)).await;
                 let frames = a.frames_until_closed().await;
                 assert_eq!(errors(&frames), Vec::<String>::new());
+                // Said before the end of stream (#700).
+                let types: Vec<&str> = frames.iter().map(frame_type).collect();
+                assert!(types.contains(&"STOP_ACCEPTED"), "{types:?}");
                 let summary = daemon.finished().await.expect("a clean stop");
                 assert_eq!(summary.confirmed_shell_exits, 1);
+            }
+
+            /// A terminal printing without end, for a hub that stops reading:
+            /// its connection's writer is then blocked on the transport.
+            fn flood(channel_id: &str) -> HubToAgent {
+                spawn(
+                    channel_id,
+                    if cfg!(windows) {
+                        "for /l %i in (0,0,1) do @echo yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+                    } else {
+                        "yes yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+                    },
+                )
+            }
+
+            /// The daemon process's own shutdown path waits for a writer its
+            /// hub does not read: `run_daemon_impl` has not returned while
+            /// that writer is held, and once the hub reads, STOP_ACCEPTED is
+            /// there, whole (#700).
+            #[tokio::test]
+            async fn the_daemon_does_not_end_while_a_writer_it_owes_is_held() {
+                let daemon = TestDaemon::start("held-writer").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, flood("held-flood")).await;
+                // Not read from here on: the transport fills, then the writer blocks.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                a.send(&stop(true)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                assert!(
+                    !daemon.task.is_finished(),
+                    "the daemon ended with its writer still held"
+                );
+                let frames = a.frames_until_closed().await;
+                let types: Vec<&str> = frames.iter().map(frame_type).collect();
+                assert!(types.contains(&"STOP_ACCEPTED"), "no STOP_ACCEPTED");
+                daemon.finished().await.expect("a clean stop");
+            }
+
+            /// Two hubs: the first reads, so its writer is done at once; the
+            /// second does not, so its writer is held until it reads again,
+            /// within the bound. `run_daemon_impl` waits for the second, not
+            /// only the first, and that hub reads STOP_ACCEPTED whole (#700).
+            #[tokio::test]
+            async fn the_daemon_waits_for_every_writer_it_owes_not_only_the_first() {
+                let daemon = TestDaemon::start("every-writer").await;
+                let (mut quick, _) = daemon.connect_as(KEY_A).await;
+                let (mut held, _) = daemon.connect_as(KEY_B).await;
+                spawned(&mut held, flood("every-writer-flood")).await;
+                // Not read from here on: the transport fills, then the writer blocks.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                held.send(&stop(true)).await;
+                // Read to its end: this writer is done while the other is held.
+                quick.frames_until_closed().await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                assert!(
+                    !daemon.task.is_finished(),
+                    "the daemon ended after the first writer only"
+                );
+                let frames = held.frames_until_closed().await;
+                let types: Vec<&str> = frames.iter().map(frame_type).collect();
+                assert!(types.contains(&"STOP_ACCEPTED"), "no STOP_ACCEPTED");
+                daemon.finished().await.expect("a clean stop");
+            }
+
+            /// Two hubs that never read: the daemon ends once, after one bound
+            /// of about two seconds for both, not one each (#700).
+            #[tokio::test]
+            async fn the_daemon_ends_after_one_bound_for_writers_never_read() {
+                let daemon = TestDaemon::start("held-writers").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, flood("held-flood-a")).await;
+                let (mut b, _) = daemon.connect_as(KEY_B).await;
+                spawned(&mut b, flood("held-flood-b")).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                a.send(&stop(true)).await;
+                let started = std::time::Instant::now();
+                let summary = tokio::time::timeout(Duration::from_secs(20), daemon.finished())
+                    .await
+                    .expect("the daemon ends")
+                    .expect("a clean stop");
+                let took = started.elapsed();
+                assert_eq!(summary.confirmed_shell_exits + summary.unresolved.len(), 2);
+                assert!(took >= Duration::from_millis(1900), "{took:?}");
+                assert!(
+                    took < Duration::from_millis(3900),
+                    "a bound per writer: {took:?}"
+                );
+                drop((a, b));
             }
 
             /// Another hub connected but holding nothing does not keep the

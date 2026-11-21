@@ -62,6 +62,7 @@ async function openMenu(hostId: string): Promise<void> {
 				onReconnect: record("reconnect"),
 				onDisconnect: record("disconnect"),
 				onStopAgent: record("stop-agent"),
+				onKeepAgent: record("keep-agent"),
 				onClose: () => emitted.push(["close", hostId]),
 			}),
 	});
@@ -284,4 +285,61 @@ describe("the host menu's Duplicate and Move to Group, refused (#734)", () => {
 		await moveTo("Prod");
 		expect(toasts()).toHaveLength(2);
 	});
+});
+
+describe("Keep the agent left here and connect (#701)", () => {
+	function hostIs(patch: Partial<Host>): void {
+		const store = useHostsStore();
+		store.hosts = store.hosts.map((h) => (h.id === "pi" ? { ...h, ...patch } : h));
+	}
+
+	it.each([
+		{ os: "linux", sshRemoteDaemon: false },
+		{ os: "darwin", sshRemoteDaemon: null },
+		{ os: "linux" },
+	] as const)(
+		"offers it to an unconnected $os host not set to keep one ($sshRemoteDaemon)",
+		async (patch) => {
+			hostIs(patch);
+			await openMenu("pi");
+			expect(offered()).toContain("keep-agent");
+			document.body.querySelector<HTMLElement>('[data-action="keep-agent"]')?.click();
+			expect(emitted).toEqual([
+				["keep-agent", "pi"],
+				["close", "pi"],
+			]);
+		},
+	);
+
+	it.each([
+		["an unknown system", { os: null, sshRemoteDaemon: false }],
+		["Windows", { os: "windows", sshRemoteDaemon: false }],
+		["a host set to keep one", { os: "linux", sshRemoteDaemon: true }],
+	] as const)("does not offer it to %s", async (_, patch) => {
+		hostIs(patch);
+		await openMenu("pi");
+		expect(offered()).not.toContain("keep-agent");
+	});
+
+	it("does not offer it to a connected host", async () => {
+		hostIs({ os: "linux", sshRemoteDaemon: false });
+		sessionIs("active");
+		await openMenu("pi");
+		expect(offered()).not.toContain("keep-agent");
+	});
+});
+
+describe("Keep the agent left here and connect on a host the hub lost (#701)", () => {
+	it.each(["disconnected", "starting"] as const)(
+		"offers it while no agent is connected (session %s)",
+		async (status) => {
+			const store = useHostsStore();
+			store.hosts = store.hosts.map((h) =>
+				h.id === "pi" ? { ...h, os: "linux", sshRemoteDaemon: false } : h,
+			);
+			sessionIs(status);
+			await openMenu("pi");
+			expect(offered()).toContain("keep-agent");
+		},
+	);
 });

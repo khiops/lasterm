@@ -60,12 +60,12 @@ describe("openTestDatabases", () => {
 		expect(fk).toBe(1);
 	});
 
-	it("meta.db: schema_version is 29 after migration", () => {
+	it("meta.db: schema_version is 30 after migration", () => {
 		dbs = openTestDatabases();
 		const row = dbs.meta.prepare("SELECT MAX(version) as v FROM schema_version").get() as {
 			v: number;
 		};
-		expect(row.v).toBe(29);
+		expect(row.v).toBe(30);
 	});
 
 	it("spool.db: schema_version is 1 after migration", () => {
@@ -104,7 +104,7 @@ describe("openTestDatabases", () => {
 		expect(table?.name).toBe("chunks");
 	});
 
-	it("migration runner is idempotent (running twice produces same schema_version = 29)", () => {
+	it("migration runner is idempotent (running twice produces same schema_version = 30)", () => {
 		// First open
 		const dbs1 = openTestDatabases();
 		const v1 = (
@@ -119,8 +119,8 @@ describe("openTestDatabases", () => {
 		).v;
 		dbs2.close();
 
-		expect(v1).toBe(29);
-		expect(v2).toBe(29);
+		expect(v1).toBe(30);
+		expect(v2).toBe(30);
 	});
 
 	it("close() closes memory databases synchronously and returns a promise", async () => {
@@ -274,6 +274,7 @@ describe("meta.db and its baseline", () => {
 			{ version: 27 },
 			{ version: 28 },
 			{ version: 29 },
+			{ version: 30 },
 		]);
 		expect(tables(dbs.meta)).toEqual([
 			"auth_tokens",
@@ -361,6 +362,7 @@ describe("meta.db and its baseline", () => {
 			);
 			CREATE TABLE launch_profiles (id TEXT PRIMARY KEY, name TEXT);
 			CREATE TABLE workspaces (id TEXT PRIMARY KEY);
+			CREATE TABLE channels (id TEXT PRIMARY KEY, status TEXT);
 		`);
 		before.close();
 
@@ -376,8 +378,10 @@ describe("meta.db and its baseline", () => {
 			{ version: 27 },
 			{ version: 28 },
 			{ version: 29 },
+			{ version: 30 },
 		]);
 		expect(tables(dbs.meta)).toEqual([
+			"channels",
 			"host_launch_profiles",
 			"hosts",
 			"launch_profiles",
@@ -387,6 +391,8 @@ describe("meta.db and its baseline", () => {
 			"workspaces",
 		]);
 		expect(columns(dbs.meta, "launch_profiles")).toEqual(["id", "name", "report_directory"]);
+		// Migration 030 adds its column to the channels a database of then holds (#932).
+		expect(columns(dbs.meta, "channels")).toEqual(["id", "status", "end_id"]);
 		expect(columns(dbs.meta, "hosts")).toEqual([
 			"id",
 			"type",
@@ -515,6 +521,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 27 },
 			{ version: 28 },
 			{ version: 29 },
+			{ version: 30 },
 		]);
 		// What a connection reads, and compares with fingerprintOf(key) as it is.
 		expect(dal.getHostFingerprint("T", routeOf("T"))).toBe(fingerprintOf(target));
@@ -552,6 +559,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 27 },
 			{ version: 28 },
 			{ version: 29 },
+			{ version: 30 },
 		]);
 		expect(pins(dbs.meta)).toEqual([]);
 	});
@@ -574,6 +582,7 @@ describe("meta.db migration 022: SSH pins without padding", () => {
 			{ version: 27 },
 			{ version: 28 },
 			{ version: 29 },
+			{ version: 30 },
 		]);
 		expect(pins(dbs.meta)).toEqual(migrated);
 
@@ -661,6 +670,7 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 			{ version: 27 },
 			{ version: 28 },
 			{ version: 29 },
+			{ version: 30 },
 		]);
 		const row = (
 			id: string,
@@ -711,6 +721,7 @@ describe("meta.db migration 023: the agent's default shell in a column of its ow
 			{ version: 27 },
 			{ version: 28 },
 			{ version: 29 },
+			{ version: 30 },
 		]);
 		expect(shells(dbs.meta)).toEqual(chosen);
 	});
@@ -791,6 +802,7 @@ describe("meta.db migration 024: a launch profile override says whether the user
 			{ version: 27 },
 			{ version: 28 },
 			{ version: 29 },
+			{ version: 30 },
 		]);
 		expect(overrides(dbs.meta)).toEqual([
 			{
@@ -880,6 +892,7 @@ describe("meta.db migration 025: a launch profile can have its PowerShell report
 			{ version: 27 },
 			{ version: 28 },
 			{ version: 29 },
+			{ version: 30 },
 		]);
 		expect(
 			dbs.meta.prepare("SELECT id, report_directory, updated_at FROM launch_profiles").all(),
@@ -1066,6 +1079,7 @@ describe("meta.db migration 026: the uploads' tables", () => {
 			{ version: 27 },
 			{ version: 28 },
 			{ version: 29 },
+			{ version: 30 },
 		]);
 		const after = contents(dbs.meta);
 		expect(Object.keys(after).filter((table) => !(table in before))).toEqual([
@@ -1074,17 +1088,23 @@ describe("meta.db migration 026: the uploads' tables", () => {
 		]);
 		// Migrations 028 and 029, which run after it, add columns to hosts, NULL in
 		// every row (#1034, #1047): what 026 left is the rest.
-		const hosts = after.hosts as { columns: string[]; rows: Array<Record<string, unknown>> };
-		const added = ["connect_timeout_seconds", "ssh_proxy_user", "ssh_proxy_port"];
-		for (const column of added) {
-			expect(hosts.rows.map((row) => row[column])).toEqual(hosts.rows.map(() => null));
-		}
-		after.hosts = {
-			columns: hosts.columns.filter((column) => !added.includes(column)),
-			rows: hosts.rows.map((row) =>
-				Object.fromEntries(Object.entries(row).filter(([column]) => !added.includes(column))),
-			),
+		// Migration 030 adds a column to channels, NULL in every row (#932).
+		const laterColumns: Record<string, string[]> = {
+			hosts: ["connect_timeout_seconds", "ssh_proxy_user", "ssh_proxy_port"],
+			channels: ["end_id"],
 		};
+		for (const [table, added] of Object.entries(laterColumns)) {
+			const was = after[table] as { columns: string[]; rows: Array<Record<string, unknown>> };
+			for (const column of added) {
+				expect(was.rows.map((row) => row[column])).toEqual(was.rows.map(() => null));
+			}
+			after[table] = {
+				columns: was.columns.filter((column) => !added.includes(column)),
+				rows: was.rows.map((row) =>
+					Object.fromEntries(Object.entries(row).filter(([column]) => !added.includes(column))),
+				),
+			};
+		}
 		for (const [table, was] of Object.entries(before)) expect(after[table]).toEqual(was);
 		expect(columns(dbs.meta, "transfers")).toEqual([
 			"id",
@@ -1176,6 +1196,7 @@ describe("meta.db migration 026: the uploads' tables", () => {
 			{ version: 27 },
 			{ version: 28 },
 			{ version: 29 },
+			{ version: 30 },
 		]);
 		const meta = new MetaDAL(dbs.meta);
 		expect(meta.getHost("H")?.label).toBe("pi");
@@ -1252,6 +1273,7 @@ describe("meta.db migration 027", () => {
 			{ version: 27 },
 			{ version: 28 },
 			{ version: 29 },
+			{ version: 30 },
 		]);
 		const methods = ["agent", "key", "agent", "agent", "password", "agent", null];
 		expect(hosts(dbs.meta)).toEqual(
@@ -1364,5 +1386,72 @@ describe("meta.db migration 029", () => {
 		expect(dal.getHost("H1")?.sshProxyPort).toBeUndefined();
 		dal.updateHost("H1", { sshProxyUser: "relay", sshProxyPort: 2200 });
 		expect(dal.getHost("H1")).toMatchObject({ sshProxyUser: "relay", sshProxyPort: 2200 });
+	});
+});
+
+describe("meta.db migration 030", () => {
+	let dir: string;
+	let dbs: DatabaseManager | undefined;
+
+	beforeEach(() => {
+		dir = makeTempDir("lasterm-db-030-");
+	});
+
+	afterEach(async () => {
+		await dbs?.close();
+		dbs = undefined;
+		await removeTempDir(dir);
+	});
+
+	const migration = (name: string) =>
+		readFileSync(fileURLToPath(new URL(`./migrations/meta/${name}`, import.meta.url)), "utf-8");
+
+	it("migration 030 adds channels.end_id", () => {
+		const before = new Database(join(dir, "meta.db"));
+		for (const file of [
+			"021-baseline.sql",
+			"022-unpadded-ssh-pins.sql",
+			"023-discovered-default-shell.sql",
+			"024-launch-profile-set-by-user.sql",
+			"025-launch-profile-report-directory.sql",
+			"026-transfers.sql",
+			"027-ssh-auth-for-every-ssh-host.sql",
+			"028-host-connect-timeout.sql",
+			"029-proxy-jump-user-port.sql",
+		]) {
+			before.exec(migration(file));
+		}
+		const at = "2026-11-21T00:00:00.000Z";
+		before
+			.prepare(
+				`INSERT INTO hosts (id, type, label, created_at, updated_at)
+				VALUES ('H', 'local', 'here', '${at}', '${at}')`,
+			)
+			.run();
+		before
+			.prepare(
+				`INSERT INTO sessions (id, host_id, status, created_at, updated_at)
+				VALUES ('S', 'H', 'closed', '${at}', '${at}')`,
+			)
+			.run();
+		before
+			.prepare(
+				`INSERT INTO channels (id, session_id, status, shell, exit_code, end_reason, created_at, updated_at)
+				VALUES ('C', 'S', 'dead', 'bash', 3, 'killed', '${at}', '${at}')`,
+			)
+			.run();
+		const rowBefore = before.prepare("SELECT * FROM channels WHERE id = 'C'").get();
+		before.close();
+
+		dbs = openDatabases(dir);
+
+		const rowAfter = dbs.meta.prepare("SELECT * FROM channels WHERE id = 'C'").get() as Record<
+			string,
+			unknown
+		>;
+		expect(rowAfter.end_id).toBeNull();
+		const { end_id: _added, ...rest } = rowAfter;
+		expect(rest).toEqual(rowBefore);
+		expect(new MetaDAL(dbs.meta).getChannel("C")).not.toHaveProperty("endId");
 	});
 });

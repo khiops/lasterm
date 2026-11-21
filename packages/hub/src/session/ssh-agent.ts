@@ -466,6 +466,12 @@ export class SshAgent extends AgentConnection {
 		 * Windows remotes ignore it: no SSH channel carries a named pipe.
 		 */
 		private readonly remoteDaemon: boolean = false,
+		/**
+		 * Reach a daemon already running on the host and nothing else (#701):
+		 * no deploy, no launch, no agent on stdio. What does not answer fails
+		 * with `NoRunningDaemon` or `DaemonUnreachable`.
+		 */
+		private readonly daemonOnly: boolean = false,
 	) {
 		super();
 	}
@@ -478,6 +484,7 @@ export class SshAgent extends AgentConnection {
 	 * stay as they were — their terminals end with the connection.
 	 */
 	private daemonBinary(remotePath: string, os: HostOs | null): string | undefined {
+		if (this.daemonOnly) return remotePath;
 		if (!this.remoteDaemon) return undefined;
 		if ((os ?? this.host.os) === "windows") return undefined;
 		return remotePath;
@@ -901,6 +908,7 @@ export class SshAgent extends AgentConnection {
 								...(this.loggingConfig.logFilesKept !== undefined && {
 									logFilesKept: this.loggingConfig.logFilesKept,
 								}),
+								...(this.daemonOnly && { launch: false }),
 							})
 								.then((attachment) => {
 									this.usedRemoteDaemon = true;
@@ -916,7 +924,7 @@ export class SshAgent extends AgentConnection {
 									onStream(attachment.stream as unknown as ClientChannel);
 								})
 								.catch((err: unknown) => {
-									if (err instanceof SocketForwardingRefused) {
+									if (err instanceof SocketForwardingRefused && !this.daemonOnly) {
 										// No daemon can be reached here, however long one waits
 										// (#765): the agent runs on stdio, as on a host that keeps
 										// none, and its terminals end with this connection.
@@ -1013,7 +1021,7 @@ export class SshAgent extends AgentConnection {
 						);
 					};
 
-					if (this.deployOptions) {
+					if (this.deployOptions && !this.daemonOnly) {
 						// Auto-deploy is best-effort: if it fails, we still try to run the agent
 						// (the user may have installed it manually in a non-standard path).
 						// DeployError (user-initiated rejection) propagates; infrastructure failures fall back.

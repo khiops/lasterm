@@ -19,6 +19,7 @@ import { PasteRelay } from "./paste-relay.js";
 import type {
 	AgentAttachMessage,
 	AgentAttachOkMessage,
+	AgentChannelStateMessage,
 	AgentConfig,
 	AgentCwdQueryMessage,
 	AgentEnvMessage,
@@ -69,13 +70,14 @@ import type { DatabaseManager } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
 import type { TransferConnectOutcome } from "../transfers/transfer-service.js";
-import type { AgentConnection } from "./agent-connection.js";
+import { type AgentConnection, AgentRefusedHub } from "./agent-connection.js";
 import { AgentConnectionManager } from "./agent-connection-manager.js";
 import { AgentBinaryDecisionNeeded, DeployError, getBinaryCacheDir } from "./agent-deployer.js";
 import { stopLocalAgent } from "./agent-launcher.js";
 import { AgentRetirement, isOlderVersion } from "./agent-retirement.js";
 import { HostKeyRejectedError, notResumedReason, sshConnectErrorCode } from "./auth-cancelled.js";
 import { ChannelLifecycleManager, HOST_NOT_FOUND_MESSAGE } from "./channel-lifecycle-manager.js";
+import { inventoryFacts } from "./daemon-inventory.js";
 import { requestDaemonStop } from "./daemon-stop.js";
 import {
 	type HostConnectionFacts,
@@ -229,7 +231,10 @@ export type ReplaceAgentOutcome =
 			readonly code?:
 				| typeof ErrorCode.OTHER_HUBS_HOLD_CHANNELS
 				| typeof ErrorCode.HOST_BUSY
-				| typeof ErrorCode.TRANSFERS_WOULD_STOP;
+				| typeof ErrorCode.TRANSFERS_WOULD_STOP
+				| typeof ErrorCode.OTHER_HOST_TERMINALS
+				| typeof ErrorCode.AGENT_INVENTORY_UNKNOWN
+				| typeof ErrorCode.TERMINALS_SHOWN_ENDED;
 			/** How many, when the agent said. */
 			readonly otherOwnerChannels?: number;
 			/** With TRANSFERS_WOULD_STOP: the uploads to the host that would stop (#833). */
@@ -266,6 +271,12 @@ export type HostConnectionOutcome =
 	| { readonly kind: "not-ssh" }
 	| { readonly kind: "quitting" }
 	| { readonly kind: "busy" }
+	/** Another connection of the host is being made, which a daemon-only one never joins (#701). */
+	| { readonly kind: "connecting-already" }
+	/** `daemon_only` on a host whose stored OS is not linux or darwin (#701). */
+	| { readonly kind: "daemon-not-possible" }
+	/** `daemon_only` on a host connected otherwise than through its daemon (#701). */
+	| { readonly kind: "no-daemon-connection" }
 	/**
 	 * Closing the connection would end terminals, and `force` did not say to:
 	 * nothing was done. `transfers`: the uploads it would stop too, when any.
@@ -323,6 +334,11 @@ export class SessionManager {
 	private transfers: HostTransfers | null = null;
 	/** Replaces an agent older than this hub once it holds nothing of it (#805). */
 	private readonly retirement: AgentRetirement;
+	/**
+	 * Hosts whose acquisition reaches a daemon and nothing else (#701): no
+	 * other Connect joins it, since none asked for that.
+	 */
+	private readonly daemonOnlyReaches = new Set<string>();
 
 	// ─── Spool GC (owned by coordinator) ─────────────────────────────────────
 	private readonly gc: SpoolGarbageCollector;
@@ -453,6 +469,7 @@ export class SessionManager {
 			release: (hostId, agent) => this.releaseAgent(hostId, agent),
 			startLocalAgent: (hostId, sessionId) => this.startLocalAgentAgain(hostId, sessionId),
 			transfersOn: (hostId) => this.transfersOn(hostId),
+			reconnectIfDropped: (hostId) => this.reconnectAfterUnconfirmedStop(hostId),
 		});
 		this.lifecycle.onAgentMayBeIdle = (hostId) => {
 			void this.retirement.retireIfIdle(hostId);
@@ -885,7 +902,10 @@ export class SessionManager {
 		this.lifecycle.closeSession(hostId, sessionId, "killed");
 		// A daemon older than this hub, which now holds nothing of it, is
 		// stopped rather than left running with nothing to do (#805); the next
-		// terminal there starts the current one. Any other connection is
+		// terminal there starts the current one. A remote daemon whose list
+		// still names the terminals just destroyed is not yet idle by it: its
+		// connection is closed, and it is retired at the next connection's
+		// adoption, or ends at its idle timeout (#701). Any other connection is
 		// closed, the daemon left as it is.
 		if (agent && !this.retirement.retireDetached(hostId, agent)) void agent.close();
 		return "closed";
@@ -1878,6 +1898,8 @@ export class SessionManager {
 							// being purged, and nothing reads its output any more,
 							// even while this hub still holds it in memory.
 							...(kept !== undefined && this.endedOutputOf(channelId, ended)),
+							// Which end this is, and its code and reason (#932).
+							...this.recordedEndOf(channelId),
 						};
 			client.send(errorMsg);
 			return false;
@@ -2066,6 +2088,7 @@ export class SessionManager {
 					message: "This terminal is no longer running on its host.",
 					channelId,
 					...this.endedOutputOf(channelId, channel),
+					...this.recordedEndOf(channelId),
 				} satisfies ErrorMessage);
 				return false;
 			}
@@ -2091,6 +2114,21 @@ export class SessionManager {
 			client.send(attachOk);
 		}
 		return true;
+	}
+
+	/**
+	 * The end meta.db records for a dead channel, for its CHANNEL_DEAD: its id,
+	 * exit code and reason, each when set (#932). Nothing for a row that is not
+	 * dead, or gone.
+	 */
+	private recordedEndOf(channelId: string): Pick<ErrorMessage, "endId" | "exitCode" | "endReason"> {
+		const row = this.ctx.metaDal.getChannel(channelId);
+		if (row?.status !== "dead") return {};
+		return {
+			...(row.endId !== undefined && { endId: row.endId }),
+			...(row.exitCode !== undefined && { exitCode: row.exitCode }),
+			...(row.endReason !== undefined && { endReason: row.endReason }),
+		};
 	}
 
 	/**
@@ -2531,7 +2569,16 @@ export class SessionManager {
 					"This connection does not reach a remote daemon.",
 				);
 			}
-			const ended = this.connectionFacts(hostId, host).liveTerminals;
+			// A terminal starting there is in no count yet, or a Restart's
+			// replacement is on its way: a stop now would end it uncounted (#701).
+			if (this.retirement.isStarting(hostId)) {
+				return error(409, ErrorCode.HOST_BUSY, "A terminal is starting on this host.");
+			}
+			const daemonRefusal = this.daemonStopRefusal(hostId, agent, "stop-keeping");
+			if ("code" in daemonRefusal) {
+				return error(409, daemonRefusal.code, daemonRefusal.message);
+			}
+			const ended = this.connectionFacts(hostId, host).liveTerminals + daemonRefusal.shownEnded;
 			if (ended > 0 && !options.endTerminals) {
 				return {
 					kind: "error",
@@ -2639,6 +2686,73 @@ export class SessionManager {
 	}
 
 	/**
+	 * What a remote daemon's own list forbids a stop asked from `hostId`
+	 * (#701): a list that never came, terminals another host record tracks,
+	 * and for Replace, which counts nothing, terminals shown as ended. Else
+	 * how many of those stop-keeping counts.
+	 */
+	private daemonStopRefusal(
+		hostId: string,
+		agent: SshAgent,
+		asking: "stop-keeping" | "replace",
+	):
+		| {
+				readonly code:
+					| typeof ErrorCode.AGENT_INVENTORY_UNKNOWN
+					| typeof ErrorCode.OTHER_HOST_TERMINALS
+					| typeof ErrorCode.TERMINALS_SHOWN_ENDED;
+				readonly message: string;
+		  }
+		| { readonly shownEnded: number } {
+		const inventory = agent.daemonInventory;
+		if (inventory === undefined) {
+			return {
+				code: ErrorCode.AGENT_INVENTORY_UNKNOWN,
+				message: "This agent has not said which terminals it holds. Reconnect, then try again.",
+			};
+		}
+		const facts = inventoryFacts(inventory, this.ctx.channels, hostId);
+		const [other] = facts.elsewhere;
+		if (other !== undefined) {
+			const label = this.ctx.metaDal.getHost(other)?.label ?? other;
+			return {
+				code: ErrorCode.OTHER_HOST_TERMINALS,
+				message: `Terminals of ${label} run on this agent. Stop it from that host, or end them first.`,
+			};
+		}
+		if (asking === "replace" && facts.shownEnded > 0) {
+			const n = facts.shownEnded;
+			return {
+				code: ErrorCode.TERMINALS_SHOWN_ENDED,
+				message: `This agent still runs ${n} terminal${n === 1 ? "" : "s"} shown as ended. Stop keeping an agent here counts them.`,
+			};
+		}
+		return { shownEnded: facts.shownEnded };
+	}
+
+	/**
+	 * After a stop that was not confirmed, dial an SSH host again when its
+	 * connection dropped while the host was held: what Replace does when it
+	 * lets go of the host, for the retirement, which held it too (#700).
+	 */
+	private reconnectAfterUnconfirmedStop(hostId: string): void {
+		const session = this.ctx.sessions.get(hostId);
+		if (
+			!this.isQuitting() &&
+			this.ctx.metaDal.getHost(hostId)?.type === "ssh" &&
+			session?.status === "disconnected" &&
+			!this.ctx.stoppingAgents.has(hostId) &&
+			!this.ctx.agents.has(hostId) &&
+			!this.ctx.reconnectTimers.has(hostId) &&
+			!this.ctx.reconnectAbortControllers.has(hostId) &&
+			!this.ctx.acquisitions.has(hostId) &&
+			!this.ctx.userDisconnectedHosts.has(hostId)
+		) {
+			this.sshMgr.scheduleReconnect(hostId, session.id, 0, Date.now());
+		}
+	}
+
+	/**
 	 * Stop-keeping's way to stop a daemon its STOP could not reach: the agent's
 	 * own `--stop`, run over the SSH connection. True once the daemon is
 	 * confirmed gone.
@@ -2737,6 +2851,10 @@ export class SessionManager {
 						"This host's agent runs with its connection, so it is already replaced whenever it reconnects.",
 				};
 			}
+			const daemonRefusal = this.daemonStopRefusal(hostId, agent, "replace");
+			if ("code" in daemonRefusal) {
+				return { replaced: false, code: daemonRefusal.code, message: daemonRefusal.message };
+			}
 			heldAgent = true;
 			const transfers = this.transfersOn(hostId);
 			if (transfers > 0 && options.stopTransfers !== true) {
@@ -2788,6 +2906,7 @@ export class SessionManager {
 		switch (stop.kind) {
 			case "displaced":
 			case "closed_by_hub":
+			case "unconfirmed":
 				return {
 					replaced: false,
 					message: "The connection ended without confirming the agent stopped.",
@@ -3006,12 +3125,43 @@ export class SessionManager {
 			readonly clientId?: string;
 			/** Told why the connection was not made, when it failed (#860). */
 			readonly onFailure?: (error: unknown) => void;
+			/**
+			 * Reach the daemon already running there and nothing else, then
+			 * store Yes for the host (#701): the host menu's "Keep the agent left
+			 * here and connect".
+			 */
+			readonly daemonOnly?: boolean;
+			/** With `daemonOnly`: the host was stored Yes. */
+			readonly onHostStored?: () => void;
 		} = {},
 	): HostConnectionOutcome {
 		const host = this.ctx.metaDal.getHost(hostId);
 		if (this.hostIsBeingStopped(hostId)) return { kind: "busy" };
 		if (host?.type !== "ssh") return { kind: "not-ssh" };
 		if (this.isQuitting()) return { kind: "quitting" };
+		if (this.daemonOnlyReaches.has(hostId)) return { kind: "connecting-already" };
+		if (options.daemonOnly === true) {
+			// A socket a daemon listens on is reached only on these (#701).
+			if (host.os !== "linux" && host.os !== "darwin") return { kind: "daemon-not-possible" };
+			const agent = this.ctx.agents.get(hostId);
+			if (agent?.connected === true) {
+				if (!(agent instanceof SshAgent) || !agent.usedRemoteDaemon) {
+					return { kind: "no-daemon-connection" };
+				}
+				this.userActsOnHost(hostId, true);
+				return { kind: "connected" };
+			}
+			// Never joined: what it would join may deploy, launch or run stdio.
+			if (this.ctx.acquisitions.has(hostId)) return { kind: "connecting-already" };
+			this.userActsOnHost(hostId, false);
+			return {
+				kind: "connecting",
+				ended: 0,
+				done: this.reachHostOnRequest(hostId, host, options.clientId, options.onFailure, {
+					onHostStored: options.onHostStored,
+				}),
+			};
+		}
 		if (this.ctx.agents.get(hostId)?.connected === true) {
 			this.userActsOnHost(hostId, true);
 			return { kind: "connected" };
@@ -3379,6 +3529,8 @@ export class SessionManager {
 		host: Host,
 		clientId: string | undefined,
 		onFailure?: (error: unknown) => void,
+		/** Reach the daemon already running there and nothing else (#701). */
+		daemonOnly?: { readonly onHostStored?: (() => void) | undefined },
 	): Promise<boolean> {
 		let fence: QuitFence;
 		try {
@@ -3408,8 +3560,13 @@ export class SessionManager {
 		}
 
 		const { acq, lease } = Acq.acquire(this.ctx, hostId, client.id);
+		if (daemonOnly !== undefined) this.daemonOnlyReaches.add(hostId);
 		let session: SessionState | undefined;
 		let neverConnected = false;
+		/** The daemon a daemon-only connection reached, until it is the host's for good (#701). */
+		let reached: AgentConnection | undefined;
+		/** Yes was stored for this attempt, and goes back if it fails after (#701). */
+		let yesStored = false;
 		try {
 			session = await this.agentMgr.getOrCreateSession(hostId, true, fence);
 			neverConnected = session.status === "starting";
@@ -3422,7 +3579,10 @@ export class SessionManager {
 				session.id,
 				acq.controller.signal,
 				acq.id,
+				undefined,
+				daemonOnly !== undefined,
 			);
+			if (daemonOnly !== undefined) reached = agent;
 			if (
 				this.ctx.acquisitions.get(hostId) !== acq ||
 				acq.state !== "CONNECTING" ||
@@ -3431,6 +3591,26 @@ export class SessionManager {
 			) {
 				void agent.close();
 				throw new Error("SSH connect aborted");
+			}
+			if (daemonOnly !== undefined) {
+				const listed = await this.keepTheDaemonReached(
+					hostId,
+					host,
+					agent,
+					acq,
+					session.id,
+					client,
+				);
+				yesStored = true;
+				daemonOnly.onHostStored?.();
+				this.broadcaster.updateSessionStatus(hostId, session.id, "active");
+				this.ctx.commits.adoptAgent(fence, hostId, agent);
+				this.lifecycle.takeUpListed(hostId, agent, listed);
+				reached = undefined;
+				yesStored = false;
+				Acq.commit(this.ctx, acq, session);
+				clearContext(this.ctx, acq.id);
+				return true;
 			}
 			this.ctx.commits.adoptAgent(fence, hostId, agent);
 			const adopted = await this.lifecycle.adoptWhatTheDaemonHolds(hostId, agent);
@@ -3446,13 +3626,101 @@ export class SessionManager {
 				hostId,
 				message: err instanceof Error ? err.message : String(err),
 			});
+			// A daemon-only connection that failed after it was reached is let
+			// go of and closed: nothing stays connected for an attempt that failed.
+			if (reached !== undefined) {
+				this.releaseAgent(hostId, reached);
+				void reached.close();
+			}
+			// Failed after Yes was stored: the setting goes back to what it was.
+			if (yesStored) {
+				try {
+					this.ctx.metaDal.updateHost(hostId, { sshRemoteDaemon: host.sshRemoteDaemon ?? null });
+					daemonOnly?.onHostStored?.();
+				} catch (cause) {
+					this.ctx.hubLogger?.log("error", "daemon-only connect: setting not put back", {
+						hostId,
+						cause: String(cause),
+					});
+				}
+			}
 			this.settleFailedConnect(hostId, session, neverConnected);
 			this.failConnectingAcq(acq, err, lease, () => this.holdsHost(hostId));
 			onFailure?.(err);
 			return false;
 		} finally {
+			if (daemonOnly !== undefined) this.daemonOnlyReaches.delete(hostId);
 			if (!lease.released) Acq.release(this.ctx, lease, () => this.holdsHost(hostId));
 		}
+	}
+
+	/**
+	 * The daemon a daemon-only connection reached (#701), made the host's:
+	 * its AUTH and its list first, then, if the attempt is still the host's
+	 * and the host still the one it set out for, Yes stored. Until then the
+	 * agent is nobody's: not in `ctx.agents`, not announced, so another
+	 * Connect meets the acquisition and a terminal open waits for it. Each
+	 * failure closes the connection, stores nothing, and says why to `client`.
+	 */
+	private async keepTheDaemonReached(
+		hostId: string,
+		host: Host,
+		agent: AgentConnection,
+		acq: SessionAcquisition,
+		sessionId: string,
+		client: WsClient,
+	): Promise<{ readonly states: AgentChannelStateMessage[]; readonly askedAt: number }> {
+		const fail = (code: string, message: string): never => {
+			void agent.close();
+			client.send({ type: "ERROR", code, message, hostId } satisfies ErrorMessage);
+			throw new Error(message);
+		};
+		const stillThisAttempt = (): boolean =>
+			this.ctx.acquisitions.get(hostId) === acq &&
+			acq.state === "CONNECTING" &&
+			!acq.controller.signal.aborted &&
+			this.ctx.sessions.get(hostId)?.id === sessionId;
+		let listed: { readonly states: AgentChannelStateMessage[]; readonly askedAt: number };
+		try {
+			listed = await this.lifecycle.listDaemonChannels(agent);
+		} catch (err) {
+			// Disconnected or quitting meanwhile: ended as any attempt aborted is,
+			// with nothing to say.
+			if (!stillThisAttempt()) {
+				void agent.close();
+				throw new Error("SSH connect aborted");
+			}
+			if (err instanceof AgentRefusedHub) return fail(ErrorCode.AGENT_REFUSED_HUB, err.message);
+			return fail(
+				ErrorCode.DAEMON_UNREACHABLE,
+				"The agent on this host did not say which terminals it holds.",
+			);
+		}
+		// One synchronous stretch from here to the write: nothing can change
+		// in between.
+		if (!stillThisAttempt() || !agent.connected) {
+			void agent.close();
+			throw new Error("SSH connect aborted");
+		}
+		const now = this.ctx.metaDal.getHost(hostId);
+		if (now === undefined || !sameDestination(host, now)) {
+			return fail(ErrorCode.HOST_CHANGED, "The host changed while connecting. Try again.");
+		}
+		let stored: Host | undefined;
+		try {
+			stored = this.ctx.metaDal.updateHost(hostId, { sshRemoteDaemon: true });
+		} catch (cause) {
+			this.ctx.hubLogger?.log("error", "daemon-only connect: setting write failed", {
+				hostId,
+				cause: String(cause),
+			});
+		}
+		if (stored === undefined) {
+			return fail("INTERNAL_ERROR", "The agent was reached, but the setting could not be saved.");
+		}
+		// A socket that answered proves the server forwards it now.
+		this.askServerAgain(hostId);
+		return listed;
 	}
 
 	/**
@@ -3544,6 +3812,12 @@ export class SessionManager {
 		signal?: AbortSignal,
 		ownerAcqId?: string,
 		approvedAgentSha?: string,
+		/**
+		 * Reach a daemon already running and nothing else (#701): no deploy,
+		 * no launch, no stdio, and the host is not announced active here: the
+		 * caller does it once the daemon is the host's.
+		 */
+		daemonOnly = false,
 	): Promise<import("./agent-connection.js").AgentConnection> {
 		const promptAuth = this.sshMgr.buildPromptAuth(client, signal, ownerAcqId);
 
@@ -3597,6 +3871,7 @@ export class SessionManager {
 				this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
 				this.ctx.socketForwardingRefusals,
 			),
+			daemonOnly,
 		);
 
 		console.error(`[lasterm-ssh] starting SSH connection to ${host.sshHost ?? host.label}`);
@@ -3662,6 +3937,7 @@ export class SessionManager {
 					signal,
 					ownerAcqId,
 					err.remoteSha256,
+					daemonOnly,
 				);
 			}
 
@@ -3718,7 +3994,16 @@ export class SessionManager {
 				) {
 					if (!this.ctx.metaDal.updateHostFingerprint(hostId, kv.capturedFingerprint, hostKey))
 						hostChanged();
-					return await this._connectSshAgent(hostId, host, client, sessionId, signal, ownerAcqId);
+					return await this._connectSshAgent(
+						hostId,
+						host,
+						client,
+						sessionId,
+						signal,
+						ownerAcqId,
+						undefined,
+						daemonOnly,
+					);
 				}
 
 				const action = await this.sshMgr.promptHostKeyVerify(
@@ -3776,6 +4061,7 @@ export class SessionManager {
 						this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
 						this.ctx.socketForwardingRefusals,
 					),
+					daemonOnly,
 				);
 				console.error(`[lasterm-ssh] creating SshAgent for host ${host.id} (retry)`);
 				console.error(
@@ -3828,7 +4114,7 @@ export class SessionManager {
 					retryAgent.close();
 					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
 				}
-				this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
+				if (!daemonOnly) this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 				this.agentMgr.wireAgentEvents(hostId, sessionId, retryAgent);
 				// B4: do NOT set ctx.agents here — caller sets it atomically with commit().
 				return retryAgent;
@@ -3856,7 +4142,7 @@ export class SessionManager {
 		}
 
 		// First connection succeeded without TOFU/mismatch prompt
-		this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
+		if (!daemonOnly) this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 		this.agentMgr.wireAgentEvents(hostId, sessionId, sshAgent);
 		// B4: do NOT set ctx.agents here — caller sets it atomically with commit().
 		return sshAgent;
@@ -3906,4 +4192,24 @@ async function closeAgentWithTimeout(agent: import("./agent-connection.js").Agen
 	} finally {
 		if (timer !== undefined) clearTimeout(timer);
 	}
+}
+
+/**
+ * Whether `now` is still the host `then` set out for (#701): the fields that
+ * say where it is and what keeps an agent there. A label or a colour may
+ * change meanwhile.
+ */
+function sameDestination(then: Host, now: Host): boolean {
+	return (
+		then.sshHost === now.sshHost &&
+		then.sshPort === now.sshPort &&
+		then.sshUser === now.sshUser &&
+		then.sshConfigHost === now.sshConfigHost &&
+		then.sshProxyHostId === now.sshProxyHostId &&
+		then.sshProxySpec === now.sshProxySpec &&
+		then.sshProxyUser === now.sshProxyUser &&
+		then.sshProxyPort === now.sshProxyPort &&
+		then.os === now.os &&
+		then.sshRemoteDaemon === now.sshRemoteDaemon
+	);
 }

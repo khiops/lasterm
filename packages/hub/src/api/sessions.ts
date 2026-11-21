@@ -2,6 +2,7 @@ import { type AgentEnvironmentResponse, ErrorCode, toSnakeCase } from "@lasterm/
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
+import { listedChannel } from "./listed-channel.js";
 
 /**
  * What a replace request asks for. `force` ends the terminals other hubs hold
@@ -117,7 +118,11 @@ export function registerSessionRoutes(
 				if (
 					outcome.code === ErrorCode.OTHER_HUBS_HOLD_CHANNELS ||
 					outcome.code === "HOST_BUSY" ||
-					outcome.code === ErrorCode.TRANSFERS_WOULD_STOP
+					outcome.code === ErrorCode.TRANSFERS_WOULD_STOP ||
+					// What the daemon's own list forbids (#701).
+					outcome.code === ErrorCode.OTHER_HOST_TERMINALS ||
+					outcome.code === ErrorCode.AGENT_INVENTORY_UNKNOWN ||
+					outcome.code === ErrorCode.TERMINALS_SHOWN_ENDED
 				) {
 					return reply.code(409).send({
 						error: {
@@ -163,7 +168,7 @@ export function registerSessionRoutes(
 		}
 
 		// Include channels for this session
-		const channels = metaDal.listChannels(request.params.id);
+		const channels = metaDal.listChannels(request.params.id).map(listedChannel);
 		return toSnakeCase({ ...session, channels });
 	});
 

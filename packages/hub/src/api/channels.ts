@@ -2,6 +2,7 @@ import { type Channel, isValidUlid, toSnakeCase } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
+import { listedChannel } from "./listed-channel.js";
 
 export function registerChannelRoutes(
 	server: FastifyInstance,
@@ -29,7 +30,7 @@ export function registerChannelRoutes(
 			const hostOf = host_id === undefined ? metaDal.listChannelHosts() : null;
 
 			return channels.map((ch) => {
-				const row = toSnakeCase(ch) as Record<string, unknown>;
+				const row = toSnakeCase(listedChannel(ch)) as Record<string, unknown>;
 				row.display_title = sessionManager.resolveDisplayTitle(ch.id);
 				row.host_id = host_id ?? hostOf?.get(ch.id) ?? null;
 				return row;
@@ -64,7 +65,7 @@ export function registerChannelRoutes(
 		if (!channel) {
 			return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Channel not found" } });
 		}
-		const row = toSnakeCase(channel) as Record<string, unknown>;
+		const row = toSnakeCase(listedChannel(channel)) as Record<string, unknown>;
 		row.display_title = sessionManager.resolveDisplayTitle(channel.id);
 		return row;
 	});
@@ -176,7 +177,7 @@ export function registerChannelRoutes(
 			}
 
 			const updated = metaDal.getChannel(id);
-			return reply.code(200).send(toSnakeCase(updated));
+			return reply.code(200).send(toSnakeCase(updated && listedChannel(updated)));
 		},
 	);
 

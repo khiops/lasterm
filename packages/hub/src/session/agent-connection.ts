@@ -58,10 +58,35 @@ export abstract class AgentConnection extends EventEmitter {
 	 */
 	otherOwnerChannels: number | undefined;
 
+	/**
+	 * What a remote daemon said it holds of this hub's, once its list ended,
+	 * kept for the stops this hub asks of it (#701). Undefined until then, and
+	 * when the list did not come: then no stop is decided on it.
+	 */
+	daemonInventory: DaemonInventory | undefined;
+
+	/**
+	 * The channels that exited after the daemon's list ended and before that
+	 * list was kept as `daemonInventory`: a batch of frames can carry the end
+	 * of the list and an exit together, and the exit must not be lost between
+	 * the two (#701). Undefined outside that window.
+	 */
+	exitedSinceList: Set<string> | undefined;
+
 	constructor() {
 		super();
+		this.on("message", (msg: ProtocolMessage) => {
+			if (msg.type !== "CHANNEL_EXIT" || this.exitedSinceList === undefined) return;
+			const channelId = (msg as { channelId?: unknown }).channelId;
+			if (typeof channelId === "string") this.exitedSinceList.add(channelId);
+		});
 		this.channelStatePromise = new Promise<AgentChannelStateMessage[]>((resolve, reject) => {
-			const states: AgentChannelStateMessage[] = [];
+			// By channel: an exit removes its state at once, whatever the count (#701).
+			const states = new Map<string, AgentChannelStateMessage>();
+			// A terminal can end between the daemon's snapshot of its channels and
+			// the states it sends from it: its exit then comes first, and the state
+			// after it is stale (#701).
+			const exited = new Set<string>();
 			let settled = false;
 
 			const cleanup = (): void => {
@@ -79,13 +104,23 @@ export abstract class AgentConnection extends EventEmitter {
 
 			const onMessage = (msg: ProtocolMessage): void => {
 				if (msg.type === "AGENT_CHANNEL_STATE") {
-					states.push(msg as AgentChannelStateMessage);
+					const state = msg as AgentChannelStateMessage;
+					if (!exited.has(state.channelId)) states.set(state.channelId, state);
+				} else if (msg.type === "CHANNEL_EXIT") {
+					const channelId = (msg as { channelId?: unknown }).channelId;
+					if (typeof channelId === "string") {
+						exited.add(channelId);
+						states.delete(channelId);
+					}
+				} else if (msg.type === "ERROR" && isAuthRefusal(msg)) {
+					settle(() => reject(new AgentRefusedHub((msg as { message?: string }).message ?? "")));
 				} else if (msg.type === "CHANNEL_STATE_END") {
 					const others = (msg as ChannelStateEndMessage).otherOwnerChannels;
 					if (typeof others === "number" && Number.isSafeInteger(others) && others >= 0) {
 						this.otherOwnerChannels = others;
 					}
-					settle(() => resolve(states));
+					this.exitedSinceList = new Set();
+					settle(() => resolve([...states.values()]));
 				}
 			};
 
@@ -222,5 +257,32 @@ function isMessage(value: unknown): value is ProtocolMessage {
 		typeof value === "object" &&
 		value !== null &&
 		typeof (value as { type?: unknown }).type === "string"
+	);
+}
+
+/**
+ * What a remote daemon reported holding of this hub's at its adoption (#701):
+ * the channels it listed, less those that exited since, and those of them the
+ * adoption destroyed as this hub's own orphans.
+ */
+export interface DaemonInventory {
+	readonly listed: Set<string>;
+	readonly destroyed: ReadonlySet<string>;
+}
+
+/** The daemon answered HELLO, then refused this hub's AUTH (#701). */
+export class AgentRefusedHub extends Error {
+	constructor(said: string) {
+		super(`The agent on this host refused this hub.${said === "" ? "" : ` It said: ${said}`}`);
+		this.name = "AgentRefusedHub";
+	}
+}
+
+/** A daemon's refusal of the AUTH that follows HELLO: AUTH_REQUIRED or AUTH_INVALID. */
+function isAuthRefusal(msg: ProtocolMessage): boolean {
+	const error = msg as { code?: unknown; channelId?: unknown };
+	return (
+		error.channelId === undefined &&
+		(error.code === "AUTH_INVALID" || error.code === "AUTH_REQUIRED")
 	);
 }

@@ -257,6 +257,12 @@ export interface ChannelExitMessage {
 	channelId: string;
 	exitCode: number;
 	signal?: string;
+	/**
+	 * The terminal's final screen, when its program ended by itself (#933).
+	 * Absent from an older agent, for a terminal the hub destroyed, and for a
+	 * screen too large to carry.
+	 */
+	screen?: SnapshotData;
 }
 
 /** Hub → Agent: destroy a channel and its PTY */
@@ -312,6 +318,14 @@ export interface ErrorMessage {
 	 * other ERROR, and from a hub older than that.
 	 */
 	lastOutput?: EndedOutput;
+	/**
+	 * Hub → UI, on `CHANNEL_DEAD` answering an ATTACH only: the end it is
+	 * about, as `ChannelStateMessage.endId` names it, and that end's exit code
+	 * and reason, each when the hub holds one (#932).
+	 */
+	endId?: string;
+	exitCode?: number;
+	endReason?: ChannelEndReason;
 }
 
 /**
@@ -341,6 +355,15 @@ export interface AgentChannelStateMessage {
 	title: string;
 	pid: number;
 	alive: boolean;
+}
+
+/**
+ * Agent → Hub (daemon mode, `stop-accepted`): the daemon took the STOP and is
+ * shutting down; its connection ends once its terminals are torn down. A
+ * close counts as the stop only after this (#700).
+ */
+export interface StopAcceptedMessage {
+	type: "STOP_ACCEPTED";
 }
 
 /** Agent → Hub (daemon mode): sentinel marking end of AGENT_CHANNEL_STATE enumeration */
@@ -819,6 +842,11 @@ export interface ChannelStateMessage {
 	 * asking over a `killed` one (#592).
 	 */
 	endReason?: ChannelEndReason;
+	/**
+	 * Only on a `dead` report: the id the hub gave this end of the terminal,
+	 * new at each end (#932). Absent for an end recorded before end ids.
+	 */
+	endId?: string;
 }
 
 /**
@@ -1176,6 +1204,7 @@ export type AgentMessage =
 	| HeartbeatAckMessage
 	| AgentChannelStateMessage
 	| ChannelStateEndMessage
+	| StopAcceptedMessage
 	| AgentTitleChangeMessage
 	| AgentProcessTitleMessage
 	| CwdChangeMessage
@@ -1335,6 +1364,7 @@ export type ProtocolMessage =
 	| PromptCancelMessage
 	| AgentChannelStateMessage
 	| ChannelStateEndMessage
+	| StopAcceptedMessage
 	| AgentTitleChangeMessage
 	| AgentProcessTitleMessage
 	| AgentBellMessage

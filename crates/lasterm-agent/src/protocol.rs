@@ -54,6 +54,11 @@ pub enum AgentToHub {
         exit_code: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         signal: Option<String>,
+        /// The terminal's final screen, when its program ended by itself
+        /// (#933). Absent for a terminal the hub destroyed, and for a screen
+        /// too large to carry.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        screen: Option<SnapshotData>,
     },
     #[serde(rename = "HEARTBEAT_ACK")]
     HeartbeatAck { ts: String },
@@ -138,6 +143,12 @@ pub enum AgentToHub {
         #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// A daemon took a STOP and is shutting down: no new terminal starts from
+    /// here, and the connection ends once its terminals are torn down
+    /// (`stop-accepted`, #700). A hub counts that end as the stop only after
+    /// this frame; without it, a close may be a lost link.
+    #[serde(rename = "STOP_ACCEPTED")]
+    StopAccepted {},
     #[serde(rename = "LOG")]
     Log {
         channel_id: String,

@@ -2457,3 +2457,161 @@ describe("useChannelsStore — a new terminal's spawn, whichever pane shows it (
 		});
 	});
 });
+
+describe("useChannelsStore — each end of a terminal (#932)", () => {
+	/** A dead row as the hub's list gives it, with E1's end. */
+	function rowWithE1(): Record<string, unknown> {
+		return {
+			id: "ch-end",
+			session_id: "sess-1",
+			shell: "/bin/bash",
+			cols: 80,
+			rows: 24,
+			status: "dead",
+			exit_code: 3,
+			end_reason: "killed",
+			created_at: "2026-11-21T00:00:00Z",
+			updated_at: "2026-11-21T00:00:00Z",
+		};
+	}
+
+	function listAnswers(rows: Record<string, unknown>[]): void {
+		mockFetch.mockImplementation((url: string) => {
+			const body = url.includes("/api/groups") ? [] : rows;
+			return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		});
+	}
+
+	async function listedWithE1() {
+		listAnswers([rowWithE1()]);
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+		// The list carries no end id: the end's report gives it (#932).
+		store.updateChannelStatus("ch-end", "dead", 3, "killed", "E1");
+		expect(store.channels.find((c) => c.id === "ch-end")).toMatchObject({
+			exitCode: 3,
+			endReason: "killed",
+			endId: "E1",
+		});
+		return store;
+	}
+
+	it("a newer end replaces a pending one", async () => {
+		listAnswers([rowWithE1()]);
+		const store = useChannelsStore();
+		const fetching = store.fetchChannels("host-1");
+		// Heard while the fetch is in flight, the channel not listed yet: held pending.
+		store.updateChannelStatus("ch-end", "dead", 3, undefined, "E1");
+		store.takeEndedAnswer("ch-end", { endId: "E2", exitCode: 5 });
+
+		await fetching;
+
+		expect(store.channels.find((c) => c.id === "ch-end")).toMatchObject({
+			exitCode: 5,
+			endId: "E2",
+		});
+	});
+
+	it("a newer end without a code clears the fetched row", async () => {
+		listAnswers([rowWithE1()]);
+		const store = useChannelsStore();
+		const fetching = store.fetchChannels("host-1");
+		store.takeEndedAnswer("ch-end", { endId: "E2" });
+
+		await fetching;
+
+		const listed = store.channels.find((c) => c.id === "ch-end");
+		expect(listed?.endId).toBe("E2");
+		expect(listed).not.toHaveProperty("exitCode");
+		expect(listed).not.toHaveProperty("endReason");
+	});
+
+	it("a new run forgets the previous end's code", async () => {
+		const store = await listedWithE1();
+
+		store.updateChannelStatus("ch-end", "live");
+		expect(store.channels.find((c) => c.id === "ch-end")).not.toHaveProperty("exitCode");
+		store.updateChannelStatus("ch-end", "dead", undefined, undefined, "E2");
+
+		const listed = store.channels.find((c) => c.id === "ch-end");
+		expect(listed).not.toHaveProperty("exitCode");
+		expect(listed?.endId).toBe("E2");
+	});
+
+	it("a new run announced by CHANNEL_CREATED forgets the previous end's code", async () => {
+		const store = await listedWithE1();
+
+		store.handleChannelCreated(makeCreatedMsg({ channelId: "ch-end", status: "live" }));
+
+		const listed = store.channels.find((c) => c.id === "ch-end");
+		expect(listed).not.toHaveProperty("exitCode");
+		expect(listed).not.toHaveProperty("endReason");
+		expect(listed).not.toHaveProperty("endId");
+	});
+
+	it("a newer dead report replaces the previous end", async () => {
+		const store = await listedWithE1();
+
+		store.updateChannelStatus("ch-end", "dead", undefined, undefined, "E2");
+
+		const listed = store.channels.find((c) => c.id === "ch-end");
+		expect(listed?.endId).toBe("E2");
+		expect(listed).not.toHaveProperty("exitCode");
+		expect(listed).not.toHaveProperty("endReason");
+		expect(store.reportOf("ch-end")).toEqual({ status: "dead", endId: "E2" });
+	});
+});
+
+describe("useChannelsStore — the end a window holds, kept and cleared (#932)", () => {
+	function listAnswers(rows: Record<string, unknown>[]): void {
+		mockFetch.mockImplementation((url: string) => {
+			const body = url.includes("/api/groups") ? [] : rows;
+			return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		});
+	}
+
+	it("a newer end told again still clears the fetched row", async () => {
+		listAnswers([
+			{
+				id: "ch-again",
+				session_id: "sess-1",
+				shell: "/bin/bash",
+				cols: 80,
+				rows: 24,
+				status: "dead",
+				exit_code: 3,
+				end_reason: "killed",
+				created_at: "2026-11-21T00:00:00Z",
+				updated_at: "2026-11-21T00:00:00Z",
+			},
+		]);
+		const store = useChannelsStore();
+		const fetching = store.fetchChannels("host-1");
+		store.takeEndedAnswer("ch-again", { endId: "E2" });
+		// The same end reported again, as CHANNEL_STATE says it.
+		store.updateChannelStatus("ch-again", "dead", undefined, undefined, "E2");
+
+		await fetching;
+
+		const listed = store.channels.find((c) => c.id === "ch-again");
+		expect(listed?.endId).toBe("E2");
+		expect(listed).not.toHaveProperty("exitCode");
+		expect(listed).not.toHaveProperty("endReason");
+	});
+
+	it("a terminal created again leaves no end in its report, on any host", () => {
+		const store = useChannelsStore();
+		store.updateChannelStatus("ch-other", "dead", 3, "killed", "E1");
+
+		store.handleChannelCreated(
+			makeCreatedMsg({ channelId: "ch-other", hostId: "a-host-not-in-view", status: "live" }),
+		);
+
+		expect(store.reportOf("ch-other")).toEqual({ status: "live" });
+		expect(store.endReasonOf("ch-other")).toBeUndefined();
+		// Nor in what waits for that host's list: the store holds no end for it
+		// any more, so an answer naming E1 is that end, not a repeat.
+		store.takeEndedAnswer("ch-other", { endId: "E1", exitCode: 3 });
+		expect(store.reportOf("ch-other")).toEqual({ status: "dead", exitCode: 3, endId: "E1" });
+	});
+});

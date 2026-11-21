@@ -161,7 +161,7 @@ agent's default. A default profile the user set (`PUT /api/hosts/:id/profiles/:p
 replaced, and a profile the user hid is never marked (#800). The host's default profile is what a
 new terminal starts there, the local host's as an SSH host's (§ 4.4, #802).
 
-**Capabilities.** The hub logs the list, and gates nothing on it but `adapts_input`, which follows `"input-modes"` (§ 4.2), and `streams_paste` and its PASTE relay, which follow `"paste-stream"` (§ 3.21, § 4.21): every agent it can meet has the others but `"hub-identity"`, and every daemon `"hub-identity"` too. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"input-modes"` means an agent that sends the terminal's input modes and alternate screen with each snapshot (§ 3.3) and writes paste markers and cursor keys in its program's form (§ 3.4); the hub tells the UI so with `adapts_input` (§ 4.2, § 4.4). `"paste-stream"` means an agent that takes a paste as PASTE chunks, acknowledges each once its terminal took it, and writes and closes its markers itself (§ 3.21); the hub tells the UI so with `streams_paste`. `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17).
+**Capabilities.** The hub logs the list, and gates on it `adapts_input`, which follows `"input-modes"` (§ 4.2), `streams_paste` and its PASTE relay, which follow `"paste-stream"` (§ 3.21, § 4.21), and how it reads the end of a STOP, which follows `"stop-accepted"` (§ 3.17): every agent it can meet has the others but `"hub-identity"` and `"stop-accepted"`, which only daemons say, and `"stop-accepted"` only daemons released with it. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"input-modes"` means an agent that sends the terminal's input modes and alternate screen with each snapshot (§ 3.3) and writes paste markers and cursor keys in its program's form (§ 3.4); the hub tells the UI so with `adapts_input` (§ 4.2, § 4.4). `"paste-stream"` means an agent that takes a paste as PASTE chunks, acknowledges each once its terminal took it, and writes and closes its markers itself (§ 3.21); the hub tells the UI so with `streams_paste`. `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17). `"stop-accepted"`, said by a daemon only, means it answers a STOP it takes with STOP_ACCEPTED before its connection ends (§ 3.17, #700): the hub reads a close after STOP as the stop only after it.
 
 ### 3.1b AUTH (Hub → Agent, daemon mode)
 
@@ -488,9 +488,26 @@ holds, before every OUTPUT it does not, with `last_seq` the `seq` of the last re
   type: "CHANNEL_EXIT",
   channel_id: string,
   exit_code: number,
-  signal?: string        // "SIGTERM", "SIGKILL"
+  signal?: string,       // "SIGTERM", "SIGKILL"
+  screen?: { serialized: string, cols: number, rows: number,
+             cursor_x: number, cursor_y: number,
+             alternate_screen?: boolean, input_modes?: string }  // as on ATTACH_OK (§ 3.3)
 }
 ```
+
+`screen` is the terminal's final screen, from its `vt100` mirror after the last output of its PTY
+(#933). The agent sends it when the terminal's program ended by itself: not for one the hub
+destroyed (DESTROY), and not when `serialized` and `input_modes` together exceed 256 KiB, a bound
+on the frame a daemon keeps for its hub while it is away (§ 2.1b). An older agent sends none.
+
+The hub takes it before it records the end (§ 4.2, `last_output`): when the last output it would
+answer with is complete and the screen's redraw still fits in its 128 KiB tail, it appends the
+redraw to the terminal's stored output; otherwise it stores the screen as the terminal's newest
+snapshot. The redraw is the whole screen as the scroll region, origin and insert modes off,
+autowrap on and US ASCII in G0 to G3 with G0 shifted in (`ESC[r ESC[?6l ESC[4l ESC[?7h ESC(B
+ESC)B ESC*B ESC+B SI`), then `serialized`, which starts by clearing the visible screen. A screen
+whose JSON would exceed the 256 KiB a stored snapshot is sent at is not taken. Storing it never
+stops the end from being recorded: a storage error is logged by its code, and the end goes on.
 
 ### 3.9 DESTROY (Hub → Agent)
 
@@ -663,14 +680,27 @@ daemon that other owners still hold channels on refuses, and stops nothing:
 `2 terminals on this agent belong to other hubs; …`.
 
 Otherwise the daemon shuts down as on SIGTERM, ending every channel it holds, and is recorded as a
-stop that was asked for, under the same deadline. It sends nothing first. From the STOP on it
-refuses any new SPAWN, so no terminal can start between the count and the teardown; once the
-terminals are torn down it closes every hub connection, what each had queued going out first. The
-connection ending is the answer. A stdio agent answers `ERROR { code: "INVALID_MESSAGE" }` and keeps
-running: it ends when its input closes.
+stop that was asked for, under the same deadline. From the STOP on it refuses any new SPAWN, so no
+terminal can start between the count and the teardown. A daemon that says `"stop-accepted"` first
+answers on that connection, before its end of stream (#700):
 
-The hub's `requestDaemonStop` does not count DISPLACED or a hub-issued close as confirmation;
-a close while the hub is quitting is also unconfirmed. Replace's response is defined in § 6.
+```typescript
+{ type: "STOP_ACCEPTED" }
+```
+
+Once the terminals are torn down it closes every hub connection, what each had queued going out
+first; the shutdown waits for those writes, within one bound of 2 seconds for all connections
+together. A STOP still queued on a connection that a newer one of the same hub displaced is
+dropped, with no answer (#700). A stdio agent answers `ERROR { code: "INVALID_MESSAGE" }` and
+keeps running: it ends when its input closes.
+
+The hub's `requestDaemonStop` reads a close as the stop only for an agent that sent STOP_ACCEPTED
+first, when it says `"stop-accepted"`; a close without it is `unconfirmed`, since the link may have
+dropped before the daemon took the STOP, and is then handled as a dropped link. An agent that does
+not say `"stop-accepted"`, any released before it existed, never sends it: its close is read as the
+stop.
+DISPLACED, a hub-issued close and a close while the hub is quitting are never confirmation. Replace's
+response is defined in § 6.
 
 Only terminals refuse a STOP without `force`: another hub connected there and holding none does not,
 and its connection closes with the rest. The hub sends one by itself, never with `force`, to a daemon
@@ -926,18 +956,25 @@ connected or not. One the hub has no record of is answered `CHANNEL_NOT_FOUND`, 
 lock: bringing an ended one back is a SPAWN that names it, which is the user's Restart (#559).
 
 ```typescript
+// on ERROR CHANNEL_DEAD answering an ATTACH only; absent from a hub older than #932
+end_id?: string,        // the end it is about, as CHANNEL_STATE names it (§ 4.7); absent for an end recorded before end ids
+exit_code?: number,     // that end's exit code, when it has one
+end_reason?: "killed" | "stopped",  // as on CHANNEL_STATE (§ 4.7)
+
 // on ERROR CHANNEL_DEAD answering an ATTACH only (#927); absent from a hub older than that
 last_output: {
   snapshot: { serialized, cols, rows, cursor_x, cursor_y } | null,
   tail: Uint8Array[],   // the output after the snapshot, as one element; [] when none is sent
   truncated?: true,     // a snapshot or output was not sent (rules below)
-  cols: number,         // the terminal's last size, which the pane draws them at (resizes are not stored)
+  cols: number,         // the size meta.db last recorded; the spool keeps no resize, so output before one is drawn at this size
   rows: number
 }
 ```
 
 `last_output` is what the terminal last printed, as far as spool.db still holds it: the newest
 snapshot and the output stored after it, or, with no snapshot, the whole stream from its first seq.
+For an end whose CHANNEL_EXIT carried the final screen (§ 3.8), that output ends on the screen's
+redraw, or the screen is the snapshot and nothing follows it.
 Only output that continues where it starts is sent, since a piece of a terminal stream drawn on a
 screen it was not written for shows something wrong without saying so:
 
@@ -974,6 +1011,15 @@ and `CHANNEL_DEAD` shows it has ended, whatever the pane showed before.
 - **No focus report from a replay:** a focus report xterm makes for the `?1004h` of a replay is not
   sent.
 - **An ended terminal's last output** (`last_output`) applies neither field.
+- **A newer end (#932).** A pane keeps the `end_id` of the ending its screen holds: the end it saw
+  live (CHANNEL_STATE `dead`), or the one whose `last_output` it drew. It keeps it through a Restart
+  over that screen and a cached ATTACH_OK that leaves the screen, and drops it when an answer
+  replaces the screen or the pane's terminal changes. A CHANNEL_DEAD naming another `end_id` than
+  that one, both present, resets the screen and draws its `last_output`, or nothing, whatever the
+  attach kept, and the pane answers it as an end found, forgetting what it held about the earlier
+  one. Whichever pane asked, the window takes the answer's end, its `exit_code` and `end_reason`
+  (removed when absent), wherever it keeps a channel's end, when the `end_id` differs from the one
+  it last heard. An answer or an ending without an `end_id` keeps the screen as before.
 - **While `adapts_input` is true** for the terminal it shows, from the ATTACH_OK or SPAWN_OK that bound
   it:
   - the pane brackets every paste itself: its text without any paste marker (removed until none is
@@ -1306,7 +1352,12 @@ absent from `channels` has ended, or is unknown.
   // its shell or command exited, or when the hub found it gone. Stored with the
   // end in channels.end_reason and cleared when the terminal runs again, so
   // the channel list (§ 6) carries it too, and STATE_SYNC (§ 4.6) a "killed" (#592).
-  end_reason?: "killed" | "stopped"
+  end_reason?: "killed" | "stopped",
+  // Only with "dead": the ULID the hub gave this end, new at each end and the same when the end is
+  // told again (#932). Absent for an end recorded before end ids. A window hearing a "dead" with
+  // another end_id than the one it holds for that channel takes that end's exit_code and
+  // end_reason, removed when absent; any other status, and CHANNEL_CREATED, clear the end it held.
+  end_id?: string
 }
 
 // end_reason "killed": that terminal, or its session, was stopped on purpose.
@@ -2319,7 +2370,7 @@ them: they read no body, or `null`, as an empty one.
 | DELETE | `/api/hosts/:id/welcome` | ● | 204 |
 | POST | `/api/hosts/:id/agent/replace` | ● | `{ force?: boolean, stop_transfers?: boolean }` → `{ replaced: true, message }`. Stops the remote daemon serving this host, ending every terminal it holds, so the next connection starts the agent this hub carries (#456). Once the stop is confirmed, every terminal this hub held there is reported dead with `end_reason: "stopped"` (§ 4.7, #599). The daemon gets STOP over the hub's own connection (§ 3.17): while other hubs hold terminals there it refuses, and the answer is 409 `{ error: { code: "OTHER_HUBS_HOLD_CHANNELS", message, other_owner_channels? } }`; the same request with `force: true` ends those too. One the STOP cannot reach is stopped with its own `--stop`. 409 `HOST_BUSY` while another Replace holds the host (`SessionManager.replaceAgent`). A displaced or hub-closed connection is not replaced: `requestDaemonStop` classifies it as unconfirmed, and Replace answers 409 `AGENT_NOT_REPLACED`. 409 `AGENT_NOT_REPLACED` when nothing was stopped for another reason, 400 `VALIDATION_ERROR` for a `force` that is not a boolean, 404 for an unknown host. While uploads to the host run (§ 4.19), 409 `TRANSFERS_WOULD_STOP` `{ transfers }` until `stop_transfers: true`, which interrupts them; not `force`, which is about other hubs' terminals. On the local host it ends nothing, and ignores `force`: it does now what the hub does by itself (§ 3.17, #805), stopping an agent older than the hub that holds none of its terminals and starting the one beside the hub, `{ replaced: true, message }`; otherwise 409 `AGENT_NOT_REPLACED`, whose message says why (no agent connected to this hub, one not older, one still holding this hub's terminals, other hubs holding some there, a terminal starting) |
 | GET | `/api/hosts/:id/agent-environment` | ● | `?mode=inherit\|minimal` (default `inherit`) → `{ mode, os, env }`: the variables a terminal on this host would start with in that mode, before any profile changes them, asked live of the agent over ENV_QUERY (§ 3.18) and answered with `Cache-Control: no-store` (#576). Never stored, never logged, names included. 409 `HOST_NOT_CONNECTED` when no agent of this host is connected to this hub, 504 `AGENT_TIMEOUT` after 5 s without an answer, 400 `VALIDATION_ERROR` for another mode, 404 for an unknown host |
-| POST | `/api/hosts/:id/connect` | ● | `{ client_id? }` → 202 `{ status: "connecting", ended: 0 }`, or 200 `{ status: "connected" }` when it is already. Connects an SSH host and readies its agent, without starting a terminal (#648): the first connection of a terminal, less the terminal, through the same SPAWN acquisition, so a SPAWN, a restart or an attach meanwhile waits for it rather than dial again. What a remote daemon still holds is taken up; on stdio, terminals a lost link left waiting start again under their ids. It answers at once: the host's `SESSION_STATE` says `starting`, then `active`, or `closed` / `disconnected` when it failed. Its questions (host key, passphrase, agent binary) go to the window `client_id` names, the id its `AUTH_OK` gave it, or else to the first window connected; a failure is an `ERROR` sent to that window, as for a SPAWN. A pending automatic reconnect gives way to it |
+| POST | `/api/hosts/:id/connect` | ● | `{ client_id?, daemon_only? }` → 202 `{ status: "connecting", ended: 0 }`, or 200 `{ status: "connected" }` when it is already. Connects an SSH host and readies its agent, without starting a terminal (#648): the first connection of a terminal, less the terminal, through the same SPAWN acquisition, so a SPAWN, a restart or an attach meanwhile waits for it rather than dial again. What a remote daemon still holds is taken up; on stdio, terminals a lost link left waiting start again under their ids. It answers at once: the host's `SESSION_STATE` says `starting`, then `active`, or `closed` / `disconnected` when it failed. Its questions (host key, passphrase, agent binary) go to the window `client_id` names, the id its `AUTH_OK` gave it, or else to the first window connected; a failure is an `ERROR` sent to that window, as for a SPAWN. A pending automatic reconnect gives way to it. `daemon_only` (connect only; a boolean, else 400 `VALIDATION_ERROR`; reconnect and disconnect ignore it) is the host menu's "Keep the agent left here and connect" (#701): 409 `DAEMON_NOT_POSSIBLE` unless the host's stored `os` is `linux` or `darwin`; 200 `connected` for a host already connected through its daemon, storing nothing; 409 `NO_DAEMON_CONNECTION` for one connected otherwise; 409 `HOST_BUSY` while another connection is being made, which it never joins. Otherwise the connection reaches a daemon already running there and nothing else: no deploy, no launch, no agent on stdio. A socket seen silent fails it with `ERROR` `NO_AGENT_RUNNING`; forwarding refused, a listening socket still unreachable after one retry, or a host that cannot say what listens, with `DAEMON_UNREACHABLE`; a daemon refusing this hub's AUTH, with `AGENT_REFUSED_HUB`; a list not sent within 5 s, with `DAEMON_UNREACHABLE`; a destination edited meanwhile, with `HOST_CHANGED`. Once the daemon has listed what it holds, the hub stores `ssh_remote_daemon: true`, announces `HOSTS_CHANGED`, and only then announces the host `active` and takes up its terminals: until then another connect is refused and a terminal open waits. A failure stores no setting (`ssh_remote_daemon` stays as it was; the shells the agent's HELLO named may be recorded, as on any connect); one after Yes was stored, a storage error while the terminals are taken up, closes the connection and puts the setting back. That connection has no agent path, so a STOP it cannot send is not followed by `--stop` |
 | POST | `/api/hosts/:id/reconnect` | ● | `{ client_id?, force? }` → 202 `{ status: "connecting", ended }`. Closes the host's connection, then connects as above. A remote daemon keeps its terminals, taken up on the new connection. An agent on stdio ends with its connection, and its terminals with it (`end_reason: "stopped"`, § 4.7): unless `force` is `true`, the hub does nothing and answers 409 `{ error: { code: "TERMINALS_WOULD_END", message, terminals } }` with how many, for the client to ask its user and send `force: true`; with uploads to the host running as well (§ 4.19), `transfers` counts them in the same answer. Uploads alone answer 409 `TRANSFERS_WOULD_STOP` `{ transfers }`; `force: true` interrupts them. With no connection up there is nothing to close and nothing ends |
 | POST | `/api/hosts/:id/disconnect` | ● | `{ force? }` → 200 `{ status: "disconnected", ended }`. Closes the host's connection, and stops any reconnect waiting or under way. A remote daemon's terminals keep running on the host, their session `disconnected`, as after a hub restart. On stdio they end (`end_reason: "stopped"`) and the session closes; 409 `TERMINALS_WOULD_END` as for reconnect until `force: true`, and `TRANSFERS_WOULD_STOP` likewise while uploads to the host run (§ 4.19). The hub then marks the host disconnected by its user (`disconnected_by_user`, § 4.6, § 4.7) and does not reach for it again by itself: no reconnect after a lost link or a keepalive, none for a window attaching to its terminals (answered from the spool, `cached: true`), and no start marked `automatic` (§ 4.4), until someone acts on it: connect, reconnect, a new terminal there, or a terminal restarted there (SPAWN, or `POST /api/channels/:id/restart`). Kept in memory only: a hub restart forgets it, and reaches the host as it always did. A host with nothing connected, nothing connecting and no session answers 200 `ended: 0` and is not marked |
 | POST | `/api/hosts/:id/agent/stop-keeping` | ● | `readStopKeepingBody` accepts `{ end_terminals?: boolean, force?: boolean, stop_transfers?: boolean }`; `SessionManager.stopKeepingAgent` tries to stop the remote daemon the host is connected through, and stores No after the attempt. 200 `{ outcome: "stopped", ended, host }` or `{ outcome: "disabled_not_stopped", message, host }`, with the saved host in the GET host shape. Admission and refusals are listed below |
@@ -2345,17 +2396,23 @@ arrival between `HOSTS_CHANGED` over WebSocket and the HTTP answer.
 
 `SessionManager.stopKeepingAgent` admits requests in this order: 404 `NOT_FOUND`,
 400 `NOT_SSH_HOST`, 409 `HUB_QUITTING`, 409 `HOST_BUSY` (stop or acquisition),
-409 `HOST_NOT_CONNECTED`, then 409 `NO_DAEMON_CONNECTION` (connected over stdio).
+409 `HOST_NOT_CONNECTED`, 409 `NO_DAEMON_CONNECTION` (connected over stdio), 409 `HOST_BUSY`
+while a terminal start or Restart there waits for its SPAWN's answer, then what the daemon's list
+forbids (#701): 409 `AGENT_INVENTORY_UNKNOWN` when it has not listed what it holds, and 409
+`OTHER_HOST_TERMINALS` while it holds a live terminal another host record of this hub tracks.
+Replace answers these two the same way, and 409 `TERMINALS_SHOWN_ENDED` while the daemon holds
+terminals this hub shows as ended, which Replace does not count.
 `readStopKeepingBody` takes an absent or `null` body as empty, and rejects any other
 non-object body or a non-boolean consent field with 400 `VALIDATION_ERROR`. Its consent
 fields are optional; unknown fields are ignored.
 
 The operation's refusal answers change nothing: 409 `TERMINALS_WOULD_END` carries
-`error.terminals`, this hub's live terminals filed under that host, until
-`end_terminals: true`; 409 `TRANSFERS_WOULD_STOP` carries `error.transfers`, the uploads to the
-host that would stop (§ 4.19), until `stop_transfers: true`, which interrupts them. The daemon ends every terminal it holds, so terminals that
-another host entry of this hub reaches through the same daemon, or a SPAWN not yet
-answered, are not counted (#701); a STOP refusal answers
+`error.terminals`, this hub's live terminals filed under that host plus the terminals the daemon
+holds that this hub shows as ended, until `end_terminals: true`; 409 `TRANSFERS_WOULD_STOP` carries `error.transfers`, the uploads to the
+host that would stop (§ 4.19), until `stop_transfers: true`, which interrupts them. The daemon
+ends every terminal it holds: those another host record tracks refuse the stop instead, a SPAWN
+not yet answered makes it wait, and one its 10 s wait gave up on leaves the daemon's list unknown
+(`AGENT_INVENTORY_UNKNOWN`) until the host is reached again (#701). A STOP refusal answers
 409 `OTHER_HUBS_HOLD_CHANNELS` with `error.other_owner_channels` when known.
 A forced retry sends a forced STOP. When no STOP can be written, only a forced request goes on to
 the agent's own `--stop`, over SSH: without a refusal, nothing says whether other hubs hold

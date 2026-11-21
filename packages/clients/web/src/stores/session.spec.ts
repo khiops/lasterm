@@ -733,6 +733,22 @@ describe("useSessionStore — a pane over another host's terminal, after Reconne
 		expect(piPane(channels)).toBe("not-connected");
 	});
 
+	// A pane keeps the end it saw by its id, which only the report carries (#932).
+	it("hands the pane the id of each end the hub reports", async () => {
+		const { ws, channels } = await pageLoaded();
+
+		ws?.emit({
+			type: "CHANNEL_STATE",
+			channelId: PI_CHANNEL,
+			sessionId: "s-pi",
+			status: "dead",
+			exitCode: 3,
+			endId: "E1",
+		});
+
+		expect(channels.reportOf(PI_CHANNEL)).toEqual({ status: "dead", exitCode: 3, endId: "E1" });
+	});
+
 	// The pane must not bring back a terminal that was stopped from elsewhere,
 	// and only the report says it was (#580).
 	it("hands the pane why the hub ended a terminal, when the hub ended it", async () => {
@@ -939,6 +955,25 @@ describe("useSessionStore — a host coming back (#605)", () => {
 			level: "error",
 			text: "connect ECONNREFUSED 192.0.2.7:22",
 		});
+	});
+});
+
+describe("what keeping the agent left on a host says (#701)", () => {
+	it.each([
+		["NO_AGENT_RUNNING", "No Lasterm agent is running on this host."],
+		[
+			"DAEMON_UNREACHABLE",
+			"Lasterm could not reach an agent on this host, and cannot tell whether one is running.",
+		],
+		["AGENT_REFUSED_HUB", "The agent on this host refused this hub."],
+	])("shows %s with its message", async (code, message) => {
+		const sessionStore = useSessionStore();
+		await sessionStore.connect();
+		const toastStore = useToastStore();
+		wsHarness.instances[0]?.emit({ type: "ERROR", code, message, hostId: "pi" });
+		expect(toastStore.messages).toContainEqual(
+			expect.objectContaining({ level: "error", text: message }),
+		);
 	});
 });
 

@@ -177,3 +177,87 @@ describe("#674 stop close classification", () => {
 		expect(stopped).toHaveBeenCalledOnce();
 	});
 });
+
+describe("STOP_ACCEPTED (#700)", () => {
+	/** A daemon that says it answers a STOP it takes with STOP_ACCEPTED. */
+	function acknowledging(): FakeDaemonConnection & { helloMessage: unknown } {
+		const daemon = new FakeDaemonConnection() as FakeDaemonConnection & { helloMessage: unknown };
+		daemon.helloMessage = { type: "HELLO", capabilities: ["hub-identity", "stop-accepted"] };
+		return daemon;
+	}
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("reads the close after STOP_ACCEPTED as the stop, letting the owner go first", async () => {
+		const daemon = acknowledging();
+		const events: string[] = [];
+		daemon.on("close", () => events.push("close handling"));
+		const pending = requestDaemonStop(asAgent(daemon), {
+			force: false,
+			onStopped: () => events.push("let go"),
+		});
+		daemon.emit("message", { type: "STOP_ACCEPTED" });
+		// Accepted, not yet ended: nothing is decided on the acknowledgement alone.
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(events).toEqual([]);
+		daemon.emit("close");
+		expect(await pending).toEqual({ kind: "stopped" });
+		expect(events).toEqual(["let go", "close handling"]);
+	});
+
+	it("reads a close without STOP_ACCEPTED as unconfirmed, and lets nothing go", async () => {
+		const daemon = acknowledging();
+		const stopped = vi.fn();
+		const pending = requestDaemonStop(asAgent(daemon), { force: true, onStopped: stopped });
+		daemon.emit("close");
+		expect(await pending).toEqual({ kind: "unconfirmed" });
+		expect(stopped).not.toHaveBeenCalled();
+	});
+
+	it("still reads a close the hub caused, or one while it quits, as the hub's own", async () => {
+		const byHub = acknowledging();
+		const stoppedByHub = vi.fn();
+		const pendingByHub = requestDaemonStop(asAgent(byHub), {
+			force: false,
+			onStopped: stoppedByHub,
+		});
+		byHub.emit("message", { type: "STOP_ACCEPTED" });
+		byHub.closedByHub = true;
+		byHub.emit("close");
+		expect(await pendingByHub).toEqual({ kind: "closed_by_hub" });
+		expect(stoppedByHub).not.toHaveBeenCalled();
+
+		const quitting = acknowledging();
+		const stoppedQuitting = vi.fn();
+		const pendingQuitting = requestDaemonStop(asAgent(quitting), {
+			force: false,
+			onStopped: stoppedQuitting,
+			isHubQuitting: () => true,
+		});
+		quitting.emit("message", { type: "STOP_ACCEPTED" });
+		quitting.emit("close");
+		expect(await pendingQuitting).toEqual({ kind: "closed_by_hub" });
+		expect(stoppedQuitting).not.toHaveBeenCalled();
+	});
+
+	it("keeps reading an older daemon's close as the stop: it never says STOP_ACCEPTED", async () => {
+		const daemon = new FakeDaemonConnection() as FakeDaemonConnection & { helloMessage: unknown };
+		daemon.helloMessage = { type: "HELLO", capabilities: ["hub-identity"] };
+		const stopped = vi.fn();
+		const pending = requestDaemonStop(asAgent(daemon), { force: false, onStopped: stopped });
+		daemon.emit("close");
+		expect(await pending).toEqual({ kind: "stopped" });
+		expect(stopped).toHaveBeenCalledOnce();
+	});
+
+	it("gives up when STOP_ACCEPTED came but the connection did not end in time", async () => {
+		vi.useFakeTimers();
+		const daemon = acknowledging();
+		const pending = requestDaemonStop(asAgent(daemon), { force: false, timeoutMs: 1_000 });
+		daemon.emit("message", { type: "STOP_ACCEPTED" });
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(await pending).toEqual({ kind: "timeout" });
+	});
+});

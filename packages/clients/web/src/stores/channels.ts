@@ -288,6 +288,8 @@ interface PendingStatus {
 	endReason?: ChannelEndReason;
 	endId?: string;
 	replacesEnd?: true;
+	/** A terminal created again: its own session and size win over a fetched row's (#1109). */
+	row?: Pick<Channel, "sessionId" | "cols" | "rows">;
 }
 
 /**
@@ -297,6 +299,13 @@ interface PendingStatus {
  * run (#1091).
  */
 function bufferedStatus(held: PendingStatus | undefined, heard: PendingStatus): PendingStatus {
+	const buffered = bufferedEnd(held, heard);
+	// What a creation told of the terminal outlives the statuses heard after it.
+	const row = heard.row ?? held?.row;
+	return row === undefined ? buffered : { ...buffered, row };
+}
+
+function bufferedEnd(held: PendingStatus | undefined, heard: PendingStatus): PendingStatus {
 	const sameEnd =
 		held !== undefined &&
 		heard.replacesEnd !== true &&
@@ -321,6 +330,7 @@ function withHeard(channel: Channel, heard: PendingStatus): Channel {
 		...(heard.exitCode !== undefined && { exitCode: heard.exitCode }),
 		...(heard.endReason !== undefined && { endReason: heard.endReason }),
 		...(heard.endId !== undefined && { endId: heard.endId }),
+		...heard.row,
 	};
 }
 
@@ -1161,7 +1171,12 @@ export const useChannelsStore = defineStore("channels", () => {
 		// one that was dead is live again, on a new session, and skipping this
 		// left it greyed out in the sidebar with its terminal running behind it.
 		// A fetch in flight may list it with an older row, ended (#1091).
-		heardDuringFetch(msg.channelId, { status: msg.status, replacesEnd: true });
+		heardDuringFetch(msg.channelId, {
+			status: msg.status,
+			replacesEnd: true,
+			// Session and size only: a title or time changed since is the newer word.
+			row: { sessionId: msg.sessionId, cols: msg.cols, rows: msg.rows },
+		});
 		knownToHub(msg.channelId);
 
 		const knownIndex = channels.value.findIndex((c) => c.id === msg.channelId);

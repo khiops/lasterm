@@ -16,7 +16,7 @@
  *   Directory specification requires, and the home-directory default is used,
  *   which must itself be absolute.
  */
-import { homedir } from "node:os";
+import os from "node:os";
 import path from "node:path";
 
 /**
@@ -105,7 +105,12 @@ const HOME_DEFAULT: Record<PlatformDirKind, readonly string[]> = {
 };
 
 function currentContext(): PlatformDirContext {
-	return { platform: process.platform, env: process.env, homedir, channel: buildChannel() };
+	return {
+		platform: process.platform,
+		env: process.env,
+		homedir: () => os.homedir(),
+		channel: buildChannel(),
+	};
 }
 
 function pathFor(context: PlatformDirContext): typeof path.posix {

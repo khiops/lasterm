@@ -4925,6 +4925,63 @@ mod tests {
                 daemon.stop().await;
             }
 
+            /// A live restart whose SPAWN comes before the destroyed shell's
+            /// reader sends its exit: that reader sends none, which would come
+            /// after the SPAWN_OK and mark the new run dead (#1113).
+            #[tokio::test]
+            async fn a_live_restart_answered_first_gets_no_exit_of_the_destroyed_shell() {
+                crate::pty::delay_torn_down_of("restart-first", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("restart-first").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("restart-first")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "restart-first".to_string(),
+                })
+                .await;
+                // Its reader has seen its PTY close, and waits.
+                a.read_through(|frame| is_about(frame, "LOG", "restart-first"))
+                    .await;
+                spawned(&mut a, interactive("restart-first")).await;
+                let later = a.frames_until_quiet(Duration::from_millis(3000)).await;
+                assert!(
+                    !mentions(&later, "restart-first").contains(&"CHANNEL_EXIT".to_string()),
+                    "an exit after the SPAWN_OK marks the restarted terminal dead"
+                );
+
+                daemon.stop().await;
+            }
+
+            /// A live restart whose new run ends at once, before the destroyed
+            /// shell's reader sends its exit: the hub gets the new run's exit,
+            /// and that one only (#1113).
+            #[tokio::test]
+            async fn a_restarted_run_that_ends_at_once_gets_its_own_exit_only() {
+                crate::pty::delay_torn_down_of("restart-ends", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("restart-ends").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("restart-ends")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "restart-ends".to_string(),
+                })
+                .await;
+                a.read_through(|frame| is_about(frame, "LOG", "restart-ends"))
+                    .await;
+                spawned(&mut a, spawn("restart-ends", "exit 5")).await;
+                let later = a.frames_until_quiet(Duration::from_millis(3000)).await;
+                let exits: Vec<Option<i64>> = later
+                    .iter()
+                    .filter(|frame| is_about(frame, "CHANNEL_EXIT", "restart-ends"))
+                    .map(|frame| frame["exit_code"].as_i64())
+                    .collect();
+                assert_eq!(exits, vec![Some(5)]);
+
+                daemon.stop().await;
+            }
+
             fn stop(force: bool) -> HubToAgent {
                 HubToAgent::Stop { force }
             }

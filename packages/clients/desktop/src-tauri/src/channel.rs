@@ -9,7 +9,6 @@
 //! it in the binary.
 
 const CHANNEL_MARKER: &str = concat!("lasterm-build-channel:", env!("LASTERM_BUILD_CHANNEL"));
-const MARKER_PREFIX: &str = "lasterm-build-channel:";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Channel {
@@ -46,9 +45,13 @@ impl Channel {
 /// The channel this executable was built for, read from its marker.
 pub(crate) fn build_channel() -> Channel {
     // black_box: the marker is read, not folded away, so it stays in the binary.
-    match std::hint::black_box(CHANNEL_MARKER).strip_prefix(MARKER_PREFIX) {
-        Some("release") => Channel::Release,
-        _ => Channel::Dev,
+    // Its end is compared, with no prefix literal of its own: the linker lays
+    // literals side by side, and a prefix placed before "release" would read as
+    // the release marker in a dev build.
+    if std::hint::black_box(CHANNEL_MARKER).ends_with(":release") {
+        Channel::Release
+    } else {
+        Channel::Dev
     }
 }
 

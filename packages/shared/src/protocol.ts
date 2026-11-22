@@ -836,8 +836,9 @@ export interface SessionStateMessage {
  *
  * - `killed`: someone stopped that terminal, or its session, on purpose: a
  *   kill (`DELETE /api/channels/:id`), a session closed
- *   (`DELETE /api/sessions/:id`). Never undone by "When a terminal ends",
- *   whether the pane saw the end or found it later.
+ *   (`DELETE /api/sessions/:id`), a restart that ended its shell and then
+ *   failed (`POST /api/channels/:id/restart`, #1113). Never undone by "When a
+ *   terminal ends", whether the pane saw the end or found it later.
  * - `stopped`: it ended with its agent or its hub, as a whole was stopped: the
  *   agent replaced, the hub quitting. Nobody aimed at that terminal. A pane
  *   that sees it happen leaves it be, rather than race the replacement or the

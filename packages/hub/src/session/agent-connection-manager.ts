@@ -394,45 +394,9 @@ export class AgentConnectionManager {
 				this.ctx.scheduler.onSnapshotResponse(res.channelId);
 				this.lifecycle.storeSnapshot(res.channelId, res.snapshot);
 			} else if (msg.type === "CHANNEL_EXIT") {
-				const exitMsg = msg as ChannelExitMessage;
-				// Its final screen first, while its output is still tracked (#933).
-				if (exitMsg.screen !== undefined) {
-					this.lifecycle.takeFinalScreen(exitMsg.channelId, exitMsg.screen);
-				}
-				// The recording follows the hub's view of the channel (#80).
-				this.ctx.recorder?.endChannel(exitMsg.channelId, "exited", exitMsg.exitCode);
-				const channel = this.ctx.channels.get(exitMsg.channelId);
-				if (channel) {
-					// An ended terminal has no directory any more (#834).
-					delete channel.liveCwd;
-					this.broadcaster.updateChannelStatus(
-						exitMsg.channelId,
-						channel.sessionId,
-						"dead",
-						exitMsg.exitCode,
-						// The hub is stopping this host's agent to replace it: its
-						// terminals end with it, which nobody aimed at them (#580,
-						// #592). The broadcaster marks every end heard during a
-						// quit itself.
-						this.ctx.stoppingAgents.has(hostId) ? "stopped" : undefined,
-					);
-				}
-				this.ctx.scheduler.untrackChannel(exitMsg.channelId);
-				this.ctx.chunker.untrackChannel(exitMsg.channelId);
-				this.broadcaster.clearTitleDebounce(exitMsg.channelId);
-				this.broadcaster.clearProcessTitleDebounce(exitMsg.channelId);
-				// Close and remove the channel logger on exit
-				const exitLogger = this.ctx.loggerRegistry?.get(exitMsg.channelId);
-				if (exitLogger) {
-					exitLogger.log("hub", "info", "channel exit", { exitCode: exitMsg.exitCode ?? null });
-					exitLogger.close();
-					this.ctx.loggerRegistry?.delete(exitMsg.channelId);
-				}
-				// No longer held there: the stops asked of this daemon count it no
-				// more (#701).
-				agent.daemonInventory?.listed.delete(exitMsg.channelId);
-				// Its last one here, perhaps: an agent older than this hub goes now (#805).
-				this.lifecycle.agentMayBeIdle(hostId);
+				// Applied, or held while a restart of its terminal can still
+				// succeed (#1113).
+				this.lifecycle.channelExited(hostId, agent, msg as ChannelExitMessage);
 			} else if (msg.type === "TITLE_CHANGE") {
 				this.broadcaster.handleTitleChange(msg as AgentTitleChangeMessage);
 			} else if (msg.type === "PROCESS_TITLE") {

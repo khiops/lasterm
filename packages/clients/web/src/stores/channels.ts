@@ -435,10 +435,36 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Display titles set here DURING each in-flight index fetch, whether or not a
 	 * list holds the channel. The index is rebuilt from the response, which the
 	 * hub may have read before the title: a title heard since goes over its row
-	 * (#1128). Independent of `statusesDuringFetch`: the index fetch has no
-	 * generation and is not tied to a host list.
+	 * (#1128). Independent of `statusesDuringFetch`: the index fetch is not tied to a
+	 * host list or its generations.
+	 *
+	 * `listed` is what a host list published into the index while the fetch was in
+	 * flight: those entries stay over the response's rows, which the hub may have
+	 * read before the list did (#1148). Titles heard still go over them. Only a list
+	 * whose request started after the index fetch's publishes there (`startedAt`,
+	 * from `requestSeq`): by the order the calls were made here, which is what this
+	 * window can know of the hub's reads, a list started earlier is the older read.
 	 */
-	const indexTitlesDuringFetch = new Set<Map<string, string>>();
+	interface IndexHeard {
+		startedAt: number;
+		titles: Map<string, string>;
+		listed: Map<string, ChannelIndexEntry>;
+	}
+	/** Orders the starts of list and index requests as this window made them. */
+	let requestSeq = 0;
+	const indexTitlesDuringFetch = new Set<IndexHeard>();
+
+	/**
+	 * The latest index fetch started, and the latest whose response was taken.
+	 * Fetches are ordered by when they started here: the hub may answer them in
+	 * any order, and an older request's response must not replace a newer one's
+	 * (#1133), or a channel listed by the newer one drops out. An older response
+	 * still applies while no newer one has, so a newer fetch the hub refused does
+	 * not leave the index stale. Separate from `fetchGeneration`, which belongs
+	 * to a host's list.
+	 */
+	let indexGeneration = 0;
+	let indexCommittedGeneration = 0;
 
 	/**
 	 * A run heard for a channel since the last STATE_SYNC says the hub has it:
@@ -479,6 +505,11 @@ export const useChannelsStore = defineStore("channels", () => {
 	function deletedDuringFetch(channelIds: Iterable<string>): void {
 		for (const heardHere of statusesDuringFetch.values()) {
 			for (const id of channelIds) heardHere.set(id, "deleted");
+		}
+		// What a list published for an index fetch in flight goes with the channel (#1148);
+		// a row of that fetch's own response is not filtered, as before.
+		for (const heardHere of indexTitlesDuringFetch) {
+			for (const id of channelIds) heardHere.listed.delete(id);
 		}
 	}
 
@@ -615,8 +646,9 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	async function fetchChannelIndex(): Promise<void> {
 		if (authStore.token === null) return;
-		const myTitles = new Map<string, string>();
-		indexTitlesDuringFetch.add(myTitles);
+		const myIndexGeneration = ++indexGeneration;
+		const myHeard: IndexHeard = { startedAt: ++requestSeq, titles: new Map(), listed: new Map() };
+		indexTitlesDuringFetch.add(myHeard);
 		try {
 			const res = await hubFetch(`${hubBaseUrl()}/api/channels`, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
@@ -624,6 +656,9 @@ export const useChannelsStore = defineStore("channels", () => {
 			if (!res.ok) return;
 			const rows = (await res.json()) as Array<Record<string, unknown>>;
 			if (!Array.isArray(rows)) return;
+			// After the last await: the response of a fetch started later has been
+			// taken, and this older one does not replace it (#1133).
+			if (myIndexGeneration < indexCommittedGeneration) return;
 
 			const nextIndex = new Map<string, ChannelIndexEntry>();
 			const nextHostMap = new Map(channelHostMap.value);
@@ -633,7 +668,8 @@ export const useChannelsStore = defineStore("channels", () => {
 				if (typeof id !== "string" || typeof rowHostId !== "string") continue;
 				// Prefer the last title set during this request over the row's (#1128).
 				const title =
-					myTitles.get(id) ?? (typeof row.display_title === "string" ? row.display_title : "");
+					myHeard.titles.get(id) ??
+					(typeof row.display_title === "string" ? row.display_title : "");
 				// Whether it runs a command, for a pane over it while another host
 				// is in view: its overlay offers Configure, and it is not restarted
 				// on its own (#574).
@@ -650,13 +686,20 @@ export const useChannelsStore = defineStore("channels", () => {
 				});
 				nextHostMap.set(id, rowHostId);
 			}
+			// What a host list requested after this fetch published meanwhile is newer than these rows (#1148);
+			// a title heard since goes over it.
+			for (const [id, listed] of myHeard.listed) {
+				const title = myHeard.titles.get(id);
+				nextIndex.set(id, title === undefined ? listed : { ...listed, displayTitle: title });
+			}
+			indexCommittedGeneration = myIndexGeneration;
 			channelIndex.value = nextIndex;
 			channelHostMap.value = nextHostMap;
 		} catch {
 			// An index that could not be read is an index that says nothing; the
 			// tab bar falls back to what it showed before.
 		} finally {
-			indexTitlesDuringFetch.delete(myTitles);
+			indexTitlesDuringFetch.delete(myHeard);
 		}
 	}
 
@@ -668,6 +711,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		// per-generation lifecycle (loading start → loading end) is fully
 		// bracketed by the same generation value.
 		const myGeneration = ++fetchGeneration.value;
+		const myStart = ++requestSeq;
 
 		loading.value = true;
 		error.value = null;
@@ -786,13 +830,27 @@ export const useChannelsStore = defineStore("channels", () => {
 			const nextIndex = new Map(channelIndex.value);
 			for (const ch of merged) {
 				nextHostMap.set(ch.id, hostId);
-				nextIndex.set(ch.id, {
+				const entry: ChannelIndexEntry = {
 					hostId,
 					displayTitle: ch.displayTitle ?? "",
 					...(ch.directProcess === true && { directProcess: true as const }),
 					...(ch.status === "dead" && ch.endReason !== undefined && { endReason: ch.endReason }),
 					...(ch.status === "dead" && { ended: true as const }),
-				});
+				};
+				nextIndex.set(ch.id, entry);
+				// An index fetch in flight reads rows the hub may have listed before
+				// this list: what this list publishes stays over them (#1148).
+				for (const heardHere of indexTitlesDuringFetch) {
+					if (heardHere.startedAt < myStart) heardHere.listed.set(ch.id, entry);
+				}
+			}
+			// This list is the whole host: what an earlier list of it published for
+			// a channel it no longer holds goes (#1148).
+			const mergedIds = new Set(merged.map((c) => c.id));
+			for (const heardHere of indexTitlesDuringFetch) {
+				for (const [id, listed] of heardHere.listed) {
+					if (listed.hostId === hostId && !mergedIds.has(id)) heardHere.listed.delete(id);
+				}
 			}
 			channelHostMap.value = nextHostMap;
 			channelIndex.value = nextIndex;
@@ -1011,7 +1069,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	function setDisplayTitle(channelId: string, displayTitle: string): void {
 		titleHeardDuringFetch(channelId, { displayTitle });
-		for (const heardHere of indexTitlesDuringFetch) heardHere.set(channelId, displayTitle);
+		for (const heardHere of indexTitlesDuringFetch) heardHere.titles.set(channelId, displayTitle);
 		// The index keeps up even for a channel this host does not list, so the
 		// tab still carries the last title it was given after a host switch.
 		const indexed = channelIndex.value.get(channelId);
@@ -1218,8 +1276,8 @@ export const useChannelsStore = defineStore("channels", () => {
 		// A creation tells the display title anew, on any host: the titles heard
 		// before it, for an index fetch in flight, go (#1128).
 		for (const heardHere of indexTitlesDuringFetch) {
-			if (msg.displayTitle === undefined) heardHere.delete(msg.channelId);
-			else heardHere.set(msg.channelId, msg.displayTitle);
+			if (msg.displayTitle === undefined) heardHere.titles.delete(msg.channelId);
+			else heardHere.titles.set(msg.channelId, msg.displayTitle);
 		}
 
 		// Ignore channels for other hosts — this client may be viewing a

@@ -13,6 +13,7 @@ import type {
 	Channel,
 	ChannelCreatedMessage,
 	ChannelEndReason,
+	ChannelExitMessage,
 	ChannelStateMessage,
 	DestroyMessage,
 	ElevationMethod,
@@ -74,6 +75,20 @@ interface RestartSpawnResult {
 	errCode: string | null;
 }
 
+/**
+ * A live restart's hold on the exit of the run its DESTROY ended (#1113).
+ * Until the restart's outcome is known, nobody can tell whether that exit is
+ * the terminal's end or the end of a run replaced.
+ */
+interface RestartHold {
+	/** The tracked entry of the run the DESTROY ended. */
+	readonly entry: ChannelState;
+	/** Its exit, once heard, with the connection and host it came over. */
+	exit:
+		| { readonly msg: ChannelExitMessage; readonly agent: AgentConnection; readonly hostId: string }
+		| undefined;
+}
+
 /** Options for _sendSpawnAndWait */
 export interface SendSpawnOpts {
 	agent: AgentConnection;
@@ -111,6 +126,12 @@ export class ChannelLifecycleManager {
 	 */
 	onAgentMayBeIdle?: (hostId: string) => void;
 
+	/** The live restarts' holds, by channel id (#1113): see `restartChannel`. */
+	private readonly restartHolds = new Map<string, RestartHold>();
+
+	/** The daemon list adoption under way on each host, until it settles (#1113). */
+	private readonly adoptions = new Map<string, Promise<void>>();
+
 	constructor(
 		private readonly ctx: SharedSessionContext,
 		private readonly broadcaster: StateBroadcaster,
@@ -119,6 +140,158 @@ export class ChannelLifecycleManager {
 	/** See {@link onAgentMayBeIdle}. */
 	agentMayBeIdle(hostId: string): void {
 		this.onAgentMayBeIdle?.(hostId);
+	}
+
+	// ─── Exit ────────────────────────────────────────────────────────────────
+
+	/**
+	 * A CHANNEL_EXIT from a host's agent connection.
+	 *
+	 * While a live restart can still succeed, the exit of the run its DESTROY
+	 * ended is held, whichever connection it comes over (#1113): on the
+	 * restart's SPAWN_OK it was the end of a run replaced, and is dropped;
+	 * otherwise it is the terminal's end. Applied at once instead, it showed
+	 * every window the restarted terminal ended. Only while the tracked entry
+	 * is the restart's: a kill or a session close during the restart owns that
+	 * end, and its exit's bookkeeping runs.
+	 *
+	 * A run whose restart failed before its exit was heard has that exit
+	 * applied as an end the hub caused, whenever it comes.
+	 */
+	channelExited(hostId: string, agent: AgentConnection, msg: ChannelExitMessage): void {
+		const entry = this.ctx.channels.get(msg.channelId);
+		const hold = this.restartHolds.get(msg.channelId);
+		if (hold !== undefined && entry === hold.entry) {
+			// An agent of this version sends one at most; were there more, the
+			// latest is kept.
+			hold.exit = { msg, agent, hostId };
+			return;
+		}
+		if (entry?.restartFailed === true) {
+			this.applyChannelExit(hostId, agent, msg, this.restartEndReason(hostId));
+			return;
+		}
+		this.applyChannelExit(hostId, agent, msg);
+	}
+
+	/**
+	 * Apply a terminal's exit: its final screen, its end, and what a running
+	 * terminal holds. The CHANNEL_EXIT handler's work, which a failed restart
+	 * also does with the exit it held (#1113). `agent` is the connection whose
+	 * daemon inventory no longer counts the terminal, if any; `endReason`, the
+	 * reason the hub gives an end it caused.
+	 */
+	applyChannelExit(
+		hostId: string,
+		agent: AgentConnection | undefined,
+		exitMsg: ChannelExitMessage,
+		endReason?: ChannelEndReason,
+	): void {
+		// Its final screen first, while its output is still tracked (#933).
+		if (exitMsg.screen !== undefined) {
+			this.takeFinalScreen(exitMsg.channelId, exitMsg.screen);
+		}
+		// The recording follows the hub's view of the channel (#80).
+		this.ctx.recorder?.endChannel(exitMsg.channelId, "exited", exitMsg.exitCode);
+		const channel = this.ctx.channels.get(exitMsg.channelId);
+		if (channel) {
+			// An ended terminal has no directory any more (#834).
+			delete channel.liveCwd;
+			this.broadcaster.updateChannelStatus(
+				exitMsg.channelId,
+				channel.sessionId,
+				"dead",
+				exitMsg.exitCode,
+				// The hub is stopping this host's agent to replace it: its
+				// terminals end with it, which nobody aimed at them (#580,
+				// #592). The broadcaster marks every end heard during a
+				// quit itself.
+				endReason ?? (this.ctx.stoppingAgents.has(hostId) ? "stopped" : undefined),
+			);
+		}
+		this.ctx.scheduler.untrackChannel(exitMsg.channelId);
+		this.ctx.chunker.untrackChannel(exitMsg.channelId);
+		this.broadcaster.clearTitleDebounce(exitMsg.channelId);
+		this.broadcaster.clearProcessTitleDebounce(exitMsg.channelId);
+		// Close and remove the channel logger on exit
+		const exitLogger = this.ctx.loggerRegistry?.get(exitMsg.channelId);
+		if (exitLogger) {
+			exitLogger.log("hub", "info", "channel exit", { exitCode: exitMsg.exitCode ?? null });
+			exitLogger.close();
+			this.ctx.loggerRegistry?.delete(exitMsg.channelId);
+		}
+		// No longer held there: the stops asked of this daemon count it no
+		// more (#701).
+		agent?.daemonInventory?.listed.delete(exitMsg.channelId);
+		// Its last one here, perhaps: an agent older than this hub goes now (#805).
+		this.agentMayBeIdle(hostId);
+	}
+
+	/**
+	 * The reason a failed restart's end gives (#1113): the hub ended that
+	 * terminal, `killed`, as a kill does (#580); `stopped` when its agent is
+	 * being stopped or the hub quits, as any end then does (#599).
+	 */
+	private restartEndReason(hostId: string): ChannelEndReason {
+		return this.ctx.stoppingAgents.has(hostId) || this.ctx.quitState === "QUITTING"
+			? "stopped"
+			: "killed";
+	}
+
+	/**
+	 * A SPAWN_OK for `channelId`: a new run holds the id (#1113). A restart's
+	 * hold on it ends: its exit, ordered before this answer by the agent, was
+	 * the end of the run replaced, and is dropped, unless the terminal was
+	 * deleted or its session closed meanwhile. That exit is then applied now,
+	 * while no entry holds the id, so it reaches no run but the one it ended.
+	 * A mark a failed restart left on the entry goes too: the exit to come is
+	 * the new run's own.
+	 *
+	 * Called as the SPAWN_OK is handled, before the frames read with it: the
+	 * new run's own exit may come in the same read (#1089).
+	 */
+	private newRunStarted(channelId: string): void {
+		const entry = this.ctx.channels.get(channelId);
+		if (entry !== undefined) delete entry.restartFailed;
+		const hold = this.restartHolds.get(channelId);
+		if (hold === undefined) return;
+		this.restartHolds.delete(channelId);
+		if (hold.exit !== undefined && entry === undefined) {
+			this.applyChannelExit(hold.exit.hostId, hold.exit.agent, hold.exit.msg);
+		}
+	}
+
+	/**
+	 * A live restart settled (#1113). Its hold still on, no SPAWN_OK answered
+	 * it: the run its DESTROY ended is the terminal's end. Its exit held is
+	 * applied as the hub's end, with the host's current connection, before the
+	 * restart returns, so that the end of the start sees it (#805). Not heard
+	 * yet, the run stays as it is, marked: its exit, whichever side of the
+	 * failure it lands on, is applied as that end when it comes.
+	 */
+	private settleRestartHold(channelId: string, hold: RestartHold, hostId: string): void {
+		if (this.restartHolds.get(channelId) !== hold) return;
+		this.restartHolds.delete(channelId);
+		if (hold.exit === undefined) {
+			if (this.ctx.channels.get(channelId) === hold.entry) hold.entry.restartFailed = true;
+			return;
+		}
+		const current = this.ctx.agents.get(hostId);
+		try {
+			this.applyChannelExit(
+				hostId,
+				current?.connected === true ? current : undefined,
+				hold.exit.msg,
+				this.restartEndReason(hostId),
+			);
+		} catch (err) {
+			// The restart's own outcome stays its caller's answer; this end's
+			// failure is logged, as a storage error on an exit is (#1113).
+			this.ctx.hubLogger?.log("error", "channel-lifecycle: restart end not recorded", {
+				channelId,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
 	}
 
 	/**
@@ -595,13 +768,34 @@ export class ChannelLifecycleManager {
 		const { channel, hostId } = info;
 		const ch = this.ctx.channels.get(channelId);
 
-		let agent = this.ctx.agents.get(hostId);
-		if (agent?.connected && ch && ch.status !== "dead") {
-			agent.send({ type: "DESTROY", channelId } as DestroyMessage);
-			// The run being replaced: its recording ends now, before its exit (#80).
-			this.ctx.recorder?.endChannel(channelId, "restarted");
+		const live = this.ctx.agents.get(hostId);
+		if (!live?.connected || !ch || ch.status === "dead") {
+			return await this.startAgain(channelId, channel, hostId, ch, requestingClientId);
 		}
+		live.send({ type: "DESTROY", channelId } as DestroyMessage);
+		// The run being replaced: its recording ends now, before its exit (#80).
+		this.ctx.recorder?.endChannel(channelId, "restarted");
+		// From this DESTROY until the restart settles, the exit of the run it
+		// ends is held (#1113): it is that run's end only if nothing replaces
+		// it. Every way out of the restart ends the hold.
+		const hold: RestartHold = { entry: ch, exit: undefined };
+		this.restartHolds.set(channelId, hold);
+		try {
+			return await this.startAgain(channelId, channel, hostId, ch, requestingClientId);
+		} finally {
+			this.settleRestartHold(channelId, hold, hostId);
+		}
+	}
 
+	/** A restart, once the DESTROY of its live run, if it had one, is sent. */
+	private async startAgain(
+		channelId: string,
+		channel: Channel,
+		hostId: string,
+		ch: ChannelState | undefined,
+		requestingClientId: string | undefined,
+	): Promise<boolean> {
+		let agent = this.ctx.agents.get(hostId);
 		let sessionEntry = this.ctx.sessions.get(hostId);
 
 		// If agent not connected, try to reconnect (SSH hosts need a fresh connection)
@@ -933,14 +1127,24 @@ export class ChannelLifecycleManager {
 			}, SPAWN_TIMEOUT_MS);
 
 			this.ctx.pendingRequests.set(spawnMsg.requestId, (incoming: ProtocolMessage) => {
+				clearTimeout(timer);
+				this.ctx.pendingRequests.delete(spawnMsg.requestId);
+				// The boundary of the restart's hold, whatever happens next (#1113):
+				// a SPAWN_OK says a new workload holds the id even when the hub is
+				// quitting, and a throw while recording it is the restart's error,
+				// not a failure to replace the run.
+				if (incoming.type === "SPAWN_OK" && spawnMsg.channelId !== undefined) {
+					try {
+						this.newRunStarted(spawnMsg.channelId);
+					} catch (err) {
+						reject(err);
+						return;
+					}
+				}
 				if (!isQuitFenceCurrent(this.ctx, quitEpoch)) {
-					clearTimeout(timer);
-					this.ctx.pendingRequests.delete(spawnMsg.requestId);
 					resolve({ ok: false, channelId: null, errCode: "HUB_QUITTING" });
 					return;
 				}
-				clearTimeout(timer);
-				this.ctx.pendingRequests.delete(spawnMsg.requestId);
 				if (incoming.type === "SPAWN_OK") {
 					const { channelId } = incoming as AgentSpawnOkMessage;
 					try {
@@ -1487,16 +1691,18 @@ export class ChannelLifecycleManager {
 			}, SPAWN_TIMEOUT_MS);
 
 			this.ctx.pendingRequests.set(requestId, (incoming: ProtocolMessage) => {
+				clearTimeout(timeout);
+				this.ctx.pendingRequests.delete(requestId);
+				// A new shell under the same id, the same entry: an exit of the id
+				// is now its own, whatever a restart under way holds or a failed one
+				// marked (#1113), the hub quitting or not.
+				if (incoming.type === "SPAWN_OK" && stillCurrent()) this.newRunStarted(channelId);
 				if (!isQuitFenceCurrent(this.ctx, quitEpoch) || !stillCurrent()) {
-					clearTimeout(timeout);
-					this.ctx.pendingRequests.delete(requestId);
 					settle();
 					return;
 				}
-				clearTimeout(timeout);
-				this.ctx.pendingRequests.delete(requestId);
 				if (incoming.type === "SPAWN_OK") {
-					// A new shell under the same id: no answer asked before it speaks of it.
+					// No answer asked before it speaks of it.
 					ch.startedAt = this.startedNow();
 					onSpawnOk(channelId, ch);
 				} else {
@@ -1531,6 +1737,29 @@ export class ChannelLifecycleManager {
 		agent: AgentConnection & { usedRemoteDaemon?: boolean },
 	): Promise<boolean> {
 		if (agent.usedRemoteDaemon !== true) return false;
+		const adoption = this.takeUpWhatTheDaemonLists(hostId, agent);
+		this.adoptions.set(hostId, adoption);
+		try {
+			await adoption;
+		} finally {
+			if (this.adoptions.get(hostId) === adoption) this.adoptions.delete(hostId);
+		}
+		return true;
+	}
+
+	/**
+	 * Settles once the adoption of a daemon's list under way on `hostId` has;
+	 * undefined when none is. A restart waits for it before its DESTROY
+	 * (#1113): the adoption collects the daemon's exits at the connection,
+	 * outside the restart's hold, and would take the id of the run a DESTROY
+	 * ends out of its inventory, though the restart's new run holds it.
+	 */
+	adoptionSettled(hostId: string): Promise<void> | undefined {
+		return this.adoptions.get(hostId);
+	}
+
+	/** Ask a daemon what it holds of this hub's, and take that up. Never rejects. */
+	private async takeUpWhatTheDaemonLists(hostId: string, agent: AgentConnection): Promise<void> {
 		try {
 			const listed = await this.listDaemonChannels(agent);
 			this.takeUpListed(hostId, agent, listed);
@@ -1544,7 +1773,6 @@ export class ChannelLifecycleManager {
 				}`,
 			);
 		}
-		return true;
 	}
 
 	/**

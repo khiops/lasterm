@@ -479,12 +479,15 @@ describe("Hub Server — CORS allowlist", () => {
 			.split(",")
 			.map((name) => name.trim())
 			.sort();
-		expect(exposed).toEqual([
-			"Content-Disposition",
-			"X-Lasterm-Cast-Last-Seq",
-			"X-Lasterm-Cast-Lost",
-			"X-Lasterm-Cast-Next-Seq",
-		]);
+		// Among those a download exposes (#840).
+		expect(exposed).toEqual(
+			expect.arrayContaining([
+				"Content-Disposition",
+				"X-Lasterm-Cast-Last-Seq",
+				"X-Lasterm-Cast-Lost",
+				"X-Lasterm-Cast-Next-Seq",
+			]),
+		);
 	});
 
 	it("disallowed origin (http://evil.com) gets no CORS allow header", async () => {

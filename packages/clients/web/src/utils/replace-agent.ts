@@ -7,6 +7,8 @@
  * yes sends the request again with `force`.
  */
 
+import { transfersText } from "./host-connection.js";
+
 /** What the hub answered, reduced to what this flow reads. */
 export interface ReplaceAgentResponse {
 	readonly ok: boolean;
@@ -18,6 +20,8 @@ export interface ReplaceAgentResponse {
 			readonly message?: string;
 			readonly other_owner_channels?: number;
 			readonly transfers?: number;
+			/** How many of `transfers` are downloads (#840). */
+			readonly downloads?: number;
 		};
 	};
 }
@@ -46,15 +50,31 @@ export function otherHubsQuestion(count: number | undefined): string {
 	return `${what} will be closed. Replace anyway?`;
 }
 
-/** The question asked before interrupting the uploads to the host. */
-export function transfersQuestion(count: number | undefined): string {
+/**
+ * The question asked before interrupting the uploads to the host, and the
+ * downloads from it, which `count` holds and `downloads` names apart (#840).
+ */
+export function transfersQuestion(count: number | undefined, downloads?: number): string {
 	const what =
-		count === undefined
-			? "Uploads to this host"
-			: count === 1
-				? "1 upload to this host"
-				: `${count} uploads to this host`;
+		downloads !== undefined && downloads > 0
+			? `${transfersText({ uploads: (count ?? downloads) - downloads, downloads })} on this host`
+			: count === undefined
+				? "Uploads to this host"
+				: count === 1
+					? "1 upload to this host"
+					: `${count} uploads to this host`;
 	return `${what} will be interrupted. Replace anyway?`;
+}
+
+/** What a no to that question leaves running: the uploads, the downloads, or both (#840). */
+function transfersDeclined(count: number | undefined, downloads?: number): string {
+	const what =
+		downloads === undefined || downloads === 0
+			? "the uploads to this host"
+			: (count ?? downloads) > downloads
+				? "the uploads and downloads on this host"
+				: "the downloads on this host";
+	return `Nothing was replaced: ${what} are still running.`;
 }
 
 /** Ask for the replacement, and for each wider one only after a yes. Resolves to what to show. */
@@ -76,8 +96,8 @@ export async function replaceAgentWithConsent(deps: ReplaceAgentDeps): Promise<s
 			error?.code === "TRANSFERS_WOULD_STOP" &&
 			!consent.stop_transfers
 		) {
-			question = transfersQuestion(error.transfers);
-			declined = "Nothing was replaced: the uploads to this host are still running.";
+			question = transfersQuestion(error.transfers, error.downloads);
+			declined = transfersDeclined(error.transfers, error.downloads);
 			next = { ...consent, stop_transfers: true };
 		} else {
 			return error?.message ?? `The hub answered ${answer.status}.`;

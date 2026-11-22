@@ -13,6 +13,7 @@ import Fastify from "fastify";
 import { registerAgentRoutes } from "./api/agents.js";
 import { registerChannelRoutes } from "./api/channels.js";
 import { registerConfigRoutes } from "./api/config.js";
+import { registerFileContentRoutes, TICKET_ROUTES } from "./api/file-content.js";
 import { registerFileRoutes } from "./api/files.js";
 import { registerFontRoutes } from "./api/fonts.js";
 import { registerGroupRoutes } from "./api/groups.js";
@@ -49,6 +50,7 @@ import {
 	loadGcConfig,
 	matchCorsOrigin,
 } from "./config.js";
+import { DownloadTickets } from "./files/download-tickets.js";
 import { HostFilesService } from "./files/host-files-service.js";
 import { startFolderSettings } from "./files/start-folder.js";
 import type { HubLogger } from "./logging/hub-logger.js";
@@ -220,6 +222,11 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		options.securityLog ?? new SecurityLog((msg, fields) => server.log.info(fields, msg)),
 	);
 	server.decorateRequest("authTokenId", null);
+	server.decorateRequest("downloadGrant", null);
+	// Download tickets (#840), and how a ticket's route names its host, set
+	// once the host files are built below.
+	const downloadTickets = new DownloadTickets();
+	let ticketHostOf: ((param: "id" | "hostId", value: string) => string | null) | null = null;
 	endWhatOutlastsTheClose(server);
 
 	// Helmet — sets security-related HTTP response headers
@@ -300,19 +307,27 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			cb(null, isCorsOriginAllowed(origin));
 		},
 		methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+		// What a web client on another allowed origin reads of a download (#840),
+		// and where a recording's export goes on (#80).
+		exposedHeaders: [
+			"ETag",
+			"Content-Range",
+			"Content-Length",
+			"Content-Disposition",
+			"X-Lasterm-Cast-Last-Seq",
+			"X-Lasterm-Cast-Next-Seq",
+			"X-Lasterm-Cast-Lost",
+		],
 		allowedHeaders: [
 			"Content-Type",
 			"Authorization",
 			"X-Lasterm-Owner",
 			"X-Lasterm-Client",
+			// A download's resume and its record (#840).
+			"Range",
+			"If-Range",
+			"X-Lasterm-Download",
 			"X-Lasterm-Client-Id",
-		],
-		// A recording's export says where its parts go on in these (#80).
-		exposedHeaders: [
-			"Content-Disposition",
-			"X-Lasterm-Cast-Last-Seq",
-			"X-Lasterm-Cast-Next-Seq",
-			"X-Lasterm-Cast-Lost",
 		],
 		credentials: true,
 	});
@@ -373,6 +388,34 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			if (routePath === "/api/pair/verify") return;
 			if (request.method === "POST" && (routePath === "/api/shutdown" || routePath === "/api/quit"))
 				return;
+
+			// A browser's ordinary download carries no header: a GET on exactly a
+			// download route, with no bearer, passes on a ticket made for that
+			// route's kind and host (#840). Any other request carrying a ticket is
+			// judged by its bearer below, which never consumes a ticket.
+			const ticketRoute = TICKET_ROUTES[routePath];
+			const ticket = (request.query as { ticket?: unknown } | null)?.ticket;
+			if (
+				ticketRoute !== undefined &&
+				request.method === "GET" &&
+				request.headers.authorization === undefined &&
+				typeof ticket === "string"
+			) {
+				const params = request.params as Record<string, string | undefined>;
+				const value = params[ticketRoute.param] ?? "";
+				const expected = routePath.replace(`:${ticketRoute.param}`, encodeURIComponent(value));
+				const hostId =
+					pathname === expected ? (ticketHostOf?.(ticketRoute.param, value) ?? null) : null;
+				const grant =
+					hostId === null ? null : downloadTickets.take(ticket, ticketRoute.kind, hostId);
+				if (grant !== null) {
+					request.downloadGrant = grant;
+					return;
+				}
+				return reply
+					.code(401)
+					.send({ error: "TICKET_INVALID", message: "The download ticket is not valid" });
+			}
 
 			// WebSocket auth is handled at the message level (AUTH → AUTH_OK/AUTH_FAIL),
 			// not at the HTTP upgrade level.
@@ -502,7 +545,15 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			sshHost: (hostId) => activeSessionManager.connectedSshAgent(hostId),
 			// The folder a panel opens at when the terminal's own is unknown (#836).
 			startFolder: (channelId) => startFolderSettings(channelId, metaDal, configResolver),
+			hostType: (hostId) => metaDal.getHost(hostId)?.type ?? null,
 		});
+		ticketHostOf = (param, value) => {
+			try {
+				return hostFiles.hostOf(param === "id" ? { channelId: value } : { hostId: value }).hostId;
+			} catch {
+				return null;
+			}
+		};
 		let routesForTransfers: WsRoutes | null = null;
 		const metaDb = options.dbManager.meta;
 		const fileTransferEnabled = () => isFileTransferEnabled(configResolver.uiConfig);
@@ -576,6 +627,12 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		registerChannelRoutes(server, metaDal, activeSessionManager);
 		registerRecordingRoutes(server, activeSessionManager);
 		registerFileRoutes(server, { files: hostFiles, writerCheck: wsRoutes.writerCheck });
+		registerFileContentRoutes(server, {
+			files: hostFiles,
+			tickets: downloadTickets,
+			enabled: fileTransferEnabled,
+			responseOpen: (hostId) => activeSessionManager.downloadOpened(hostId),
+		});
 		registerTransferRoutes(server, {
 			transfers,
 			enabled: fileTransferEnabled,

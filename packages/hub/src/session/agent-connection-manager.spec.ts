@@ -16,7 +16,7 @@ import type { SpoolDAL } from "../storage/spool.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { AgentConnectionManager, AgentVersionMismatchError } from "./agent-connection-manager.js";
 import { deployAgentIfNeeded } from "./agent-deployer.js";
-import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
+import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { LastermAgent } from "./lasterm-agent.js";
 import { OutputChunker } from "./output-chunker.js";
 import type {
@@ -374,11 +374,14 @@ describe("quit-protected revival capabilities", () => {
 			const logger = { log: vi.fn(), close: vi.fn() };
 			const registry = new Map([["chan-1", logger]]);
 			(built.ctx as unknown as Record<string, unknown>).loggerRegistry = registry;
-			(built.lifecycle as unknown as Record<string, unknown>).agentMayBeIdle = vi.fn();
+			// The lifecycle applies an exit (#1113): a real one, its idle hook watched.
+			const lifecycle = new ChannelLifecycleManager(built.ctx, built.broadcaster);
+			lifecycle.agentMayBeIdle = vi.fn();
+			const manager = new AgentConnectionManager(built.ctx, built.broadcaster, lifecycle);
 			const agent = new EventEmitter() as unknown as LastermAgent & EventEmitter;
-			built.manager.wireAgentEvents(HOST_ID, SESSION_ID, agent);
+			manager.wireAgentEvents(HOST_ID, SESSION_ID, agent);
 			chunker.trackChannel("chan-1");
-			return { ...built, chunker, logger, registry, agent, insertChunk };
+			return { ...built, lifecycle, manager, chunker, logger, registry, agent, insertChunk };
 		}
 
 		it("still finishes an ended terminal's cleanup, and nothing reaches the listener", () => {

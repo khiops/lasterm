@@ -8,6 +8,7 @@
 import { BUNDLED_THEMES } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { userEvent } from "vitest/browser";
 import { type App, createApp, h, nextTick } from "vue";
 import "../styles/base.css";
 import { useHostsStore } from "../stores/hosts.js";
@@ -121,6 +122,18 @@ describe("recording controls' contrast (#80)", () => {
 			if (save === undefined) throw new Error("no Save button");
 			const ratio = textOnFill(save, "Save button");
 			expect(ratio, `Save: ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(TEXT_CONTRAST_AA);
+			// Mutation caught: a hover that dims the button (opacity 0.85: 4.0:1 in gruvbox-dark).
+			await userEvent.hover(save);
+			expect(save.matches(":hover")).toBe(true);
+			// Read once the hover's 0.12 s transition is over.
+			await new Promise((resolve) => setTimeout(resolve, 200));
+			const opacity = Number(getComputedStyle(save).opacity);
+			const hovered = textOnFill(save, "hovered Save button");
+			expect(opacity, "hovered Save opacity").toBe(1);
+			expect(hovered, `hovered Save: ${hovered.toFixed(2)}`).toBeGreaterThanOrEqual(
+				TEXT_CONTRAST_AA,
+			);
+			await userEvent.unhover(document.body);
 
 			// Mutation caught: the confirmation's white on red, and red text from the ANSI palette.
 			[...document.querySelectorAll("button")]

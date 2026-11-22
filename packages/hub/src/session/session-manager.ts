@@ -68,6 +68,7 @@ import {
 } from "../ssh/known-hosts.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
+import { RecordingsDAL } from "../storage/recordings.js";
 import { SpoolDAL } from "../storage/spool.js";
 import type { TransferConnectOutcome } from "../transfers/transfer-service.js";
 import { type AgentConnection, AgentRefusedHub } from "./agent-connection.js";
@@ -109,6 +110,7 @@ import {
 	HubQuittingError,
 	type QuitFence,
 } from "./quit-fence.js";
+import { SessionRecorder } from "./recorder.js";
 import {
 	hostKeepsDaemon,
 	hostTriesDaemon,
@@ -440,6 +442,7 @@ export class SessionManager {
 			elevationPromptOwners: new Map(),
 			promptIndex: new Map(),
 			getWriteLockHolder: null,
+			recorder: null,
 			pastes: null,
 			metaDal,
 			spoolDal,
@@ -601,7 +604,38 @@ export class SessionManager {
 			}
 		};
 
-		this.gc = new SpoolGarbageCollector(spoolDal, metaDal, gcConfig, { logger: hubLogger ?? null });
+		const recordingsDal = new RecordingsDAL(dbManager.spool);
+		this.gc = new SpoolGarbageCollector(spoolDal, metaDal, gcConfig, {
+			logger: hubLogger ?? null,
+			recordings: recordingsDal,
+			beforePass: () => ctx.recorder?.retryPendingEnds(),
+		});
+		ctx.recorder = new SessionRecorder({
+			dal: recordingsDal,
+			now: () => performance.now(),
+			wallNow: () => new Date(),
+			capBytes: (gcConfig?.recordingMaxTotalMb ?? 1024) * 1024 * 1024,
+			broadcast: (msg) => this.broadcaster.broadcastToAllClients(msg),
+			log: (level, msg, fields) => {
+				if (hubLogger) hubLogger.log(level, msg, fields);
+				else if (level !== "debug") console.warn(msg);
+			},
+			sendAttach: (hostId, channelId, requestId) => {
+				const agent = ctx.agents.get(hostId);
+				if (!agent?.connected) return false;
+				agent.send({ type: "ATTACH", channelId, requestId });
+				return true;
+			},
+			agentMatchesHub: (hostId) =>
+				ctx.agents.get(hostId)?.helloMessage?.agentVersion === HUB_VERSION,
+			pendingRequests: ctx.pendingRequests,
+			titleOf: (channelId) => this.broadcaster.resolveDisplayTitle(channelId),
+			purge: (ids) => {
+				void this.gc.purgeRecordings(ids);
+			},
+		});
+		// Before any channel is adopted: rows a crash left open, deletions a stop cut short.
+		ctx.recorder.recoverAtStart();
 		this.gc.start();
 	}
 
@@ -669,6 +703,7 @@ export class SessionManager {
 		this.ctx.elevationCache.clear();
 		this.ctx.scheduler.shutdown();
 		this.ctx.chunker.shutdown();
+		this.ctx.recorder?.shutdown();
 		this.gc.stop();
 		const agentCloseResults = await Promise.allSettled(
 			[...this.ctx.agents.values()].map((agent) => closeAgentWithTimeout(agent)),
@@ -789,6 +824,76 @@ export class SessionManager {
 
 	resolveDisplayTitle(channelId: string): string {
 		return this.broadcaster.resolveDisplayTitle(channelId);
+	}
+
+	// ─── Recordings (#80) ─────────────────────────────────────────────────────
+
+	/** The recorder; set in the constructor. */
+	get recorder(): SessionRecorder {
+		const recorder = this.ctx.recorder;
+		if (!recorder) throw new Error("recorder not set");
+		return recorder;
+	}
+
+	/** The open recording of a terminal, or null. */
+	recordingIdOf(channelId: string): string | null {
+		return this.ctx.recorder?.recordingIdOf(channelId) ?? null;
+	}
+
+	/**
+	 * Start recording a terminal now: it must be live in this hub and its
+	 * host's agent connected. The screen is asked of the agent.
+	 */
+	startRecording(
+		channelId: string,
+	):
+		| { ok: true; id: string }
+		| { ok: false; status: 404 | 409 | 500; code: string; message: string; openId?: string } {
+		if (!this.ctx.metaDal.getChannel(channelId)) {
+			return { ok: false, status: 404, code: "CHANNEL_NOT_FOUND", message: "Channel not found" };
+		}
+		const ch = this.ctx.channels.get(channelId);
+		const agent = ch ? this.ctx.agents.get(ch.hostId) : undefined;
+		if (ch?.status !== "live" || !agent?.connected) {
+			return {
+				ok: false,
+				status: 409,
+				code: "CHANNEL_NOT_LIVE",
+				message: "Only a running terminal whose host is connected can be recorded",
+			};
+		}
+		const result = this.recorder.startManual({
+			channelId,
+			hostId: ch.hostId,
+			hostLabel: this.ctx.metaDal.getHost(ch.hostId)?.label ?? ch.hostId,
+			cols: ch.cols,
+			rows: ch.rows,
+		});
+		if ("id" in result) return { ok: true, id: result.id };
+		switch (result.refused) {
+			case "ALREADY_RECORDING":
+				return {
+					ok: false,
+					status: 409,
+					code: "ALREADY_RECORDING",
+					message: "This terminal is already being recorded",
+					...(result.openId !== undefined && { openId: result.openId }),
+				};
+			case "RECORDING_CAP":
+				return {
+					ok: false,
+					status: 409,
+					code: "RECORDING_CAP",
+					message: "Recordings already take all the space allowed: save or discard some first",
+				};
+			default:
+				return {
+					ok: false,
+					status: 500,
+					code: "RECORDING_STORAGE_ERROR",
+					message: "The recording could not be stored",
+				};
+		}
 	}
 
 	// ─── Channel operations ───────────────────────────────────────────────────
@@ -2241,6 +2346,7 @@ export class SessionManager {
 		channel.rows = rows;
 		this.ctx.metaDal.updateChannelDimensions(channelId, cols, rows);
 		if (changed) {
+			this.ctx.recorder?.onResize(channelId, cols, rows);
 			this.broadcaster.broadcastToChannel(channelId, {
 				type: "CHANNEL_SIZE",
 				channelId,

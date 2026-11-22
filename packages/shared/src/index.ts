@@ -14,6 +14,7 @@ export * from "./powershell.js";
 export * from "./profile-write.js";
 export * from "./protocol.js";
 export * from "./proxy-jump.js";
+export * from "./recording.js";
 export * from "./sanitize.js";
 export * from "./socket-path.js";
 export * from "./ssh-auth.js";

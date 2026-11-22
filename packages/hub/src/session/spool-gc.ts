@@ -2,6 +2,7 @@ import type { GcConfig } from "../config.js";
 import { DEFAULT_GC_CONFIG } from "../config.js";
 import type { HubLogger } from "../logging/hub-logger.js";
 import type { MetaDAL } from "../storage/meta.js";
+import type { RecordingsDAL } from "../storage/recordings.js";
 import type { ChunkBatchLimits, ChunkKinds, SpoolDAL } from "../storage/spool.js";
 
 const GC_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
@@ -32,6 +33,14 @@ export interface SpoolGcOptions {
 	/** Overrides the 10-minute interval. */
 	intervalMs?: number;
 	logger?: Pick<HubLogger, "log"> | null;
+	/**
+	 * The recordings (#80): a pass also deletes the blocks of every recording
+	 * marked for deletion, so a deletion that failed or that a hub stop cut
+	 * short is finished. No age or size rule ever deletes a recording.
+	 */
+	recordings?: Pick<RecordingsDAL, "deletingIds" | "deleteBatch"> | null;
+	/** Runs at the start of every pass (the recorder retries the ends it could not write). */
+	beforePass?: () => void;
 }
 
 /** What one pass, or one purge, did. */
@@ -117,6 +126,8 @@ export class SpoolGarbageCollector {
 	private readonly sliceBudgetMs: number;
 	private readonly intervalMs: number;
 	private readonly logger: Pick<HubLogger, "log"> | null;
+	private readonly recordings: Pick<RecordingsDAL, "deletingIds" | "deleteBatch"> | null;
+	private readonly beforePass: (() => void) | null;
 
 	constructor(
 		private spoolDal: SpoolDAL,
@@ -130,6 +141,8 @@ export class SpoolGarbageCollector {
 		this.sliceBudgetMs = options.sliceBudgetMs ?? SLICE_BUDGET_MS;
 		this.intervalMs = options.intervalMs ?? GC_INTERVAL_MS;
 		this.logger = options.logger ?? null;
+		this.recordings = options.recordings ?? null;
+		this.beforePass = options.beforePass ?? null;
 	}
 
 	start(): void {
@@ -172,6 +185,19 @@ export class SpoolGarbageCollector {
 		const ids = [...channelIds];
 		return this.enqueue("purge", async (slicer, stats) => {
 			for (const channelId of ids) await this.collectOrphan(slicer, stats, channelId);
+			stats.freePages = await this.vacuum(slicer);
+		});
+	}
+
+	/**
+	 * Delete recordings marked for deletion, in a pass's bounded batches, then
+	 * give the pages back. A recording not marked is never touched. A batch
+	 * that fails leaves the rest marked, for the next pass. Never rejects.
+	 */
+	purgeRecordings(recordingIds: readonly string[]): Promise<GcPassStats> {
+		const ids = [...recordingIds];
+		return this.enqueue("purge", async (slicer, stats) => {
+			for (const id of ids) await this.collectRecording(slicer, stats, id);
 			stats.freePages = await this.vacuum(slicer);
 		});
 	}
@@ -224,6 +250,10 @@ export class SpoolGarbageCollector {
 	}
 
 	private async runPass(slicer: Slicer, stats: GcPassStats): Promise<void> {
+		if (this.beforePass !== null) {
+			const before = this.beforePass;
+			await slicer.step(() => before());
+		}
 		// 1. Channels dead past their retention: every chunk they held when judged.
 		// A chunk written after that has a higher seq, and is not theirs to lose:
 		// a channel can be brought back under its own id meanwhile.
@@ -244,6 +274,13 @@ export class SpoolGarbageCollector {
 			}
 			const after = channelId;
 			channelId = await slicer.step(() => this.spoolDal.nextChannelId(after));
+		}
+
+		// Recordings marked for deletion and not deleted yet (#80).
+		if (this.recordings !== null) {
+			const recordings = this.recordings;
+			const marked = await slicer.step(() => recordings.deletingIds());
+			for (const id of marked) await this.collectRecording(slicer, stats, id);
 		}
 
 		// 3. Give the freed pages back.
@@ -351,6 +388,18 @@ export class SpoolGarbageCollector {
 	 * still free. A database whose auto_vacuum is not incremental frees
 	 * nothing: stop when nothing moves.
 	 */
+	/** Delete one marked recording's blocks, a bounded batch per step, its row with the last. */
+	private async collectRecording(slicer: Slicer, stats: GcPassStats, id: string): Promise<void> {
+		const recordings = this.recordings;
+		if (recordings === null) return;
+		for (;;) {
+			const result = await slicer.step(() => recordings.deleteBatch(id, DELETE_BATCH));
+			stats.deletedChunks += result.deleted;
+			stats.deletedBytes += result.bytes;
+			if (result.done) return;
+		}
+	}
+
 	private async vacuum(slicer: Slicer): Promise<number> {
 		let free = Number.POSITIVE_INFINITY;
 		for (;;) {

@@ -389,6 +389,7 @@ export class AgentConnectionManager {
 				this.broadcaster.broadcastToChannel(outputMsg.channelId, outputMsg);
 				this.ctx.scheduler.onOutput(outputMsg.channelId);
 				this.ctx.chunker.onOutput(outputMsg.channelId, outputMsg.data);
+				this.ctx.recorder?.onOutput(outputMsg.channelId, outputMsg.data);
 			} else if (msg.type === "SNAPSHOT_RES") {
 				const res = msg as AgentSnapshotResMessage;
 				this.ctx.scheduler.onSnapshotResponse(res.channelId);
@@ -399,6 +400,8 @@ export class AgentConnectionManager {
 				if (exitMsg.screen !== undefined) {
 					this.lifecycle.takeFinalScreen(exitMsg.channelId, exitMsg.screen);
 				}
+				// The recording follows the hub's view of the channel (#80).
+				this.ctx.recorder?.endChannel(exitMsg.channelId, "exited", exitMsg.exitCode);
 				const channel = this.ctx.channels.get(exitMsg.channelId);
 				if (channel) {
 					// An ended terminal has no directory any more (#834).
@@ -529,6 +532,8 @@ export class AgentConnectionManager {
 
 			// Guard: stale close events from replaced agents produce no further side effects.
 			if (!isCurrentAgent) return;
+			// Output until a new connection may be missing or late (#80).
+			this.ctx.recorder?.onAgentLost(hostId);
 
 			if (!session) return;
 

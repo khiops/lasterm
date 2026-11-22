@@ -23,6 +23,7 @@ import { createHostsChangeAnnouncer } from "./api/hosts-changed.js";
 import { registerLaunchProfileRoutes } from "./api/launch-profiles.js";
 import { registerLogRoutes } from "./api/logs.js";
 import { registerPairRoutes } from "./api/pair.js";
+import { registerRecordingRoutes } from "./api/recordings.js";
 import { registerSessionRoutes } from "./api/sessions.js";
 import { registerSshKeyRoutes } from "./api/ssh-keys.js";
 import { registerThemeRoutes } from "./api/themes.js";
@@ -566,6 +567,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		registerSessionRoutes(server, metaDal, activeSessionManager);
 		registerHostConnectionRoutes(server, metaDal, activeSessionManager, hostsChange.announce);
 		registerChannelRoutes(server, metaDal, activeSessionManager);
+		registerRecordingRoutes(server, activeSessionManager);
 		registerFileRoutes(server, { files: hostFiles, writerCheck: wsRoutes.writerCheck });
 		registerTransferRoutes(server, {
 			transfers,

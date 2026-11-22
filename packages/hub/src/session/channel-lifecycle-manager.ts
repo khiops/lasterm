@@ -378,6 +378,8 @@ export class ChannelLifecycleManager {
 					this.ctx.metaDal.updateChannelStatus(channelId, "live");
 					this.ctx.scheduler.trackChannel(channelId);
 					this.ctx.chunker.trackChannel(channelId);
+					// A new workload: recorded from its first output when its profile says so (#80).
+					this.startRecordingIfAsked(channelId, hostId, cols, rows);
 					client.attachedChannels.add(channelId);
 					this.broadcaster.reactivateDetachedSession(hostId);
 
@@ -472,6 +474,7 @@ export class ChannelLifecycleManager {
 		}
 
 		this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead", undefined, "killed");
+		this.ctx.recorder?.endChannel(channelId, "killed");
 
 		this.ctx.scheduler.untrackChannel(channelId);
 		this.ctx.chunker.untrackChannel(channelId);
@@ -561,6 +564,7 @@ export class ChannelLifecycleManager {
 	 * heard of it, and a SPAWN that names it to bring it back is refused.
 	 */
 	forgetChannel(channelId: string): void {
+		this.ctx.recorder?.endChannel(channelId, "gone");
 		const ch = this.ctx.channels.get(channelId);
 		if (ch) {
 			for (const clientId of ch.clients) {
@@ -594,6 +598,8 @@ export class ChannelLifecycleManager {
 		let agent = this.ctx.agents.get(hostId);
 		if (agent?.connected && ch && ch.status !== "dead") {
 			agent.send({ type: "DESTROY", channelId } as DestroyMessage);
+			// The run being replaced: its recording ends now, before its exit (#80).
+			this.ctx.recorder?.endChannel(channelId, "restarted");
 		}
 
 		let sessionEntry = this.ctx.sessions.get(hostId);
@@ -1030,6 +1036,9 @@ export class ChannelLifecycleManager {
 		});
 		this.ctx.scheduler.trackChannel(channelId);
 		this.ctx.chunker.trackChannel(channelId);
+		// A new workload under the same id: the previous run's recording ends here (#80).
+		this.ctx.recorder?.endChannel(channelId, "restarted");
+		this.startRecordingIfAsked(channelId, hostId, cols, rows);
 
 		if (channelIdChanged) {
 			const dbChannel = this.ctx.metaDal.getChannel(channelId);
@@ -1348,9 +1357,40 @@ export class ChannelLifecycleManager {
 		this.storeSnapshot(channelId, screen);
 	}
 
+	/**
+	 * Open a recording for a new workload when the terminal's resolved profile
+	 * says `recordTerminals` (#80), in the code that tracks it, so the first
+	 * output read with its SPAWN_OK is recorded.
+	 */
+	private startRecordingIfAsked(
+		channelId: string,
+		hostId: string,
+		cols: number,
+		rows: number,
+	): void {
+		const recorder = this.ctx.recorder;
+		if (!recorder) return;
+		const profile = this.ctx.configResolver?.resolve(hostId, channelId) ?? null;
+		if (profile?.recordTerminals !== true) return;
+		recorder.startAutomatic({
+			channelId,
+			hostId,
+			hostLabel: this.ctx.metaDal.getHost(hostId)?.label ?? hostId,
+			cols,
+			rows,
+		});
+	}
+
 	// ─── Re-attach channels ───────────────────────────────────────────────────
 
 	reAttachChannels(hostId: string, sessionId: string, agent: AgentConnection): void {
+		// Each live terminal is spawned again: a new workload, so its recording
+		// ends before the SPAWN, whatever the answer (#80).
+		for (const [channelId, ch] of this.ctx.channels.entries()) {
+			if (ch.hostId === hostId && ch.status !== "dead") {
+				this.ctx.recorder?.endChannel(channelId, "restarted");
+			}
+		}
 		this.spawnChannelsForHost(
 			hostId,
 			agent,
@@ -1360,6 +1400,7 @@ export class ChannelLifecycleManager {
 				}
 				this.ctx.scheduler.trackChannel(channelId);
 				this.ctx.chunker.trackChannel(channelId);
+				this.startRecordingIfAsked(channelId, hostId, ch.cols, ch.rows);
 			},
 			(channelId, ch) => {
 				this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead");

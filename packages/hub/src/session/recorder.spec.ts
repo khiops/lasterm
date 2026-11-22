@@ -1523,6 +1523,35 @@ describe("SessionRecorder", () => {
 		});
 	});
 
+	// A hub stop during a pass ends it quietly: the deletions it cut short stay
+	// marked for the next start, and none is logged as failed. Mutation caught:
+	// the stop caught as a deletion failure, one false warning per marked row.
+	it("logs no deletion failure when the hub stops a pass", async () => {
+		const ids = ["A", "B"].map((channelId) => {
+			const id = startAuto(h, channelId);
+			h.rec.onOutput(channelId, enc(channelId));
+			h.rec.stop(id);
+			h.dal.markDeleting(id);
+			return id;
+		});
+		const warnings: string[] = [];
+		const gc = new SpoolGarbageCollector(
+			new SpoolDAL(h.dbs.spool),
+			{ listStaleDeadChannelIds: () => [], hasChannel: () => true } as never,
+			undefined,
+			{ sliceBudgetMs: 0, recordings: h.dal, logger: { log: (_l, msg) => warnings.push(msg) } },
+		);
+		const deleteBatch = h.dal.deleteBatch.bind(h.dal);
+		vi.spyOn(h.dal, "deleteBatch").mockImplementation((id, limits) => {
+			gc.stop(); // the hub stops while the first deletion runs
+			return deleteBatch(id, limits);
+		});
+		const pass = await gc.collect();
+		expect(pass.completed).toBe(false);
+		expect(warnings).toEqual([]);
+		expect(ids.filter((id) => h.dal.get(id)?.deleting === true)).toHaveLength(ids.length - 1);
+	});
+
 	// R-NO-SILENT-DELETE: a GC pass never deletes a recording not marked.
 	it("never deletes an unmarked recording in a GC pass", async () => {
 		const id = startAuto(h);

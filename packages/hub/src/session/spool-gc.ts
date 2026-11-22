@@ -286,6 +286,8 @@ export class SpoolGarbageCollector {
 				try {
 					await this.collectRecording(slicer, stats, id);
 				} catch (err) {
+					// A hub stop ends the pass, as for the channels: not a failure.
+					if (err instanceof PassStopped) throw err;
 					const code = (err as { code?: unknown } | null)?.code;
 					this.logger?.log("warn", "spool GC recording deletion failed", {
 						code: typeof code === "string" ? code : "no code",

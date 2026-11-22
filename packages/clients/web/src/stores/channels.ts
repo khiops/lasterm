@@ -441,11 +441,15 @@ export const useChannelsStore = defineStore("channels", () => {
 	const indexTitlesDuringFetch = new Set<Map<string, string>>();
 
 	/**
-	 * The latest index fetch started. Only its response may replace the index: an
-	 * older one read the hub before it, and would drop a channel listed since
-	 * (#1133). Separate from `fetchGeneration`, which belongs to a host's list.
+	 * The latest index fetch started, and the latest whose response was taken.
+	 * The index never goes back to an older response: it read the hub before a
+	 * newer one, and would drop a channel listed since (#1133). An older response
+	 * still applies while no newer one has, so a newer fetch the hub refused does
+	 * not leave the index stale. Separate from `fetchGeneration`, which belongs
+	 * to a host's list.
 	 */
 	let indexGeneration = 0;
+	let indexCommittedGeneration = 0;
 
 	/**
 	 * A run heard for a channel since the last STATE_SYNC says the hub has it:
@@ -632,9 +636,10 @@ export const useChannelsStore = defineStore("channels", () => {
 			if (!res.ok) return;
 			const rows = (await res.json()) as Array<Record<string, unknown>>;
 			if (!Array.isArray(rows)) return;
-			// After the last await: a newer fetch has started since, and its
-			// response, not this older one, says what the hub lists (#1133).
-			if (indexGeneration !== myIndexGeneration) return;
+			// After the last await: a newer fetch's response has been taken since,
+			// and it, not this older one, says what the hub lists (#1133).
+			if (myIndexGeneration < indexCommittedGeneration) return;
+			indexCommittedGeneration = myIndexGeneration;
 
 			const nextIndex = new Map<string, ChannelIndexEntry>();
 			const nextHostMap = new Map(channelHostMap.value);

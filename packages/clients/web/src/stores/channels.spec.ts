@@ -641,6 +641,31 @@ describe("useChannelsStore — fetchChannelIndex", () => {
 				expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("heard");
 			});
 
+			it("applies the older response when the newer fetch is refused", async () => {
+				const store = useChannelsStore();
+				const responses: Array<(r: unknown) => void> = [];
+				mockFetch.mockImplementation(
+					() =>
+						new Promise((resolve) => {
+							responses.push(resolve);
+						}),
+				);
+				const older = store.fetchChannelIndex();
+				const newer = store.fetchChannelIndex();
+				responses[1]?.({ ok: false, status: 503 });
+				await newer;
+				responses[0]?.({
+					ok: true,
+					json: () => Promise.resolve([row("ch-new", "host-2", "created")]),
+				});
+				await older;
+
+				expect(store.channelIndex.get("ch-new")).toEqual({
+					hostId: "host-2",
+					displayTitle: "created",
+				});
+			});
+
 			it("keeps a title heard before the older response is ignored for the newer response that follows", async () => {
 				const store = useChannelsStore();
 				const answers = heldRequests();

@@ -225,8 +225,8 @@ async fn stop_requested_by_hub(requests: &mut tokio::sync::watch::Receiver<bool>
 
 /// `--detach` is a usage error outside Windows: a POSIX launch detaches
 /// through the shell (`setsid`, `nohup`).
-fn refuse_detach_off_windows(cli: &Cli) -> Result<(), clap::Error> {
-    if cli.detach && !cfg!(windows) {
+fn refuse_detach_off_windows(cli: &Cli, windows: bool) -> Result<(), clap::Error> {
+    if cli.detach && !windows {
         use clap::CommandFactory;
         return Err(Cli::command().error(
             clap::error::ErrorKind::ArgumentConflict,
@@ -261,7 +261,7 @@ fn main() -> std::io::Result<()> {
 async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
     // Parse CLI args
     let cli = Cli::parse();
-    if let Err(error) = refuse_detach_off_windows(&cli) {
+    if let Err(error) = refuse_detach_off_windows(&cli, cfg!(windows)) {
         error.exit();
     }
     // Before anything resolves a directory: the log, the records, auth.json.
@@ -792,19 +792,15 @@ mod tests {
         assert!(Cli::try_parse_from(["lasterm-agent", "--detach"]).is_err());
         let cli = Cli::try_parse_from(["lasterm-agent", "--daemon", "--detach"]).unwrap();
         assert!(cli.detach);
-        let refused = refuse_detach_off_windows(&cli);
-        if cfg!(windows) {
-            assert!(refused.is_ok());
-        } else {
-            let error = refused.expect_err("POSIX refuses --detach");
-            assert_eq!(error.exit_code(), 2);
-            assert!(
-                error
-                    .to_string()
-                    .contains("--detach is for Windows; a POSIX launch detaches through the shell"),
-                "{error}"
-            );
-        }
+        assert!(refuse_detach_off_windows(&cli, true).is_ok());
+        let error = refuse_detach_off_windows(&cli, false).expect_err("POSIX refuses --detach");
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            error
+                .to_string()
+                .contains("--detach is for Windows; a POSIX launch detaches through the shell"),
+            "{error}"
+        );
     }
 
     #[test]

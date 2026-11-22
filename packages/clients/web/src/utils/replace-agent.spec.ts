@@ -138,6 +138,44 @@ describe("replacing while uploads to the host run (#1090)", () => {
 	});
 });
 
+describe("replacing while downloads from the host run (#840)", () => {
+	it.each([
+		[
+			{ transfers: 1, downloads: 1 },
+			"1 download on this host will be interrupted. Replace anyway?",
+			"Nothing was replaced: the downloads on this host are still running.",
+		],
+		[
+			{ transfers: 2, downloads: 1 },
+			"1 upload and 1 download on this host will be interrupted. Replace anyway?",
+			"Nothing was replaced: the uploads and downloads on this host are still running.",
+		],
+		[
+			{ transfers: 2 },
+			"2 uploads to this host will be interrupted. Replace anyway?",
+			"Nothing was replaced: the uploads to this host are still running.",
+		],
+	])("names downloads apart from uploads: %o", async (counts, question, declined) => {
+		const running: ReplaceAgentResponse = {
+			ok: false,
+			status: 409,
+			body: { error: { code: "TRANSFERS_WOULD_STOP", message: "hub reason", ...counts } },
+		};
+		const post = mockedHub(running, running, replaced);
+		const confirm = vi.fn(() => false);
+
+		expect(await replaceAgentWithConsent({ post, confirm })).toBe(declined);
+		confirm.mockReturnValue(true);
+		expect(await replaceAgentWithConsent({ post, confirm })).toBe("The agent was stopped.");
+		expect(confirm.mock.calls).toEqual([[question], [question]]);
+		expect(post.mock.calls).toEqual([
+			[{ force: false, stop_transfers: false }],
+			[{ force: false, stop_transfers: false }],
+			[{ force: false, stop_transfers: true }],
+		]);
+	});
+});
+
 describe("transfersQuestion", () => {
 	it("says how many, in the right number, or none when unknown", () => {
 		expect(transfersQuestion(1)).toBe("1 upload to this host will be interrupted. Replace anyway?");

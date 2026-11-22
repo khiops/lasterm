@@ -922,6 +922,11 @@ describe("the paths and names a client browses leave no trace in the logs (#832)
 			maxAgeDays: 30,
 			maxSizeMb: 50,
 		});
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "lasterm-files-log-"));
+		// Downloads wait behind the flag (#840).
+		const configDir = path.join(root, "config");
+		fs.mkdirSync(configDir);
+		fs.writeFileSync(path.join(configDir, "config.toml"), "[experimental]\nfile_transfer = true\n");
 		const hub = await createServer({
 			tls: getTestTls(),
 			logger: { level: "trace", destination: serverLog.destination },
@@ -931,8 +936,8 @@ describe("the paths and names a client browses leave no trace in the logs (#832)
 			authConfig: { tokenTtlDays: 90 },
 			securityLog: log.securityLog,
 			hubLogger,
+			configDir,
 		});
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "lasterm-files-log-"));
 		const folder = path.join(root, folderName);
 		fs.mkdirSync(folder);
 		fs.writeFileSync(path.join(folder, fileName), "x");
@@ -987,6 +992,34 @@ describe("the paths and names a client browses leave no trace in the logs (#832)
 
 			expect(statuses).toEqual([200, 200, 200, 409, 404, 409, 201, 409, 403]);
 			expect(fs.statSync(path.join(folder, newName)).isDirectory()).toBe(true);
+
+			// A download (#840): the content, a range of it, a refusal, and the ticket
+			// a browser's own download carries. Neither path, name nor ticket is logged.
+			const filePath = path.join(folder, fileName);
+			const content = (query: string, headers: Record<string, string> = bearer) =>
+				hub.inject({
+					method: "GET",
+					url: `/api/channels/${channels.local}/files/content?${query}`,
+					headers,
+				});
+			const ticket = await hub.inject({
+				method: "POST",
+				url: `/api/channels/${channels.local}/files/content-ticket`,
+				headers: bearer,
+				payload: { path: filePath },
+			});
+			expect(ticket.statusCode, ticket.body).toBe(200);
+			const ticketValue = (ticket.json() as { ticket: string }).ticket;
+			const downloads = [
+				(await content(`path=${encodeURIComponent(filePath)}`)).statusCode,
+				(await content(`path=${encodeURIComponent(filePath)}`, { ...bearer, range: "bytes=0-0" }))
+					.statusCode,
+				(await content(`path=${encodeURIComponent(path.join(folder, `${newName}-gone`))}`))
+					.statusCode,
+				(await content(`ticket=${encodeURIComponent(ticketValue)}`, {})).statusCode,
+			];
+			expect(downloads).toEqual([200, 206, 404, 200]);
+			expect(`${serverLog.text()}\n${log.text()}`).not.toContain(ticketValue);
 
 			// The folder a panel opens at (#836): the fallback folder, through a
 			// variable, then one that cannot be opened. Neither the path nor the

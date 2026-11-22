@@ -1,6 +1,6 @@
 import type { StopKeepingAgentResponse } from "@lasterm/shared";
 import type { StopKeepingAgentAnswer, StopKeepingAgentBody } from "../stores/hosts.js";
-import type { HostConnectionQuestion } from "./host-connection.js";
+import { type HostConnectionQuestion, transfersText } from "./host-connection.js";
 
 export interface StopAgentDeps {
 	readonly post: (body: StopKeepingAgentBody) => Promise<StopKeepingAgentAnswer>;
@@ -16,6 +16,17 @@ export type StopAgentResult =
 export function uploadsPhrase(count: number | undefined): string {
 	if (count === undefined) return "Uploads";
 	return `${count} upload${count === 1 ? "" : "s"}`;
+}
+
+/** "4 uploads to this host stop.", or with downloads "1 upload and 1 download on this host stop." (#840). */
+function transfersStopMessage(
+	transfers: number | undefined,
+	downloads: number | undefined,
+): string {
+	if (downloads === undefined || downloads === 0)
+		return `${uploadsPhrase(transfers)} to this host stop.`;
+	const uploads = (transfers ?? downloads) - downloads;
+	return `${transfersText({ uploads, downloads })} on this host stop.`;
 }
 
 export async function stopAgentWithConsent(
@@ -43,7 +54,7 @@ export async function stopAgentWithConsent(
 			error?.code === "TRANSFERS_WOULD_STOP" &&
 			!body.stop_transfers
 		) {
-			message = `${uploadsPhrase(error.transfers)} to this host stop.`;
+			message = transfersStopMessage(error.transfers, error.downloads);
 			consent = { stop_transfers: true };
 		} else if (answer.status === 409 && error?.code === "OTHER_HUBS_HOLD_CHANNELS" && !body.force) {
 			const count = error.other_owner_channels;

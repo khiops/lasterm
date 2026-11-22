@@ -9,7 +9,9 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick } from "vue";
 import type { IWsClient } from "../../services/ws-client.js";
+import { useAuthStore } from "../../stores/auth.js";
 import { useFilesPanelStore } from "../../stores/files-panel.js";
+import { useToastStore } from "../../stores/toast.js";
 import { useWriteLockStore } from "../../stores/writelock.js";
 import type { FileEntryView } from "../../utils/files-panel.js";
 import type { FileListingView, FilesAnswer } from "../../utils/host-files.js";
@@ -26,7 +28,18 @@ const mocks = vi.hoisted(() => ({
 		>(),
 	createHostFolder:
 		vi.fn<(channelId: string, path: string) => Promise<FilesAnswer<{ path: string }>>>(),
+	hubFetch: vi.fn<(input: string | URL, init?: RequestInit) => Promise<Response>>(),
+	invoke: vi.fn<(command: string, args?: unknown) => Promise<unknown>>(),
+	listen:
+		vi.fn<(event: string, handler: (event: { payload: unknown }) => void) => Promise<() => void>>(),
+	tauri: false,
 }));
+
+vi.mock("../../utils/hub-fetch.js", () => ({ hubFetch: mocks.hubFetch }));
+vi.mock("../../utils/tauri-runtime.js", () => ({ isTauriRuntime: () => mocks.tauri }));
+vi.mock("../../utils/hub-url.js", () => ({ hubBaseUrl: () => "https://127.0.0.1:4100" }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 
 vi.mock("../../utils/host-files.js", () => ({
 	listHostFiles: mocks.listHostFiles,
@@ -377,5 +390,273 @@ describe("a new folder", () => {
 		expect(rows()).toEqual(["src", "logs", "notes.md"]);
 		note.querySelector<HTMLButtonElement>("button")?.click();
 		expect(sent).toEqual([{ type: "WRITE_CLAIM", channelId: A }]);
+	});
+});
+
+describe("Download… (#840)", () => {
+	const downloadButton = (): HTMLButtonElement =>
+		[...root.querySelectorAll<HTMLButtonElement>(".files-actions .files-btn")].find((b) =>
+			(b.textContent ?? "").includes("Download"),
+		) as HTMLButtonElement;
+
+	function showEntries(entries: FileEntryView[]): void {
+		mocks.listHostFiles.mockImplementation(async () => ({
+			ok: true,
+			value: { path: "/srv/drop", entries, truncated: 0, start: "fallback" },
+		}));
+	}
+
+	afterEach(() => {
+		// The anchor's click and the platform, stubbed by a test that may have failed.
+		vi.restoreAllMocks();
+		mocks.tauri = false;
+		mocks.hubFetch.mockReset();
+		mocks.invoke.mockReset();
+		mocks.listen.mockReset();
+	});
+
+	it("download a file as a reader", async () => {
+		// Browser: a ticket through the bearer, then an anchor that carries only the ticket.
+		showEntries([file("report.txt")]);
+		mocks.hubFetch.mockResolvedValue(
+			new Response(JSON.stringify({ ticket: "T1", expires_in: 60 }), { status: 200 }),
+		);
+		const clicked: string[] = [];
+		const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+			this: HTMLAnchorElement,
+		) {
+			clicked.push(this.href);
+		});
+		useAuthStore().token = "SECRET-BEARER";
+		mountBrowser({ writer: false });
+		await settle();
+		expect(downloadButton().disabled).toBe(false);
+		downloadButton().click();
+		await settle();
+		const [url, init] = mocks.hubFetch.mock.calls[0] ?? [];
+		expect(String(url)).toContain(`/api/channels/${A}/files/content-ticket`);
+		expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+			path: "/srv/drop/report.txt",
+		});
+		expect(clicked).toHaveLength(1);
+		// Only the ticket: no bearer under any name, nothing else in the query.
+		expect(clicked[0]).toBe(`https://127.0.0.1:4100/api/channels/${A}/files/content?ticket=T1`);
+		expect(clicked[0]).not.toContain("SECRET-BEARER");
+		click.mockRestore();
+	});
+
+	it("download a file as a reader: on the desktop, through the save dialog and the shell", async () => {
+		mocks.tauri = true;
+		showEntries([file("a:b.txt")]);
+		mocks.listen.mockResolvedValue(() => {});
+		mocks.invoke.mockImplementation(async (command: string) =>
+			command === "pick_download_target"
+				? { outcome: "chosen", root_id: "R", display: "C:\\Downloads", name: "a_b.txt" }
+				: null,
+		);
+		const platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
+		mountBrowser({ writer: false });
+		await settle();
+		downloadButton().click();
+		await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledTimes(2));
+		expect(mocks.invoke.mock.calls[0]).toEqual(["pick_download_target", { name: "a_b.txt" }]);
+		const [command, args] = mocks.invoke.mock.calls[1] ?? [];
+		expect(command).toBe("download_hub_file_to");
+		expect((args as { request: Record<string, unknown> }).request).toMatchObject({
+			root_id: "R",
+			rel_path: "a_b.txt",
+			host_id: "H",
+			path: "/srv/drop/a:b.txt",
+			port: 4100,
+		});
+		expect(mocks.hubFetch).not.toHaveBeenCalled();
+		platform.mockRestore();
+	});
+
+	it("download a file as a reader: each download has its own id, after a reload too", async () => {
+		mocks.tauri = true;
+		showEntries([file("report.txt")]);
+		mocks.listen.mockResolvedValue(() => {});
+		mocks.invoke.mockImplementation(async (command: string) =>
+			command === "pick_download_target"
+				? { outcome: "chosen", root_id: "R", display: "C:Downloads", name: "report.txt" }
+				: null,
+		);
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_732_190_000_000);
+		const ids = () =>
+			mocks.invoke.mock.calls
+				.filter(([command]) => command === "download_hub_file_to")
+				.map(([, args]) => (args as { request: { download_id: string } }).request.download_id);
+		try {
+			mountBrowser({ writer: false });
+			await settle();
+			// Two downloads at the same instant.
+			downloadButton().click();
+			await vi.waitFor(() => expect(ids()).toHaveLength(1));
+			downloadButton().click();
+			await vi.waitFor(() => expect(ids()).toHaveLength(2));
+			// The page reloaded a moment later: its module, and its count, start again.
+			now.mockReturnValue(1_732_190_000_001);
+			vi.resetModules();
+			const reloaded = await import("../../utils/host-download.js");
+			await reloaded.downloadHostFile({
+				channelId: A,
+				hostId: "H",
+				path: "/srv/drop/report.txt",
+				name: "report.txt",
+				windows: false,
+			});
+			expect(ids()).toHaveLength(3);
+			expect(new Set(ids()).size).toBe(3);
+		} finally {
+			now.mockRestore();
+		}
+	});
+
+	it("download a file as a reader: a refusal without a sentence of its own says the hub's words", async () => {
+		showEntries([file("report.txt")]);
+		mocks.hubFetch.mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					error: {
+						code: "FILE_TRANSFER_DISABLED",
+						message: "File transfer is off: [experimental] file_transfer",
+					},
+				}),
+				{ status: 404 },
+			),
+		);
+		mountBrowser({ writer: false });
+		await settle();
+		downloadButton().click();
+		await settle();
+		const alert = document.querySelector('[role="alert"]');
+		expect(alert?.textContent?.trim()).toBe(
+			"report.txt could not be downloaded: File transfer is off: [experimental] file_transfer",
+		);
+	});
+
+	it("download a file as a reader: on the desktop, events of another item are not this one's", async () => {
+		mocks.tauri = true;
+		showEntries([file("report.txt")]);
+		const handlers = new Map<string, (event: { payload: unknown }) => void>();
+		mocks.listen.mockImplementation(
+			async (name: string, handler: (event: { payload: unknown }) => void) => {
+				handlers.set(name, handler);
+				return () => {};
+			},
+		);
+		mocks.invoke.mockImplementation(async (command: string) =>
+			command === "pick_download_target"
+				? { outcome: "chosen", root_id: "R", display: "C:\\Downloads", name: "report.txt" }
+				: null,
+		);
+		mountBrowser({ writer: false });
+		await settle();
+		downloadButton().click();
+		await vi.waitFor(() =>
+			expect(mocks.invoke.mock.calls.some(([command]) => command === "download_hub_file_to")).toBe(
+				true,
+			),
+		);
+		const request = mocks.invoke.mock.calls.find(
+			([command]) => command === "download_hub_file_to",
+		)?.[1] as {
+			request: { download_id: string };
+		};
+		const id = request.request.download_id;
+		const toasts = useToastStore();
+		const ended = handlers.get("download-ended");
+		ended?.({
+			payload: { download_id: id, item_id: "2", outcome: "done", final_name: "other.txt" },
+		});
+		await settle();
+		expect(toasts.messages.some((m) => m.text.startsWith("Downloading report.txt"))).toBe(true);
+		expect(toasts.messages.some((m) => m.text.startsWith("Saved"))).toBe(false);
+		ended?.({
+			payload: { download_id: id, item_id: "1", outcome: "done", final_name: "report.txt" },
+		});
+		await settle();
+		expect(toasts.messages.some((m) => m.text === "Saved report.txt")).toBe(true);
+		expect(toasts.messages.some((m) => m.text.startsWith("Downloading"))).toBe(false);
+	});
+
+	it("download a file as a reader: on the desktop, events that cannot be heard start nothing", async () => {
+		mocks.tauri = true;
+		showEntries([file("report.txt")]);
+		mocks.listen.mockRejectedValue(new Error("event API gone"));
+		mocks.invoke.mockImplementation(async (command: string) =>
+			command === "pick_download_target"
+				? { outcome: "chosen", root_id: "R", display: "C:\\Downloads", name: "report.txt" }
+				: null,
+		);
+		mountBrowser({ writer: false });
+		await settle();
+		downloadButton().click();
+		await vi.waitFor(() => expect(document.querySelector('[role="alert"]')).not.toBeNull());
+		expect(document.querySelector('[role="alert"]')?.textContent).toContain("event API gone");
+		const toasts = useToastStore();
+		expect(toasts.messages.some((m) => m.text.startsWith("Downloading"))).toBe(false);
+		const commands = mocks.invoke.mock.calls.map(([command]) => command);
+		expect(commands).not.toContain("download_hub_file_to");
+	});
+
+	it("download a file as a reader: a Cancel during the setup starts nothing", async () => {
+		mocks.tauri = true;
+		showEntries([file("report.txt")]);
+		let release: () => void = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		mocks.listen.mockImplementationOnce(async () => {
+			await held;
+			return () => {};
+		});
+		mocks.listen.mockResolvedValue(() => {});
+		mocks.invoke.mockImplementation(async (command: string) =>
+			command === "pick_download_target"
+				? { outcome: "chosen", root_id: "R", display: "C:\\Downloads", name: "report.txt" }
+				: null,
+		);
+		mountBrowser({ writer: false });
+		await settle();
+		downloadButton().click();
+		await vi.waitFor(() => expect(mocks.listen).toHaveBeenCalledTimes(1));
+		const toasts = useToastStore();
+		const toast = toasts.messages.find((m) => m.text.startsWith("Downloading report.txt"));
+		expect(toast?.action?.label).toBe("Cancel");
+		toasts.act(toast?.id ?? -1);
+		release();
+		await vi.waitFor(() =>
+			expect(toasts.messages.some((m) => m.text.startsWith("Downloading"))).toBe(false),
+		);
+		await settle();
+		const commands = mocks.invoke.mock.calls.map(([command]) => command);
+		expect(commands).not.toContain("download_hub_file_to");
+	});
+
+	it("download a file as a reader: disabled on a link or a folder, with the reason", async () => {
+		showEntries([
+			{
+				name: "latest",
+				kind: "symlink",
+				size: null,
+				mtime: null,
+				linkTarget: "/x",
+				linkKind: "file",
+			},
+			folder("logs"),
+		]);
+		mountBrowser({ writer: true });
+		await settle();
+		expect(downloadButton().disabled).toBe(true);
+		const reason = () =>
+			root.querySelector(`#${CSS.escape(downloadButton().getAttribute("aria-describedby") ?? "")}`)
+				?.textContent;
+		expect(reason()).toBe("Links are not followed — open the folder the link points to");
+		key(rowEl("latest"), "ArrowDown");
+		await settle();
+		expect(downloadButton().disabled).toBe(true);
+		expect(reason()).toBe("Downloading folders is not available yet");
 	});
 });

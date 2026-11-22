@@ -204,6 +204,31 @@ describe("CastPlayback", () => {
 		expect(last().text).toBe("ABC");
 	});
 
+	// A wait asked while the seek runs would be left behind and play a later event early.
+	it("leaves no wait behind when Play is pressed during a seek", async () => {
+		const text = [
+			'{"version":3,"term":{"cols":80,"rows":24}}',
+			'[1.5, "o", "A"]',
+			'[0.1, "o", "B"]',
+			'[1.9, "o", "C"]',
+		].join("\n");
+		const { playback, last } = player(text, false);
+		const seeking = playback.seek(1.55);
+		playback.play();
+		for (let i = 0; i < 17; i++) {
+			last().flush();
+			await vi.advanceTimersByTimeAsync(100);
+		}
+		await seeking;
+		// 1.7 s after the seek: B (due at 50 ms) is out, C (due at 1.95 s) is not.
+		expect(last().text).toBe("AB");
+		for (let i = 0; i < 5; i++) {
+			last().flush();
+			await vi.advanceTimersByTimeAsync(100);
+		}
+		expect(last().text).toBe("ABC");
+	});
+
 	it("stops between the pieces of a large event at a pause, and goes on from there", async () => {
 		const big = `${"x".repeat(2 * PIECE)}`;
 		const text = ['{"version":3,"term":{"cols":80,"rows":24}}', JSON.stringify([0, "o", big])].join(

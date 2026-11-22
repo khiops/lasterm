@@ -11548,7 +11548,8 @@ describe("SessionManager recordings (#80)", () => {
 			rows: 24,
 		});
 		await sm.startup();
-		expect(sm.recordingIdOf("ADOPTCH00AAAAAAAAAAAAAAAAAA")).toBeNull();
+		// No row at all: a recording opened then ended by the restore would still be listed.
+		expect(sm.recorder.list().recordings).toEqual([]);
 	});
 
 	// AC-START-UNAVAILABLE / old-agent through the hub's own version check.

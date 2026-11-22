@@ -431,6 +431,97 @@ describe("useChannelsStore — fetchChannelIndex", () => {
 
 		expect(store.channelIndex.get("ch-4")?.displayTitle).toBe("kept");
 	});
+
+	describe("a title set while the fetch is in flight (#1128)", () => {
+		/** An index fetch whose (older) response waits for `release`. */
+		function fetchingIndex(store: ReturnType<typeof useChannelsStore>, rows: unknown[]) {
+			let release!: () => void;
+			const held = new Promise<void>((r) => {
+				release = r;
+			});
+			mockFetch.mockImplementation(() =>
+				held.then(() => ({ ok: true, json: () => Promise.resolve(rows) })),
+			);
+			return { fetching: store.fetchChannelIndex(), release };
+		}
+
+		it("keeps the title set for a channel the index already held", async () => {
+			mockFetch.mockImplementation(() =>
+				Promise.resolve({ ok: true, json: () => Promise.resolve([row("ch-1", "host-2", "old")]) }),
+			);
+			const store = useChannelsStore();
+			await store.fetchChannelIndex();
+
+			const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-2", "old")]);
+			store.setDisplayTitle("ch-1", "new");
+			release();
+			await fetching;
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("new");
+		});
+
+		it("keeps the title set for a channel the index did not hold yet", async () => {
+			const store = useChannelsStore();
+			const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-2", "old")]);
+			store.setDisplayTitle("ch-1", "first");
+			store.setDisplayTitle("ch-1", "newest");
+			release();
+			await fetching;
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("newest");
+		});
+
+		it("leaves a title set for a channel the response does not list out of the index", async () => {
+			const store = useChannelsStore();
+			const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-2", "old")]);
+			store.setDisplayTitle("ch-unlisted", "x");
+			release();
+			await fetching;
+
+			expect(store.channelIndex.has("ch-unlisted")).toBe(false);
+		});
+
+		it("does not carry the title into a later fetch, which reads the hub's newer one", async () => {
+			const store = useChannelsStore();
+			const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-2", "old")]);
+			store.setDisplayTitle("ch-1", "heard");
+			release();
+			await fetching;
+
+			mockFetch.mockImplementation(() =>
+				Promise.resolve({
+					ok: true,
+					json: () => Promise.resolve([row("ch-1", "host-2", "hub says")]),
+				}),
+			);
+			await store.fetchChannelIndex();
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("hub says");
+		});
+
+		it("does not carry the title out of a fetch the hub refused", async () => {
+			const store = useChannelsStore();
+			let release!: () => void;
+			const held = new Promise<void>((r) => {
+				release = r;
+			});
+			mockFetch.mockImplementation(() => held.then(() => ({ ok: false, status: 503 })));
+			const refused = store.fetchChannelIndex();
+			store.setDisplayTitle("ch-1", "heard");
+			release();
+			await refused;
+
+			mockFetch.mockImplementation(() =>
+				Promise.resolve({
+					ok: true,
+					json: () => Promise.resolve([row("ch-1", "host-2", "hub says")]),
+				}),
+			);
+			await store.fetchChannelIndex();
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("hub says");
+		});
+	});
 });
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import { registerSessionRoutes } from "../api/sessions.js";
 import { HUB_VERSION } from "../build-version.js";
 import { type DatabaseManager, openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
+import type { AgentConnection } from "./agent-connection.js";
 import { isOlderVersion } from "./agent-retirement.js";
 import type { SharedSessionContext } from "./session-context.js";
 import { SessionManager, type WsClient } from "./session-manager.js";
@@ -34,6 +35,8 @@ interface FakeDaemon {
 	stopMode: "obey" | "hold" | "silent" | "throw" | "displaced";
 	/** Report the end of a terminal it is told to destroy, as a real daemon may, before what follows. */
 	exitOnDestroy: boolean;
+	/** Refuse every SPAWN with a SPAWN_ERR of this code, when set (#1113). */
+	refusesSpawn: string | null;
 	release?: () => void;
 	readonly agents: FakeAgent[];
 }
@@ -77,6 +80,7 @@ const daemons = vi.hoisted(() => ({
 			othersHold: 0,
 			stopMode: "obey",
 			exitOnDestroy: false,
+			refusesSpawn: null,
 			agents: [],
 		};
 	},
@@ -94,6 +98,18 @@ const behaviour = vi.hoisted(() => ({
 		agent.sent.push(msg);
 		const daemon = agent.daemon;
 		if (msg.type === "SPAWN") {
+			const code = daemon.refusesSpawn;
+			if (code !== null) {
+				setImmediate(() =>
+					emit("message", {
+						type: "SPAWN_ERR",
+						requestId: msg.requestId,
+						code,
+						message: "the terminal could not start",
+					}),
+				);
+				return;
+			}
 			const named = (msg as { channelId?: string }).channelId;
 			const channelId = named ?? `ch-${++behaviour.nextChannel}`;
 			daemon.channels.add(channelId);
@@ -542,6 +558,22 @@ describe("the local agent, older than the hub (#805)", () => {
 		expect(old.channels.has("ch-held")).toBe(true);
 	});
 
+	// The end of the shell it destroyed is the terminal's end when nothing
+	// replaced it, which leaves the hub nothing there (#1113).
+	it("stops it once a restart refused after its DESTROY ended its last terminal", async () => {
+		const old = daemons.make(OLD);
+		old.exitOnDestroy = true;
+		old.refusesSpawn = "SHELL_NOT_FOUND";
+		await restartOnto(old);
+		await settle();
+		expect(stopsTo(old)).toEqual([]);
+
+		expect(await sm.restartChannel("ch-held")).toBe(false);
+
+		await vi.waitFor(() => expect(stopsTo(old)).toEqual([{ type: "STOP", force: false }]));
+		expect(metaDal.getChannel("ch-held")?.status).toBe("dead");
+	});
+
 	it.each([
 		["the STOP cannot be written", "throw"],
 		["another connection took the hub's place", "displaced"],
@@ -856,6 +888,22 @@ describe("a remote daemon older than the hub (#805)", () => {
 					internals.ctx.reconnectAbortControllers.has(hostId),
 			).toBe(true),
 		);
+	});
+
+	it("is stopped once a restart refused after its DESTROY ended its last terminal of this hub", async () => {
+		const old = daemons.make(OLD);
+		old.exitOnDestroy = true;
+		old.refusesSpawn = "SHELL_NOT_FOUND";
+		await connectHolding(old);
+		await settle();
+		const inventory = (old.agents[0] as unknown as AgentConnection).daemonInventory;
+		expect(inventory?.listed.has("ch-remote")).toBe(true);
+		expect(stopsTo(old)).toEqual([]);
+
+		expect(await sm.restartChannel("ch-remote")).toBe(false);
+
+		await vi.waitFor(() => expect(stopsTo(old)).toEqual([{ type: "STOP", force: false }]));
+		expect(inventory?.listed.has("ch-remote")).toBe(false);
 	});
 
 	it("is kept while other hubs hold terminals there", async () => {

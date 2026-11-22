@@ -244,7 +244,7 @@ impl Batcher {
 
     /// Send what `channel_id` has buffered, now, and keep no buffer for it:
     /// its next output makes a new one. A channel whose exit is never sent,
-    /// withdrawn by a DESTROY (#1089), leaves none behind either.
+    /// its id taken over by a restart (#1089, #1113), leaves none behind either.
     fn release(&mut self, channel_id: &str, tx: &mpsc::UnboundedSender<BatchedEvent>) {
         let held = self
             .buffers
@@ -425,7 +425,7 @@ mod tests {
     }
 
     /// An event about a channel takes its buffer with it, its output first:
-    /// a channel whose exit is withdrawn sends its LOG last, and keeps no
+    /// a channel whose exit is never sent sends its LOG last, and keeps no
     /// buffer for the daemon's lifetime (#1089).
     #[test]
     fn an_event_leaves_no_buffer_behind() {

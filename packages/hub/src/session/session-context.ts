@@ -194,6 +194,16 @@ export interface ChannelState {
 	 * meta.db, it started before anything was asked (#599).
 	 */
 	startedAt?: number;
+	/**
+	 * Set when a live restart of this run failed after its DESTROY before the
+	 * run's exit was heard (#1113): the next exit of this entry is taken as the
+	 * terminal's end and says the hub ended it (`killed`, or `stopped` while
+	 * its agent is stopped or the hub quits). That is the destroyed run's exit,
+	 * unless the DESTROY's teardown failed or a replacement started after the
+	 * restart's timeout, when it is that live shell's. It goes with this entry:
+	 * a new run replaces it, and a reconnect's or a restart's SPAWN_OK clears it.
+	 */
+	restartFailed?: true;
 }
 
 export interface SessionState {

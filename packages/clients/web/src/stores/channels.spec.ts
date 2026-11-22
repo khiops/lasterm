@@ -3288,3 +3288,141 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		expect(store.channels.map((c) => c.id)).toEqual(["ch-a"]);
 	});
 });
+
+describe("useChannelsStore — a title set while a list fetch is in flight (#1122)", () => {
+	function row(): Record<string, unknown> {
+		return {
+			id: "ch-t",
+			session_id: "sess-old",
+			shell: "/bin/bash",
+			cols: 80,
+			rows: 24,
+			status: "dead",
+			display_title: "old display",
+			dynamic_title: "old dynamic",
+			process_title: "old process",
+			created_at: "2026-11-21T00:00:00Z",
+			updated_at: "2026-11-21T00:00:00Z",
+		};
+	}
+
+	function created(extra: Record<string, unknown> = {}) {
+		return {
+			type: "CHANNEL_CREATED",
+			channelId: "ch-t",
+			sessionId: "sess-new",
+			hostId: "host-1",
+			cols: 132,
+			rows: 43,
+			status: "live",
+			displayTitle: "creation title",
+			createdAt: "2026-11-21T00:01:00Z",
+			updatedAt: "2026-11-21T00:02:00Z",
+			...extra,
+		} as unknown as Parameters<ReturnType<typeof useChannelsStore>["handleChannelCreated"]>[0];
+	}
+
+	/** ch-t listed, then a list fetch whose (older) row waits for `release`. */
+	async function listedThenFetching(before?: (store: ReturnType<typeof useChannelsStore>) => void) {
+		const ok = (body: unknown) => Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		mockFetch.mockImplementation((url: string) => ok(url.includes("/api/groups") ? [] : [row()]));
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+		before?.(store);
+
+		let release!: () => void;
+		const held = new Promise<void>((r) => {
+			release = r;
+		});
+		mockFetch.mockImplementation((url: string) =>
+			url.includes("/api/groups")
+				? ok([])
+				: held.then(() => ({ ok: true, json: () => Promise.resolve([row()]) })),
+		);
+		const fetching = store.fetchChannels("host-1");
+		return { store, fetching, release };
+	}
+
+	it("each title set after the fetch started outlives the older row", async () => {
+		const { store, fetching, release } = await listedThenFetching();
+
+		store.setDisplayTitle("ch-t", "new display");
+		store.setDynamicTitle("ch-t", "new dynamic");
+		store.updateProcessTitle("ch-t", "new process");
+		release();
+		await fetching;
+
+		expect(store.channels.find((c) => c.id === "ch-t")).toMatchObject({
+			displayTitle: "new display",
+			dynamicTitle: "new dynamic",
+			processTitle: "new process",
+		});
+	});
+
+	it("a title set to the value the store already held still outlives the older row", async () => {
+		const { store, fetching, release } = await listedThenFetching((s) =>
+			s.setDisplayTitle("ch-t", "local title"),
+		);
+
+		store.setDisplayTitle("ch-t", "local title");
+		release();
+		await fetching;
+
+		expect(store.channels.find((c) => c.id === "ch-t")?.displayTitle).toBe("local title");
+	});
+
+	it("a title set after a re-creation outlives both the row and the creation's title", async () => {
+		const { store, fetching, release } = await listedThenFetching();
+
+		store.handleChannelCreated(created());
+		store.setDisplayTitle("ch-t", "after creation");
+		release();
+		await fetching;
+
+		expect(store.channels.find((c) => c.id === "ch-t")).toMatchObject({
+			sessionId: "sess-new",
+			cols: 132,
+			displayTitle: "after creation",
+		});
+	});
+
+	it("a re-creation's title and time outlive the older row, over a title set before it", async () => {
+		const { store, fetching, release } = await listedThenFetching();
+
+		store.setDisplayTitle("ch-t", "before creation");
+		store.handleChannelCreated(created());
+		release();
+		await fetching;
+
+		expect(store.channels.find((c) => c.id === "ch-t")).toMatchObject({
+			displayTitle: "creation title",
+			updatedAt: "2026-11-21T00:02:00Z",
+		});
+	});
+
+	it("a status heard after a title leaves the title in place", async () => {
+		const { store, fetching, release } = await listedThenFetching();
+
+		store.setDisplayTitle("ch-t", "new display");
+		store.updateChannelStatus("ch-t", "live");
+		release();
+		await fetching;
+
+		expect(store.channels.find((c) => c.id === "ch-t")).toMatchObject({
+			status: "live",
+			displayTitle: "new display",
+		});
+	});
+
+	it("a title set before the fetch started is the row's to tell", async () => {
+		const ok = (body: unknown) => Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+		mockFetch.mockImplementation((url: string) => ok(url.includes("/api/groups") ? [] : [row()]));
+		const store = useChannelsStore();
+		await store.fetchChannels("host-1");
+
+		store.setDisplayTitle("ch-t", "stale local");
+		await store.fetchChannels("host-1");
+
+		expect(store.channels.find((c) => c.id === "ch-t")?.displayTitle).toBe("old display");
+	});
+});

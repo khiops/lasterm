@@ -282,14 +282,28 @@ export interface ChannelReport {
  * running again, so the fetched row's exit code, reason and end id give way
  * to its own, absent ones included (#932).
  */
-interface PendingStatus {
+interface PendingStatus extends Heard {
 	status: Channel["status"];
+}
+
+/** The titles a channel can be given while a list fetch is in flight (#1122). */
+type HeardTitles = Partial<Pick<Channel, "displayTitle" | "dynamicTitle" | "processTitle">>;
+
+/**
+ * What was heard for a channel during a fetch. `status` is absent while only
+ * a title was heard.
+ */
+interface Heard {
+	status?: Channel["status"];
 	exitCode?: number;
 	endReason?: ChannelEndReason;
 	endId?: string;
 	replacesEnd?: true;
-	/** A terminal created again: its own session and size win over a fetched row's (#1109). */
-	row?: Pick<Channel, "sessionId" | "cols" | "rows">;
+	/** A terminal created again: its own session, size, title and time win over a fetched row's (#1109). */
+	row?: Pick<Channel, "sessionId" | "cols" | "rows" | "updatedAt"> &
+		Partial<Pick<Channel, "displayTitle">>;
+	/** Titles heard since the creation, if any: the newest word over the row's (#1122). */
+	titles?: HeardTitles;
 }
 
 /**
@@ -298,14 +312,20 @@ interface PendingStatus {
  * that it replaces the fetched row's end (#932); so does an end heard after a
  * run (#1091).
  */
-function bufferedStatus(held: PendingStatus | undefined, heard: PendingStatus): PendingStatus {
-	const buffered = bufferedEnd(held, heard);
+function bufferedStatus(held: Heard | undefined, heard: PendingStatus): PendingStatus {
+	// A creation tells the terminal's titles anew: the ones heard before it go.
+	const { titles: _before, ...buffered } = bufferedEnd(held, heard);
 	// What a creation told of the terminal outlives the statuses heard after it.
 	const row = heard.row ?? held?.row;
-	return row === undefined ? buffered : { ...buffered, row };
+	const titles = heard.row === undefined ? held?.titles : undefined;
+	return {
+		...buffered,
+		...(row !== undefined && { row }),
+		...(titles !== undefined && { titles }),
+	};
 }
 
-function bufferedEnd(held: PendingStatus | undefined, heard: PendingStatus): PendingStatus {
+function bufferedEnd(held: Heard | undefined, heard: PendingStatus): PendingStatus {
 	const sameEnd =
 		held !== undefined &&
 		heard.replacesEnd !== true &&
@@ -323,14 +343,15 @@ function bufferedEnd(held: PendingStatus | undefined, heard: PendingStatus): Pen
 }
 
 /** A channel with a status heard for it over what it held (#932). */
-function withHeard(channel: Channel, heard: PendingStatus): Channel {
+function withHeard(channel: Channel, heard: Heard): Channel {
 	return {
 		...(heard.replacesEnd === true ? withoutEnd(channel) : channel),
-		status: heard.status,
+		...(heard.status !== undefined && { status: heard.status }),
 		...(heard.exitCode !== undefined && { exitCode: heard.exitCode }),
 		...(heard.endReason !== undefined && { endReason: heard.endReason }),
 		...(heard.endId !== undefined && { endId: heard.endId }),
 		...heard.row,
+		...heard.titles,
 	};
 }
 
@@ -408,7 +429,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * when it commits, as `pendingStatuses` does for channels not listed: the
 	 * hub may have read those rows before them (#1091).
 	 */
-	const statusesDuringFetch = new Map<number, Map<string, PendingStatus | "deleted">>();
+	const statusesDuringFetch = new Map<number, Map<string, Heard | "deleted">>();
 
 	/**
 	 * A run heard for a channel since the last STATE_SYNC says the hub has it:
@@ -427,6 +448,18 @@ export const useChannelsStore = defineStore("channels", () => {
 			// Heard for a channel in the list, so it was created again since a
 			// deletion recorded here: the deletion no longer stands.
 			heardHere.set(channelId, bufferedStatus(held === "deleted" ? undefined : held, heard));
+		}
+	}
+
+	/**
+	 * Record a title set here for every fetch in flight: the hub may have read
+	 * the row before it, and the title must not go back (#1122).
+	 */
+	function titleHeardDuringFetch(channelId: string, titles: HeardTitles): void {
+		for (const heardHere of statusesDuringFetch.values()) {
+			const held = heardHere.get(channelId);
+			if (held === "deleted") continue;
+			heardHere.set(channelId, { ...held, titles: { ...held?.titles, ...titles } });
 		}
 	}
 
@@ -640,7 +673,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		wsAddedDuringFetch.value = new Map(wsAddedDuringFetch.value).set(myGeneration, myWsAdded);
 		// Older generations can no longer commit: stop recording for them.
 		statusesDuringFetch.clear();
-		const myHeard = new Map<string, PendingStatus | "deleted">();
+		const myHeard = new Map<string, Heard | "deleted">();
 		statusesDuringFetch.set(myGeneration, myHeard);
 
 		try {
@@ -946,6 +979,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		if (idx === -1) return;
 		const existing = channels.value[idx];
 		if (existing === undefined) return;
+		titleHeardDuringFetch(channelId, { dynamicTitle: title });
 		// Avoid unnecessary reactivity triggers if title hasn't changed
 		if (existing.dynamicTitle === title) return;
 		const next = [...channels.value];
@@ -973,6 +1007,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		if (idx === -1) return;
 		const existing = channels.value[idx];
 		if (existing === undefined) return;
+		titleHeardDuringFetch(channelId, { displayTitle });
 		if (existing.displayTitle === displayTitle) return;
 		const next = [...channels.value];
 		next[idx] = { ...existing, displayTitle };
@@ -988,6 +1023,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		if (idx === -1) return;
 		const existing = channels.value[idx];
 		if (existing === undefined) return;
+		titleHeardDuringFetch(channelId, { processTitle: title });
 		// Avoid unnecessary reactivity triggers if title hasn't changed
 		if (existing.processTitle === title) return;
 		const next = [...channels.value];
@@ -1174,8 +1210,13 @@ export const useChannelsStore = defineStore("channels", () => {
 		heardDuringFetch(msg.channelId, {
 			status: msg.status,
 			replacesEnd: true,
-			// Session and size only: a title or time changed since is the newer word.
-			row: { sessionId: msg.sessionId, cols: msg.cols, rows: msg.rows },
+			row: {
+				sessionId: msg.sessionId,
+				cols: msg.cols,
+				rows: msg.rows,
+				updatedAt: msg.updatedAt,
+				...(msg.displayTitle !== undefined && { displayTitle: msg.displayTitle }),
+			},
 		});
 		knownToHub(msg.channelId);
 

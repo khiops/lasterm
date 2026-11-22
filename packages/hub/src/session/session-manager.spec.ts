@@ -11983,6 +11983,25 @@ describe("SessionManager recordings (#80)", () => {
 		}
 	});
 
+	// AC-REFUSE / no-agent through the real close: the close handler removes the
+	// agent from the map, and the terminal is still live until judged. Mutation
+	// caught: a guard that refuses only an agent marked disconnected, not one gone.
+	it("refuses a recording on a live terminal whose agent connection closed", async () => {
+		const channelId = await spawnLocal();
+		const hostId = await sm.ensureLocalHost();
+		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+		mockLocalAgents[0]?.simulateDisconnect();
+		expect(ctx.agents.has(hostId)).toBe(false);
+		expect(ctx.channels.get(channelId)?.status).toBe("live");
+		expect(sm.startRecording(channelId)).toMatchObject({
+			ok: false,
+			status: 409,
+			code: "CHANNEL_NOT_LIVE",
+		});
+		expect(sm.recordingIdOf(channelId)).toBeNull();
+		expect(sm.recorder.list().recordings).toEqual([]);
+	});
+
 	// AC-START-CORRELATED. Mutation caught: the first snapshot for the channel taken.
 	it("takes only the ATTACH_OK answering its own request", async () => {
 		const channelId = await spawnLocal();

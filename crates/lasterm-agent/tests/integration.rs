@@ -636,7 +636,14 @@ impl StopFixture {
     }
 
     fn agent(&self, mode: &str) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lasterm-agent"));
+        self.agent_from(
+            std::path::Path::new(env!("CARGO_BIN_EXE_lasterm-agent")),
+            mode,
+        )
+    }
+
+    fn agent_from(&self, binary: &std::path::Path, mode: &str) -> Command {
+        let mut command = Command::new(binary);
         command
             .args([mode, "--socket", &self.socket])
             .env("XDG_STATE_HOME", &self.dir)
@@ -741,6 +748,41 @@ async fn stop_mode_leaves_no_record_of_the_daemon_it_stopped() {
     fixture.remove();
     // Mutation caught: on Windows, keeping the record of the daemon the stop
     // terminated, which a later reuse of its pid turns into a mismatch.
+}
+
+/// #1144: replacing a running Windows daemon first renames its image aside.
+/// The identity record keeps the original pathname, while Win32 reports the
+/// renamed one. The out-of-band stop must still recognise that same process.
+#[cfg(windows)]
+#[tokio::test]
+async fn deploy_renamed_daemon_binary_remains_stoppable() {
+    let fixture = StopFixture::new("deploy-renamed");
+    let installed = fixture.dir.join("lasterm-agent.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_lasterm-agent"), &installed)
+        .expect("install the daemon binary");
+    let mut daemon = DaemonGuard(
+        fixture
+            .agent_from(&installed, "--daemon")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .expect("spawn the installed daemon"),
+    );
+    let record = fixture.live_record().await;
+
+    let aside = fixture.dir.join("lasterm-agent.exe.old-8da124a46e8d21f5");
+    std::fs::rename(&installed, &aside).expect("rename the running daemon image aside");
+    std::fs::copy(env!("CARGO_BIN_EXE_lasterm-agent"), &installed)
+        .expect("install the replacement daemon binary");
+
+    assert_eq!(fixture.stop().await, (true, "stopped".to_owned()));
+    let _ = daemon.wait().await.expect("wait stopped daemon");
+    assert!(!record.exists(), "a stopped daemon leaves no live record");
+
+    fixture.remove();
+    // Mutation caught: exact path comparison answers `record does not match a
+    // live process` and leaves the renamed daemon running.
 }
 
 /// SC-09: Agent sends HELLO as the very first frame on stdout.

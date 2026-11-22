@@ -134,6 +134,8 @@ describe("CastPlayback", () => {
 		].join("\n");
 		const { playback, last } = player(text, false);
 		const done = playback.seek(1);
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		// Nothing parsed yet: the size change waits.
 		expect(last().calls).toEqual(["write:1:0"]);
 		last().flush();
 		await Promise.resolve();

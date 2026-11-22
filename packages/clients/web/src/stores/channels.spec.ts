@@ -521,6 +521,56 @@ describe("useChannelsStore — fetchChannelIndex", () => {
 			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("new");
 		});
 
+		describe("a creation heard during the fetch", () => {
+			function created(extra: Record<string, unknown>) {
+				return {
+					type: "CHANNEL_CREATED",
+					channelId: "ch-1",
+					sessionId: "sess-new",
+					hostId: "host-9",
+					cols: 80,
+					rows: 24,
+					status: "live",
+					createdAt: "2026-11-21T00:01:00Z",
+					updatedAt: "2026-11-21T00:02:00Z",
+					...extra,
+				} as unknown as Parameters<ReturnType<typeof useChannelsStore>["handleChannelCreated"]>[0];
+			}
+
+			it("replaces a title heard before it with the title it tells", async () => {
+				const store = useChannelsStore();
+				const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-9", "created")]);
+				store.setDisplayTitle("ch-1", "before the creation");
+				store.handleChannelCreated(created({ displayTitle: "created" }));
+				release();
+				await fetching;
+
+				expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("created");
+			});
+
+			it("drops a title heard before it when it tells none", async () => {
+				const store = useChannelsStore();
+				const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-9", "hub says")]);
+				store.setDisplayTitle("ch-1", "before the creation");
+				store.handleChannelCreated(created({}));
+				release();
+				await fetching;
+
+				expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("hub says");
+			});
+
+			it("keeps a title heard after it", async () => {
+				const store = useChannelsStore();
+				const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-9", "created")]);
+				store.handleChannelCreated(created({ displayTitle: "created" }));
+				store.setDisplayTitle("ch-1", "after the creation");
+				release();
+				await fetching;
+
+				expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("after the creation");
+			});
+		});
+
 		it("does not carry the title out of a fetch the hub refused", async () => {
 			const store = useChannelsStore();
 			let release!: () => void;

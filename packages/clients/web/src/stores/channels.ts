@@ -1006,7 +1006,8 @@ export const useChannelsStore = defineStore("channels", () => {
 	/**
 	 * Update the hub-resolved display title for a channel.
 	 * Called on TITLE_CHANGE, PROCESS_TITLE, ATTACH_OK, and STATE_SYNC.
-	 * A channel no list holds is still recorded for fetches in flight and kept in the index.
+	 * A channel no list holds is still recorded for index fetches in flight; the index
+	 * itself changes only for a channel it already holds.
 	 */
 	function setDisplayTitle(channelId: string, displayTitle: string): void {
 		titleHeardDuringFetch(channelId, { displayTitle });
@@ -1212,6 +1213,13 @@ export const useChannelsStore = defineStore("channels", () => {
 			const next = new Map(pendingStatuses.value);
 			next.delete(msg.channelId);
 			pendingStatuses.value = next;
+		}
+
+		// A creation tells the display title anew, on any host: the titles heard
+		// before it, for an index fetch in flight, go (#1128).
+		for (const heardHere of indexTitlesDuringFetch) {
+			if (msg.displayTitle === undefined) heardHere.delete(msg.channelId);
+			else heardHere.set(msg.channelId, msg.displayTitle);
 		}
 
 		// Ignore channels for other hosts — this client may be viewing a

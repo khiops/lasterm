@@ -433,8 +433,9 @@ export const useHostsStore = defineStore("hosts", () => {
 
 	/**
 	 * Hosts meant to keep an agent running whose SSH server refused the socket
-	 * forwarding that reaches it, as the hub reports it (#765). The hub runs
-	 * their agent over the connection instead, so their terminals end with it.
+	 * forwarding that reaches it, as the hub reports it (#765). The hub reaches
+	 * their agent through a relay instead, and their terminals still outlive
+	 * the connection (#755).
 	 */
 	const _socketForwardingRefused = ref<Map<string, true>>(new Map());
 

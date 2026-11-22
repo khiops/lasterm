@@ -1672,3 +1672,433 @@ async fn the_channel_flag_picks_the_daemons_directories() {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+// ---------------------------------------------------------------------------
+// `--attach`: the relay a hub runs over an exec channel (#755)
+// ---------------------------------------------------------------------------
+
+/// Run `--attach` against `fixture`'s endpoint with `extra` arguments, every
+/// stream piped.
+fn spawn_relay(fixture: &StopFixture, extra: &[&str]) -> Child {
+    fixture
+        .agent("--attach")
+        .args(extra)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn relay")
+}
+
+/// The relay's exit status, stderr lines and stdout, once it has exited.
+async fn relay_end(relay: Child, within: Duration) -> (i32, Vec<String>, Vec<u8>) {
+    let output = tokio::time::timeout(within, relay.wait_with_output())
+        .await
+        .expect("relay did not exit in time")
+        .expect("relay output");
+    let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8");
+    (
+        output.status.code().expect("relay exit status"),
+        stderr.lines().map(str::to_owned).collect(),
+        output.stdout,
+    )
+}
+
+/// AC-R1, AC-R9: what a hub writes reaches the daemon, and what the daemon
+/// says comes back, through the relay alone; its stderr carries `start` and
+/// nothing once connected. Mutations: a relay that drops stdin (no
+/// CHANNEL_STATE_END), one that copies one way only (no HELLO), one that logs
+/// once connected.
+#[tokio::test]
+async fn relay_carries_hello_and_auth_both_ways() {
+    let fixture = StopFixture::new("relay-both");
+    let _daemon = fixture.spawn_daemon();
+    let mut relay = spawn_relay(&fixture, &["--wait", "5000"]);
+    let mut stdin = relay.stdin.take().expect("relay stdin");
+    let mut stdout = relay.stdout.take().expect("relay stdout");
+
+    let hello = read_frame_timeout(&mut stdout, 10).await;
+    assert_eq!(hello["type"].as_str(), Some("HELLO"), "{hello:?}");
+    write_frame(
+        &mut stdin,
+        &msgmap(vec![
+            ("type", sv("AUTH")),
+            ("token", sv("")),
+            ("hub_key", sv("relay-test-hub-key")),
+        ]),
+    )
+    .await;
+    let answer = read_frame_timeout(&mut stdout, 10).await;
+    assert_eq!(
+        answer["type"].as_str(),
+        Some("CHANNEL_STATE_END"),
+        "{answer:?}"
+    );
+
+    drop(stdin);
+    drop(stdout);
+    let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 0);
+    assert_eq!(stderr, vec!["lasterm-attach: start".to_owned()]);
+}
+
+/// AC-R2, AC-R9. Mutation: every failure exiting 1, or no outcome marker.
+#[tokio::test]
+async fn relay_exits_3_when_nothing_listens() {
+    let fixture = StopFixture::new("relay-none");
+    let relay = spawn_relay(&fixture, &[]);
+    let (status, stderr, stdout) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 3, "{stderr:?}");
+    assert_eq!(
+        stderr.len(),
+        3,
+        "start, the marker, the human line: {stderr:?}"
+    );
+    assert_eq!(stderr[0], "lasterm-attach: start");
+    assert_eq!(stderr[1], "lasterm-attach: nothing-listens");
+    assert!(stdout.is_empty());
+}
+
+/// AC-R2 on a socket file a dead daemon left: ECONNREFUSED is nothing
+/// listening too, so the hub may start one. Mutation: ECONNREFUSED as failed.
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_exits_3_on_a_socket_nobody_listens_on() {
+    let fixture = StopFixture::new("relay-stale");
+    drop(std::os::unix::net::UnixListener::bind(&fixture.socket).expect("bind"));
+    assert!(std::path::Path::new(&fixture.socket).exists());
+    let relay = spawn_relay(&fixture, &[]);
+    let (status, stderr, stdout) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 3, "{stderr:?}");
+    assert_eq!(
+        stderr.len(),
+        3,
+        "start, the marker, the human line: {stderr:?}"
+    );
+    assert_eq!(stderr[0], "lasterm-attach: start");
+    assert_eq!(stderr[1], "lasterm-attach: nothing-listens");
+    assert!(stdout.is_empty());
+}
+
+/// AC-R3. Mutation: `--wait` ignored.
+#[tokio::test]
+async fn relay_waits_for_a_late_listener() {
+    let fixture = StopFixture::new("relay-late");
+    let mut relay = spawn_relay(&fixture, &["--wait", "5000"]);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _daemon = fixture.spawn_daemon();
+    let mut stdout = relay.stdout.take().expect("relay stdout");
+    let hello = read_frame_timeout(&mut stdout, 10).await;
+    assert_eq!(hello["type"].as_str(), Some("HELLO"), "{hello:?}");
+}
+
+/// AC-R3 / expires. Mutation: retrying for ever.
+#[tokio::test]
+async fn relay_wait_gives_up() {
+    let fixture = StopFixture::new("relay-gives-up");
+    let started = std::time::Instant::now();
+    let relay = spawn_relay(&fixture, &["--wait", "500"]);
+    let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 3, "{stderr:?}");
+    // 0.56 s alone; 2.07 s once beside the whole suite's processes on Windows.
+    // The bound is for a relay that never gives up, not for its start-up.
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// A listener of the test's own on `fixture`'s endpoint, for one client.
+#[cfg(unix)]
+fn accept_one(
+    fixture: &StopFixture,
+) -> (
+    tokio::sync::oneshot::Receiver<tokio::net::UnixStream>,
+    AbortOnDrop,
+) {
+    let listener = tokio::net::UnixListener::bind(&fixture.socket).expect("bind test listener");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let _ = tx.send(stream);
+    });
+    (rx, AbortOnDrop(task))
+}
+
+#[cfg(windows)]
+fn accept_one(
+    fixture: &StopFixture,
+) -> (
+    tokio::sync::oneshot::Receiver<tokio::net::windows::named_pipe::NamedPipeServer>,
+    AbortOnDrop,
+) {
+    let server = tokio::net::windows::named_pipe::ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&fixture.socket)
+        .expect("create test pipe");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        server.connect().await.expect("accept");
+        let _ = tx.send(server);
+    });
+    (rx, AbortOnDrop(task))
+}
+
+/// AC-R4 / stdin-eof: every byte written before stdin ends reaches the
+/// endpoint, then the endpoint ends. Mutations: a half-close only (a Windows
+/// pipe never sees it), a relay waiting for the endpoint, one dropping its
+/// last buffer.
+#[tokio::test]
+async fn relay_ends_when_the_hub_side_closes() {
+    let fixture = StopFixture::new("relay-eof");
+    let (accepted, _guard) = accept_one(&fixture);
+    let mut relay = spawn_relay(&fixture, &["--wait", "5000"]);
+    let mut endpoint = tokio::time::timeout(Duration::from_secs(10), accepted)
+        .await
+        .expect("relay connected in time")
+        .expect("accepted");
+    let pattern: Vec<u8> = (0..65_536u32).map(|i| (i % 251) as u8).collect();
+    let mut stdin = relay.stdin.take().expect("relay stdin");
+    let writer = tokio::spawn(async move {
+        stdin.write_all(&pattern).await.expect("write pattern");
+        drop(stdin);
+        pattern
+    });
+    let mut received = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), endpoint.read_to_end(&mut received))
+        .await
+        .expect("end-of-stream within the bound");
+    let pattern = writer.await.expect("writer");
+    assert_eq!(received.len(), 65_536);
+    assert!(received == pattern, "the bytes changed on the way");
+    let (status, _, _) = relay_end(relay, Duration::from_secs(5)).await;
+    assert_eq!(status, 0);
+}
+
+/// AC-R4 / endpoint-ends. Mutation: a relay that waits for stdin.
+#[tokio::test]
+async fn relay_ends_when_the_daemon_side_closes() {
+    let fixture = StopFixture::new("relay-gone");
+    let (accepted, _guard) = accept_one(&fixture);
+    let mut relay = spawn_relay(&fixture, &["--wait", "5000"]);
+    let mut endpoint = tokio::time::timeout(Duration::from_secs(10), accepted)
+        .await
+        .expect("relay connected in time")
+        .expect("accepted");
+    endpoint.write_all(b"last words").await.expect("write");
+    endpoint.flush().await.expect("flush");
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        let raw = endpoint.as_raw_handle() as usize;
+        tokio::task::spawn_blocking(move || unsafe {
+            windows_sys::Win32::Storage::FileSystem::FlushFileBuffers(raw as _)
+        })
+        .await
+        .expect("flush pipe");
+    }
+    drop(endpoint);
+    // stdin stays open: held here until the relay has exited.
+    let stdin = relay.stdin.take();
+    let (status, _, stdout) = relay_end(relay, Duration::from_secs(5)).await;
+    drop(stdin);
+    assert_eq!(status, 0);
+    assert_eq!(stdout, b"last words");
+}
+
+/// AC-R5. Mutation: denied folded into 1.
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_exits_4_on_denied_endpoint() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root searches any directory");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = StopFixture::new("relay-denied");
+    let _listener = std::os::unix::net::UnixListener::bind(&fixture.socket).expect("bind");
+    /// Gives the directory its mode back whatever fails, so it can be removed.
+    struct Searchable<'a>(&'a std::path::Path);
+    impl Drop for Searchable<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    std::fs::set_permissions(&fixture.dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let _searchable = Searchable(&fixture.dir);
+    let relay = spawn_relay(&fixture, &[]);
+    let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 4, "{stderr:?}");
+    assert_eq!(
+        stderr.len(),
+        3,
+        "start, the marker, the human line: {stderr:?}"
+    );
+    assert_eq!(stderr[0], "lasterm-attach: start");
+    assert_eq!(stderr[1], "lasterm-attach: denied");
+}
+
+/// AC-R6: without `--socket`, the relay goes where `--daemon` listens for the
+/// same channel. Every variable a default endpoint is made of points at the
+/// fixture, so nothing of the developer's is reached. Mutation: an attach that
+/// always resolves the release channel.
+#[tokio::test]
+async fn attach_default_endpoint_follows_the_channel() {
+    let fixture = StopFixture::new("relay-default");
+    let user = format!("lasterm-test-{}", ulid::Ulid::generate());
+    let output = Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
+        .args(["--attach", "--channel", "dev"])
+        .env("XDG_STATE_HOME", &fixture.dir)
+        .env("XDG_CONFIG_HOME", &fixture.dir)
+        .env("LOCALAPPDATA", &fixture.dir)
+        .env("APPDATA", &fixture.dir)
+        .env("USERNAME", &user)
+        .output()
+        .await
+        .expect("run relay");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8");
+    let expected = if cfg!(windows) {
+        format!(r"\\.\pipe\lasterm-dev-agent-{user}")
+    } else {
+        fixture
+            .dir
+            .join("lasterm-dev")
+            .join("agent.socket")
+            .to_string_lossy()
+            .into_owned()
+    };
+    assert!(
+        stderr.contains(&format!("nothing listens on {expected}")),
+        "{stderr}"
+    );
+}
+
+/// AC-R7: a pipe that exists with no free instance is not "nothing listens",
+/// which would have the hub start a second daemon. Mutation: busy as 3.
+#[cfg(windows)]
+#[tokio::test]
+async fn relay_busy_pipe_is_not_nothing_listens() {
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+    let fixture = StopFixture::new("relay-busy");
+    let server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&fixture.socket)
+        .expect("create test pipe");
+    // Its only instance, taken.
+    let _holder = ClientOptions::new()
+        .open(&fixture.socket)
+        .expect("occupy the pipe");
+    let started = std::time::Instant::now();
+    let relay = spawn_relay(&fixture, &["--wait", "0"]);
+    let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
+    drop(server);
+    assert_eq!(status, 6, "{stderr:?}");
+    assert_eq!(
+        stderr.len(),
+        3,
+        "start, the marker, the human line: {stderr:?}"
+    );
+    assert_eq!(stderr[0], "lasterm-attach: start");
+    assert_eq!(stderr[1], "lasterm-attach: busy");
+    assert!(
+        started.elapsed() >= Duration::from_millis(1_800),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// AC-R7 / freed: a busy pipe is tried again for as long as `--wait` says.
+/// Mutations: a relay that sleeps then gives up, or caps the wait at 2 s.
+#[cfg(windows)]
+#[tokio::test]
+async fn relay_retries_a_busy_pipe() {
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+    let fixture = StopFixture::new("relay-freed");
+    let first = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&fixture.socket)
+        .expect("create test pipe");
+    let _holder = ClientOptions::new()
+        .open(&fixture.socket)
+        .expect("occupy the pipe");
+    let mut relay = spawn_relay(&fixture, &["--wait", "6000"]);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let mut second = ServerOptions::new()
+        .create(&fixture.socket)
+        .expect("second instance");
+    tokio::time::timeout(Duration::from_secs(5), second.connect())
+        .await
+        .expect("relay connected in time")
+        .expect("connect");
+    second.write_all(b"freed").await.expect("write");
+    let mut stdout = relay.stdout.take().expect("relay stdout");
+    let mut got = [0u8; 5];
+    tokio::time::timeout(Duration::from_secs(5), stdout.read_exact(&mut got))
+        .await
+        .expect("bytes in time")
+        .expect("read");
+    assert_eq!(&got, b"freed");
+    drop(first);
+}
+
+/// A default endpoint that cannot be resolved is an outcome the relay says,
+/// after `start`, not silence a hub would read as an agent without
+/// `--attach`. Mutation: resolving before `start`.
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_says_why_it_has_no_endpoint() {
+    let output = Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
+        .arg("--attach")
+        .env_remove("HOME")
+        .env_remove("XDG_STATE_HOME")
+        .output()
+        .await
+        .expect("run relay");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(lines.first(), Some(&"lasterm-attach: start"), "{stderr}");
+    assert!(
+        lines
+            .get(1)
+            .is_some_and(|line| line.starts_with("lasterm-attach: failed ")),
+        "{stderr}"
+    );
+}
+
+/// What the daemon sends that cannot reach stdout makes the relay exit 1, not
+/// 0. Mutation: every end reported as 0.
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_fails_when_it_cannot_deliver_the_daemons_bytes() {
+    let fixture = StopFixture::new("relay-full");
+    let _daemon = fixture.spawn_daemon();
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full");
+    let mut relay = fixture
+        .agent("--attach")
+        .args(["--wait", "5000"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(full)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn relay");
+    let _stdin = relay.stdin.take();
+    let status = tokio::time::timeout(Duration::from_secs(10), relay.wait())
+        .await
+        .expect("relay exited in time")
+        .expect("relay status");
+    assert_eq!(status.code(), Some(1));
+}

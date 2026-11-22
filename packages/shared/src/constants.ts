@@ -99,8 +99,8 @@ export const ErrorCode = {
 	NO_AGENT_RUNNING: "NO_AGENT_RUNNING",
 	/**
 	 * Connect with `daemon_only` (#701): the daemon's socket could not be
-	 * reached, and the host cannot say whether one listens; also an inventory
-	 * the daemon did not send in time.
+	 * reached, and the host cannot say whether one listens, or its relay
+	 * failed (#755); also an inventory the daemon did not send in time.
 	 */
 	DAEMON_UNREACHABLE: "DAEMON_UNREACHABLE",
 	/** Connect with `daemon_only` (#701): the daemon answered, then refused this hub's AUTH. */

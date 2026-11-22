@@ -640,7 +640,6 @@ export const useChannelsStore = defineStore("channels", () => {
 			// After the last await: the response of a fetch started later has been
 			// taken, and this older one does not replace it (#1133).
 			if (myIndexGeneration < indexCommittedGeneration) return;
-			indexCommittedGeneration = myIndexGeneration;
 
 			const nextIndex = new Map<string, ChannelIndexEntry>();
 			const nextHostMap = new Map(channelHostMap.value);
@@ -667,6 +666,7 @@ export const useChannelsStore = defineStore("channels", () => {
 				});
 				nextHostMap.set(id, rowHostId);
 			}
+			indexCommittedGeneration = myIndexGeneration;
 			channelIndex.value = nextIndex;
 			channelHostMap.value = nextHostMap;
 		} catch {

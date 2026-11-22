@@ -666,18 +666,43 @@ describe("useChannelsStore — fetchChannelIndex", () => {
 				});
 			});
 
-			it("keeps a title heard before the older response is ignored for the newer response that follows", async () => {
+			it("keeps a title heard before an ignored response for the fetch still in flight", async () => {
 				const store = useChannelsStore();
 				const answers = heldRequests();
-				const older = store.fetchChannelIndex();
-				const newer = store.fetchChannelIndex();
+				const first = store.fetchChannelIndex();
+				const second = store.fetchChannelIndex();
+				const third = store.fetchChannelIndex();
+				answers[1]?.([row("ch-1", "host-2", "second")]);
+				await second;
 				store.setDisplayTitle("ch-1", "heard");
 				answers[0]?.([row("ch-1", "host-2", "stale")]);
-				await older;
-				answers[1]?.([row("ch-1", "host-2", "read before the title")]);
-				await newer;
+				await first;
+				answers[2]?.([row("ch-1", "host-2", "read before the title")]);
+				await third;
 
 				expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("heard");
+			});
+
+			it("applies the older response when the newer one is not a listing", async () => {
+				const store = useChannelsStore();
+				const responses: Array<(r: unknown) => void> = [];
+				mockFetch.mockImplementation(
+					() =>
+						new Promise((resolve) => {
+							responses.push(resolve);
+						}),
+				);
+				const older = store.fetchChannelIndex();
+				const newer = store.fetchChannelIndex();
+				responses[1]?.({ ok: true, json: () => Promise.resolve([null]) });
+				await newer;
+				responses[0]?.({
+					ok: true,
+					json: () => Promise.resolve([row("ch-new", "host-2", "created")]),
+				});
+				await older;
+
+				expect(store.channelIndex.get("ch-new")?.displayTitle).toBe("created");
 			});
 
 			it("keeps a title heard while only the ignored older fetch was in flight out of the next one", async () => {

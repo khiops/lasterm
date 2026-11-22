@@ -499,6 +499,28 @@ describe("useChannelsStore — fetchChannelIndex", () => {
 			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("hub says");
 		});
 
+		it("keeps the title when the older of two overlapping fetches resolves last", async () => {
+			const store = useChannelsStore();
+			const releases: Array<() => void> = [];
+			mockFetch.mockImplementation(
+				() =>
+					new Promise((resolve) => {
+						releases.push(() =>
+							resolve({ ok: true, json: () => Promise.resolve([row("ch-1", "host-2", "old")]) }),
+						);
+					}),
+			);
+			const older = store.fetchChannelIndex();
+			const newer = store.fetchChannelIndex();
+			store.setDisplayTitle("ch-1", "new");
+			releases[1]?.();
+			await newer;
+			releases[0]?.();
+			await older;
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("new");
+		});
+
 		it("does not carry the title out of a fetch the hub refused", async () => {
 			const store = useChannelsStore();
 			let release!: () => void;

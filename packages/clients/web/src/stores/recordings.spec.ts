@@ -183,7 +183,7 @@ describe("recordings store", () => {
 			await useRecordingsStore().save(rec, true);
 			expect(requests.some((r) => r.startsWith("DELETE"))).toBe(false);
 			expect(useToastStore().messages.at(-1)?.text).toBe(
-				"The recording could not be saved. It is still in Recordings.",
+				"The recording could not be saved, and the file you chose may be empty. It is still in Recordings.",
 			);
 			// Every failure after the dialog aborts the file it opened.
 			expect(state.writable?.aborted).toBe(true);
@@ -374,6 +374,98 @@ describe("recordings store", () => {
 			store.registerHandlers(socket as never);
 			store.registerHandlers(socket as never);
 			expect(handlers).toHaveLength(1);
+		});
+
+		// Mutation caught: one read after a DELETE, the purge still counting its bytes,
+		// leaving the badge full once the space is free.
+		it("reads the list again while a deletion still counts bytes no row holds", async () => {
+			vi.useFakeTimers();
+			try {
+				const answers = [
+					() => Response.json({ recordings: [], used_bytes: 1024, cap_bytes: 1024 }),
+					() => Response.json({ recordings: [], used_bytes: 0, cap_bytes: 1024 }),
+				];
+				const requests = hub({
+					list: () => (answers.shift() ?? answers[0] ?? (() => Response.json({})))(),
+				});
+				const store = useRecordingsStore();
+				await store.refresh();
+				expect(store.usedBytes).toBe(1024);
+				await vi.advanceTimersByTimeAsync(2000);
+				expect(store.usedBytes).toBe(0);
+				await vi.advanceTimersByTimeAsync(10000);
+				expect(requests.filter((r) => r === "GET /api/recordings")).toHaveLength(2);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		// The spec's merge of channel rows' recording_id: the newer news wins.
+		describe("merging a channel list's recording_id", () => {
+			const known = {
+				recordingId: "01RECOLD",
+				title: "t",
+				hostLabel: "h",
+				startedAt: "2026-11-22T10:00:00.000Z",
+			};
+
+			// Mutation caught: channel rows' recording_id ignored.
+			it("opens a listed id and ends a terminal the list says records nothing", () => {
+				hub();
+				const store = useRecordingsStore();
+				store.open = new Map([["ch-old", known]]);
+				const start = store.listFetchStarted();
+				store.mergeListed(start, [
+					{ channelId: "ch-new", recordingId: "01RECNEW" },
+					{ channelId: "ch-old", recordingId: null },
+				]);
+				expect([...store.open.keys()]).toEqual(["ch-new"]);
+				expect(store.open.get("ch-new")?.recordingId).toBe("01RECNEW");
+			});
+
+			// Mutation caught: the list applied over a state heard during its fetch.
+			it("keeps a state heard during the channel list fetch over the list's", () => {
+				hub();
+				const store = useRecordingsStore();
+				const start = store.listFetchStarted();
+				store.onState({
+					type: "RECORDING_STATE",
+					channelId: "ch-1",
+					recordingId: "01RECHEARD",
+					title: "t",
+					hostLabel: "h",
+					startedAt: "2026-11-22T10:00:00.000Z",
+				});
+				store.mergeListed(start, [{ channelId: "ch-1", recordingId: null }]);
+				expect(store.open.get("ch-1")?.recordingId).toBe("01RECHEARD");
+			});
+
+			// Mutation caught: an unknown id kept without its title and start time.
+			it("reads the recordings list for an id it does not know", async () => {
+				vi.useFakeTimers();
+				try {
+					const requests = hub();
+					const store = useRecordingsStore();
+					store.mergeListed(store.listFetchStarted(), [
+						{ channelId: "ch-new", recordingId: "01RECNEW" },
+					]);
+					await vi.advanceTimersByTimeAsync(150);
+					expect(requests.filter((r) => r === "GET /api/recordings")).toHaveLength(1);
+				} finally {
+					vi.useRealTimers();
+				}
+			});
+
+			// Mutation caught: a channel list read before the connection was let go merged.
+			it("merges nothing fetched before the connection was let go", () => {
+				hub();
+				const store = useRecordingsStore();
+				store.open = new Map([["ch-old", known]]);
+				const start = store.listFetchStarted();
+				store.stopRetrying();
+				store.mergeListed(start, [{ channelId: "ch-old", recordingId: null }]);
+				expect(store.open.has("ch-old")).toBe(true);
+			});
 		});
 
 		// AC-UI-STATE-ORDER: the list is the one source, so a read that fails is

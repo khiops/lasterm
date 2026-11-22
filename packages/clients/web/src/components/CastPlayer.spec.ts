@@ -4,7 +4,17 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick } from "vue";
 
-const built = vi.hoisted(() => ({ count: 0 }));
+/**
+ * What the player's terminals were asked: every write and resize, in order.
+ * With `defer`, a write's callback waits until the test calls `release`, as
+ * xterm's does until it has parsed the data.
+ */
+const built = vi.hoisted(() => ({
+	count: 0,
+	calls: [] as string[],
+	defer: false,
+	pending: [] as Array<() => void>,
+}));
 
 vi.mock("@xterm/xterm", () => ({
 	Terminal: class {
@@ -12,16 +22,27 @@ vi.mock("@xterm/xterm", () => ({
 		unicode = { activeVersion: "6" };
 		constructor() {
 			built.count++;
+			built.calls.push("new");
 		}
 		loadAddon(): void {}
 		open(): void {}
-		write(_data: string, done?: () => void): void {
-			done?.();
+		write(data: string, done?: () => void): void {
+			built.calls.push(`write:${data}`);
+			if (built.defer) built.pending.push(() => done?.());
+			else done?.();
 		}
-		resize(): void {}
+		resize(cols: number, rows: number): void {
+			built.calls.push(`resize:${cols}x${rows}`);
+		}
 		dispose(): void {}
 	},
 }));
+
+function release(): void {
+	const all = built.pending;
+	built.pending = [];
+	for (const done of all) done();
+}
 vi.mock("@xterm/addon-unicode11", () => ({ Unicode11Addon: class {} }));
 
 import CastPlayer from "./CastPlayer.vue";
@@ -57,6 +78,9 @@ const clockText = () => document.querySelector(".player__time")?.textContent?.tr
 describe("CastPlayer", () => {
 	beforeEach(() => {
 		built.count = 0;
+		built.calls = [];
+		built.defer = false;
+		built.pending = [];
 	});
 
 	afterEach(() => {
@@ -149,6 +173,65 @@ describe("CastPlayer", () => {
 		await settle();
 		// Skip idle off: the 10 s pause counts whole.
 		expect(clockText()).toBe("0:00 / 0:10");
+	});
+
+	// The controls drive the playback the engine's own tests cover.
+	// Mutation caught: the seek bar not seeking (AC-PLAYER-SEEK, -SEEK-IDLE).
+	it("seeks from the Position bar: a fresh screen, the output and size up to it", async () => {
+		mount(() => parts(`${HEADER}\n`, '[0, "o", "hello"]\n[0.5, "r", "100x30"]\n[1, "o", "bye"]\n'));
+		await settle();
+		const seek = document.querySelector<HTMLInputElement>(".player__seek");
+		if (seek) {
+			seek.value = "0.6";
+			seek.dispatchEvent(new Event("input"));
+		}
+		await settle();
+		const after = built.calls.slice(built.calls.lastIndexOf("new"));
+		expect(after).toEqual(["new", "write:hello", "resize:100x30"]);
+	});
+
+	// Mutation caught: the Speed select not reaching the playback.
+	it("plays at the speed chosen in the Speed list", async () => {
+		vi.useFakeTimers({
+			toFake: [
+				"setTimeout",
+				"clearTimeout",
+				"requestAnimationFrame",
+				"cancelAnimationFrame",
+				"performance",
+			],
+		});
+		mount(() => parts(`${HEADER}\n`, '[0, "o", "A"]\n[1, "o", "B"]\n'));
+		await settle();
+		const speed = document.querySelector<HTMLSelectElement>(
+			'.player__field select[aria-label="Speed"]',
+		);
+		if (speed) {
+			speed.value = "2";
+			speed.dispatchEvent(new Event("change"));
+		}
+		await vi.advanceTimersByTimeAsync(490);
+		expect(built.calls).not.toContain("write:B");
+		await vi.advanceTimersByTimeAsync(20);
+		expect(built.calls).toContain("write:B");
+	});
+
+	// Mutation caught: Skip idle off by default.
+	it("counts a long pause as 2 s by default", async () => {
+		mount(() => parts(`${HEADER}\n`, '[0, "o", "A"]\n[10, "o", "B"]\n'));
+		await settle();
+		expect(clockText()).toBe("0:00 / 0:02");
+	});
+
+	// Mutation caught: the terminal adapter calling back before xterm parsed the write.
+	it("writes the next event only once xterm has parsed the one before", async () => {
+		built.defer = true;
+		mount(() => parts(`${HEADER}\n`, '[0, "o", "A"]\n[0, "o", "B"]\n'));
+		await settle();
+		expect(built.calls.filter((c) => c.startsWith("write:"))).toEqual(["write:A"]);
+		release();
+		await settle();
+		expect(built.calls.filter((c) => c.startsWith("write:"))).toEqual(["write:A", "write:B"]);
 	});
 
 	// Mutation caught: a player closed during its load going on to build and fetch.

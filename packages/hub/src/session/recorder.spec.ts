@@ -662,6 +662,20 @@ describe("SessionRecorder", () => {
 	});
 
 	// AC-PART-DELETED. Mutation caught: a missing block read as the end.
+	// AC-PART-DELETED, R-DELETING-HIDDEN: a recording being deleted answers no
+	// part, its blocks still there. Mutation caught: the check on the first part only.
+	it("answers no later part once a DELETE has marked the recording, before its purge", () => {
+		const id = startAuto(h);
+		h.rec.onOutput(CHANNEL, enc("a".repeat(3 * MiB)));
+		h.rec.exportPart(id);
+		h.rec.onOutput(CHANNEL, enc("b".repeat(3 * MiB)));
+		h.rec.stop(id);
+		expect(h.rec.exportPart(id)?.nextSeq).toBe(2);
+		h.rec.delete(id); // marked; the purge has not run
+		expect(h.dal.lastSeq(id)).toBe(2);
+		expect(h.rec.exportPart(id, { fromSeq: 2, lastSeq: 2, lost: 0 })).toBeUndefined();
+	});
+
 	it("answers nothing for a part whose blocks a deletion took", async () => {
 		const id = startAuto(h);
 		h.rec.onOutput(CHANNEL, enc("a".repeat(3 * MiB)));

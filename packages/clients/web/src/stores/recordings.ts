@@ -79,6 +79,31 @@ const RETRY_FIRST_MS = 1000;
 const RETRY_MAX_MS = 30_000;
 /** A list read that has not answered by then counts as failed, so it is tried again. */
 const LIST_DEADLINE_MS = 15_000;
+/** While a deletion still counts bytes no listed row holds, the list is read again this often. */
+const PURGE_POLL_MS = 2000;
+/** And at most this many times in a row, so a deletion that keeps failing reads no further. */
+const PURGE_POLL_LIMIT = 60;
+
+/** What a channel list fetch merges against: see `mergeListed`. */
+export interface ListFetchStart {
+	heard: ReadonlyMap<string, number>;
+	lifetime: number;
+}
+
+/** The `recording_id` of channel rows, where the hub sent the field. */
+export function listedRecordings(
+	rows: ReadonlyArray<Record<string, unknown>>,
+): Array<{ channelId: string; recordingId: string | null }> {
+	const out: Array<{ channelId: string; recordingId: string | null }> = [];
+	for (const row of rows) {
+		if (typeof row.id !== "string" || !("recording_id" in row)) continue;
+		out.push({
+			channelId: row.id,
+			recordingId: typeof row.recording_id === "string" ? row.recording_id : null,
+		});
+	}
+	return out;
+}
 
 export const useRecordingsStore = defineStore("recordings", () => {
 	/** channelId → its open recording. Keyed by channel, whether or not its row is known yet. */
@@ -91,7 +116,7 @@ export const useRecordingsStore = defineStore("recordings", () => {
 	/** Each list fetch's turn: an answer older than one already applied is dropped. */
 	let fetches = 0;
 	let applied = 0;
-	/** One list fetch for a burst of states (a reconnection ends and starts every recording). */
+	/** One list fetch for a burst of states. */
 	let refreshQueued: ReturnType<typeof setTimeout> | null = null;
 	/**
 	 * The list is the one source of which terminals record: a read that fails
@@ -104,13 +129,14 @@ export const useRecordingsStore = defineStore("recordings", () => {
 	let lifetime = 0;
 	let retryTimer: ReturnType<typeof setTimeout> | null = null;
 	let retryDelay = RETRY_FIRST_MS;
+	let purgePolls = 0;
 
-	function refreshSoon(): void {
+	function refreshSoon(delay = REFRESH_BURST_MS): void {
 		if (refreshQueued !== null) return;
 		refreshQueued = setTimeout(() => {
 			refreshQueued = null;
 			void refresh();
-		}, REFRESH_BURST_MS);
+		}, delay);
 	}
 
 	/** The connection is gone: no try goes on; the next authentication reads the list again. */
@@ -231,7 +257,55 @@ export const useRecordingsStore = defineStore("recordings", () => {
 			});
 		}
 		open.value = next;
+		// A discarded or saved recording's bytes count until its deletion ends,
+		// and nothing announces that end: the list is read again until the space
+		// used matches the rows it lists, so a "full" badge does not outlive it.
+		const listedBytes = rows.value.reduce((sum, r) => sum + (r.bytes ?? 0), 0);
+		if (usedBytes.value > listedBytes && purgePolls < PURGE_POLL_LIMIT) {
+			purgePolls++;
+			refreshSoon(PURGE_POLL_MS);
+		} else {
+			purgePolls = 0;
+		}
 		return true;
+	}
+
+	/** Where a channel list fetch starts: what was heard by then, and in which connection. */
+	function listFetchStarted(): ListFetchStart {
+		return { heard: new Map(heard), lifetime };
+	}
+
+	/**
+	 * Merge the `recording_id` of channel rows (GET /api/channels) by the same
+	 * rule as the recordings list: the newer news wins, so a RECORDING_STATE heard
+	 * since the fetch began keeps its terminal; otherwise the row says which
+	 * recording is open, if any. An id this window does not know yet reads the
+	 * recordings list for its title and start time.
+	 */
+	function mergeListed(
+		start: ListFetchStart,
+		listed: ReadonlyArray<{ channelId: string; recordingId: string | null }>,
+	): void {
+		if (start.lifetime !== lifetime) return;
+		let unknown = false;
+		const map = open.value;
+		for (const { channelId, recordingId } of listed) {
+			if ((heard.get(channelId) ?? 0) !== (start.heard.get(channelId) ?? 0)) continue;
+			if (recordingId === null) {
+				map.delete(channelId);
+				continue;
+			}
+			if (map.get(channelId)?.recordingId === recordingId) continue;
+			const row = rows.value.find((r) => r.id === recordingId);
+			map.set(channelId, {
+				recordingId,
+				title: row?.title ?? "",
+				hostLabel: row?.host_label ?? "",
+				startedAt: row?.started_at ?? new Date().toISOString(),
+			});
+			if (row === undefined) unknown = true;
+		}
+		if (unknown) refreshSoon();
 	}
 
 	/** Start recording a terminal now. */
@@ -351,9 +425,10 @@ export const useRecordingsStore = defineStore("recordings", () => {
 				await writable.close();
 			} catch {
 				await writable?.abort().catch(() => undefined);
+				// The dialog made the file already: it is left empty, or as it was.
 				useToastStore().show(
 					"error",
-					"The recording could not be saved. It is still in Recordings.",
+					"The recording could not be saved, and the file you chose may be empty. It is still in Recordings.",
 				);
 				void refresh();
 				return;
@@ -398,6 +473,8 @@ export const useRecordingsStore = defineStore("recordings", () => {
 		registerHandlers,
 		refresh,
 		stopRetrying,
+		listFetchStarted,
+		mergeListed,
 		start,
 		stop,
 		discard,

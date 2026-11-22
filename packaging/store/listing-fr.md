@@ -12,12 +12,12 @@ Des terminaux qui restent là où vous les avez laissés : vos shells locaux et
 
 Lasterm fait tourner vos shells dans un hub sur votre ordinateur, pas dans la fenêtre. Réduisez la fenêtre dans la zone de notification : ils continuent de tourner, ceux en SSH compris. Rouvrez-la : chaque écran est tel que vous l’avez laissé.
 
-Ajoutez les machines sur lesquelles vous travaillez en SSH, directement ou via un hôte de rebond. Lasterm copie son petit agent sur chacune, adapté à son système, et n’y ouvre aucun port. Un hôte Linux peut garder cet agent en marche : ses terminaux survivent alors aussi à une connexion perdue.
+Ajoutez les machines sur lesquelles vous travaillez en SSH, directement ou via un hôte de rebond. Lasterm copie son petit agent sur chacune, adapté à son système, et n’y ouvre aucun port. Un hôte Linux, ou un hôte Windows dont le serveur SSH le permet, peut garder cet agent en marche : ses terminaux survivent alors aussi à une connexion perdue.
 
 POINTS FORTS
 • Les sessions survivent à la fenêtre : fermez-la ou rechargez-la, chaque terminal continue de tourner et revient avec son écran.
 • Hôtes distants en SSH : une clé, votre agent SSH ou un mot de passe demandé à chaque fois ; hôtes de rebond ; clés d’hôte vérifiées par rapport à ce que vous approuvez, y compris votre propre known_hosts.
-• Des terminaux qui survivent à une connexion perdue, sur les hôtes Linux qui gardent un agent en marche. Sur les hôtes Windows, les shells se terminent avec la connexion.
+• Des terminaux qui survivent à une connexion perdue, sur les hôtes qui gardent un agent en marche : les hôtes Linux, et les hôtes Windows dont le serveur SSH le permet.
 • Une barre d’hôtes : un badge, une couleur et un point d’état pour chacun, dans les groupes et l’ordre que vous choisissez.
 • Onglets, panneaux divisés, et recherche dans un panneau ou dans tous.
 • Profils de lancement : shell, environnement, dossier de travail et élévation avec sudo, doas, pkexec ou gsudo.
@@ -31,7 +31,7 @@ Logiciel libre, sous licence AGPL-3.0.
 - Des terminaux locaux et SSH qui continuent de tourner quand la fenêtre se ferme
 - Chaque écran restauré tel que vous l’avez laissé
 - Hôtes SSH joints directement ou via un hôte de rebond
-- Des terminaux qui survivent à une connexion perdue sur les hôtes Linux
+- Des terminaux qui survivent à une connexion perdue sur les hôtes Linux et Windows
 - Une barre d’hôtes avec l’état de chacun d’un coup d’œil
 - Onglets, panneaux divisés et recherche dans tous les panneaux
 - Profils de lancement avec environnement, dossier de travail et élévation

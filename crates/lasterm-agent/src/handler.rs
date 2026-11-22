@@ -20,7 +20,7 @@ use crate::output_cut::OutputCut;
 use crate::owner::OwnerId;
 use crate::protocol::{error_codes, AgentToHub, SnapshotData};
 use crate::pty::{
-    log_teardown_outcome, spawn_teardown_confirmation, DestroyAllSummary, PtyManager,
+    log_teardown_outcome, spawn_teardown_confirmation, DestroyAllSummary, EndingSend, PtyManager,
     TeardownConfirmation, TeardownStart,
 };
 use crate::report_directory;
@@ -186,7 +186,8 @@ pub(crate) async fn take_own_workload(
     match mgr.channels.get(channel_id) {
         None => ReaderWorkload::Gone,
         Some(channel) if channel.process.pid() != pty_pid => ReaderWorkload::Replaced,
-        Some(_) => match mgr.remove(channel_id) {
+        // Its id stays held until its exit has been routed (#1089).
+        Some(_) => match mgr.take_ended(channel_id) {
             Some(process) => ReaderWorkload::Own(Box::new(process)),
             None => ReaderWorkload::Gone,
         },
@@ -699,7 +700,14 @@ pub(crate) async fn handle_message(
                             None
                         }
                     },
-                    false => None,
+                    // Its program ended and its exit is not sent yet: the hub
+                    // asked for its end, and a restart's SPAWN follows (#1089).
+                    false => {
+                        if mgr.withdraw_ending(&channel_id, owner) {
+                            tracing::debug!(%channel_id, "DESTROY of an ended channel: its exit is withdrawn");
+                        }
+                        None
+                    }
                 }
             };
             if let Some(confirmation) = confirmation {
@@ -1062,19 +1070,27 @@ async fn handle_spawn(
     // Suppress unused warning — cleanup_path lifetime is managed by schedule_cleanup
     let _ = cleanup_path;
 
-    let spawn_result = {
+    let spawn_result = loop {
         let mut mgr = pty_manager.lock().await;
-        mgr.spawn(
-            owner.clone(),
-            channel_id,
-            &effective_program,
-            &effective_args,
-            expanded_cwd.as_deref(),
-            Some(&environment),
-            cols,
-            rows,
-        )
-        .await
+        // The exit of the channel that held this id is on its way: it reaches
+        // the hub before this SPAWN's answer (#1089).
+        if let Some(mut routed) = channel_id.as_deref().and_then(|id| mgr.exit_in_transit(id)) {
+            drop(mgr);
+            let _ = routed.changed().await;
+            continue;
+        }
+        break mgr
+            .spawn(
+                owner.clone(),
+                channel_id,
+                &effective_program,
+                &effective_args,
+                expanded_cwd.as_deref(),
+                Some(&environment),
+                cols,
+                rows,
+            )
+            .await;
     };
 
     match spawn_result {
@@ -1360,7 +1376,12 @@ fn spawn_reader_task(
         let exit_status = match take_own_workload(&pty_manager, &channel_id, pty_pid).await {
             ReaderWorkload::Own(mut process) => {
                 ended_by_itself = true;
-                process.wait().await.ok()
+                let status = process.wait().await.ok();
+                #[cfg(test)]
+                if let Some(delay) = crate::pty::exit_delay_of(&channel_id) {
+                    tokio::time::sleep(delay).await;
+                }
+                status
             }
             ReaderWorkload::Gone => None,
             // The hub asked for this workload to end and already knows it did:
@@ -1387,7 +1408,34 @@ fn spawn_reader_task(
             signal,
             (at_pty_end && ended_by_itself).then_some(&mirror),
         );
-        send_channel_event(&channel_events, &flow, &owner, &channel_id, &msg);
+        if !ended_by_itself {
+            send_channel_event(&channel_events, &flow, &owner, &channel_id, &msg);
+            return;
+        }
+        // Its id is held from the take above until its exit has been routed
+        // to its hub, so nothing can take that id before the exit is on its
+        // way, nor be answered before it arrives (#1089). Sent under the lock
+        // a DESTROY takes, so that one either withdraws it first or finds it
+        // on its way.
+        let mut routed = {
+            let mut mgr = pty_manager.lock().await;
+            match mgr.send_ending(&channel_id, pty_pid) {
+                EndingSend::Send(routed_tx) => {
+                    let routed = routed_tx.subscribe();
+                    send_ending_exit(&channel_events, &flow, &owner, &channel_id, &msg, routed_tx);
+                    routed
+                }
+                // The hub asked for its end, or the id is another workload's.
+                EndingSend::Withdrawn => return,
+            }
+        };
+        // Nothing is ever sent on it: it ends once the exit is routed, or
+        // dropped with the pipeline.
+        let _ = routed.changed().await;
+        pty_manager
+            .lock()
+            .await
+            .release_ending(&channel_id, pty_pid);
     });
 }
 
@@ -1535,7 +1583,29 @@ fn send_channel_event(
             channel_id: channel_id.to_owned(),
             charge: flow.read(frame.len()),
             frame,
-            ends_channel: matches!(msg, AgentToHub::ChannelExit { .. }),
+            routed: None,
+        }));
+    }
+}
+
+/// Send the CHANNEL_EXIT of a channel whose id is held until it is routed:
+/// `routed` goes with it, and is dropped once the frame is in its hub's
+/// connection queue or away queue (#1089).
+fn send_ending_exit(
+    channel_events: &ChannelEventSender,
+    flow: &Arc<Flow>,
+    owner: &OwnerId,
+    channel_id: &str,
+    msg: &AgentToHub,
+    routed: tokio::sync::watch::Sender<()>,
+) {
+    if let Ok(frame) = encode_frame(msg) {
+        channel_events.send(ChannelEvent::Frame(EventFrame {
+            owner: owner.clone(),
+            channel_id: channel_id.to_owned(),
+            charge: flow.read(frame.len()),
+            frame,
+            routed: Some(routed),
         }));
     }
 }

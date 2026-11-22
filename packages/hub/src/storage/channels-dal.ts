@@ -206,6 +206,26 @@ export class ChannelsDAL {
 	}
 
 	/**
+	 * The ids of the dead channels, of one host or of all, and nothing else
+	 * of them: what a purge deletes. The status index picks them, however many
+	 * other rows are stored (#1119).
+	 */
+	listDeadChannelIds(hostId?: string): string[] {
+		const rows = (
+			hostId !== undefined
+				? this.db
+						.prepare(
+							`SELECT c.id FROM channels c
+							 JOIN sessions s ON c.session_id = s.id
+							 WHERE c.status = 'dead' AND s.host_id = ?`,
+						)
+						.all(hostId)
+				: this.db.prepare("SELECT id FROM channels WHERE status = 'dead'").all()
+		) as Array<{ id: string }>;
+		return rows.map((r) => r.id);
+	}
+
+	/**
 	 * Record a channel's status, and why it ended when the hub ended it
 	 * itself: `killed` or `stopped` (#592).
 	 *

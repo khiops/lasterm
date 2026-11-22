@@ -1078,6 +1078,16 @@ where
                 pid: channel.process.pid(),
                 alive: true,
             })
+            // Ended, its exit still on its way: listed. Its exit reaches this
+            // connection too, before or after this state (#1089).
+            .chain(mgr.ending_of(&owner).into_iter().map(|(channel_id, pid)| {
+                AgentToHub::AgentChannelState {
+                    channel_id,
+                    title: String::new(),
+                    pid,
+                    alive: true,
+                }
+            }))
             .collect();
         (states, mgr.held_by_others(&owner))
     };
@@ -1488,12 +1498,22 @@ fn spawn_output_router(mut batched_rx: mpsc::UnboundedReceiver<BatchedEvent>, ro
     tokio::spawn(async move {
         while let Some(event) = batched_rx.recv().await {
             match event.into_delivery() {
-                Ok(Delivery::Owner(routed)) => routes.lock().await.route(
-                    &routed.owner,
-                    &routed.channel_id,
-                    routed.frame,
-                    routed.charge,
-                ),
+                Ok(Delivery::Owner(routed)) => {
+                    #[cfg(test)]
+                    if routed.routed.is_some() {
+                        if let Some(delay) = crate::pty::route_delay_of(&routed.channel_id) {
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
+                    routes.lock().await.route(
+                        &routed.owner,
+                        &routed.channel_id,
+                        routed.frame,
+                        routed.charge,
+                    );
+                    // In its hub's queue now: the id it held is free (#1089).
+                    drop(routed.routed);
+                }
                 Ok(Delivery::Asker(reply)) => reply.send(),
                 Err(_) => {}
             }
@@ -4710,8 +4730,13 @@ mod tests {
             /// exit arrive after the SPAWN_OK of its replacement, when the
             /// replacement first printed: the hub took the new terminal for
             /// dead.
+            ///
+            /// Its reader holds the exit a while, its workload's status in
+            /// hand: a reconnection in that window used to find the id free
+            /// and get its SPAWN_OK before the exit (#1089).
             #[tokio::test]
             async fn an_exit_while_its_hub_was_away_reaches_it_before_any_reply() {
+                crate::pty::delay_exit_of("flush-restarted", Duration::from_millis(300));
                 let daemon = TestDaemon::start("flush").await;
                 let (mut a, _) = daemon.connect_as(KEY_A).await;
                 // Waits for a line, then ends a second later: its hub is gone.
@@ -4744,6 +4769,121 @@ mod tests {
                 assert!(
                     !mentions(&later, "flush-restarted").contains(&"CHANNEL_EXIT".to_string()),
                     "an exit after the SPAWN_OK marks the restarted terminal dead"
+                );
+
+                daemon.stop().await;
+            }
+
+            /// A restart of a terminal whose program has just ended, its exit
+            /// not sent yet, starts: the hub asked for its end, so that exit
+            /// is never sent, and none arrives after the replacement's
+            /// SPAWN_OK to mark it dead (#1089).
+            #[tokio::test]
+            async fn a_restart_while_an_exit_is_held_starts_and_gets_no_late_exit() {
+                crate::pty::delay_exit_of("held-restarted", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("held-restart").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, spawn("held-restarted", "exit 5")).await;
+                // Its PTY closed. Its reader takes its workload back right
+                // after, then holds the exit.
+                a.read_through(|frame| is_about(frame, "LOG", "held-restarted"))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "held-restarted".to_string(),
+                })
+                .await;
+                spawned(&mut a, interactive("held-restarted")).await;
+                let later = a.frames_until_quiet(Duration::from_millis(2000)).await;
+                assert!(
+                    !mentions(&later, "held-restarted").contains(&"CHANNEL_EXIT".to_string()),
+                    "an exit after the SPAWN_OK marks the restarted terminal dead"
+                );
+
+                daemon.stop().await;
+            }
+
+            /// While its exit is not sent, an ended terminal is still there:
+            /// its hub, connecting again, is told so and then gets its exit,
+            /// and a SPAWN reusing its id is refused (#1089).
+            #[tokio::test]
+            async fn an_ended_terminal_keeps_its_id_until_its_exit_is_sent() {
+                crate::pty::delay_exit_of("held-id", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("held-id").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, spawn("held-id", "exit 5")).await;
+                a.read_through(|frame| is_about(frame, "LOG", "held-id"))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                let (mut a2, listed) = daemon.connect_as(KEY_A).await;
+                assert!(
+                    listed
+                        .iter()
+                        .any(|frame| is_about(frame, "AGENT_CHANNEL_STATE", "held-id")
+                            && frame["alive"].as_bool() == Some(true)),
+                    "the ended terminal is not listed; received {:?}",
+                    listed.iter().map(frame_type).collect::<Vec<_>>()
+                );
+                a2.send(&interactive("held-id")).await;
+                let answer = a2
+                    .read_through(|frame| {
+                        frame["request_id"].as_str() == Some("request-held-id")
+                            || is_about(frame, "CHANNEL_EXIT", "held-id")
+                    })
+                    .await;
+                assert_eq!(
+                    answer.last().map(frame_type),
+                    Some("SPAWN_ERR"),
+                    "{:?}",
+                    answer.iter().map(frame_type).collect::<Vec<_>>()
+                );
+                let exit = a2
+                    .read_through(|frame| is_about(frame, "CHANNEL_EXIT", "held-id"))
+                    .await;
+                assert_eq!(exit.last().unwrap()["exit_code"].as_i64(), Some(5));
+
+                daemon.stop().await;
+            }
+
+            /// Another hub's ended terminal, its exit not sent yet, still
+            /// counts among the terminals other hubs hold (#1089).
+            #[tokio::test]
+            async fn an_ended_terminal_counts_for_other_hubs_until_its_exit_is_sent() {
+                crate::pty::delay_exit_of("held-count", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("held-count").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, spawn("held-count", "exit 5")).await;
+                a.read_through(|frame| is_about(frame, "LOG", "held-count"))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                let (_b, frames) = daemon.connect_as(KEY_B).await;
+                assert_eq!(state(&frames).1, 1);
+
+                daemon.stop().await;
+            }
+
+            /// A SPAWN reusing the id of a terminal whose exit is on its way
+            /// waits for it: the exit comes before its SPAWN_OK (#1089).
+            #[tokio::test]
+            async fn a_spawn_waits_for_an_exit_on_its_way() {
+                crate::pty::delay_route_of("routed-id", Duration::from_millis(800));
+                let daemon = TestDaemon::start("routed-id").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, spawn("routed-id", "exit 5")).await;
+                a.read_through(|frame| is_about(frame, "LOG", "routed-id"))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                let frames = spawned(&mut a, interactive("routed-id")).await;
+                assert!(
+                    frames
+                        .iter()
+                        .any(|frame| is_about(frame, "CHANNEL_EXIT", "routed-id")),
+                    "the exit must come before the SPAWN_OK; received {:?}",
+                    frames.iter().map(frame_type).collect::<Vec<_>>()
                 );
 
                 daemon.stop().await;

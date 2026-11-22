@@ -153,6 +153,8 @@ interface MockHost {
 	releaseSpawn: () => void;
 	/** The channels its daemon was told to DESTROY. */
 	destroys: string[];
+	/** Its daemon reports the end (137) of a terminal it is told to destroy, before what follows (#1113). */
+	exitsOnDestroy: boolean;
 	/** End every SSH connection it holds, leaving it listening. */
 	dropLinks: () => void;
 	close: () => Promise<void>;
@@ -248,7 +250,13 @@ function serveAgent(stream: Stream, remote?: MockHost): void {
 				continue;
 			}
 			if (msg.type === "DESTROY" && remote) {
-				remote.destroys.push((msg as { channelId: string }).channelId);
+				const { channelId } = msg as { channelId: string };
+				remote.destroys.push(channelId);
+				if (remote.exitsOnDestroy) {
+					stream.write(
+						Buffer.from(encodeFrame({ type: "CHANNEL_EXIT", channelId, exitCode: 137 })),
+					);
+				}
 				continue;
 			}
 			if (msg.type !== "SPAWN") continue;
@@ -318,6 +326,7 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 		holdsSpawn: false,
 		releaseSpawn: () => {},
 		destroys: [],
+		exitsOnDestroy: false,
 		dropLinks: () => {
 			for (const end of ends.splice(0)) end();
 		},
@@ -2348,6 +2357,48 @@ describe("A daemon's own list, as it changes (#701)", { timeout: 30_000 }, () =>
 			await h.sm.stopKeepingAgent(h.host.id, { endTerminals: true, force: true }),
 		).toMatchObject({ code: "AGENT_INVENTORY_UNKNOWN" });
 		expect(h.remote.stops).toEqual([]);
+	});
+
+	/** A live terminal restarted while its daemon's list, asked again, is held. */
+	async function restartedDuringAdoption(
+		h: Harness,
+	): Promise<{ id: string; destroyedDuringAdoption: string[]; restarted: boolean }> {
+		await connected(h);
+		const [id] = terminalsOn(h, 1);
+		if (id === undefined) throw new Error("no terminal");
+		h.remote.holdsList = true;
+		const relisting = relisted(h);
+		await until("the daemon is asked for its list", () => h.remote.listStream !== null);
+		const restarting = h.sm.restartChannel(id, h.window.id);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		const destroyedDuringAdoption = [...h.remote.destroys];
+		h.remote.releaseList();
+		await relisting;
+		return { id, destroyedDuringAdoption, restarted: (await restarting) === true };
+	}
+
+	// A restart asked while the host's daemon list is being taken up waits for
+	// that adoption: it collects the daemon's exits at the connection, outside
+	// the restart's hold, and the exit of the shell a DESTROY ends would leave
+	// the inventory though the restart's new run holds the id (#1113).
+	it("ends no terminal it restarts until the host's daemon list is taken up", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+
+		const { id, destroyedDuringAdoption, restarted } = await restartedDuringAdoption(h);
+
+		expect(destroyedDuringAdoption).toEqual([]);
+		expect(restarted).toBe(true);
+		expect(h.remote.destroys).toEqual([id]);
+	});
+
+	it("keeps a terminal restarted during an adoption in the daemon's inventory", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		h.remote.exitsOnDestroy = true;
+
+		const { id, restarted } = await restartedDuringAdoption(h);
+
+		expect(restarted).toBe(true);
+		expect(agentOf(h)?.daemonInventory?.listed.has(id)).toBe(true);
 	});
 });
 

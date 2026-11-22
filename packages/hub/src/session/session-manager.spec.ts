@@ -16,6 +16,7 @@ import { ErrorCode } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { createHostsChangeAnnouncer, HOSTS_CHANGED_QUIET_MS } from "../api/hosts-changed.js";
 import type { ConfigResolver } from "../config.js";
+import type { LoggerRegistry } from "../logging/index.js";
 import { openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
@@ -24,6 +25,7 @@ import { onWriteLockChange } from "../ws/ws-handler.js";
 import type { AgentConnection } from "./agent-connection.js";
 import { connectOrLaunch as _connectOrLaunchForMock } from "./agent-launcher.js";
 import { AuthCancelledError } from "./auth-cancelled.js";
+import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { resolveHostOs } from "./host-profile-menu.js";
 import {
 	clearContext,
@@ -49,6 +51,18 @@ let nextLocalAttachNotFoundChannelId: string | null = null;
  * CHANNEL_EXIT, with this code, comes in the same read as the SPAWN_OK.
  */
 let nextLocalSpawnEndsWith: number | null = null;
+/**
+ * Set before a test to have the next local DESTROY answered, on the turn after
+ * it, by the destroyed terminal's CHANNEL_EXIT, with this code and screen,
+ * then by one (code 0) for each other terminal named: what the agent sends of
+ * the run a restart ended before it answers the restart's SPAWN (#1113).
+ */
+let nextLocalDestroyEndsWith: { exitCode: number; screen?: unknown; alsoEnds?: string[] } | null =
+	null;
+/** Set before a test to leave the next local SPAWN unanswered: the test answers it (#1113). */
+let nextLocalSpawnUnanswered = false;
+/** Set before a test to have the next SSH SPAWN refused with this SPAWN_ERR, or left unanswered. */
+let nextSshSpawnAnswer: { code: string; message: string } | "unanswered" | null = null;
 /** Set before a test to have the next elevated local SPAWN start without a secret. */
 let nextLocalElevationPasswordless = false;
 let localChannelStateWaitCount = 0;
@@ -114,6 +128,10 @@ vi.mock("./agent-launcher.js", async () => {
 					(spawnMsg.channelId as string | undefined) ??
 					nextLocalChannelId();
 				nextLocalSpawnChannelIdOverride = null;
+				if (nextLocalSpawnUnanswered) {
+					nextLocalSpawnUnanswered = false;
+					return;
+				}
 				const refusal = nextLocalSpawnError;
 				if (refusal !== null) {
 					nextLocalSpawnError = null;
@@ -147,6 +165,22 @@ vi.mock("./agent-launcher.js", async () => {
 					// One read, as AgentConnection emits its frames: synchronously.
 					if (endsWith !== null) {
 						this.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: endsWith });
+					}
+				});
+			} else if (msg.type === "DESTROY") {
+				const ends = nextLocalDestroyEndsWith;
+				nextLocalDestroyEndsWith = null;
+				if (ends === null) return;
+				const { channelId } = msg as unknown as { channelId: string };
+				setImmediate(() => {
+					this.emit("message", {
+						type: "CHANNEL_EXIT",
+						channelId,
+						exitCode: ends.exitCode,
+						...(ends.screen !== undefined && { screen: ends.screen }),
+					});
+					for (const other of ends.alsoEnds ?? []) {
+						this.emit("message", { type: "CHANNEL_EXIT", channelId: other, exitCode: 0 });
 					}
 				});
 			} else if (msg.type === "ATTACH") {
@@ -205,6 +239,9 @@ afterEach(() => {
 	nextLocalSpawnChannelIdOverride = null;
 	nextLocalSpawnError = null;
 	nextLocalSpawnEndsWith = null;
+	nextLocalDestroyEndsWith = null;
+	nextLocalSpawnUnanswered = false;
+	nextSshSpawnAnswer = null;
 	nextLocalElevationPasswordless = false;
 	nextLocalAttachNotFoundChannelId = null;
 	nextLocalChannelStateFailure = null;
@@ -250,6 +287,15 @@ class MockSshAgent {
 		if (msg.type === "SPAWN") {
 			const spawnMsg = msg as unknown as Record<string, string>;
 			const channelId = spawnMsg.channelId ?? nextSshChannelId();
+			const answer = nextSshSpawnAnswer;
+			nextSshSpawnAnswer = null;
+			if (answer === "unanswered") return;
+			if (answer !== null) {
+				setImmediate(() => {
+					this._emit("message", { type: "SPAWN_ERR", requestId: spawnMsg.requestId, ...answer });
+				});
+				return;
+			}
 			setImmediate(() => {
 				this._emit("message", {
 					type: "SPAWN_OK",
@@ -1061,6 +1107,401 @@ describe("SessionManager", () => {
 			(m) => m.type === "CHANNEL_STATE" && (m as { channelId?: string }).channelId === "local-ch-1",
 		);
 		expect(states.at(-1)).toMatchObject({ status: "dead", exitCode: 3 });
+	});
+
+	// ─── A live restart and the exit of the shell it replaced (#1113) ───────
+	//
+	// A live restart sends DESTROY, then SPAWN under the same id. The agent
+	// sends the destroyed shell's exit before the restart's SPAWN_OK. Until the
+	// restart's outcome, nobody can tell whether that exit is the terminal's
+	// end: once a new run holds the id it is dropped; when nothing replaced
+	// the shell, it is the end, which the hub caused (`killed`).
+	describe("a live restart and the exit of the shell it replaced (#1113)", () => {
+		const ctxOf = () =>
+			(sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+		const REFUSED = { code: "SHELL_NOT_FOUND", message: "no such shell" };
+		const SCREEN = {
+			serialized: "\u001b[Hthe replaced shell's screen",
+			cols: 80,
+			rows: 24,
+			cursorX: 0,
+			cursorY: 0,
+		};
+
+		/** A live local terminal, a window that hears what follows, and its agent. */
+		async function liveTerminal(windowId = "window") {
+			const heard: ProtocolMessage[] = [];
+			sm.addClient(makeClient(windowId, heard));
+			const channelId = await sm.handleSpawn(windowId, { type: "SPAWN", hostId: "local" });
+			if (channelId === null) throw new Error("expected a local channel");
+			const agent = mockLocalAgents.at(-1);
+			if (agent === undefined) throw new Error("expected the local agent");
+			const emit = (msg: unknown) => (agent as unknown as EventEmitter).emit("message", msg);
+			heard.length = 0;
+			return { channelId, heard, agent, emit };
+		}
+
+		/** A live terminal on an SSH host whose agent runs on stdio, and a window. */
+		async function sshTerminal() {
+			const host = new MetaDAL(dbManager.meta).createHost({
+				type: "ssh",
+				label: "box",
+				sshHost: "user@box.test",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+			});
+			const heard: ProtocolMessage[] = [];
+			sm.addClient(makeClient("ssh-window", heard));
+			const channelId = await sm.handleSpawn("ssh-window", { type: "SPAWN", hostId: host.id });
+			if (channelId === null) throw new Error("expected an SSH channel");
+			heard.length = 0;
+			return { hostId: host.id, channelId, heard };
+		}
+
+		/** The CHANNEL_STATEs a window heard about a terminal. */
+		function statesOf(heard: ProtocolMessage[], channelId: string): ChannelStateMessage[] {
+			return heard.filter(
+				(m): m is ChannelStateMessage => m.type === "CHANNEL_STATE" && m.channelId === channelId,
+			);
+		}
+
+		/** The ends a window heard of a terminal. */
+		function endsOf(heard: ProtocolMessage[], channelId: string): ChannelStateMessage[] {
+			return statesOf(heard, channelId).filter((state) => state.status === "dead");
+		}
+
+		/** The SPAWNs an agent was sent under a terminal's id: its restarts'. */
+		function spawnsNaming(
+			agent: { send: ReturnType<typeof vi.fn> },
+			channelId: string,
+		): AgentSpawnMessage[] {
+			return agent.send.mock.calls
+				.map(([msg]) => msg as AgentSpawnMessage)
+				.filter((msg) => msg.type === "SPAWN" && msg.channelId === channelId);
+		}
+
+		/** A channel logger, registered for a terminal. */
+		function loggerFor(channelId: string) {
+			const logger = { log: vi.fn(), close: vi.fn() };
+			const registry = new Map([[channelId, logger]]);
+			ctxOf().loggerRegistry = registry as unknown as LoggerRegistry;
+			return { logger, registry };
+		}
+
+		/** What a remote daemon's adoption leaves on its connection: the terminal listed (#701). */
+		function listedOn(agent: unknown, channelId: string): AgentConnection {
+			const connection = agent as AgentConnection;
+			connection.daemonInventory = { listed: new Set([channelId]), destroyed: new Set() };
+			return connection;
+		}
+
+		it("a live restart never reports the replaced shell's exit", async () => {
+			const { channelId, heard, agent } = await liveTerminal();
+			nextLocalDestroyEndsWith = { exitCode: 137 };
+
+			expect(await sm.restartChannel(channelId)).toBe(true);
+
+			expect(agent.send).toHaveBeenCalledWith({ type: "DESTROY", channelId });
+			expect(
+				statesOf(heard, channelId).filter((s) => s.status === "dead" || s.endId !== undefined),
+			).toEqual([]);
+			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("live");
+			expect(ctxOf().channels.get(channelId)?.status).toBe("live");
+		});
+
+		it("a live restart keeps the replaced shell's logger and inventory entry for its new run", async () => {
+			const { channelId, agent, emit } = await liveTerminal();
+			const { logger, registry } = loggerFor(channelId);
+			const connection = listedOn(agent, channelId);
+			nextLocalSpawnUnanswered = true;
+
+			const restarting = sm.restartChannel(channelId);
+			await vi.waitFor(() => expect(spawnsNaming(agent, channelId)).toHaveLength(1));
+			emit({ type: "CHANNEL_EXIT", channelId, exitCode: 137 });
+
+			expect(registry.get(channelId)).toBe(logger);
+			expect(logger.close).not.toHaveBeenCalled();
+			expect(connection.daemonInventory?.listed.has(channelId)).toBe(true);
+
+			const [spawn] = spawnsNaming(agent, channelId);
+			emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
+			expect(await restarting).toBe(true);
+
+			expect(registry.get(channelId)).toBe(logger);
+			expect(logger.close).not.toHaveBeenCalled();
+			expect(connection.daemonInventory?.listed.has(channelId)).toBe(true);
+		});
+
+		it.each([
+			["", false],
+			[", on an entry marked by a restart that failed before", true],
+		] as const)(
+			"a restart whose new run cannot be recorded applies that run's own exit only%s",
+			async (_, marked) => {
+				const { channelId, heard } = await liveTerminal();
+				if (marked) {
+					nextLocalSpawnError = REFUSED;
+					expect(await sm.restartChannel(channelId)).toBe(false);
+				}
+				const lifecycle = (sm as unknown as { lifecycle: ChannelLifecycleManager }).lifecycle;
+				const recording = vi.spyOn(lifecycle, "applyRestartState").mockImplementationOnce(() => {
+					throw new Error("the new run cannot be recorded");
+				});
+				nextLocalDestroyEndsWith = { exitCode: 137 };
+				nextLocalSpawnEndsWith = 4;
+
+				await expect(sm.restartChannel(channelId)).rejects.toThrow(
+					"the new run cannot be recorded",
+				);
+				recording.mockRestore();
+
+				const ends = endsOf(heard, channelId);
+				expect(ends).toHaveLength(1);
+				expect(ends[0]).toMatchObject({ status: "dead", exitCode: 4 });
+				expect(ends[0]).not.toHaveProperty("endReason");
+			},
+		);
+
+		it("a live restart whose new program ends at once reports that end only", async () => {
+			const { channelId, heard, agent } = await liveTerminal();
+			nextLocalDestroyEndsWith = { exitCode: 137 };
+			nextLocalSpawnEndsWith = 4;
+
+			expect(await sm.restartChannel(channelId)).toBe(true);
+
+			expect(agent.send).toHaveBeenCalledWith({ type: "DESTROY", channelId });
+			expect(new MetaDAL(dbManager.meta).getChannel(channelId)).toMatchObject({
+				status: "dead",
+				exitCode: 4,
+			});
+			const ends = endsOf(heard, channelId);
+			expect(ends).toHaveLength(1);
+			expect(ends[0]).toMatchObject({ status: "dead", exitCode: 4 });
+			expect(ends[0]).not.toHaveProperty("endReason");
+		});
+
+		it("a restart refused after its DESTROY reports the replaced shell's end as killed", async () => {
+			const { channelId, heard } = await liveTerminal();
+			nextLocalDestroyEndsWith = { exitCode: 137 };
+			nextLocalSpawnError = REFUSED;
+
+			expect(await sm.restartChannel(channelId)).toBe(false);
+
+			expect(new MetaDAL(dbManager.meta).getChannel(channelId)).toMatchObject({
+				status: "dead",
+				exitCode: 137,
+				endReason: "killed",
+			});
+			const ends = endsOf(heard, channelId);
+			expect(ends).toHaveLength(1);
+			expect(ends[0]).toMatchObject({ status: "dead", exitCode: 137, endReason: "killed" });
+		});
+
+		it("a replaced shell's final screen is stored only once it is the terminal's end", async () => {
+			const spool = new SpoolDAL(dbManager.spool);
+			// Replaced: never stored.
+			const replaced = await liveTerminal("replaced-window");
+			nextLocalDestroyEndsWith = { exitCode: 137, screen: SCREEN };
+			expect(await sm.restartChannel(replaced.channelId)).toBe(true);
+			expect(spool.getChannelChunkCount(replaced.channelId)).toBe(0);
+
+			// Refused: stored as the end's final screen, and not while it was held.
+			const refused = await liveTerminal("refused-window");
+			nextLocalSpawnUnanswered = true;
+			const restarting = sm.restartChannel(refused.channelId);
+			await vi.waitFor(() =>
+				expect(spawnsNaming(refused.agent, refused.channelId)).toHaveLength(1),
+			);
+			refused.emit({
+				type: "CHANNEL_EXIT",
+				channelId: refused.channelId,
+				exitCode: 137,
+				screen: SCREEN,
+			});
+			expect(spool.getChannelChunkCount(refused.channelId)).toBe(0);
+			const [spawn] = spawnsNaming(refused.agent, refused.channelId);
+			refused.emit({ type: "SPAWN_ERR", requestId: spawn?.requestId, ...REFUSED });
+			expect(await restarting).toBe(false);
+			expect(spool.getChannelChunkCount(refused.channelId)).toBe(1);
+			const stored = spool.getLatestSnapshot(refused.channelId);
+			expect(JSON.parse(Buffer.from(stored?.dataBlob ?? []).toString())).toEqual(SCREEN);
+		});
+
+		it("a replaced shell's exit after its restart failed is reported as killed", async () => {
+			const { channelId, heard, emit } = await liveTerminal();
+			nextLocalSpawnError = REFUSED;
+			expect(await sm.restartChannel(channelId)).toBe(false);
+			// Nothing heard of the shell it ended yet: it stays as it is.
+			expect(endsOf(heard, channelId)).toEqual([]);
+
+			emit({ type: "CHANNEL_EXIT", channelId, exitCode: 137 });
+
+			expect(new MetaDAL(dbManager.meta).getChannel(channelId)).toMatchObject({
+				status: "dead",
+				endReason: "killed",
+			});
+			const ends = endsOf(heard, channelId);
+			expect(ends).toHaveLength(1);
+			expect(ends[0]).toMatchObject({ status: "dead", exitCode: 137, endReason: "killed" });
+		});
+
+		it("a replaced shell's exit heard once the hub quits, after its restart failed, is reported as stopped", async () => {
+			const { channelId, heard, emit } = await liveTerminal();
+			nextLocalSpawnError = REFUSED;
+			expect(await sm.restartChannel(channelId)).toBe(false);
+			sm.beginQuit();
+
+			emit({ type: "CHANNEL_EXIT", channelId, exitCode: 137 });
+
+			const ends = endsOf(heard, channelId);
+			expect(ends).toHaveLength(1);
+			expect(ends[0]).toMatchObject({ status: "dead", exitCode: 137, endReason: "stopped" });
+		});
+
+		it("another terminal's exit during a restart is reported at once", async () => {
+			const restarted = await liveTerminal();
+			const other = await sm.handleSpawn("window", { type: "SPAWN", hostId: "local" });
+			if (other === null) throw new Error("expected a second local channel");
+			restarted.heard.length = 0;
+			nextLocalDestroyEndsWith = { exitCode: 137, alsoEnds: [other] };
+
+			expect(await sm.restartChannel(restarted.channelId)).toBe(true);
+
+			const heard = restarted.heard;
+			const otherEnded = heard.findIndex(
+				(m) => m.type === "CHANNEL_STATE" && m.channelId === other && m.status === "dead",
+			);
+			const restartedLive = heard.findIndex(
+				(m) =>
+					m.type === "CHANNEL_STATE" && m.channelId === restarted.channelId && m.status === "live",
+			);
+			expect(otherEnded).toBeGreaterThanOrEqual(0);
+			expect(restartedLive).toBeGreaterThan(otherEnded);
+			expect(endsOf(heard, restarted.channelId)).toEqual([]);
+		});
+
+		it("a terminal started again after a failed restart reports its own end without a reason", async () => {
+			const { channelId, heard } = await liveTerminal();
+			nextLocalSpawnError = REFUSED;
+			expect(await sm.restartChannel(channelId)).toBe(false);
+
+			nextLocalSpawnEndsWith = 4;
+			expect(await sm.restartChannel(channelId)).toBe(true);
+
+			const ends = endsOf(heard, channelId);
+			expect(ends).toHaveLength(1);
+			expect(ends[0]).toMatchObject({ status: "dead", exitCode: 4 });
+			expect(ends[0]).not.toHaveProperty("endReason");
+		});
+
+		it("a terminal its reconnect starts again after a failed restart reports its own end without a reason", async () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const { hostId, channelId, heard } = await sshTerminal();
+				nextSshSpawnAnswer = REFUSED;
+				expect(await sm.restartChannel(channelId)).toBe(false);
+
+				// The link drops; its reconnect starts the terminal again under its id.
+				const first = mockSshAgentInstance;
+				first?.simulateClose();
+				await vi.advanceTimersByTimeAsync(1_000);
+				await vi.waitFor(() => expect(sm.sessions.get(hostId)?.status).toBe("active"));
+				const again = mockSshAgentInstance;
+				expect(again).not.toBe(first);
+				await vi.waitFor(() =>
+					expect(again?.send).toHaveBeenCalledWith(
+						expect.objectContaining({ type: "SPAWN", channelId }),
+					),
+				);
+				await flushImmediate();
+
+				again?._emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 2 });
+
+				const ends = endsOf(heard, channelId);
+				expect(ends).toHaveLength(1);
+				expect(ends[0]).toMatchObject({ status: "dead", exitCode: 2 });
+				expect(ends[0]).not.toHaveProperty("endReason");
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		// The literal case, an elevated restart waiting for its password, has no
+		// reconnect re-spawn: elevation is local only (ERR-04), and only an SSH
+		// agent on stdio is started again by its reconnect. The same hold is
+		// open while a restart's SPAWN goes unanswered on a link that drops.
+		it("a reconnect that starts the terminal again during its restart keeps it live, and its end its own", async () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const { hostId, channelId, heard } = await sshTerminal();
+				const first = mockSshAgentInstance;
+				nextSshSpawnAnswer = "unanswered";
+				const restarting = sm.restartChannel(channelId);
+				await vi.waitFor(() =>
+					expect(first?.send).toHaveBeenCalledWith(
+						expect.objectContaining({ type: "SPAWN", channelId }),
+					),
+				);
+				// The destroyed shell's exit comes; the link drops before any answer.
+				first?._emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 137 });
+				first?.simulateClose();
+				await vi.advanceTimersByTimeAsync(1_000);
+				await vi.waitFor(() => expect(sm.sessions.get(hostId)?.status).toBe("active"));
+				const again = mockSshAgentInstance;
+				expect(again).not.toBe(first);
+				await vi.waitFor(() =>
+					expect(again?.send).toHaveBeenCalledWith(
+						expect.objectContaining({ type: "SPAWN", channelId }),
+					),
+				);
+				await flushImmediate();
+				// The restart's own SPAWN is never answered: it fails.
+				await vi.advanceTimersByTimeAsync(10_000);
+				expect(await restarting).toBe(false);
+
+				expect(endsOf(heard, channelId)).toEqual([]);
+				expect(ctxOf().channels.get(channelId)?.status).toBe("live");
+
+				again?._emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 2 });
+
+				const ends = endsOf(heard, channelId);
+				expect(ends).toHaveLength(1);
+				expect(ends[0]).toMatchObject({ status: "dead", exitCode: 2 });
+				expect(ends[0]).not.toHaveProperty("endReason");
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		// What the restart writes back once the terminal was deleted is outside
+		// this: the exit only must not end that run (HOLD1).
+		it.each([
+			["held before it", "before"],
+			["heard after it", "after"],
+		] as const)(
+			"a terminal deleted during its restart, the replaced shell's exit %s, has that exit's bookkeeping done for the run it ended",
+			async (_, order) => {
+				const { channelId, agent, emit } = await liveTerminal();
+				const { logger, registry } = loggerFor(channelId);
+				const connection = listedOn(agent, channelId);
+				nextLocalSpawnUnanswered = true;
+				const restarting = sm.restartChannel(channelId);
+				await vi.waitFor(() => expect(spawnsNaming(agent, channelId)).toHaveLength(1));
+
+				const exit = { type: "CHANNEL_EXIT", channelId, exitCode: 137 };
+				if (order === "before") emit(exit);
+				expect(sm.destroyChannel(channelId)).toBe(true);
+				if (order === "after") emit(exit);
+				const [spawn] = spawnsNaming(agent, channelId);
+				emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
+				expect(await restarting).toBe(true);
+
+				expect(connection.daemonInventory?.listed.has(channelId)).toBe(false);
+				expect(logger.close).toHaveBeenCalledTimes(1);
+				expect(registry.has(channelId)).toBe(false);
+				expect(ctxOf().channels.get(channelId)?.status).toBe("live");
+			},
+		);
 	});
 
 	// ─── DB persistence ─────────────────────────────────────────────────────
@@ -7133,6 +7574,117 @@ describe("SessionManager — elevation support", () => {
 				(m as ProtocolMessage & { code?: string }).code === "ELEVATION_CANCELLED",
 		);
 		expect(errMsg).toBeDefined();
+	});
+
+	// ─── An elevated restart and the exit of the shell it replaced (#1113) ───
+	//
+	// The shell is ended before the password prompt: its exit is held while
+	// the prompt waits, and is the terminal's end only once the restart fails.
+
+	/**
+	 * An elevated local terminal, and a window that answers its spawn's
+	 * password prompt, then its restart's with what `atRestartPrompt` gives. The
+	 * window hears what follows; the restart prompts, its cache expired.
+	 */
+	async function elevatedTerminal(clientId: string, atRestartPrompt: () => string | null) {
+		const localHostId = await sm.ensureLocalHost();
+		const received: ProtocolMessage[] = [];
+		let restarting = false;
+		sm.addClient({
+			id: clientId,
+			send: (msg: ProtocolMessage) => {
+				received.push(msg);
+				if (msg.type !== "AUTH_PROMPT") return;
+				const promptMsg = msg as AuthPromptMessage;
+				Promise.resolve().then(() => {
+					sm.handleAuthPromptResponse(clientId, {
+						hostId: promptMsg.hostId,
+						secret: restarting ? atRestartPrompt() : "initial-pass",
+						promptId: promptMsg.promptId,
+						deliveryEpoch: promptMsg.deliveryEpoch,
+					});
+				});
+			},
+			attachedChannels: new Set(),
+		});
+		const channelId = await sm.handleSpawn(clientId, {
+			type: "SPAWN",
+			hostId: localHostId,
+			elevated: true,
+		});
+		if (channelId === null) throw new Error("expected an elevated channel");
+		restarting = true;
+		getElevationCache().set(`${localHostId}:${clientId}`, {
+			secret: "old",
+			expiresAt: Date.now() - 1,
+		});
+		received.length = 0;
+		return { localHostId, channelId, received };
+	}
+
+	function deadStatesOf(received: ProtocolMessage[], channelId: string): ChannelStateMessage[] {
+		return received.filter(
+			(m): m is ChannelStateMessage =>
+				m.type === "CHANNEL_STATE" && m.channelId === channelId && m.status === "dead",
+		);
+	}
+
+	it("a restart whose password prompt is cancelled reports the replaced shell's end only then", async () => {
+		const { channelId, received } = await elevatedTerminal("c-cancel-1113", () => null);
+		nextLocalDestroyEndsWith = { exitCode: 137 };
+
+		expect(await sm.restartChannel(channelId, "c-cancel-1113")).toBe(false);
+
+		const prompted = received.findIndex((m) => m.type === "AUTH_PROMPT");
+		const cancelled = received.findIndex(
+			(m) => m.type === "ERROR" && (m as ErrorMessage).code === "ELEVATION_CANCELLED",
+		);
+		const ended = received.findIndex(
+			(m) => m.type === "CHANNEL_STATE" && m.channelId === channelId && m.status === "dead",
+		);
+		expect(prompted).toBeGreaterThanOrEqual(0);
+		expect(cancelled).toBeGreaterThan(prompted);
+		expect(ended).toBeGreaterThan(cancelled);
+		expect(deadStatesOf(received, channelId)).toEqual([
+			expect.objectContaining({ exitCode: 137, endReason: "killed" }),
+		]);
+		const { MetaDAL } = await import("../storage/meta.js");
+		expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
+	});
+
+	it("a restart refused while its agent is being stopped reports the end as stopped", async () => {
+		const ctx = (sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+		const hostId = await sm.ensureLocalHost();
+		const { channelId, received } = await elevatedTerminal("c-stopping-1113", () => {
+			// The agent starts being stopped before the password is answered.
+			ctx.stoppingAgents.add(hostId);
+			return "p@ss";
+		});
+		nextLocalDestroyEndsWith = { exitCode: 137 };
+
+		try {
+			expect(await sm.restartChannel(channelId, "c-stopping-1113")).toBe(false);
+		} finally {
+			ctx.stoppingAgents.delete(hostId);
+		}
+
+		expect(deadStatesOf(received, channelId)).toEqual([
+			expect.objectContaining({ exitCode: 137, endReason: "stopped" }),
+		]);
+	});
+
+	it("a restart that fails as the hub quits during its prompt reports the end as stopped", async () => {
+		const { channelId, received } = await elevatedTerminal("c-quitting-1113", () => {
+			sm.beginQuit();
+			return "p@ss";
+		});
+		nextLocalDestroyEndsWith = { exitCode: 137 };
+
+		expect(await sm.restartChannel(channelId, "c-quitting-1113")).toBe(false);
+
+		expect(deadStatesOf(received, channelId)).toEqual([
+			expect.objectContaining({ exitCode: 137, endReason: "stopped" }),
+		]);
 	});
 
 	// ─── A terminal brought back from its pane (#858) ────────────────────────

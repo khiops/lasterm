@@ -82,6 +82,19 @@ describe("RecordingsModal", () => {
 		expect(discard).toHaveBeenCalledWith(ROW.id);
 	});
 
+	// AC-PLAYER-PARSE / too-large. Mutation caught: the file read before its size is checked.
+	it("refuses a file over 1 GiB without reading it", async () => {
+		const input = document.querySelector<HTMLInputElement>(".rec-file");
+		const file = new File(["x"], "big.cast");
+		Object.defineProperty(file, "size", { value: 1024 * 1024 * 1024 + 1 });
+		const read = vi.spyOn(file, "text");
+		Object.defineProperty(input, "files", { value: [file], configurable: true });
+		input?.dispatchEvent(new Event("change"));
+		await nextTick();
+		expect(read).not.toHaveBeenCalled();
+		expect(document.body.textContent).toContain("This file is larger than 1 GiB");
+	});
+
 	it("says full when the space is used up", async () => {
 		store.usedBytes = store.capBytes;
 		await nextTick();

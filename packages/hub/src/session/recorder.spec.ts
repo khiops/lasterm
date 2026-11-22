@@ -321,6 +321,19 @@ describe("SessionRecorder", () => {
 		});
 	});
 
+	// AC-LOST-CONNECTION-MARKER (b): an exit replayed after a lost connection comes after its marker.
+	it("marks a lost connection before an exit the reconnection replays", () => {
+		const id = startAuto(h);
+		h.at(10);
+		h.rec.onAgentLost("host-1");
+		h.at(40);
+		h.rec.endChannel(CHANNEL, "exited", 1);
+		expect(h.body(id)).toEqual([
+			'[0.010, "m", "lasterm: connection to the agent lost; output until it returns may be missing or late"]',
+			'[0.030, "x", "1"]',
+		]);
+	});
+
 	// ─── Events and timing ──────────────────────────────────────────────────
 
 	// AC-EVENTS. Mutations caught: absolute times, an unchanged resize, a numeric exit.

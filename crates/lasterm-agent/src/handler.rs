@@ -1273,7 +1273,9 @@ fn spawn_reader_task(
         loop {
             tokio::select! {
                 // PTY output, unless its hub's connection is full
-                read_result = pty_reader.read(&mut rbuf), if !held_back => {
+                // A destroyed workload's reader sends nothing, so it drains its
+                // PTY whatever its hub's connection holds (#1121).
+                read_result = pty_reader.read(&mut rbuf), if !held_back || channel_events.silenced() => {
                     match read_result {
                         Ok(0) | Err(_) => {
                             #[cfg(test)]
@@ -1808,7 +1810,10 @@ fn answer_snapshot(
         // longer has.
         Err(e) => {
             tracing::warn!(channel_id = %channel_id, error = %e, "snapshot reply not encoded");
-            let _ = request.taken.send(());
+            // Unless destroyed while it rendered (#1121).
+            if !channel_events.silenced() {
+                let _ = request.taken.send(());
+            }
         }
     }
 }

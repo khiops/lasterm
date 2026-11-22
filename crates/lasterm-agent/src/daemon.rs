@@ -5059,6 +5059,17 @@ mod tests {
                             && frame["msg"].as_str() == Some("PTY closed")),
                     "the replaced shell's LOG came after the SPAWN_OK"
                 );
+                // The new run's directory, checked absent before the SPAWN_OK,
+                // does come.
+                assert!(
+                    later
+                        .iter()
+                        .any(|frame| is_about(frame, "CWD_CHANGE", "stale-output")
+                            && frame["cwd"]
+                                .as_str()
+                                .is_some_and(|cwd| cwd.contains(&new_dir_name))),
+                    "the new run's directory never came"
+                );
 
                 daemon.stop().await;
             }

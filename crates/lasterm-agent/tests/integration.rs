@@ -2390,6 +2390,34 @@ async fn detach_lets_a_powershell_launch_end() {
     pipe_appears(&fixture).await;
 }
 
+/// AC-D3, through the binary: on POSIX `--daemon --detach` is a usage error
+/// with its line, and starts nothing. Mutation: a POSIX agent that accepts
+/// the flag and runs a daemon in the foreground (the bounded wait fails).
+#[cfg(unix)]
+#[tokio::test]
+async fn detach_is_refused_on_posix() {
+    let fixture = StopFixture::new("detach-posix");
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        fixture
+            .agent("--daemon")
+            .arg("--detach")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("--detach exits at once on POSIX")
+    .expect("run the agent");
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--detach is for Windows; a POSIX launch detaches through the shell"),
+        "{stderr}"
+    );
+    assert!(!std::path::Path::new(&fixture.socket).exists());
+}
+
 /// AC-D2: a job that forbids breaking away gives exit 5 and its line, and no
 /// daemon, looked for while the job still lives (its close would kill one
 /// started inside it). Mutation: that refusal classified as 1.

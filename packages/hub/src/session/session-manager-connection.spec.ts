@@ -1012,6 +1012,36 @@ describe("a Windows host that keeps its daemon (#755)", { timeout: 30_000 }, () 
 			expect.not.objectContaining({ remoteDaemonUnavailable: expect.anything() }),
 		]);
 	});
+	// AC-W2 / cleared-by-daemon: the field goes with the daemon reach itself,
+	// on the reconnect after a lost link, with no Disconnect in between.
+	// Mutation: the reason kept per host and cleared only by a Disconnect.
+	it("forgets why once the reconnect after a lost link reaches a daemon", async () => {
+		deployFindsWindows();
+		const h = await hubWith({ daemon: true, os: "windows" });
+		h.remote.daemonSocket = "silent";
+		h.remote.detach = "breakaway-refused";
+		await connected(h);
+		await until(
+			"the host says why it keeps no daemon",
+			() => sessionStates(h).at(-1)?.remoteDaemonUnavailable === BREAKAWAY_REFUSED,
+		);
+
+		h.remote.detach = "started";
+		const launchesBefore = h.remote.daemonLaunches;
+		h.remote.dropLinks();
+		await until(
+			"the reconnect reaches a daemon",
+			() => agentOf(h)?.reachedThrough === "relay",
+			15_000,
+		);
+
+		expect(h.remote.daemonLaunches).toBe(launchesBefore + 1);
+		await until("the host says active again", () => sessionStates(h).at(-1)?.status === "active");
+		expect(sessionStates(h).at(-1)?.remoteDaemonUnavailable).toBeUndefined();
+		expect(
+			h.sm.getStateSnapshot().sessions.filter((s) => s.remoteDaemonUnavailable !== undefined),
+		).toEqual([]);
+	});
 });
 
 // ─── A server that refuses socket forwarding ─────────────────────────────────

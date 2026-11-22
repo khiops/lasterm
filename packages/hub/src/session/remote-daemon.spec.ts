@@ -1675,6 +1675,26 @@ describe("a Windows host keeps its daemon through the relay (#755)", () => {
 		},
 	);
 
+	// The Windows timeout names the log directory and reads no tail (#755).
+	// Mutation: the POSIX message, with its `tail` exec.
+	it("says it did not answer, naming the log directory, after one launch and no tail", async () => {
+		const { client, relays } = windowsConn(["nothing", "nothing"]);
+		const { exec, commands } = launchExec("lasterm-detach: started\n", 0);
+		const err = await attachRemoteDaemon({
+			conn: client,
+			agentPath: AGENT,
+			exec,
+			os: "windows",
+		}).catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(Error);
+		expect((err as Error).message).toMatch(
+			/did not answer on the account's default named pipe within \d+ms/,
+		);
+		expect((err as Error).message).toContain("Its log is in %LOCALAPPDATA%\\lasterm\\logs.");
+		expect(relays).toHaveLength(2);
+		expect(commands).toHaveLength(1);
+	});
+
 	it("a daemon-only reach finds nothing running, and launches nothing", async () => {
 		const { client, relays } = windowsConn(["nothing"]);
 		const { exec, commands } = launchExec("", 0);

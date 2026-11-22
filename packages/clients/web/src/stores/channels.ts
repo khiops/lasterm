@@ -442,14 +442,15 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * flight: those entries stay over the response's rows, which the hub may have
 	 * read before the list did (#1148). Titles heard still go over them. Only a list
 	 * whose request started after the index fetch's publishes there (`startedAt`,
-	 * from `requestSeq`): an earlier one was read by the hub before the index was.
+	 * from `requestSeq`): by the order the calls were made here, which is what this
+	 * window can know of the hub's reads, a list started earlier is the older read.
 	 */
 	interface IndexHeard {
 		startedAt: number;
 		titles: Map<string, string>;
 		listed: Map<string, ChannelIndexEntry>;
 	}
-	/** Orders the starts of list and index requests, which the hub reads in that order. */
+	/** Orders the starts of list and index requests as this window made them. */
 	let requestSeq = 0;
 	const indexTitlesDuringFetch = new Set<IndexHeard>();
 
@@ -505,7 +506,8 @@ export const useChannelsStore = defineStore("channels", () => {
 		for (const heardHere of statusesDuringFetch.values()) {
 			for (const id of channelIds) heardHere.set(id, "deleted");
 		}
-		// An index fetch in flight must not bring back what a list published for it (#1148).
+		// What a list published for an index fetch in flight goes with the channel (#1148);
+		// a row of that fetch's own response is not filtered, as before.
 		for (const heardHere of indexTitlesDuringFetch) {
 			for (const id of channelIds) heardHere.listed.delete(id);
 		}

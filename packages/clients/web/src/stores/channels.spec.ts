@@ -907,7 +907,7 @@ describe("useChannelsStore — fetchChannelIndex", () => {
 			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("read later");
 		});
 
-		it("does not bring back a channel deleted after the host list published it", async () => {
+		it("drops what the host list published for a channel deleted since", async () => {
 			const store = useChannelsStore();
 			let answerIndex!: (rows: unknown[]) => void;
 			mockFetch.mockImplementation((url: string, init?: { method?: string }) => {
@@ -934,7 +934,7 @@ describe("useChannelsStore — fetchChannelIndex", () => {
 			expect(store.channelIndex.has("ch-gone")).toBe(false);
 		});
 
-		it("does not keep what an earlier list of the host published for a channel a later list omits", async () => {
+		it("drops what an earlier list of the host published for a channel a later list omits", async () => {
 			const store = useChannelsStore();
 			let hostRows: unknown[] = [row("ch-a", "host-1", "a"), row("ch-b", "host-1", "b")];
 			let answerIndex!: (rows: unknown[]) => void;

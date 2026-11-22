@@ -631,7 +631,7 @@ export const useChannelsStore = defineStore("channels", () => {
 				const id = row.id;
 				const rowHostId = row.host_id;
 				if (typeof id !== "string" || typeof rowHostId !== "string") continue;
-				// A title set since this fetch began is newer than the row's (#1128).
+				// Prefer the last title set during this request over the row's (#1128).
 				const title =
 					myTitles.get(id) ?? (typeof row.display_title === "string" ? row.display_title : "");
 				// Whether it runs a command, for a pane over it while another host
@@ -1006,7 +1006,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	/**
 	 * Update the hub-resolved display title for a channel.
 	 * Called on TITLE_CHANGE, PROCESS_TITLE, ATTACH_OK, and STATE_SYNC.
-	 * Silently ignored if the channel is not loaded yet.
+	 * A channel no list holds is still recorded for fetches in flight and kept in the index.
 	 */
 	function setDisplayTitle(channelId: string, displayTitle: string): void {
 		titleHeardDuringFetch(channelId, { displayTitle });

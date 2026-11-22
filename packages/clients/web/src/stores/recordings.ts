@@ -66,6 +66,17 @@ export const useRecordingsStore = defineStore("recordings", () => {
 	/** Each list fetch's turn: an answer older than one already applied is dropped. */
 	let fetches = 0;
 	let applied = 0;
+	/** One list fetch for the states heard in the same turn (a reconnection's burst of them). */
+	let refreshQueued = false;
+
+	function refreshSoon(): void {
+		if (refreshQueued) return;
+		refreshQueued = true;
+		queueMicrotask(() => {
+			refreshQueued = false;
+			void refresh();
+		});
+	}
 
 	function onState(msg: RecordingStateMessage): void {
 		heard.set(msg.channelId, (heard.get(msg.channelId) ?? 0) + 1);
@@ -90,7 +101,7 @@ export const useRecordingsStore = defineStore("recordings", () => {
 			}
 		}
 		open.value = next;
-		void refresh();
+		refreshSoon();
 	}
 
 	function registerHandlers(socket: SocketLike): void {
@@ -164,8 +175,11 @@ export const useRecordingsStore = defineStore("recordings", () => {
 		const base = `${hubBaseUrl()}/api/recordings/${encodeURIComponent(recordingId)}/cast`;
 		let res = await hubFetch(base, { headers: authHeaders() });
 		if (!res.ok) throw new Error(`export answered ${res.status}`);
-		const lastSeq = res.headers.get("X-Lasterm-Cast-Last-Seq") ?? "0";
-		const lost = res.headers.get("X-Lasterm-Cast-Lost") ?? "0";
+		// Without its cursor the export cannot say whether parts follow: a page
+		// the headers do not reach would save the first part as the whole.
+		const lastSeq = res.headers.get("X-Lasterm-Cast-Last-Seq");
+		const lost = res.headers.get("X-Lasterm-Cast-Lost");
+		if (lastSeq === null || lost === null) throw new Error("export without its cursor headers");
 		yield await res.text();
 		let next = res.headers.get("X-Lasterm-Cast-Next-Seq");
 		while (next !== null) {
@@ -221,12 +235,17 @@ export const useRecordingsStore = defineStore("recordings", () => {
 		const suggestedName = recordingFileName(recording.title, recording.startedAt);
 		const picker = (globalThis as { showSaveFilePicker?: SaveFilePicker }).showSaveFilePicker;
 		if (picker === undefined) return download(recording.id, isOpen, suggestedName);
-		const handle = picker({
-			suggestedName,
-			types: [
-				{ description: "asciicast recording", accept: { "application/x-asciicast": [".cast"] } },
-			],
-		});
+		let handle: ReturnType<SaveFilePicker>;
+		try {
+			handle = picker({
+				suggestedName,
+				types: [
+					{ description: "asciicast recording", accept: { "application/x-asciicast": [".cast"] } },
+				],
+			});
+		} catch (err) {
+			handle = Promise.reject(err);
+		}
 		return (async () => {
 			let file: Awaited<typeof handle>;
 			try {
@@ -257,7 +276,12 @@ export const useRecordingsStore = defineStore("recordings", () => {
 				void refresh();
 				return;
 			}
-			await discard(recording.id);
+			if (!(await discard(recording.id))) {
+				useToastStore().show(
+					"warning",
+					"The recording was saved, but its copy could not be removed from Recordings.",
+				);
+			}
 		})();
 	}
 
@@ -271,8 +295,12 @@ export const useRecordingsStore = defineStore("recordings", () => {
 			const a = document.createElement("a");
 			a.href = url;
 			a.download = name;
+			document.body.appendChild(a);
 			a.click();
-			URL.revokeObjectURL(url);
+			a.remove();
+			// Revoked once the download has had time to start: some browsers
+			// drop a download whose URL goes in the same turn as the click.
+			setTimeout(() => URL.revokeObjectURL(url), 60_000);
 		} catch {
 			useToastStore().show("error", "The recording could not be saved. It is still in Recordings.");
 		}

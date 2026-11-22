@@ -5757,6 +5757,21 @@ describe("TerminalPane recording (#80)", () => {
 		expect(button("Stop recording and save…")).toBeDefined();
 	});
 
+	// AC-UI-SAVE / order: Stop saves an open recording, so the save stops it first.
+	// Mutation caught: the pane's Stop saving it as already ended.
+	it("saves the recording as open when Stop is chosen, in the click itself", async () => {
+		await openLive({ setUp: () => useHostsStore().updateSessionStatus(HOST, "active") });
+		useRecordingsStore().open = new Map([[T, REC]]);
+		await settle();
+		await menu();
+		const save = vi.spyOn(useRecordingsStore(), "save").mockResolvedValue();
+		button("Stop recording and save…")?.click();
+		expect(save).toHaveBeenCalledWith(
+			{ id: REC.recordingId, title: "build", startedAt: "2026-11-22T10:00:00.000Z" },
+			true,
+		);
+	});
+
 	it("offers no Start while the host is disconnected, and Stop still", async () => {
 		await openLive({ setUp: () => useHostsStore().updateSessionStatus(HOST, "disconnected") });
 		await menu();

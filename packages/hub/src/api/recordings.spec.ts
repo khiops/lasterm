@@ -107,7 +107,9 @@ describe("recording routes", () => {
 		});
 
 		it.each([
-			["dead (not in the hub's live set)", () => undefined],
+			["unknown to the hub's live set", () => undefined],
+			// A dead terminal stays in the map until it is forgotten.
+			["dead", () => live("dead" as never)],
 			["orphan", () => live("orphan")],
 			["live with its agent gone", () => live("live", false)],
 		])("refuses a terminal that is %s", async (_label, arrange) => {

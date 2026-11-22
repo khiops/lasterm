@@ -98,6 +98,16 @@ const markers = ref<Array<{ time: number; label: string }>>([]);
 const playback = shallowRef<CastPlayback | null>(null);
 let current: Terminal | null = null;
 let observer: ResizeObserver | null = null;
+/** Set when the player closes: a load still under way stops there. */
+let closed = false;
+let frame: number | null = null;
+
+/** The clock and the bar follow the time played, between events too. */
+function follow(): void {
+	const p = playback.value;
+	if (p?.isPlaying) time.value = p.currentTime;
+	frame = requestAnimationFrame(follow);
+}
 
 const opened = ref(false);
 const { onKeydown: modalKeydown } = useModalFocus({
@@ -180,7 +190,9 @@ function load(cast: ParsedCast): void {
 	total.value = p.totalTime;
 	markers.value = p.markers();
 	p.play();
-	playing.value = true;
+	// A cast with no event has ended already.
+	playing.value = p.isPlaying;
+	frame = requestAnimationFrame(follow);
 }
 
 function togglePlay(): void {
@@ -189,6 +201,7 @@ function togglePlay(): void {
 	if (p.isPlaying) p.pause();
 	else p.play();
 	playing.value = p.isPlaying;
+	time.value = p.currentTime;
 }
 
 function onSeek(event: Event): void {
@@ -226,18 +239,20 @@ let returnTo: Element | null = null;
 onMounted(async () => {
 	returnTo = document.activeElement;
 	opened.value = true;
-	let parsed: ParsedCast | { error: string };
+	let parsed: ParsedCast | { error: string } | null;
 	try {
-		parsed = await parseCastChunks(props.chunks());
+		parsed = await parseCastChunks(props.chunks(), () => closed);
 	} catch {
-		error.value = "The recording could not be read.";
+		if (!closed) error.value = "The recording could not be read.";
 		return;
 	}
+	if (parsed === null || closed) return;
 	if ("error" in parsed) {
 		error.value = parsed.error ?? NOT_A_CAST;
 		return;
 	}
 	await nextTick();
+	if (closed) return;
 	load(parsed);
 	if (stage.value && typeof ResizeObserver !== "undefined") {
 		observer = new ResizeObserver(fit);
@@ -246,6 +261,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+	closed = true;
+	if (frame !== null) cancelAnimationFrame(frame);
 	opened.value = false;
 	observer?.disconnect();
 	playback.value?.dispose();

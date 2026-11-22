@@ -35,7 +35,15 @@ function row(over: Partial<RecordingRow> = {}): RecordingRow {
 
 /** The hub's answers, and every request in the order sent. */
 function hub(
-	answers: { list?: () => Response; parts?: string[]; failPart?: number; stop?: number } = {},
+	answers: {
+		list?: () => Response;
+		parts?: string[];
+		failPart?: number;
+		stop?: number;
+		/** The export's cursor headers kept from the page, as a cross-origin page without them exposed. */
+		noCursor?: boolean;
+		deleteStatus?: number;
+	} = {},
 ) {
 	const requests: string[] = [];
 	mocks.hubFetch.mockImplementation(async (url, init) => {
@@ -50,14 +58,17 @@ function hub(
 			const parts = answers.parts ?? ["header\n"];
 			const index = u.searchParams.has("from_seq") ? Number(u.searchParams.get("from_seq")) - 1 : 0;
 			if (answers.failPart === index) return new Response("", { status: 404 });
-			const headers: Record<string, string> = {
-				"X-Lasterm-Cast-Last-Seq": String(parts.length),
-				"X-Lasterm-Cast-Lost": "0",
-			};
-			if (index + 1 < parts.length) headers["X-Lasterm-Cast-Next-Seq"] = String(index + 2);
+			const headers: Record<string, string> = answers.noCursor
+				? {}
+				: {
+						"X-Lasterm-Cast-Last-Seq": String(parts.length),
+						"X-Lasterm-Cast-Lost": "0",
+					};
+			if (!answers.noCursor && index + 1 < parts.length)
+				headers["X-Lasterm-Cast-Next-Seq"] = String(index + 2);
 			return new Response(parts[index], { status: 200, headers });
 		}
-		if (method === "DELETE") return new Response(null, { status: 204 });
+		if (method === "DELETE") return new Response(null, { status: answers.deleteStatus ?? 204 });
 		return new Response("{}", { status: 200 });
 	});
 	return requests;
@@ -181,16 +192,45 @@ describe("recordings store", () => {
 			}
 		});
 
-		// (f)
+		// Mutation caught: the export's first part taken as the whole when its cursor is missing.
+		it("deletes nothing when the export's cursor headers do not reach the page", async () => {
+			const requests = hub({ parts: ["header\n", "part-2\n"], noCursor: true });
+			const state = picker();
+			await useRecordingsStore().save(rec, true);
+			expect(requests.some((r) => r.startsWith("DELETE"))).toBe(false);
+			expect(state.writable?.closed).toBe(false);
+			expect(state.writable?.aborted).toBe(true);
+		});
+
+		// Mutation caught: a failed DELETE after the save left unsaid.
+		it("says so when the copy cannot be removed after a save", async () => {
+			hub({ deleteStatus: 500 });
+			const state = picker();
+			await useRecordingsStore().save(rec, true);
+			expect(state.writable?.closed).toBe(true);
+			expect(useToastStore().messages.at(-1)?.text).toBe(
+				"The recording was saved, but its copy could not be removed from Recordings.",
+			);
+		});
+
+		// (f) Mutation caught: the URL revoked in the same turn as the click.
 		it("downloads without the dialog, and keeps the hub's copy", async () => {
 			const requests = hub();
 			const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+			const { createObjectURL, revokeObjectURL } = globalThis.URL;
+			const revoke = vi.fn();
 			globalThis.URL.createObjectURL = vi.fn(() => "blob:x");
-			globalThis.URL.revokeObjectURL = vi.fn();
-			await useRecordingsStore().save(rec, false);
-			expect(click).toHaveBeenCalled();
-			expect(requests.some((r) => r.startsWith("DELETE"))).toBe(false);
-			click.mockRestore();
+			globalThis.URL.revokeObjectURL = revoke;
+			try {
+				await useRecordingsStore().save(rec, false);
+				expect(click).toHaveBeenCalled();
+				expect(revoke).not.toHaveBeenCalled();
+				expect(requests.some((r) => r.startsWith("DELETE"))).toBe(false);
+			} finally {
+				click.mockRestore();
+				globalThis.URL.createObjectURL = createObjectURL;
+				globalThis.URL.revokeObjectURL = revokeObjectURL;
+			}
 		});
 
 		// (g) The pane suggests the hub's name from what RECORDING_STATE said.
@@ -293,6 +333,24 @@ describe("recordings store", () => {
 		});
 
 		// K1/CONC2: an older list answer arriving last changes nothing.
+		// Mutation caught: one list fetch per state, a reconnection's burst of them included.
+		it("reads the list once for the states heard in one turn", async () => {
+			const requests = hub();
+			const store = useRecordingsStore();
+			for (const channelId of ["ch-1", "ch-2", "ch-3"]) {
+				store.onState({
+					type: "RECORDING_STATE",
+					channelId,
+					recordingId: `01REC-${channelId}`,
+					title: "t",
+					hostLabel: "h",
+					startedAt: "2026-11-22T10:00:00.000Z",
+				});
+			}
+			await settle();
+			expect(requests.filter((r) => r === "GET /api/recordings")).toHaveLength(1);
+		});
+
 		it("drops a list answer older than one already applied", async () => {
 			const answers: Array<(r: Response) => void> = [];
 			mocks.hubFetch.mockImplementation(() => new Promise((resolve) => answers.push(resolve)));

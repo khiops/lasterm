@@ -170,10 +170,14 @@ describe("SessionRecorder", () => {
 		h.at(0);
 		const { id, requestId } = startManual(h);
 		expect(h.attaches).toEqual([{ hostId: "host-1", channelId: CHANNEL, requestId }]);
-		expect(h.broadcasts.at(-1)).toMatchObject({
+		// What the client names the saved file after (AC-UI-SAVE / name).
+		expect(h.broadcasts.at(-1)).toEqual({
 			type: "RECORDING_STATE",
 			channelId: CHANNEL,
 			recordingId: id,
+			title: "build",
+			hostLabel: "pi",
+			startedAt: "2026-11-22T10:00:00.000Z",
 		});
 		h.at(30);
 		answerAttach(h, requestId, {
@@ -529,7 +533,10 @@ describe("SessionRecorder", () => {
 		const third = h.rec.exportPart(id, { fromSeq: 3, lastSeq: 3, lost: 0 });
 		expect(third?.nextSeq).toBeUndefined();
 		const whole = `${first?.body}${second?.body}${third?.body}`;
-		expect(whole.split("\n").filter(Boolean)).toHaveLength(4);
+		const header =
+			'{"version":3,"term":{"cols":80,"rows":24,"type":"xterm-256color"},"timestamp":1795341600,"title":"build — pi"}';
+		const expected = `${header}\n[0.000, "o", "${"0".repeat(3 * MiB)}"]\n[0.010, "o", "${"1".repeat(3 * MiB)}"]\n[0.010, "o", "${"2".repeat(3 * MiB)}"]\n`;
+		expect(whole === expected).toBe(true);
 		expect(second?.body.startsWith("{")).toBe(false);
 		expect(whole).not.toContain("later");
 		expect(reads.mock.calls.slice(-2).map((c) => c[1])).toEqual([2, 3]);
@@ -999,6 +1006,100 @@ describe("SessionRecorder", () => {
 		expect(h.dal.usedBytes()).toBe(sum());
 	});
 
+	// What an ended recording's row lacks is written at the next GC pass, and it
+	// then survives a restart. Mutation caught: only the end retried.
+	it("writes a kept loss count at the next GC pass, so a restart keeps its marker", () => {
+		const id = startAuto(h);
+		h.rec.onOutput(CHANNEL, enc("tail"));
+		vi.spyOn(h.dal, "writeBlock").mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		const lostWrites = vi.spyOn(h.dal, "setUnmarkedLost");
+		lostWrites.mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		lostWrites.mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		h.rec.stop(id);
+		expect(h.dal.get(id)?.endReason).toBe("stopped");
+		h.rec.retryPendingEnds();
+		const next = harness({}, h.dbs);
+		expect(next.body(id)).toEqual([
+			'[0.000, "m", "lasterm: 4 bytes not recorded (storage error)"]',
+		]);
+	});
+
+	it("writes a kept screen size at the next GC pass, so a restart keeps it", () => {
+		h.at(0);
+		const { id, requestId } = startManual(h);
+		answerAttach(h, requestId, { serialized: "S", cols: 100, rows: 30, cursorX: 0, cursorY: 0 });
+		vi.spyOn(h.dal, "writeBlock").mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		vi.spyOn(h.dal, "setSize").mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		h.rec.stop(id);
+		h.rec.retryPendingEnds();
+		const next = harness({}, h.dbs);
+		expect(JSON.parse(next.cast(id).split("\n")[0] as string).term).toMatchObject({
+			cols: 100,
+			rows: 30,
+		});
+	});
+
+	it("writes what a row lacks when the hub shuts down", () => {
+		const id = startAuto(h);
+		h.rec.onOutput(CHANNEL, enc("tail"));
+		vi.spyOn(h.dal, "writeBlock").mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		const lostWrites = vi.spyOn(h.dal, "setUnmarkedLost");
+		lostWrites.mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		lostWrites.mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		h.rec.stop(id);
+		h.rec.shutdown();
+		expect(h.dal.get(id)?.unmarkedLostBytes).toBe(4);
+	});
+
+	// The cached space follows what committed. Mutation caught: the row's bytes
+	// subtracted inside the transaction, before a COMMIT that fails.
+	it("keeps the space used right when a deletion's commit fails", async () => {
+		const a = startAuto(h, "A");
+		h.rec.onOutput("A", enc("x".repeat(1000)));
+		h.rec.stop(a);
+		const sum = () =>
+			(
+				h.dbs.spool.prepare("SELECT COALESCE(SUM(bytes), 0) AS s FROM recordings").get() as {
+					s: number;
+				}
+			).s;
+		expect(h.dal.usedBytes()).toBe(sum());
+		h.rec.delete(a);
+		const spool = h.dbs.spool;
+		vi.spyOn(spool, "transaction").mockImplementationOnce(((fn: (...args: unknown[]) => unknown) =>
+			(...args: unknown[]) => {
+				spool.exec("BEGIN");
+				try {
+					fn(...args);
+				} finally {
+					spool.exec("ROLLBACK");
+				}
+				throw sqliteFull(); // the COMMIT fails: nothing of the body stays
+			}) as never);
+		await h.gc.purgeRecordings([a]);
+		expect(h.dal.get(a)).toBeDefined();
+		expect(h.dal.usedBytes()).toBe(sum());
+		await h.gc.purgeRecordings([a]);
+		expect(h.dal.get(a)).toBeUndefined();
+		expect(h.dal.usedBytes()).toBe(0);
+	});
+
 	// ─── Hub start, list, deletion ──────────────────────────────────────────
 
 	// AC-INTERRUPTED. Mutations caught: left open; marker depending on a block write.
@@ -1098,10 +1199,10 @@ describe("SessionRecorder", () => {
 
 		// Mutation caught: an unbounded batch.
 		it.each([
-			[600, 100, (rows: number) => rows <= 256],
-			[20, 200 * 1024, (_rows: number, bytes: number) => bytes <= MiB],
-			[1, 3 * MiB, (rows: number) => rows === 1],
-		])("keeps each transaction bounded: %i blocks of %i bytes", async (count, size, ok) => {
+			[600, 100, (rows: number) => rows <= 256, 3],
+			[20, 200 * 1024, (_rows: number, bytes: number) => bytes <= MiB, 4],
+			[1, 3 * MiB, (rows: number) => rows === 1, 1],
+		])("keeps each transaction bounded: %i blocks of %i bytes", async (count, size, ok, calls) => {
 			const id = "01REC";
 			h.dal.open(
 				{
@@ -1128,6 +1229,7 @@ describe("SessionRecorder", () => {
 			h.dal.markDeleting(id);
 			const batches = vi.spyOn(h.dal, "deleteBatch");
 			await h.gc.purgeRecordings([id]);
+			expect(batches).toHaveBeenCalledTimes(calls);
 			for (const result of batches.mock.results) {
 				const r = result.value as { deleted: number; bytes: number };
 				expect(ok(r.deleted, r.bytes)).toBe(true);

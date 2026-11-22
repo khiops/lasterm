@@ -68,6 +68,21 @@ describe("RecordingsModal", () => {
 	});
 
 	// Mutation caught: Discard without a confirmation.
+	// AC-UI-SAVE / order. Mutation caught: Save… treating an open recording as ended.
+	it.each([
+		["an open recording as open", null, true],
+		["an ended one as ended", "2026-11-22T10:05:00.000Z", false],
+	])("saves %s, in the click itself", async (_label, endedAt, isOpen) => {
+		store.rows = [{ ...ROW, ended_at: endedAt }];
+		await nextTick();
+		const save = vi.spyOn(store, "save").mockResolvedValue();
+		buttonByText("Save…")?.click();
+		expect(save).toHaveBeenCalledWith(
+			{ id: ROW.id, title: "build", startedAt: "2026-11-22T10:00:00.000Z" },
+			isOpen,
+		);
+	});
+
 	it("discards only after asking", async () => {
 		const discard = vi.spyOn(store, "discard").mockResolvedValue(true);
 		buttonByText("Discard")?.click();

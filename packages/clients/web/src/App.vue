@@ -297,6 +297,7 @@
 					:active-tab-index="layout.activeTabIndex.value"
 					:get-tab-label="layout.getTabLabel"
 					:get-active-channel-id="layout.getActiveChannelId"
+					:get-tab-channel-ids="tabChannelIds"
 					:visible-tab-ids="tabsInView"
 					@select-tab="layout.setActiveTab"
 					@close-tab="onCloseTab"
@@ -602,6 +603,12 @@ const layout = useLayout();
 // The spawns the page before this one owed are kept for the panes that show
 // them; one whose id the saved layout no longer holds has none, and goes (#992).
 // A layout that could not be read says nothing of them: they stay.
+/** Every terminal a tab's panes show. */
+function tabChannelIds(tabId: string): string[] {
+	const root = layout.layouts.value[tabId];
+	return root === null || root === undefined ? [] : collectTerminalChannelIds(root);
+}
+
 if (layout.loadedSavedLayout) {
 	channelsStore.forgetPendingSpawnsNotIn(
 		new Set(

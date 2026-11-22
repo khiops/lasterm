@@ -297,7 +297,10 @@ export class RecordingsDAL {
 		recordingId: string,
 		limits: RecordingBatchLimits,
 	): { deleted: number; bytes: number; done: boolean } {
-		return this.db.transaction(() => {
+		// The cached total follows only what committed: a COMMIT that fails
+		// keeps the row, and its bytes stay counted.
+		let rowBytes = 0;
+		const result = this.db.transaction(() => {
 			const marked = this.statement(
 				"SELECT 1 AS one FROM recordings WHERE id = ? AND deleting = 1",
 			).get(recordingId);
@@ -329,11 +332,13 @@ export class RecordingsDAL {
 					| { bytes: number }
 					| undefined;
 				this.statement("DELETE FROM recordings WHERE id = ?").run(recordingId);
-				if (this.total !== null && gone !== undefined) this.total -= gone.bytes;
+				rowBytes = gone?.bytes ?? 0;
 				return { deleted, bytes, done: true };
 			}
 			return { deleted, bytes, done: false };
 		})();
+		if (this.total !== null) this.total -= rowBytes;
+		return result;
 	}
 
 	private statement(sql: string): Statement {

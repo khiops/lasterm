@@ -34,8 +34,11 @@ function validSize(cols: unknown, rows: unknown): boolean {
 class NotACast extends Error {}
 
 /**
- * Reads an asciicast v3 or v2 file chunk by chunk (#80), so a file of any
- * size the player accepts is never held as one string. Each event line is
+ * Reads an asciicast v3 or v2 file chunk by chunk (#80), so the file is never
+ * held as one string; each line is, so a line longer than a JavaScript string
+ * can hold cannot be read (the hub writes none: its lines are bounded far
+ * below that). A chunk is scanned once for line ends, and a line still open
+ * is joined only when it ends, so a long line costs its length. Each event line is
  * `[time, code, data]`, exactly three elements, `data` a string. v3 delays are
  * never negative; v2's absolute times become delays (a time below the
  * previous one is a delay of 0, and the next delay counts from it). Positions
@@ -46,7 +49,8 @@ class NotACast extends Error {}
  * built.
  */
 export class CastParser {
-	private rest = "";
+	/** The open line's pieces, joined once it ends. */
+	private rest: string[] = [];
 	private header: { version: 2 | 3; cols: number; rows: number; title: string | null } | null =
 		null;
 	private readonly events: CastEvent[] = [];
@@ -57,9 +61,13 @@ export class CastParser {
 	/** Feed the next chunk of text. */
 	push(chunk: string): void {
 		if (this.failed) return;
-		const text = this.rest + chunk;
+		if (!chunk.includes("\n")) {
+			this.rest.push(chunk);
+			return;
+		}
+		const text = this.rest.join("") + chunk;
 		const lines = text.split(/\r?\n/);
-		this.rest = lines.pop() ?? "";
+		this.rest = [lines.pop() ?? ""];
 		try {
 			for (const line of lines) this.line(line);
 		} catch (err) {
@@ -70,15 +78,16 @@ export class CastParser {
 
 	/** The cast, or why it cannot be read. */
 	finish(): ParsedCast | { error: string } {
-		if (!this.failed && this.rest !== "") {
+		const last = this.rest.join("");
+		if (!this.failed && last !== "") {
 			try {
-				this.line(this.rest);
+				this.line(last);
 			} catch (err) {
 				if (!(err instanceof NotACast)) throw err;
 				this.failed = true;
 			}
-			this.rest = "";
 		}
+		this.rest = [];
 		if (this.failed || this.header === null) return { error: NOT_A_CAST };
 		return {
 			cols: this.header.cols,
@@ -171,12 +180,20 @@ export function parseCast(text: string): ParsedCast | { error: string } {
 }
 
 /** Read a cast from chunks as they arrive: parts from the hub, or a file's stream. */
+/**
+ * Parse every chunk, or stop reading once `cancelled` says so (the player
+ * closed): leaving the loop ends the source, so no further part is fetched.
+ */
 export async function parseCastChunks(
 	chunks: AsyncIterable<string>,
-): Promise<ParsedCast | { error: string }> {
+	cancelled: () => boolean = () => false,
+): Promise<ParsedCast | { error: string } | null> {
 	const parser = new CastParser();
-	for await (const chunk of chunks) parser.push(chunk);
-	return parser.finish();
+	for await (const chunk of chunks) {
+		if (cancelled()) return null;
+		parser.push(chunk);
+	}
+	return cancelled() ? null : parser.finish();
 }
 
 /** A file's text, chunk by chunk, never whole. */

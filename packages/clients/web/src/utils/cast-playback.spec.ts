@@ -204,6 +204,24 @@ describe("CastPlayback", () => {
 		expect(last().text).toBe("ABC");
 	});
 
+	// Mutation caught: the next delay counted from the end of xterm's parse, so the
+	// parse time adds up event after event.
+	it("counts the time an event took to parse in the wait for the next", async () => {
+		const text = [
+			'{"version":3,"term":{"cols":80,"rows":24}}',
+			'[0, "o", "A"]',
+			'[1, "o", "B"]',
+		].join("\n");
+		const { playback, last } = player(text, false);
+		playback.play();
+		await vi.advanceTimersByTimeAsync(100);
+		last().flush(); // A took 100 ms to parse
+		await vi.advanceTimersByTimeAsync(910);
+		last().flush();
+		// 1.01 s from the start: B, due at 1 s, is out.
+		expect(last().text).toBe("AB");
+	});
+
 	// A wait asked while the seek runs would be left behind and play a later event early.
 	it("leaves no wait behind when Play is pressed during a seek", async () => {
 		const text = [

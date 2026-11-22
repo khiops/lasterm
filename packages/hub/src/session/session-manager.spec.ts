@@ -25,6 +25,7 @@ import type { AgentConnection } from "./agent-connection.js";
 import { connectOrLaunch as _connectOrLaunchForMock } from "./agent-launcher.js";
 import { AuthCancelledError } from "./auth-cancelled.js";
 import { resolveHostOs } from "./host-profile-menu.js";
+import { OutputChunker } from "./output-chunker.js";
 import {
 	clearContext,
 	openContext,
@@ -11364,13 +11365,18 @@ describe("SessionManager recordings (#80)", () => {
 			vi.spyOn(SpoolDAL.prototype, "readOutput"),
 			vi.spyOn(SpoolDAL.prototype, "getLatestSnapshot"),
 			vi.spyOn(SpoolDAL.prototype, "getNewestSnapshotRef"),
+			// Mutation caught: the chunker flushed before the start, as the final screen does.
+			vi.spyOn(OutputChunker.prototype, "flush"),
 		];
-		const started = sm.startRecording(channelId);
-		if (!started.ok) throw new Error(started.code);
-		await flushImmediate();
-		for (const read of reads) expect(read).not.toHaveBeenCalled();
-		expect(exportOf(sm, started.id)[1]).toBe('[0.000, "o", "<mock-snapshot>"]');
-		for (const read of reads) read.mockRestore();
+		try {
+			const started = sm.startRecording(channelId);
+			if (!started.ok) throw new Error(started.code);
+			await flushImmediate();
+			for (const read of reads) expect(read).not.toHaveBeenCalled();
+			expect(exportOf(sm, started.id)[1]).toBe('[0.000, "o", "<mock-snapshot>"]');
+		} finally {
+			for (const read of reads) read.mockRestore();
+		}
 	});
 
 	// AC-START-CORRELATED. Mutation caught: the first snapshot for the channel taken.
@@ -11682,6 +11688,43 @@ describe("SessionManager recordings (#80)", () => {
 				"lasterm: connection to the agent lost; output until it returns may be missing or late",
 			],
 			["o", "�"],
+		]);
+	});
+
+	// AC-LOST-CONNECTION-MARKER / replayed-output: the reconnection keeps the terminal and
+	// its recording. Mutation caught: a reconciliation ending a kept terminal's recording.
+	it("keeps one recording across a reconnection, the replayed output after the marker", async () => {
+		await hubWithToml("[terminal]\nrecord_terminals = true\n");
+		const channelId = await spawnLocal();
+		const first = sm.recordingIdOf(channelId);
+		const hostId = await sm.ensureLocalHost();
+		emitLocal({ type: "OUTPUT", channelId, data: new TextEncoder().encode("before") });
+		const agent = mockLocalAgents[0] as unknown as { simulateDisconnect: () => void };
+		agent.simulateDisconnect();
+		const lifecycle = (
+			sm as unknown as {
+				lifecycle: { reconcileChannelState: (h: string, s: unknown[], a: unknown) => void };
+			}
+		).lifecycle;
+		// The reconnection's list, before anything else runs: the agent still holds it.
+		lifecycle.reconcileChannelState(
+			hostId,
+			[{ type: "AGENT_CHANNEL_STATE", channelId, title: "", pid: 1, alive: true }],
+			mockLocalAgents[0],
+		);
+		emitLocal({ type: "OUTPUT", channelId, data: new TextEncoder().encode("replayed") });
+		expect(sm.recordingIdOf(channelId)).toBe(first);
+		expect(sm.recorder.list().recordings).toHaveLength(1);
+		const data = exportOf(sm, first ?? "")
+			.slice(1)
+			.map((l) => (JSON.parse(l) as [number, string, string]).slice(1));
+		expect(data).toEqual([
+			["o", "before"],
+			[
+				"m",
+				"lasterm: connection to the agent lost; output until it returns may be missing or late",
+			],
+			["o", "replayed"],
 		]);
 	});
 

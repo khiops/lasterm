@@ -84,6 +84,8 @@ interface EndedInMemory {
 	title: string;
 	endPersisted: boolean;
 	lost: number;
+	/** Whether the row holds `lost`; until then each GC pass writes it again. */
+	lostPersisted: boolean;
 	size: { cols: number; rows: number } | null;
 }
 
@@ -215,14 +217,8 @@ export class SessionRecorder {
 	/** Write the ends kept in memory after a failed UPDATE (every GC pass). */
 	retryPendingEnds(): void {
 		for (const [id, ended] of [...this.endedInMemory]) {
-			if (ended.endPersisted) continue;
-			try {
-				this.deps.dal.end(id, ended.reason, ended.endedAt, ended.title);
-				ended.endPersisted = true;
-				this.forgetIfSettled(id, ended);
-			} catch (err) {
-				this.logFailure("end", ended.channelId, err);
-			}
+			this.persistOwed(id, ended);
+			this.forgetIfSettled(id, ended);
 		}
 	}
 
@@ -455,6 +451,7 @@ export class SessionRecorder {
 	/** Hub shutdown: every open recording is written and ended `interrupted`. */
 	shutdown(): void {
 		for (const active of [...this.byChannel.values()]) this.finish(active, "interrupted");
+		this.retryPendingEnds();
 	}
 
 	private finish(
@@ -495,26 +492,16 @@ export class SessionRecorder {
 			endedAt,
 			reason,
 			title,
-			endPersisted: true,
+			endPersisted: false,
 			lost: active.lost,
+			lostPersisted: active.lost === 0,
 			size: active.sizePending ? { cols: active.cols, rows: active.rows } : null,
 		};
-		try {
-			this.deps.dal.end(active.id, reason, endedAt, title);
-		} catch (err) {
-			this.logFailure("end", active.channelId, err);
-			owed.endPersisted = false;
-		}
-		if (owed.size !== null) {
-			try {
-				this.deps.dal.setSize(active.id, owed.size.cols, owed.size.rows);
-				owed.size = null;
-			} catch (err) {
-				this.logFailure("size", active.channelId, err);
-			}
-		}
-		if (!owed.endPersisted || owed.lost > 0 || owed.size !== null)
-			this.endedInMemory.set(active.id, owed);
+		this.persistOwed(active.id, owed);
+		// Kept in memory while the row lacks any of it; each GC pass and the
+		// hub's shutdown write it again.
+		this.endedInMemory.set(active.id, owed);
+		this.forgetIfSettled(active.id, owed);
 		this.deps.broadcast({
 			type: "RECORDING_STATE",
 			channelId: active.channelId,
@@ -807,8 +794,36 @@ export class SessionRecorder {
 		return out;
 	}
 
+	/** Write what an ended recording's row still lacks: its end, lost count and size. */
+	private persistOwed(id: string, ended: EndedInMemory): void {
+		if (!ended.endPersisted) {
+			try {
+				this.deps.dal.end(id, ended.reason, ended.endedAt, ended.title);
+				ended.endPersisted = true;
+			} catch (err) {
+				this.logFailure("end", ended.channelId, err);
+			}
+		}
+		if (!ended.lostPersisted) {
+			try {
+				this.deps.dal.setUnmarkedLost(id, ended.lost);
+				ended.lostPersisted = true;
+			} catch (err) {
+				this.logFailure("lost-count", ended.channelId, err);
+			}
+		}
+		if (ended.size !== null) {
+			try {
+				this.deps.dal.setSize(id, ended.size.cols, ended.size.rows);
+				ended.size = null;
+			} catch (err) {
+				this.logFailure("size", ended.channelId, err);
+			}
+		}
+	}
+
 	private forgetIfSettled(id: string, ended: EndedInMemory): void {
-		if (ended.endPersisted && ended.lost === 0 && ended.size === null)
+		if (ended.endPersisted && ended.lostPersisted && ended.size === null)
 			this.endedInMemory.delete(id);
 	}
 

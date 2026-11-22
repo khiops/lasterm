@@ -239,6 +239,7 @@ export class CastPlayback {
 		const start = this.partial?.index === this.index ? this.partial.start : 0;
 		this.partial = null;
 		this.busy = true;
+		const began = this.now();
 		let done = false;
 		try {
 			done = await this.apply(event, gen, start, true);
@@ -247,8 +248,12 @@ export class CastPlayback {
 		}
 		if (gen !== this.generation || !done) return;
 		this.position += this.played(event);
-		this.offset = 0;
 		this.index++;
+		// The time xterm took to parse it is part of the wait for the next
+		// event, so parsing never adds to the recording's own delays.
+		const next = this.cast.events[this.index];
+		const spent = ((this.now() - began) / 1000) * this.speedValue;
+		this.offset = next === undefined ? 0 : Math.min(spent, this.played(next));
 		this.options.onTime?.(this.currentTime);
 		this.scheduleNext(gen);
 	}

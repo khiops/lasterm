@@ -2789,7 +2789,7 @@ export class SessionManager {
 			return { kind: "not_run" };
 		}
 		const remotePath = agent.remoteAgentPath;
-		if (remotePath === null || !agent.connected) return { kind: "not_run" };
+		if (remotePath === null) return { kind: "not_run" };
 		const closed = new Promise<{ readonly kind: "stopped" } | { readonly kind: "failed" }>(
 			(resolve) => {
 				onClose = () => {

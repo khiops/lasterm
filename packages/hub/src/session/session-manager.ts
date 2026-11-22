@@ -711,6 +711,15 @@ export class SessionManager {
 	}
 
 	/**
+	 * Whether a SPAWN or a restart is starting this terminal again: claimed
+	 * before its SPAWN goes and until the agent answers (#592). Its row stays
+	 * dead meanwhile, and no purge may delete it (#1118).
+	 */
+	isChannelStarting(channelId: string): boolean {
+		return this.ctx.startingChannels.has(channelId);
+	}
+
+	/**
 	 * Delete the output of channels just deleted from meta.db, in the spool
 	 * GC's bounded batches (#786). Resolves once it is gone; never rejects.
 	 */

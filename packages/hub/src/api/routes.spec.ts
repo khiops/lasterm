@@ -3113,6 +3113,34 @@ describe("a host's terminals across its sessions (#911)", () => {
 		expect(dal.getChannel(C2)?.status).toBe("live");
 	});
 
+	// Wrong implementation: either branch reads every channel and keeps the
+	// dead ones itself (41 rows read, not 1) (#1119).
+	it.each([
+		["with a host_id", true],
+		["without one", false],
+	])(
+		"DELETE /api/channels/dead %s reads only the dead terminals' rows (#1119)",
+		async (_, scoped) => {
+			const h = host("h");
+			session(S1, h, "active");
+			channel(C1, S1, "dead");
+			for (let n = 10; n < 50; n++) channel(`01K1119CHANNEL000000000L${n}`, S1, "live");
+			const all = vi.spyOn(Statement.prototype, "all");
+			try {
+				const res = await server.inject({
+					method: "DELETE",
+					url: "/api/channels/dead",
+					...(scoped && { payload: { host_id: h } }),
+				});
+				expect(res.json()).toEqual({ ok: true, purged: 1, purged_ids: [C1] });
+				const read = all.mock.results.reduce((sum, r) => sum + (r.value as unknown[]).length, 0);
+				expect(read).toBe(1);
+			} finally {
+				all.mockRestore();
+			}
+		},
+	);
+
 	// Mutations: either route left on one channel query per session (H2's count
 	// 22 higher); a channel statement prepared once and run per session (22
 	// higher); the sessions that hold a channel, then one query each (2 higher).

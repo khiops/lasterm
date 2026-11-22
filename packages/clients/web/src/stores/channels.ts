@@ -2112,10 +2112,11 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Bulk purge all dead channels for the active host.
 	 * Removes exactly the ids the hub says it purged: it picks the dead channels
 	 * when it handles the request, which can differ from this window's list by
-	 * then (#1108). Returns the number of channels purged.
+	 * then (#1108). Returns those ids: none when the hub refused or named none,
+	 * and a window closes only what they cover (#1117).
 	 */
-	async function purgeDeadChannels(): Promise<number> {
-		if (authStore.token === null || activeHostId.value === null) return 0;
+	async function purgeDeadChannels(): Promise<string[]> {
+		if (authStore.token === null || activeHostId.value === null) return [];
 		// The host is read before the request: the list in view may be another
 		// host's by the time the hub answers (#1104).
 		const hostId = activeHostId.value;
@@ -2127,13 +2128,13 @@ export const useChannelsStore = defineStore("channels", () => {
 			},
 			body: JSON.stringify({ host_id: hostId }),
 		});
-		if (!res.ok) return 0;
+		if (!res.ok) return [];
 		// The purge is done on the hub; an unreadable answer names nothing to remove here.
 		let ids: string[];
 		try {
 			ids = ((await res.json()) as { purged_ids?: string[] }).purged_ids ?? [];
 		} catch {
-			return 0;
+			return [];
 		}
 		const purged = new Set(ids);
 		deletedDuringFetch(purged);
@@ -2141,7 +2142,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		const nextMap = new Map(channelHostMap.value);
 		for (const id of purged) nextMap.delete(id);
 		channelHostMap.value = nextMap;
-		return purged.size;
+		return [...purged];
 	}
 
 	return {

@@ -1707,6 +1707,42 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		expect(h.remote.destroys).not.toContain(recorded);
 	});
 
+	// The list is the host's once Yes is stored: a terminal it leaves out ends its
+	// recording before the session's status write, which can throw (#80).
+	// Mutation caught: that recording ended only in the judgement after the
+	// write, so a failing write leaves it open.
+	it("ends the recording of a terminal its list leaves out, even when the session's status cannot be written", async () => {
+		const h = await leftOn();
+		expect(await keptAndConnected(h)).toBe(true);
+		const [gone] = terminalsOn(h, 1);
+		if (gone === undefined) throw new Error("no terminal");
+		h.sm.recorder.startAutomatic({
+			channelId: gone,
+			hostId: h.host.id,
+			hostLabel: "pi",
+			cols: 80,
+			rows: 24,
+		});
+		const id = h.sm.recordingIdOf(gone) ?? "";
+		h.sm.disconnectHost(h.host.id, { force: true });
+		await until("disconnected", () => agentOf(h) === undefined);
+		h.remote.held = [];
+		const write = h.ctx.metaDal.updateSessionStatus.bind(h.ctx.metaDal);
+		const failing = vi
+			.spyOn(h.ctx.metaDal, "updateSessionStatus")
+			.mockImplementation((sessionId, status) => {
+				if (status === "active") throw new Error("SQLITE_IOERR");
+				return write(sessionId, status);
+			});
+		try {
+			expect(await keptAndConnected(h)).toBe(false);
+		} finally {
+			failing.mockRestore();
+		}
+		expect(h.sm.recorder.listed(id)?.end_reason).toBe("gone");
+		expect(h.sm.recordingIdOf(gone)).toBeNull();
+	});
+
 	it.each([
 		["No", false],
 		["no answer", null],

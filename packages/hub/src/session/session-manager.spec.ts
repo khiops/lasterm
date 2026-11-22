@@ -12499,6 +12499,34 @@ describe("SessionManager recordings (#80)", () => {
 		]);
 	});
 
+	// AC-LOST-CONNECTION-MARKER through a close whose host read throws: the loss
+	// happened whatever meta.db says. Mutation caught: the close handler reading
+	// the host before it marks the loss, so a failing read loses the marker.
+	it("marks a lost agent connection even when its host cannot be read", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+		const read = vi.spyOn(MetaDAL.prototype, "getHost").mockImplementation(() => {
+			throw new Error("SQLITE_IOERR");
+		});
+		try {
+			expect(() => mockLocalAgents[0]?.simulateDisconnect()).toThrow("SQLITE_IOERR");
+		} finally {
+			read.mockRestore();
+		}
+		const lines = exportOf(sm, started.id)
+			.slice(1)
+			.map((l) => JSON.parse(l) as [number, string, string]);
+		expect(lines.map(([, c, d]) => [c, d])).toEqual([
+			["o", "<mock-snapshot>"],
+			[
+				"m",
+				"lasterm: connection to the agent lost; output until it returns may be missing or late",
+			],
+		]);
+	});
+
 	// AC-LOST-CONNECTION-MARKER / replayed-output: the reconnection keeps the terminal and
 	// its recording. Mutation caught: a reconciliation ending a kept terminal's recording.
 	it("keeps one recording across a reconnection, the replayed output after the marker", async () => {
@@ -12675,6 +12703,46 @@ describe("SessionManager recordings (#80)", () => {
 				withFailingStatus(() => lifecycle().retireChannel(channelId, sessionId));
 				expect(sm.recorder.listed(started.id)?.end_reason).toBe("gone");
 			});
+		});
+
+		// A list naming a terminal this hub does not track has it read in meta.db
+		// (its orphans), a read that can throw as well. Mutation caught: the
+		// recordings of the terminals the list leaves out ended after the orphans'
+		// read, so a failing one leaves them open.
+		it("gone at a reconciliation even when an unknown terminal's record cannot be read", async () => {
+			const channelId = await spawnLocal();
+			const started = sm.startRecording(channelId);
+			if (!started.ok) throw new Error(started.code);
+			const hostId = await sm.ensureLocalHost();
+			const lifecycle = (
+				sm as unknown as {
+					lifecycle: { reconcileChannelState: (h: string, s: unknown[], a: unknown) => void };
+				}
+			).lifecycle;
+			const read = vi.spyOn(MetaDAL.prototype, "getChannel").mockImplementation(() => {
+				throw new Error("SQLITE_IOERR");
+			});
+			try {
+				expect(() =>
+					lifecycle.reconcileChannelState(
+						hostId,
+						[
+							{
+								type: "AGENT_CHANNEL_STATE",
+								channelId: "01JUNKNOWNTERMINAL0000000",
+								title: "",
+								pid: 2,
+								alive: true,
+							},
+						],
+						mockLocalAgents[0],
+					),
+				).toThrow("SQLITE_IOERR");
+			} finally {
+				read.mockRestore();
+			}
+			expect(sm.recorder.listed(started.id)?.end_reason).toBe("gone");
+			expect(sm.recordingIdOf(channelId)).toBeNull();
 		});
 
 		it("killed when its host is deleted by force", async () => {

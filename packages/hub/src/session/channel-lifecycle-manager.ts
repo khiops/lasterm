@@ -1861,18 +1861,12 @@ export class ChannelLifecycleManager {
 		agent: AgentConnection,
 		askedAt?: number,
 	): ReadonlySet<string> {
+		// Every terminal judged gone below ends its recording first, before any
+		// meta.db access here can throw: the orphans' reads, and the status writes
+		// that would stop the loop (#80).
+		this.endRecordingsOfUnlisted(hostId, states, askedAt);
 		const destroyed = this.destroyOrphans(hostId, states, agent);
 		const reportedIds = new Set(states.filter((s) => s.alive).map((s) => s.channelId));
-
-		// Every terminal judged gone below ends its recording first, before any
-		// status write there can throw and stop the loop (#80).
-		if (this.ctx.sessions.has(hostId)) {
-			for (const [channelId, channelState] of this.ctx.channels) {
-				if (channelState.hostId !== hostId || reportedIds.has(channelId)) continue;
-				if (askedAt !== undefined && !this.answerStillApplies(channelId, askedAt)) continue;
-				this.ctx.recorder?.endChannel(channelId, "gone");
-			}
-		}
 
 		for (const [channelId, channelState] of this.ctx.channels) {
 			if (channelState.hostId !== hostId) continue;
@@ -1920,6 +1914,26 @@ export class ChannelLifecycleManager {
 			}
 		}
 		return destroyed;
+	}
+
+	/**
+	 * End the recordings of the terminals `reconcileChannelState` judges gone
+	 * from this list (#80): this host's, left out of it, and still spoken of by
+	 * it (`askedAt`), while the host has a session. Run before any meta.db
+	 * access that comes between the list and that judgement, which can throw.
+	 */
+	endRecordingsOfUnlisted(
+		hostId: string,
+		states: readonly AgentChannelStateMessage[],
+		askedAt?: number,
+	): void {
+		if (!this.ctx.sessions.has(hostId)) return;
+		const reportedIds = new Set(states.filter((s) => s.alive).map((s) => s.channelId));
+		for (const [channelId, channelState] of this.ctx.channels) {
+			if (channelState.hostId !== hostId || reportedIds.has(channelId)) continue;
+			if (askedAt !== undefined && !this.answerStillApplies(channelId, askedAt)) continue;
+			this.ctx.recorder?.endChannel(channelId, "gone");
+		}
 	}
 
 	/**

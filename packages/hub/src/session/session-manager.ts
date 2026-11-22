@@ -3891,6 +3891,9 @@ export class SessionManager {
 				);
 				yesStored = true;
 				daemonOnly.onHostStored?.();
+				// The list is the host's now: what it left out ends its recording
+				// before the status write below, which can throw (#80).
+				this.lifecycle.endRecordingsOfUnlisted(hostId, listed.states, listed.askedAt);
 				this.broadcaster.updateSessionStatus(hostId, session.id, "active");
 				this.ctx.commits.adoptAgent(fence, hostId, agent);
 				this.lifecycle.takeUpListed(hostId, agent, listed);

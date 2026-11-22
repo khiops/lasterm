@@ -484,7 +484,6 @@ export class AgentConnectionManager {
 			this.ctx.pastes?.agentGone(agent);
 			if (this.ctx.quitState === "QUITTING" && this.ctx.stoppingAgents.has(hostId)) return;
 			const session = this.ctx.sessions.get(hostId);
-			const host = this.ctx.metaDal.getHost(hostId);
 			// Fix C (invariant 10): identity-guard ALL side effects — not just agents.delete.
 			// A stale close from a REPLACED agent must not trigger disconnect/reconnect for
 			// the new agent's session.  Compute once, apply to every branch below.
@@ -495,7 +494,8 @@ export class AgentConnectionManager {
 
 			// Guard: stale close events from replaced agents produce no further side effects.
 			if (!isCurrentAgent) return;
-			// Output until a new connection may be missing or late (#80).
+			// Output until a new connection may be missing or late (#80). Marked
+			// before any meta.db access here, which can throw: the loss happened.
 			this.ctx.recorder?.onAgentLost(hostId);
 
 			if (!session) return;
@@ -508,6 +508,7 @@ export class AgentConnectionManager {
 				return;
 			}
 
+			const host = this.ctx.metaDal.getHost(hostId);
 			if (host?.type === "ssh") {
 				this.broadcaster.updateSessionStatus(hostId, session.id, "disconnected");
 				if (!this.ctx.stoppingAgents.has(hostId)) {

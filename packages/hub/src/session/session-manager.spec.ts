@@ -11055,10 +11055,15 @@ describe("SessionManager — an answer about a terminal started again since (#59
 		await flushImmediate();
 		// The mock daemon is not an SshAgent, so Disconnect counts its terminals as ending: forced.
 		expect(sm.disconnectHost(hostId, { force: true })).toMatchObject({ kind: "disconnected" });
-		const lines = sm.recorder.exportPart(started.id)?.body.split("\n") ?? [];
-		expect(lines).toContain(
-			'[0.000, "m", "lasterm: connection to the agent lost; output until it returns may be missing or late"]',
-		);
+		// The events after the header, without their delays: this hub runs on the real clock.
+		const events = (sm.recorder.exportPart(started.id)?.body.split("\n") ?? [])
+			.slice(1)
+			.filter(Boolean)
+			.map((l) => (JSON.parse(l) as [number, string, string]).slice(1));
+		expect(events).toContainEqual([
+			"m",
+			"lasterm: connection to the agent lost; output until it returns may be missing or late",
+		]);
 	});
 
 	it("an attach's answer read after the terminal was brought back does not end it", async () => {

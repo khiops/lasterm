@@ -643,7 +643,16 @@ export class SessionRecorder {
 				this.capping = false;
 			}
 		}
-		if (this.usedBytes() < this.deps.capBytes) return;
+		// A total that cannot be read stops nothing: the next block reads it
+		// again. Only a start is refused on it.
+		let used: number;
+		try {
+			used = this.deps.dal.usedBytes();
+		} catch (err) {
+			this.logFailure("used-bytes", active.channelId, err);
+			return;
+		}
+		if (used < this.deps.capBytes) return;
 		this.capping = true;
 		try {
 			for (const other of [...this.byChannel.values()]) {

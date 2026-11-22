@@ -178,10 +178,16 @@ describe("recording routes", () => {
 		const open = vi.spyOn(RecordingsDAL.prototype, "open").mockImplementationOnce(() => {
 			throw Object.assign(new Error("full"), { code: "SQLITE_FULL" });
 		});
-		const res = await server.inject({ method: "POST", url: `/api/channels/${CHANNEL}/recording` });
-		expect(res.statusCode).toBe(500);
-		expect(res.json().error.code).toBe("RECORDING_STORAGE_ERROR");
-		open.mockRestore();
+		try {
+			const res = await server.inject({
+				method: "POST",
+				url: `/api/channels/${CHANNEL}/recording`,
+			});
+			expect(res.statusCode).toBe(500);
+			expect(res.json().error.code).toBe("RECORDING_STORAGE_ERROR");
+		} finally {
+			open.mockRestore();
+		}
 	});
 
 	describe("a recording", () => {

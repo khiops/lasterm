@@ -987,6 +987,8 @@ export class ChannelLifecycleManager {
 		const channelIdChanged = channelId !== previousChannelId;
 
 		if (channelIdChanged) {
+			// Ended as a restart before the retire would end it as gone (#80).
+			this.ctx.recorder?.endChannel(previousChannelId, "restarted");
 			this.retireChannel(previousChannelId, sessionEntry.id);
 			for (const clientId of clients) {
 				const client = this.ctx.clients.get(clientId);

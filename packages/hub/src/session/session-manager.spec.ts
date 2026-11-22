@@ -11035,6 +11035,32 @@ describe("SessionManager — an answer about a terminal started again since (#59
 		expect(daemon.sent("ATTACH")).toEqual([]);
 	});
 
+	// AC-LOST-CONNECTION-MARKER (#80): Disconnect lets go of the connection before its
+	// close, which then comes as a stale one. Mutation caught: the marker only on a close.
+	it("marks a recording's lost connection when its host is disconnected", async () => {
+		const [channelId] = ids(1) as [string];
+		const hostId = seedHost([{ id: channelId }]);
+		sm = new SessionManager(dbManager);
+		await sm.startup();
+		sm.addClient(makeClient("c-rec", []));
+		const daemon = nextDaemon([channelId]);
+		const attach = sm.handleAttach("c-rec", channelId);
+		daemon.deliver();
+		await attach;
+		await flushImmediate();
+		daemon.deliver();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		daemon.deliver();
+		await flushImmediate();
+		// The mock daemon is not an SshAgent, so Disconnect counts its terminals as ending: forced.
+		expect(sm.disconnectHost(hostId, { force: true })).toMatchObject({ kind: "disconnected" });
+		const lines = sm.recorder.exportPart(started.id)?.body.split("\n") ?? [];
+		expect(lines).toContain(
+			'[0.000, "m", "lasterm: connection to the agent lost; output until it returns may be missing or late"]',
+		);
+	});
+
 	it("an attach's answer read after the terminal was brought back does not end it", async () => {
 		const [reaching, asked] = ids(2) as [string, string];
 		const hostId = seedHost([{ id: reaching }, { id: asked }]);
@@ -11499,6 +11525,37 @@ describe("SessionManager recordings (#80)", () => {
 		});
 	});
 
+	// AC-REC-AUTO-RESTART / restart: a restart the agent answers under an id of its own
+	// still ends the previous run's recording `restarted`, the case where no DESTROY
+	// ended it first (its agent was out of reach at the click). Mutation caught: the
+	// retire of the old id ending it `gone`.
+	it("ends the previous run's recording restarted when the restart comes back under a new id", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		const lifecycle = (
+			sm as unknown as { lifecycle: { applyRestartState: (...args: unknown[]) => void } }
+		).lifecycle;
+		const ch = (
+			sm as unknown as { ctx: { channels: Map<string, { hostId: string; sessionId: string }> } }
+		).ctx.channels.get(channelId);
+		const session = dal.listSessions().find((s) => s.id === ch?.sessionId);
+		lifecycle.applyRestartState(
+			"local-ch-new",
+			channelId,
+			dal.getChannel(channelId),
+			ch?.hostId,
+			{ id: session?.id, status: "active" },
+			ch,
+			undefined,
+			[],
+			undefined,
+			80,
+			24,
+		);
+		expect(sm.recorder.listed(started.id)?.end_reason).toBe("restarted");
+	});
+
 	// AC-REC-AUTO-RESTART / respawn and respawn-fails.
 	it("ends a recording when a reconnection spawns its terminal again, whatever the answer", async () => {
 		await hubWithToml("[terminal]\nrecord_terminals = true\n");
@@ -11627,21 +11684,24 @@ describe("SessionManager recordings (#80)", () => {
 		const open = vi.spyOn(RecordingsDAL.prototype, "open").mockImplementationOnce(() => {
 			throw Object.assign(new Error("full"), { code: "SQLITE_FULL" });
 		});
-		const received: ProtocolMessage[] = [];
-		sm.addClient(makeClient("c-open", received));
-		const channelId = await sm.handleSpawn("c-open", { type: "SPAWN", hostId: "local" });
-		expect(channelId).not.toBeNull();
-		expect(received).toContainEqual(expect.objectContaining({ type: "CHANNEL_CREATED" }));
-		expect(received).toContainEqual(
-			expect.objectContaining({
-				type: "RECORDING_STATE",
-				channelId,
-				recordingId: null,
-				refused: "storage",
-			}),
-		);
-		expect(dal.getChannel(channelId ?? "")?.status).toBe("live");
-		open.mockRestore();
+		try {
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c-open", received));
+			const channelId = await sm.handleSpawn("c-open", { type: "SPAWN", hostId: "local" });
+			expect(channelId).not.toBeNull();
+			expect(received).toContainEqual(expect.objectContaining({ type: "CHANNEL_CREATED" }));
+			expect(received).toContainEqual(
+				expect.objectContaining({
+					type: "RECORDING_STATE",
+					channelId,
+					recordingId: null,
+					refused: "storage",
+				}),
+			);
+			expect(dal.getChannel(channelId ?? "")?.status).toBe("live");
+		} finally {
+			open.mockRestore();
+		}
 	});
 
 	// AC-NO-AUTO-ADOPT. Mutation caught: automatic start on every trackChannel.

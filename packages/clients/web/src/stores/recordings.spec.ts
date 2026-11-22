@@ -184,12 +184,9 @@ describe("recordings store", () => {
 			expect(useToastStore().messages.at(-1)?.text).toBe(
 				"The recording could not be saved. It is still in Recordings.",
 			);
-			if (pickOpts !== undefined && "closeFails" in pickOpts)
-				expect(state.writable?.aborted).toBe(true);
-			if ("stop" in hubOpts) {
-				expect(requests.some((r) => r.includes("/cast"))).toBe(false);
-				expect(state.writable?.aborted).toBe(true);
-			}
+			// Every failure after the dialog aborts the file it opened.
+			expect(state.writable?.aborted).toBe(true);
+			if ("stop" in hubOpts) expect(requests.some((r) => r.includes("/cast"))).toBe(false);
 		});
 
 		// Mutation caught: the export's first part taken as the whole when its cursor is missing.
@@ -334,10 +331,12 @@ describe("recordings store", () => {
 
 		// K1/CONC2: an older list answer arriving last changes nothing.
 		// Mutation caught: one list fetch per state, a reconnection's burst of them included.
-		it("reads the list once for the states heard in one turn", async () => {
+		it("reads the list once for a burst of states, each in its own message", async () => {
+			vi.useFakeTimers();
 			const requests = hub();
 			const store = useRecordingsStore();
 			for (const channelId of ["ch-1", "ch-2", "ch-3"]) {
+				await vi.advanceTimersByTimeAsync(20); // each message is its own task
 				store.onState({
 					type: "RECORDING_STATE",
 					channelId,
@@ -347,7 +346,8 @@ describe("recordings store", () => {
 					startedAt: "2026-11-22T10:00:00.000Z",
 				});
 			}
-			await settle();
+			await vi.advanceTimersByTimeAsync(150);
+			vi.useRealTimers();
 			expect(requests.filter((r) => r === "GET /api/recordings")).toHaveLength(1);
 		});
 

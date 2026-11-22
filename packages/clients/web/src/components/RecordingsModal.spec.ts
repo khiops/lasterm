@@ -122,11 +122,14 @@ describe("RecordingsModal", () => {
 		const input = document.querySelector<HTMLInputElement>(".rec-file");
 		const file = new File(["x"], "big.cast");
 		Object.defineProperty(file, "size", { value: 1024 * 1024 * 1024 + 1 });
-		const read = vi.spyOn(file, "text");
+		// The player reads a file through its stream: the size is checked before any read.
+		const read = vi.spyOn(file, "stream");
 		Object.defineProperty(input, "files", { value: [file], configurable: true });
 		input?.dispatchEvent(new Event("change"));
 		await nextTick();
+		await nextTick();
 		expect(read).not.toHaveBeenCalled();
+		expect(document.querySelector(".player")).toBeNull();
 		expect(document.body.textContent).toContain("This file is larger than 1 GiB");
 	});
 

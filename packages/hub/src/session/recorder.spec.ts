@@ -282,7 +282,12 @@ describe("SessionRecorder", () => {
 			h.at(10);
 			h.rec.onOutput(CHANNEL, enc("held"));
 			const late = h.pending.get(requestId);
-			vi.advanceTimersByTime(5000);
+			// Mutation caught: a shorter wait. Still waiting 1 ms before 5 s.
+			vi.advanceTimersByTime(4999);
+			expect(h.pending.has(requestId)).toBe(true);
+			expect(h.dal.lastSeq(id)).toBe(0);
+			vi.advanceTimersByTime(1);
+			expect(h.pending.has(requestId)).toBe(false);
 			late?.({
 				type: "ATTACH_OK",
 				channelId: CHANNEL,
@@ -640,7 +645,8 @@ describe("SessionRecorder", () => {
 			h.rec.exportPart(id);
 			expect(h.dal.get(id)?.endReason).toBe("cap");
 			const lines = h.body(id);
-			expect(lines.at(-2)).toContain("bbbb");
+			// Whole: the cap never cuts the block that crosses it.
+			expect(lines.at(-2)).toBe(`[0.000, "o", "${"b".repeat(200_000)}"]`);
 			expect(lines.at(-1)).toBe('[0.000, "m", "lasterm: recording stopped, storage cap reached"]');
 			expect(h.rec.list().used_bytes).toBeGreaterThanOrEqual(h.rec.list().cap_bytes);
 		});
@@ -1065,6 +1071,18 @@ describe("SessionRecorder", () => {
 		h.rec.stop(id);
 		h.rec.shutdown();
 		expect(h.dal.get(id)?.unmarkedLostBytes).toBe(4);
+	});
+
+	// Mutation caught: an unreadable total taken as the cap, ending the open recordings.
+	it("ends no recording when the space used cannot be read after a block", () => {
+		const id = startAuto(h);
+		vi.spyOn(h.dal, "usedBytes").mockImplementation(() => {
+			throw sqliteFull();
+		});
+		h.rec.onOutput(CHANNEL, enc("x"));
+		h.rec.exportPart(id); // writes the block, then checks the cap
+		expect(h.rec.recordingIdOf(CHANNEL)).toBe(id);
+		expect(h.dal.get(id)?.endReason).toBeNull();
 	});
 
 	// The cached space follows what committed. Mutation caught: the row's bytes

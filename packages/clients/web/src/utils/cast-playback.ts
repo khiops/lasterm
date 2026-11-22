@@ -9,6 +9,8 @@ export interface PlaybackTerminal {
 
 /** A delay over this many seconds plays as this many with Skip idle on. */
 export const IDLE_CAP_S = 2;
+/** The longest single timer: a longer wait is taken in steps (timers count in 32 bits). */
+export const MAX_TIMER_MS = 24 * 60 * 60 * 1000;
 /**
  * The most UTF-16 units written to xterm at once: at most 3 UTF-8 bytes each,
  * so a piece is at most 1 MiB once encoded. The next waits for its callback.
@@ -61,6 +63,9 @@ export class CastPlayback {
 	/** A seek or a step is writing: no second consumer may start. */
 	private busy = false;
 	private timer: unknown = null;
+	/** Played seconds counted while playing only, at the speed of each moment. */
+	private clockBase = 0;
+	private clockAt = 0;
 	private waitStartedAt = 0;
 	private speedValue = 1;
 	private skipIdleValue = true;
@@ -114,6 +119,7 @@ export class CastPlayback {
 
 	play(): void {
 		if (this.playing) return;
+		this.rebaseClock();
 		this.playing = true;
 		// At the end, it starts over: the seek schedules what follows.
 		if (this.index >= this.cast.events.length && this.partial === null) {
@@ -126,12 +132,14 @@ export class CastPlayback {
 	pause(): void {
 		if (!this.playing) return;
 		this.offset = this.waited();
+		this.rebaseClock();
 		this.playing = false;
 		this.cancelTimer();
 	}
 
 	setSpeed(speed: number): void {
 		this.offset = this.waited();
+		this.rebaseClock();
 		this.speedValue = speed;
 		if (this.playing) this.reschedule();
 	}
@@ -226,11 +234,29 @@ export class CastPlayback {
 			return;
 		}
 		const wait = (Math.max(0, this.played(event) - this.offset) / this.speedValue) * 1000;
+		const step = Math.min(wait, MAX_TIMER_MS);
 		this.waitStartedAt = this.now();
 		this.timer = this.setTimer(() => {
 			this.timer = null;
+			if (step < wait) {
+				// Part of a long wait: count it, and wait for the rest.
+				this.offset += (step / 1000) * this.speedValue;
+				this.scheduleNext(gen);
+				return;
+			}
 			void this.step(gen);
-		}, wait);
+		}, step);
+	}
+
+	/** The played clock: it stands still while paused, and follows each speed change. */
+	private playedClock(): number {
+		if (!this.playing) return this.clockBase;
+		return this.clockBase + ((this.now() - this.clockAt) / 1000) * this.speedValue;
+	}
+
+	private rebaseClock(): void {
+		this.clockBase = this.playedClock();
+		this.clockAt = this.now();
 	}
 
 	private async step(gen: number): Promise<void> {
@@ -239,7 +265,7 @@ export class CastPlayback {
 		const start = this.partial?.index === this.index ? this.partial.start : 0;
 		this.partial = null;
 		this.busy = true;
-		const began = this.now();
+		const began = this.playedClock();
 		let done = false;
 		try {
 			done = await this.apply(event, gen, start, true);
@@ -252,7 +278,7 @@ export class CastPlayback {
 		// The time xterm took to parse it is part of the wait for the next
 		// event, so parsing never adds to the recording's own delays.
 		const next = this.cast.events[this.index];
-		const spent = ((this.now() - began) / 1000) * this.speedValue;
+		const spent = this.playedClock() - began;
 		this.offset = next === undefined ? 0 : Math.min(spent, this.played(next));
 		this.options.onTime?.(this.currentTime);
 		this.scheduleNext(gen);

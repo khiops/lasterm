@@ -10,6 +10,7 @@ import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { DatabaseManager } from "./db.js";
 import { openDatabases, openTestDatabases, restrictDatabaseFiles } from "./db.js";
 import { MetaDAL } from "./meta.js";
+import { readMigrationFiles } from "./migration-files.js";
 import { describeOpenDatabases } from "./open-databases.fixture.js";
 import { Database } from "./sqlite.js";
 import { TransfersDAL } from "./transfers-dal.js";
@@ -281,6 +282,29 @@ describe("meta.db and its baseline", () => {
 		(db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(
 			(column) => column.name,
 		);
+
+	// AC-MIG / v2: a spool.db every user already has, at version 1, gains the
+	// recordings tables. Mutation caught: the tables in 001 and 002 left empty.
+	it("upgrades a spool.db at version 1 to version 2, with the recordings tables", () => {
+		const before = new Database(join(dir, "spool.db"));
+		before.exec((readMigrationFiles("spool")[0] as { sql: string }).sql);
+		expect(tables(before).filter((name) => name.startsWith("recording"))).toEqual([]);
+		before.close();
+
+		dbs = openDatabases(dir);
+
+		expect(versions(dbs.spool)).toEqual([{ version: 1 }, { version: 2 }]);
+		expect(tables(dbs.spool).filter((name) => name.startsWith("recording"))).toEqual([
+			"recording_blocks",
+			"recordings",
+		]);
+		const insert = (id: string, channel: string) =>
+			dbs?.spool.exec(
+				`INSERT INTO recordings (id, channel_id, host_label, title, started_at, cols, rows) VALUES ('${id}', '${channel}', 'h', 't', 'now', 80, 24)`,
+			);
+		insert("r1", "c1");
+		expect(() => insert("r2", "c1")).toThrow(); // one open recording per terminal
+	});
 
 	it("comes out new at version 26, with the final schema", () => {
 		dbs = openDatabases(dir);

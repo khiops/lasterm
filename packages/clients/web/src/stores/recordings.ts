@@ -55,6 +55,9 @@ function authHeaders(): Record<string, string> {
  * or discarded: this store knows which terminals record (for their REC mark),
  * lists the recordings waiting, starts one, saves one and discards one.
  */
+/** How long states are gathered before the list is read again. */
+const REFRESH_BURST_MS = 100;
+
 export const useRecordingsStore = defineStore("recordings", () => {
 	/** channelId → its open recording. Keyed by channel, whether or not its row is known yet. */
 	const open = ref(new Map<string, OpenRecording>());
@@ -66,16 +69,16 @@ export const useRecordingsStore = defineStore("recordings", () => {
 	/** Each list fetch's turn: an answer older than one already applied is dropped. */
 	let fetches = 0;
 	let applied = 0;
-	/** One list fetch for the states heard in the same turn (a reconnection's burst of them). */
+	/** One list fetch for a burst of states (a reconnection ends and starts every recording). */
 	let refreshQueued = false;
 
 	function refreshSoon(): void {
 		if (refreshQueued) return;
 		refreshQueued = true;
-		queueMicrotask(() => {
+		setTimeout(() => {
 			refreshQueued = false;
 			void refresh();
-		});
+		}, REFRESH_BURST_MS);
 	}
 
 	function onState(msg: RecordingStateMessage): void {

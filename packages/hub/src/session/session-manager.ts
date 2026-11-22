@@ -3166,6 +3166,8 @@ export class SessionManager {
 	private releaseAgent(hostId: string, agent: AgentConnection): void {
 		if (this.ctx.agents.get(hostId) === agent) {
 			this.ctx.agents.delete(hostId);
+			// Its close comes after, as a stale one: the recordings learn of the loss here (#80).
+			this.ctx.recorder?.onAgentLost(hostId);
 			if (!this.isQuitting()) this.broadcaster.announceSessionState(hostId);
 		}
 	}

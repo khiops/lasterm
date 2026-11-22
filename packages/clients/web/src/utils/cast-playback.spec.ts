@@ -222,6 +222,74 @@ describe("CastPlayback", () => {
 		expect(last().text).toBe("AB");
 	});
 
+	const TWO = ['{"version":3,"term":{"cols":80,"rows":24}}', '[0, "o", "A"]', '[2, "o", "B"]'].join(
+		"\n",
+	);
+
+	// Mutation caught: the parse time counted from the clock, a pause during it included.
+	it("counts no paused time in the wait after a write", async () => {
+		const { playback, last } = player(TWO, false);
+		playback.play();
+		await vi.advanceTimersByTimeAsync(500);
+		playback.pause();
+		await vi.advanceTimersByTimeAsync(500);
+		last().flush(); // A parsed while paused: 0.5 s of it played
+		playback.play();
+		await vi.advanceTimersByTimeAsync(1400);
+		last().flush();
+		expect(last().text).toBe("A"); // B is due 1.5 s after the play
+		await vi.advanceTimersByTimeAsync(110);
+		last().flush();
+		expect(last().text).toBe("AB");
+	});
+
+	// Mutation caught: the whole parse time counted at the speed set during it.
+	it("counts a speed change during a write at each speed", async () => {
+		const { playback, last } = player(TWO, false);
+		playback.play();
+		await vi.advanceTimersByTimeAsync(500);
+		playback.setSpeed(2);
+		await vi.advanceTimersByTimeAsync(500);
+		last().flush(); // 0.5 s at 1x and 1 s at 2x: 1.5 s played
+		await vi.advanceTimersByTimeAsync(200);
+		last().flush();
+		expect(last().text).toBe("A"); // the last 0.5 s takes 250 ms at 2x
+		await vi.advanceTimersByTimeAsync(60);
+		last().flush();
+		expect(last().text).toBe("AB");
+	});
+
+	// Mutation caught: a wait past a timer's 32 bits asked at once (it fires at once).
+	it("takes a wait of 30 days in steps a timer can hold", async () => {
+		const asked: number[] = [];
+		let term: FakeTerminal | null = null;
+		const playback = new CastPlayback(
+			cast(
+				['{"version":3,"term":{"cols":80,"rows":24}}', '[0, "o", "A"]', '[2592000, "o", "B"]'].join(
+					"\n",
+				),
+			),
+			{
+				now: () => Date.now(),
+				createTerminal: (cols, rows) => {
+					term = new FakeTerminal(cols, rows, true);
+					return term;
+				},
+				setTimer: (fn, ms) => {
+					asked.push(ms);
+					return setTimeout(fn, ms);
+				},
+			},
+		);
+		playback.setSkipIdle(false);
+		playback.play();
+		await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+		expect((term as FakeTerminal | null)?.text).toBe("A");
+		expect(Math.max(...asked)).toBeLessThanOrEqual(2 ** 31 - 1);
+		await vi.advanceTimersByTimeAsync(30 * 24 * 60 * 60 * 1000);
+		expect((term as FakeTerminal | null)?.text).toBe("AB");
+	});
+
 	// A wait asked while the seek runs would be left behind and play a later event early.
 	it("leaves no wait behind when Play is pressed during a seek", async () => {
 		const text = [

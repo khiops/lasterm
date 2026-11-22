@@ -424,6 +424,10 @@ fn details_match(record: &IdentityRecord, live: &ProcessDetails) -> bool {
 fn paths_match(left: &Path, right: &Path) -> bool {
     let left = fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
     let right = fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    paths_equal(&left, &right) || deploy_renamed_path_matches(&left, &right)
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
     #[cfg(windows)]
     {
         left.to_string_lossy()
@@ -433,6 +437,27 @@ fn paths_match(left: &Path, right: &Path) -> bool {
     {
         left == right
     }
+}
+
+fn deploy_renamed_path_matches(live: &Path, recorded: &Path) -> bool {
+    let (Some(live_parent), Some(recorded_parent)) = (live.parent(), recorded.parent()) else {
+        return false;
+    };
+    if !paths_equal(live_parent, recorded_parent) {
+        return false;
+    }
+    let (Some(live_stem), Some(recorded_name)) = (live.file_stem(), recorded.file_name()) else {
+        return false;
+    };
+    if !paths_equal(Path::new(live_stem), Path::new(recorded_name)) {
+        return false;
+    }
+    live.extension()
+        .and_then(|extension| extension.to_str())
+        .and_then(|extension| extension.strip_prefix("old-"))
+        .is_some_and(|suffix| {
+            suffix.len() == 16 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 enum Validation {
@@ -1400,6 +1425,67 @@ mod tests {
         fs::remove_dir_all(state_dir).unwrap();
         // Mutation caught: omitting executable validation accepts another
         // executable with the same pid and creation fingerprint record.
+    }
+
+    #[test]
+    fn validation_accepts_the_deployers_renamed_executable() {
+        let record = IdentityRecord {
+            format_version: FORMAT_VERSION,
+            pid: 42,
+            creation_time: "100".to_owned(),
+            executable: PathBuf::from("agents/lasterm-agent.exe"),
+            executable_file_identity: None,
+            socket: test_socket("deploy-rename"),
+        };
+        let mut live = ProcessDetails {
+            creation_time: "100".to_owned(),
+            executable: PathBuf::from("agents/lasterm-agent.exe.old-8da124a46e8d21f5"),
+            executable_file_identity: None,
+        };
+
+        assert!(details_match(&record, &live));
+
+        live.creation_time = "101".to_owned();
+        assert!(
+            !details_match(&record, &live),
+            "a renamed path must not authenticate a process with another creation time"
+        );
+        // Mutation caught: accepting only the original pathname refuses a live
+        // Windows daemon after the deployer renames its image aside (#1144);
+        // dropping the creation-time check admits a reused pid instead.
+    }
+
+    #[test]
+    fn validation_refuses_lookalike_renamed_executable_paths() {
+        let record = IdentityRecord {
+            format_version: FORMAT_VERSION,
+            pid: 42,
+            creation_time: "100".to_owned(),
+            executable: PathBuf::from("agents/lasterm-agent.exe"),
+            executable_file_identity: None,
+            socket: test_socket("deploy-rename-lookalikes"),
+        };
+        for executable in [
+            "agents/other-agent.exe.old-8da124a46e8d21f5",
+            "other/lasterm-agent.exe.old-8da124a46e8d21f5",
+            "agents/lasterm-agent.exe.old-8da124a46e8d21f50",
+            "agents/lasterm-agent.exe.old-8da124a46e8d21f",
+            "agents/lasterm-agent.exe.old-8da124a46e8d21g",
+            "agents/lasterm-agent.exe.old-zzzzzzzzzzzzzzzz",
+            "agents/lasterm-agent.exe.old-8da124a46e8d21f5.extra",
+        ] {
+            let live = ProcessDetails {
+                creation_time: "100".to_owned(),
+                executable: PathBuf::from(executable),
+                executable_file_identity: None,
+            };
+            assert!(
+                !details_match(&record, &live),
+                "unexpected executable match for {executable}"
+            );
+        }
+        // Mutation caught: a loose `.old-` prefix, another directory, or an
+        // arbitrary suffix must not widen the process identity check.
     }
 
     #[test]

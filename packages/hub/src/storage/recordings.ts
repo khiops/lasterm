@@ -102,6 +102,12 @@ function toRow(raw: RawRow): RecordingRow {
  */
 export class RecordingsDAL {
 	private readonly statements = new Map<string, Statement>();
+	/**
+	 * Sum of `bytes` over every row, read once and then kept by this DAL's own
+	 * writes: the hub is spool.db's only writer, and a SUM per block would cost
+	 * more with every recording kept.
+	 */
+	private total: number | null = null;
 
 	constructor(private readonly db: Database) {}
 
@@ -110,8 +116,23 @@ export class RecordingsDAL {
 	 * could not be written — is ended first, in the same transaction, so the
 	 * one-open-per-terminal index never refuses the new one.
 	 */
-	open(input: OpenRecordingInput, leftOpen: { reason: RecordingEndReason; endedAt: string }): void {
+	open(
+		input: OpenRecordingInput,
+		repairs: ReadonlyArray<{
+			id: string;
+			reason: RecordingEndReason;
+			endedAt: string;
+			title: string;
+		}>,
+		leftOpen: { reason: RecordingEndReason; endedAt: string },
+	): void {
 		this.db.transaction(() => {
+			// Ends held in memory after a failed UPDATE, each with its own time and title.
+			for (const end of repairs) {
+				this.statement(
+					"UPDATE recordings SET ended_at = ?, end_reason = ?, title = ? WHERE id = ? AND ended_at IS NULL",
+				).run(end.endedAt, end.reason, end.title, end.id);
+			}
 			this.statement(
 				`UPDATE recordings SET ended_at = ?, end_reason = ? WHERE channel_id = ? AND ended_at IS NULL`,
 			).run(leftOpen.endedAt, leftOpen.reason, input.channelId);
@@ -150,6 +171,16 @@ export class RecordingsDAL {
 				input.recordingId,
 			);
 		})();
+		if (this.total !== null) this.total += input.lines.byteLength;
+	}
+
+	/** Write a size learnt from a screen that no block carried. */
+	setSize(recordingId: string, cols: number, rows: number): void {
+		this.statement("UPDATE recordings SET cols = ?, rows = ? WHERE id = ?").run(
+			cols,
+			rows,
+			recordingId,
+		);
 	}
 
 	/** Persist a lost-bytes count kept in memory. */
@@ -190,10 +221,15 @@ export class RecordingsDAL {
 
 	/** Sum of `bytes` over every row, those being deleted included. */
 	usedBytes(): number {
-		const row = this.statement("SELECT COALESCE(SUM(bytes), 0) AS total FROM recordings").get() as {
-			total: number;
-		};
-		return row.total;
+		if (this.total === null) {
+			const row = this.statement(
+				"SELECT COALESCE(SUM(bytes), 0) AS total FROM recordings",
+			).get() as {
+				total: number;
+			};
+			this.total = row.total;
+		}
+		return this.total;
 	}
 
 	/** The highest block seq of a recording, 0 when it has none. */
@@ -220,15 +256,20 @@ export class RecordingsDAL {
 		const select = this.statement(
 			"SELECT seq, data_blob FROM recording_blocks WHERE recording_id = ? AND seq = ?",
 		);
+		const size = this.statement(
+			"SELECT LENGTH(data_blob) AS bytes FROM recording_blocks WHERE recording_id = ? AND seq = ?",
+		);
 		let bytes = 0;
 		let seq = fromSeq;
 		while (seq <= lastSeq) {
+			const length = size.get(recordingId, seq) as { bytes: number } | undefined;
+			if (length === undefined) return null;
+			if (blocks.length > 0 && bytes + length.bytes > maxBytes) break;
 			const raw = select.get(recordingId, seq) as
 				| { seq: number; data_blob: Uint8Array }
 				| undefined;
 			if (raw === undefined) return null;
 			const lines = Buffer.from(raw.data_blob);
-			if (blocks.length > 0 && bytes + lines.byteLength > maxBytes) break;
 			blocks.push({ seq, lines });
 			bytes += lines.byteLength;
 			seq++;
@@ -284,7 +325,11 @@ export class RecordingsDAL {
 				"SELECT 1 AS one FROM recording_blocks WHERE recording_id = ? LIMIT 1",
 			).get(recordingId);
 			if (left === undefined) {
+				const gone = this.statement("SELECT bytes FROM recordings WHERE id = ?").get(recordingId) as
+					| { bytes: number }
+					| undefined;
 				this.statement("DELETE FROM recordings WHERE id = ?").run(recordingId);
+				if (this.total !== null && gone !== undefined) this.total -= gone.bytes;
 				return { deleted, bytes, done: true };
 			}
 			return { deleted, bytes, done: false };

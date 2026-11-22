@@ -1765,6 +1765,8 @@ const mayStartRecording = computed(() => {
 	const hostId = paneHostId.value;
 	if (chId === null || hostId === undefined) return false;
 	if (isDead.value || hasEnded.value || isGone.value || notConnected.value !== null) return false;
+	// Only a terminal the hub calls live: not one being born, nor an orphan awaiting its host.
+	if (channelsStore.statusOf(chId) !== 'live') return false;
 	return hostsStore.isHostConnected(hostId);
 });
 

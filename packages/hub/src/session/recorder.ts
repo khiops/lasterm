@@ -71,11 +71,20 @@ interface Active {
 	lost: number;
 }
 
-/** An end held in memory when the row's UPDATE failed. */
+/**
+ * What an ended recording still owes its row, held in memory: its end when
+ * the UPDATE failed, bytes lost to a failed last write whose count could not
+ * be persisted, a screen size no block carried. The export reads it; it goes
+ * once written, or when the recording is deleted.
+ */
 interface EndedInMemory {
+	channelId: string;
 	endedAt: string;
 	reason: RecordingEndReason;
 	title: string;
+	endPersisted: boolean;
+	lost: number;
+	size: { cols: number; rows: number } | null;
 }
 
 export interface RecorderDeps {
@@ -146,12 +155,23 @@ function incompleteTail(bytes: Uint8Array): number {
 		if ((b & 0xc0) === 0x80) continue; // continuation byte: look further back
 		// A lead byte says how long its sequence is; anything else stands alone.
 		const need = b < 0xc2 ? 1 : b < 0xe0 ? 2 : b < 0xf0 ? 3 : b <= 0xf4 ? 4 : 1;
-		return need > back ? back : 0;
+		if (need <= back) return 0;
+		// Held only if it can still become a valid sequence (RFC 3629 table 3-7):
+		// the byte after E0, ED, F0 and F4 has a narrower range.
+		const second = back >= 2 ? (bytes[n - back + 1] as number) : undefined;
+		if (second !== undefined) {
+			if (b === 0xe0 && second < 0xa0) return 0;
+			if (b === 0xed && second > 0x9f) return 0;
+			if (b === 0xf0 && second < 0x90) return 0;
+			if (b === 0xf4 && second > 0x8f) return 0;
+		}
+		return back;
 	}
 	return 0;
 }
 
-const utf8 = new TextDecoder("utf-8");
+// A BOM inside the output is the program's: kept, never stripped.
+const utf8 = new TextDecoder("utf-8", { ignoreBOM: true });
 
 /**
  * Records terminals into spool.db (#80, STORAGE.md § 4.3): one recording per
@@ -160,9 +180,12 @@ const utf8 = new TextDecoder("utf-8");
  */
 export class SessionRecorder {
 	private readonly byChannel = new Map<string, Active>();
+	private readonly byId = new Map<string, Active>();
 	private readonly endedInMemory = new Map<string, EndedInMemory>();
 	private readonly maxBytes: number;
 	private capping = false;
+	/** Recordings `finish` is writing out: still allowed their last events. */
+	private readonly finishing = new Set<Active>();
 
 	constructor(private readonly deps: RecorderDeps) {
 		this.maxBytes = deps.recordingMaxBytes ?? RECORDING_MAX_BYTES;
@@ -192,11 +215,13 @@ export class SessionRecorder {
 	/** Write the ends kept in memory after a failed UPDATE (every GC pass). */
 	retryPendingEnds(): void {
 		for (const [id, ended] of [...this.endedInMemory]) {
+			if (ended.endPersisted) continue;
 			try {
 				this.deps.dal.end(id, ended.reason, ended.endedAt, ended.title);
-				this.endedInMemory.delete(id);
+				ended.endPersisted = true;
+				this.forgetIfSettled(id, ended);
 			} catch (err) {
-				this.logFailure("end", "*", err);
+				this.logFailure("end", ended.channelId, err);
 			}
 		}
 	}
@@ -253,6 +278,7 @@ export class SessionRecorder {
 				type: "RECORDING_STATE",
 				channelId: input.channelId,
 				recordingId: null,
+				title: this.deps.titleOf(input.channelId),
 				refused: "cap",
 			});
 			return;
@@ -263,6 +289,7 @@ export class SessionRecorder {
 				type: "RECORDING_STATE",
 				channelId: input.channelId,
 				recordingId: null,
+				title: this.deps.titleOf(input.channelId),
 				refused: "storage",
 			});
 			return;
@@ -284,14 +311,18 @@ export class SessionRecorder {
 					cols: input.cols,
 					rows: input.rows,
 				},
-				{ reason: this.endedInMemoryReason(input.channelId), endedAt: startedAt },
+				this.pendingEnds(input.channelId),
+				{ reason: "crashed", endedAt: startedAt },
 			);
 		} catch (err) {
 			this.logFailure("open", input.channelId, err);
 			return null;
 		}
 		for (const [rid, ended] of this.endedInMemory) {
-			if (ended && this.rowChannel(rid) === input.channelId) this.endedInMemory.delete(rid);
+			if (ended.channelId === input.channelId && !ended.endPersisted) {
+				ended.endPersisted = true;
+				this.forgetIfSettled(rid, ended);
+			}
 		}
 		const active: Active = {
 			id,
@@ -316,6 +347,7 @@ export class SessionRecorder {
 			lost: 0,
 		};
 		this.byChannel.set(input.channelId, active);
+		this.byId.set(id, active);
 		return active;
 	}
 
@@ -431,7 +463,17 @@ export class SessionRecorder {
 		exitCode?: number,
 		lastMarker?: string,
 	): void {
-		if (!this.byChannel.has(active.channelId)) return;
+		if (this.byChannel.get(active.channelId) !== active) return;
+		this.finishing.add(active);
+		try {
+			this.finishWrites(active, exitCode, lastMarker);
+		} finally {
+			this.finishing.delete(active);
+		}
+		this.finishRow(active, reason);
+	}
+
+	private finishWrites(active: Active, exitCode?: number, lastMarker?: string): void {
 		if (active.awaiting !== null) this.abandonWait(active);
 		if (exitCode !== undefined) {
 			this.append(active, { pos: this.position(active), code: "x", data: String(exitCode) }, true);
@@ -441,15 +483,38 @@ export class SessionRecorder {
 		}
 		this.flushHeldUtf8(active);
 		this.byChannel.delete(active.channelId);
+		this.byId.delete(active.id);
 		this.flush(active);
+	}
+
+	private finishRow(active: Active, reason: RecordingEndReason): void {
 		const endedAt = this.deps.wallNow().toISOString();
 		const title = this.deps.titleOf(active.channelId);
+		const owed: EndedInMemory = {
+			channelId: active.channelId,
+			endedAt,
+			reason,
+			title,
+			endPersisted: true,
+			lost: active.lost,
+			size: active.sizePending ? { cols: active.cols, rows: active.rows } : null,
+		};
 		try {
 			this.deps.dal.end(active.id, reason, endedAt, title);
 		} catch (err) {
 			this.logFailure("end", active.channelId, err);
-			this.endedInMemory.set(active.id, { endedAt, reason, title });
+			owed.endPersisted = false;
 		}
+		if (owed.size !== null) {
+			try {
+				this.deps.dal.setSize(active.id, owed.size.cols, owed.size.rows);
+				owed.size = null;
+			} catch (err) {
+				this.logFailure("size", active.channelId, err);
+			}
+		}
+		if (!owed.endPersisted || owed.lost > 0 || owed.size !== null)
+			this.endedInMemory.set(active.id, owed);
 		this.deps.broadcast({
 			type: "RECORDING_STATE",
 			channelId: active.channelId,
@@ -469,12 +534,17 @@ export class SessionRecorder {
 	 * for the next `o`; any other event first writes that tail on its own.
 	 */
 	private append(active: Active, event: PendingEvent, noFlushTrigger = false): void {
+		// A recording a cap stop ended in the middle of a loop over several takes nothing more.
+		if (this.byChannel.get(active.channelId) !== active && !this.finishing.has(active)) return;
 		const pos = Math.max(active.lastPos, event.pos);
 		if (event.code === "o") {
 			const bytes = event.data as Uint8Array;
-			const joined = new Uint8Array(active.heldUtf8.length + bytes.length);
-			joined.set(active.heldUtf8, 0);
-			joined.set(bytes, active.heldUtf8.length);
+			let joined = bytes;
+			if (active.heldUtf8.length > 0) {
+				joined = new Uint8Array(active.heldUtf8.length + bytes.length);
+				joined.set(active.heldUtf8, 0);
+				joined.set(bytes, active.heldUtf8.length);
+			}
 			const tail = incompleteTail(joined);
 			const complete = joined.subarray(0, joined.length - tail);
 			active.heldUtf8 = joined.slice(joined.length - tail);
@@ -597,12 +667,13 @@ export class SessionRecorder {
 		}
 	}
 
+	/** What all recordings hold; a failed read counts as full, so nothing starts past the cap. */
 	private usedBytes(): number {
 		try {
 			return this.deps.dal.usedBytes();
 		} catch (err) {
 			this.logFailure("used-bytes", "*", err);
-			return 0;
+			return Number.POSITIVE_INFINITY;
 		}
 	}
 
@@ -612,7 +683,7 @@ export class SessionRecorder {
 		const rows = this.deps.dal.list();
 		return {
 			recordings: rows.map((row) => this.toListed(row)),
-			used_bytes: this.usedBytes(),
+			used_bytes: Math.min(this.usedBytes(), Number.MAX_SAFE_INTEGER),
 			cap_bytes: this.deps.capBytes,
 		};
 	}
@@ -631,12 +702,12 @@ export class SessionRecorder {
 			id: row.id,
 			channel_id: row.channelId,
 			host_label: row.hostLabel,
-			title: ended?.title ?? row.title,
+			title: ended && !ended.endPersisted ? ended.title : row.title,
 			started_at: row.startedAt,
-			ended_at: ended?.endedAt ?? row.endedAt,
-			end_reason: ended?.reason ?? row.endReason,
-			cols: active?.cols ?? row.cols,
-			rows: active?.rows ?? row.rows,
+			ended_at: ended && !ended.endPersisted ? ended.endedAt : row.endedAt,
+			end_reason: ended && !ended.endPersisted ? ended.reason : row.endReason,
+			cols: active?.cols ?? ended?.size?.cols ?? row.cols,
+			rows: active?.rows ?? ended?.size?.rows ?? row.rows,
 			duration_ms: row.durationMs,
 			bytes: row.bytes,
 		};
@@ -668,7 +739,10 @@ export class SessionRecorder {
 			}
 			const fresh = this.deps.dal.get(recordingId) ?? row;
 			lastSeq = this.deps.dal.lastSeq(recordingId);
-			lost = Math.max(fresh.unmarkedLostBytes, active?.lost ?? 0);
+			lost = Math.max(
+				fresh.unmarkedLostBytes,
+				active?.lost ?? this.endedInMemory.get(recordingId)?.lost ?? 0,
+			);
 			fromSeq = 1;
 			const listed = this.toListed(fresh);
 			header = `${JSON.stringify({
@@ -688,7 +762,8 @@ export class SessionRecorder {
 		if (read.nextSeq === undefined) {
 			if (lost > 0) body += eventLine(0, "m", lostMarker(lost));
 			const ended = this.endedInMemory.get(recordingId);
-			if ((ended?.reason ?? row.endReason) === "crashed") body += eventLine(0, "m", MARKER_CRASHED);
+			const reason = ended && !ended.endPersisted ? ended.reason : row.endReason;
+			if (reason === "crashed") body += eventLine(0, "m", MARKER_CRASHED);
 		}
 		return { body, fileName, lastSeq, nextSeq: read.nextSeq, lost };
 	}
@@ -701,7 +776,12 @@ export class SessionRecorder {
 		if (row === undefined || row.deleting) return false;
 		const active = this.activeById(recordingId);
 		if (active) this.finish(active, "stopped");
-		this.deps.dal.markDeleting(recordingId);
+		try {
+			this.deps.dal.markDeleting(recordingId);
+		} catch (err) {
+			this.logFailure("deleting", row.channelId, err);
+			throw err;
+		}
 		this.endedInMemory.delete(recordingId);
 		this.deps.purge([recordingId]);
 		return true;
@@ -710,23 +790,26 @@ export class SessionRecorder {
 	// ─── Helpers ──────────────────────────────────────────────────────────────
 
 	private activeById(recordingId: string): Active | undefined {
-		for (const active of this.byChannel.values()) if (active.id === recordingId) return active;
-		return undefined;
+		return this.byId.get(recordingId);
 	}
 
-	private rowChannel(recordingId: string): string | undefined {
-		try {
-			return this.deps.dal.get(recordingId)?.channelId;
-		} catch {
-			return undefined;
+	/** The ends of this terminal's recordings whose UPDATE failed, to write with the next open. */
+	private pendingEnds(
+		channelId: string,
+	): Array<{ id: string; reason: RecordingEndReason; endedAt: string; title: string }> {
+		const out: Array<{ id: string; reason: RecordingEndReason; endedAt: string; title: string }> =
+			[];
+		for (const [id, ended] of this.endedInMemory) {
+			if (ended.channelId === channelId && !ended.endPersisted) {
+				out.push({ id, reason: ended.reason, endedAt: ended.endedAt, title: ended.title });
+			}
 		}
+		return out;
 	}
 
-	private endedInMemoryReason(channelId: string): RecordingEndReason {
-		for (const [rid, ended] of this.endedInMemory) {
-			if (this.rowChannel(rid) === channelId) return ended.reason;
-		}
-		return "crashed";
+	private forgetIfSettled(id: string, ended: EndedInMemory): void {
+		if (ended.endPersisted && ended.lost === 0 && ended.size === null)
+			this.endedInMemory.delete(id);
 	}
 
 	private logFailure(operation: string, channelId: string, err: unknown): void {

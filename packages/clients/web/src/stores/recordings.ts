@@ -63,6 +63,9 @@ export const useRecordingsStore = defineStore("recordings", () => {
 	const capBytes = ref(0);
 	/** channelId → how many RECORDING_STATE were heard: a list answer older than one loses (#1099's rule). */
 	const heard = new Map<string, number>();
+	/** Each list fetch's turn: an answer older than one already applied is dropped. */
+	let fetches = 0;
+	let applied = 0;
 
 	function onState(msg: RecordingStateMessage): void {
 		heard.set(msg.channelId, (heard.get(msg.channelId) ?? 0) + 1);
@@ -77,11 +80,12 @@ export const useRecordingsStore = defineStore("recordings", () => {
 		} else {
 			next.delete(msg.channelId);
 			if (msg.refused !== undefined) {
+				const name = msg.title ? `“${msg.title}”` : "A terminal";
 				useToastStore().show(
 					"warning",
 					msg.refused === "cap"
-						? "This terminal was not recorded: recordings take all the space allowed. Save or discard some in Recordings."
-						: "This terminal was not recorded: the recording could not be stored.",
+						? `${name} was not recorded: recordings take all the space allowed. Save or discard some in Recordings.`
+						: `${name} was not recorded: the recording could not be stored.`,
 				);
 			}
 		}
@@ -101,6 +105,7 @@ export const useRecordingsStore = defineStore("recordings", () => {
 	 */
 	async function refresh(): Promise<void> {
 		const before = new Map(heard);
+		const turn = ++fetches;
 		let res: Response;
 		try {
 			res = await hubFetch(`${hubBaseUrl()}/api/recordings`, { headers: authHeaders() });
@@ -114,6 +119,8 @@ export const useRecordingsStore = defineStore("recordings", () => {
 			cap_bytes?: unknown;
 		} | null;
 		if (body === null || !Array.isArray(body.recordings)) return;
+		if (turn < applied) return;
+		applied = turn;
 		rows.value = body.recordings as RecordingRow[];
 		usedBytes.value = typeof body.used_bytes === "number" ? body.used_bytes : 0;
 		capBytes.value = typeof body.cap_bytes === "number" ? body.cap_bytes : 0;
@@ -136,10 +143,16 @@ export const useRecordingsStore = defineStore("recordings", () => {
 
 	/** Start recording a terminal now. */
 	async function start(channelId: string): Promise<void> {
-		const res = await hubFetch(
-			`${hubBaseUrl()}/api/channels/${encodeURIComponent(channelId)}/recording`,
-			{ method: "POST", headers: authHeaders() },
-		);
+		let res: Response;
+		try {
+			res = await hubFetch(
+				`${hubBaseUrl()}/api/channels/${encodeURIComponent(channelId)}/recording`,
+				{ method: "POST", headers: authHeaders() },
+			);
+		} catch {
+			useToastStore().show("error", "The recording could not start: the hub did not answer.");
+			return;
+		}
 		if (!res.ok) {
 			const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
 			useToastStore().show("error", body?.error?.message ?? "The recording could not start.");
@@ -165,13 +178,6 @@ export const useRecordingsStore = defineStore("recordings", () => {
 		}
 	}
 
-	/** A whole export, for the player. */
-	async function castText(recordingId: string): Promise<string> {
-		let text = "";
-		for await (const part of castParts(recordingId)) text += part;
-		return text;
-	}
-
 	async function stop(recordingId: string): Promise<void> {
 		const res = await hubFetch(
 			`${hubBaseUrl()}/api/recordings/${encodeURIComponent(recordingId)}/stop`,
@@ -181,13 +187,15 @@ export const useRecordingsStore = defineStore("recordings", () => {
 	}
 
 	async function discard(recordingId: string): Promise<boolean> {
-		const res = await hubFetch(
-			`${hubBaseUrl()}/api/recordings/${encodeURIComponent(recordingId)}`,
-			{
+		let res: Response;
+		try {
+			res = await hubFetch(`${hubBaseUrl()}/api/recordings/${encodeURIComponent(recordingId)}`, {
 				method: "DELETE",
 				headers: authHeaders(),
-			},
-		);
+			});
+		} catch {
+			return false;
+		}
 		if (res.ok) {
 			rows.value = rows.value.filter((r) => r.id !== recordingId);
 			void refresh();
@@ -223,13 +231,21 @@ export const useRecordingsStore = defineStore("recordings", () => {
 			let file: Awaited<typeof handle>;
 			try {
 				file = await handle;
-			} catch {
-				return; // the dialog was cancelled
+			} catch (err) {
+				// Cancelled: nothing changes. Any other refusal of the dialog is said.
+				if (!(err instanceof DOMException && err.name === "AbortError")) {
+					useToastStore().show(
+						"error",
+						"The save dialog could not open. The recording is still in Recordings.",
+					);
+				}
+				return;
 			}
 			let writable: WritableLike | null = null;
 			try {
-				if (isOpen) await stop(recording.id);
+				// Opened before the stop, so any failure after the dialog goes through abort().
 				writable = await file.createWritable();
+				if (isOpen) await stop(recording.id);
 				for await (const part of castParts(recording.id)) await writable.write(part);
 				await writable.close();
 			} catch {
@@ -248,8 +264,10 @@ export const useRecordingsStore = defineStore("recordings", () => {
 	async function download(recordingId: string, isOpen: boolean, name: string): Promise<void> {
 		try {
 			if (isOpen) await stop(recordingId);
-			const text = await castText(recordingId);
-			const url = URL.createObjectURL(new Blob([text], { type: "application/x-asciicast" }));
+			// The parts as they came, never joined into one string (a string holds at most ~512 M characters).
+			const parts: string[] = [];
+			for await (const part of castParts(recordingId)) parts.push(part);
+			const url = URL.createObjectURL(new Blob(parts, { type: "application/x-asciicast" }));
 			const a = document.createElement("a");
 			a.href = url;
 			a.download = name;
@@ -273,6 +291,6 @@ export const useRecordingsStore = defineStore("recordings", () => {
 		stop,
 		discard,
 		save,
-		castText,
+		castParts,
 	};
 });

@@ -5582,6 +5582,15 @@ describe("TerminalPane recording (#80)", () => {
 		expect(button("Stop recording and save…")).toBeDefined();
 	});
 
+	// Mutation caught: Start offered whenever the terminal is not dead (an orphan the hub refuses).
+	it("offers no Start on an orphan terminal, its host connected", async () => {
+		await openLive({ setUp: () => useHostsStore().updateSessionStatus(HOST, "active") });
+		useChannelsStore().updateChannelStatus(T, "orphan");
+		await settle();
+		await menu();
+		expect(button("Start recording")).toBeUndefined();
+	});
+
 	it("offers no Start on an ended terminal", async () => {
 		await openEnded({ setUp: () => useHostsStore().updateSessionStatus(HOST, "active") });
 		await menu();

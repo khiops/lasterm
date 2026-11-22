@@ -2,7 +2,10 @@
 // New file: the playback engine is new; no existing spec drives a cast into xterm.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ParsedCast, parseCast } from "./cast-parse.js";
-import { CastPlayback, type PlaybackTerminal, WRITE_PIECE } from "./cast-playback.js";
+import { CastPlayback, type PlaybackTerminal } from "./cast-playback.js";
+
+/** 1 MiB of UTF-8 at most: 349,525 UTF-16 units of at most 3 bytes each. */
+const PIECE = 349_525;
 
 /** A terminal that keeps what was written to it, answers writes later, and logs calls. */
 class FakeTerminal implements PlaybackTerminal {
@@ -61,6 +64,7 @@ function cast(text: string): ParsedCast {
 function player(text: string, autoParse = true) {
 	const terminals: FakeTerminal[] = [];
 	const playback = new CastPlayback(cast(text), {
+		now: () => Date.now(),
 		createTerminal: (cols, rows) => {
 			const t = new FakeTerminal(cols, rows, autoParse);
 			terminals.push(t);
@@ -109,19 +113,116 @@ describe("CastPlayback", () => {
 
 	// (c) Mutation caught: one write of everything, or writes not awaited.
 	it("writes a large output in pieces, each after the previous one is parsed", async () => {
-		const big = `${"x".repeat(3 * WRITE_PIECE - 3)}END`;
+		const big = `${"x".repeat(3 * PIECE - 3)}END`;
+		const text = ['{"version":3,"term":{"cols":80,"rows":24}}', JSON.stringify([0, "o", big])].join(
+			"\n",
+		);
+		const { playback, last } = player(text, false);
+		const done = playback.seek(1);
+		for (let piece = 0; piece < 3; piece++) {
+			for (let i = 0; i < 5; i++) await Promise.resolve();
+			// One piece at a time: the next is written only once this one is parsed.
+			expect(last().pending).toHaveLength(1);
+			last().flush();
+		}
+		await done;
+		expect(last().calls.filter((c) => c.startsWith("write"))).toEqual([
+			`write:${PIECE}:0`,
+			`write:${PIECE}:0`,
+			`write:${PIECE}:0`,
+		]);
+		expect(last().text.endsWith("END")).toBe(true);
+	});
+
+	it("never cuts a surrogate pair between two pieces", async () => {
+		const big = `${"x".repeat(PIECE - 1)}😀tail`;
 		const text = ['{"version":3,"term":{"cols":80,"rows":24}}', JSON.stringify([0, "o", big])].join(
 			"\n",
 		);
 		const { playback, last } = player(text);
 		await playback.seek(1);
 		const writes = last().calls.filter((c) => c.startsWith("write"));
-		expect(writes).toEqual([
-			`write:${WRITE_PIECE}:0`,
-			`write:${WRITE_PIECE}:0`,
-			`write:${WRITE_PIECE}:0`,
-		]);
-		expect(last().text.endsWith("END")).toBe(true);
+		expect(writes[0]).toBe(`write:${PIECE - 1}:0`);
+		expect(last().text).toBe(big);
+	});
+
+	// COR1: time is continuous. Mutation caught: the whole delay waited again after a seek or a pause.
+	it("goes on from a seek between two events with only what remains", async () => {
+		const text = [
+			'{"version":3,"term":{"cols":80,"rows":24}}',
+			'[0, "o", "A"]',
+			'[10, "o", "B"]',
+		].join("\n");
+		const { playback, last } = player(text);
+		playback.setSkipIdle(false);
+		await playback.seek(5);
+		expect(playback.currentTime).toBe(5);
+		playback.play();
+		await vi.advanceTimersByTimeAsync(4990);
+		expect(last().text).toBe("A");
+		await vi.advanceTimersByTimeAsync(20);
+		expect(last().text).toBe("AB");
+	});
+
+	it("keeps what was waited across a pause and a speed change", async () => {
+		const text = [
+			'{"version":3,"term":{"cols":80,"rows":24}}',
+			'[0, "o", "A"]',
+			'[10, "o", "B"]',
+		].join("\n");
+		const { playback, last } = player(text);
+		playback.setSkipIdle(false);
+		playback.play();
+		await vi.advanceTimersByTimeAsync(4000);
+		playback.pause();
+		expect(playback.currentTime).toBeCloseTo(4, 1);
+		playback.play();
+		await vi.advanceTimersByTimeAsync(2000); // 6 s waited
+		playback.setSpeed(2); // 4 s left: 2 s at speed 2
+		await vi.advanceTimersByTimeAsync(1990);
+		expect(last().text).toBe("A");
+		await vi.advanceTimersByTimeAsync(20);
+		expect(last().text).toBe("AB");
+	});
+
+	// C2/CONC1: one consumer. Mutation caught: play during a seek starting a second loop.
+	it("plays each event once when Play is pressed during a seek", async () => {
+		const text = [
+			'{"version":3,"term":{"cols":80,"rows":24}}',
+			'[0, "o", "A"]',
+			'[0.5, "o", "B"]',
+			'[0.5, "o", "C"]',
+		].join("\n");
+		const { playback, last } = player(text, false);
+		const seeking = playback.seek(0.6);
+		playback.play();
+		for (let i = 0; i < 20; i++) {
+			last().flush();
+			await vi.advanceTimersByTimeAsync(100);
+		}
+		await seeking;
+		expect(last().text).toBe("ABC");
+	});
+
+	it("stops between the pieces of a large event at a pause, and goes on from there", async () => {
+		const big = `${"x".repeat(2 * PIECE)}`;
+		const text = ['{"version":3,"term":{"cols":80,"rows":24}}', JSON.stringify([0, "o", big])].join(
+			"\n",
+		);
+		const { playback, last } = player(text, false);
+		playback.play();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(last().pending).toHaveLength(1);
+		playback.pause();
+		last().flush();
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		expect(last().pending).toHaveLength(0);
+		expect(last().text.length).toBe(PIECE);
+		playback.play();
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		last().flush();
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		expect(last().text.length).toBe(2 * PIECE);
 	});
 
 	// (d) Mutation caught: a resize applied before the write before it is parsed.

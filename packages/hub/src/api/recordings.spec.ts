@@ -153,6 +153,7 @@ describe("recording routes", () => {
 				cols: 80,
 				rows: 24,
 			},
+			[],
 			{ reason: "crashed", endedAt: new Date().toISOString() },
 		);
 		dal.writeBlock({
@@ -166,6 +167,19 @@ describe("recording routes", () => {
 		const res = await server.inject({ method: "POST", url: `/api/channels/${CHANNEL}/recording` });
 		expect(res.statusCode).toBe(409);
 		expect(res.json().error.code).toBe("RECORDING_CAP");
+	});
+
+	// AC-CONTROL-ERRORS / open-fails through the route. Mutation caught: the storage error answered 409.
+	it("answers 500 when the recording cannot be stored", async () => {
+		await build();
+		live();
+		const open = vi.spyOn(RecordingsDAL.prototype, "open").mockImplementationOnce(() => {
+			throw Object.assign(new Error("full"), { code: "SQLITE_FULL" });
+		});
+		const res = await server.inject({ method: "POST", url: `/api/channels/${CHANNEL}/recording` });
+		expect(res.statusCode).toBe(500);
+		expect(res.json().error.code).toBe("RECORDING_STORAGE_ERROR");
+		open.mockRestore();
 	});
 
 	describe("a recording", () => {

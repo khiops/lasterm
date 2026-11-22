@@ -1,6 +1,8 @@
 // AC-PLAYER-PARSE (#80). New file: the parser is new and no existing spec reads casts.
 import { describe, expect, it } from "vitest";
-import { NOT_A_CAST, parseCast } from "./cast-parse.js";
+import { parseCast, parseCastChunks } from "./cast-parse.js";
+
+const NOT_A_CAST = "Not an asciicast v2 or v3 file";
 
 const V3 = [
 	'{"version":3,"term":{"cols":80,"rows":24},"title":"t"}',
@@ -68,14 +70,29 @@ describe("parseCast", () => {
 		expect(parseCast(text)).toMatchObject({ events: [{ d: 0.75, c: "x", t: "3" }] });
 	});
 
-	it("takes a decreasing v2 time as a delay of 0", () => {
-		const text = ['{"version":2,"width":80,"height":24}', '[2,"o","a"]', '[1,"o","b"]'].join("\n");
+	// Mutation caught: the next delay counted from the highest time instead of the previous one.
+	it("takes a decreasing v2 time as a delay of 0, and counts the next from it", () => {
+		const text = [
+			'{"version":2,"width":80,"height":24}',
+			'[2,"o","a"]',
+			'[1,"o","b"]',
+			'[1.5,"o","c"]',
+		].join("\n");
 		expect(parseCast(text)).toMatchObject({
 			events: [
 				{ d: 2, c: "o", t: "a" },
 				{ d: 0, c: "o", t: "b" },
+				{ d: 0.5, c: "o", t: "c" },
 			],
 		});
+	});
+
+	// The file read in chunks gives the same events, a line split between chunks included.
+	it("reads a cast in chunks cut anywhere", async () => {
+		async function* chunks(): AsyncGenerator<string> {
+			for (let i = 0; i < V3.length; i += 7) yield V3.slice(i, i + 7);
+		}
+		expect(await parseCastChunks(chunks())).toMatchObject({ events: LITERAL });
 	});
 
 	it.each([
@@ -85,6 +102,9 @@ describe("parseCast", () => {
 		["a header over 500 columns", '{"version":3,"term":{"cols":501,"rows":24}}'],
 		["no header", '[0, "o", "x"]'],
 		["another version", '{"version":1,"width":80,"height":24}'],
+		["a fourth element", '{"version":3,"term":{"cols":80,"rows":24}}\n[0, "o", "x", "extra"]'],
+		["a negative v3 delay", '{"version":3,"term":{"cols":80,"rows":24}}\n[-1, "o", "x"]'],
+		["data that is not a string", '{"version":3,"term":{"cols":80,"rows":24}}\n[0, "o", 123]'],
 	])("refuses %s", (_label, text) => {
 		expect(parseCast(text)).toEqual({ error: NOT_A_CAST });
 	});

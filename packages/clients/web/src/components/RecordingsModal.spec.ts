@@ -72,14 +72,34 @@ describe("RecordingsModal", () => {
 		const discard = vi.spyOn(store, "discard").mockResolvedValue(true);
 		buttonByText("Discard")?.click();
 		await nextTick();
+		await nextTick();
 		expect(discard).not.toHaveBeenCalled();
-		expect(document.body.textContent).toContain("Discard this recording?");
-		const confirm = [
-			...document.querySelectorAll<HTMLButtonElement>(".confirm-dialog button"),
-		].find((b) => b.textContent?.trim() === "Discard");
+		expect(document.body.textContent).toContain(
+			"Delete it from this computer? This cannot be undone.",
+		);
+		const confirm = document.querySelector<HTMLButtonElement>(".rec-row__confirm .btn-danger");
+		// The keyboard goes to the question, inside the dialog.
+		expect(document.activeElement).toBe(confirm);
 		confirm?.click();
 		await nextTick();
 		expect(discard).toHaveBeenCalledWith(ROW.id);
+	});
+
+	// AC-PLAYER-CONTROLS / get-only: replaying asks the export with GETs only, and stops nothing.
+	it("replays with GETs only, even an open recording", async () => {
+		const { hubFetch } = await import("../utils/hub-fetch.js");
+		const fetched = vi.mocked(hubFetch);
+		fetched.mockClear();
+		store.rows = [{ ...ROW, ended_at: null, end_reason: null }];
+		await nextTick();
+		buttonByText("Replay")?.click();
+		await new Promise((r) => setTimeout(r, 0));
+		await nextTick();
+		const methods = fetched.mock.calls.map(
+			([, init]) => (init as RequestInit | undefined)?.method ?? "GET",
+		);
+		expect(methods.length).toBeGreaterThan(0);
+		expect(methods.every((m) => m === "GET")).toBe(true);
 	});
 
 	// AC-PLAYER-PARSE / too-large. Mutation caught: the file read before its size is checked.

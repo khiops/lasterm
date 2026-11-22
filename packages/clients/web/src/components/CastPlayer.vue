@@ -65,17 +65,18 @@
 </template>
 
 <script setup lang="ts">
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { Terminal } from "@xterm/xterm";
 import { nextTick, onMounted, onUnmounted, ref, shallowRef } from "vue";
 import { useModalFocus } from "../composables/useModalFocus.js";
 import { useConfigStore } from "../stores/config.js";
 import { useThemeStore } from "../stores/theme.js";
-import { NOT_A_CAST, type ParsedCast, parseCast } from "../utils/cast-parse.js";
+import { NOT_A_CAST, type ParsedCast, parseCastChunks } from "../utils/cast-parse.js";
 import { CastPlayback } from "../utils/cast-playback.js";
 
 const props = defineProps<{
-	/** The cast's text, from the hub or from a file. */
-	text: string;
+	/** The cast's text, chunk by chunk: the hub's export parts, or a file's stream. Never one string. */
+	chunks: () => AsyncIterable<string>;
 	title: string;
 }>();
 
@@ -98,14 +99,20 @@ const playback = shallowRef<CastPlayback | null>(null);
 let current: Terminal | null = null;
 let observer: ResizeObserver | null = null;
 
+const opened = ref(false);
 const { onKeydown: modalKeydown } = useModalFocus({
-	open: () => true,
+	open: () => opened.value,
 	root,
 	close: () => emit("close"),
 });
 
+/** Space plays or pauses, except on a control, which keeps its own Space (a button, the check box, the list). */
+function ownsSpace(target: EventTarget | null): boolean {
+	return target instanceof HTMLElement && target.closest("button, input, select, textarea, a[href]") !== null;
+}
+
 function onKeydown(event: KeyboardEvent): void {
-	if (event.key === " " && (event.target as HTMLElement | null)?.tagName !== "SELECT") {
+	if (event.key === " " && !ownsSpace(event.target)) {
 		event.preventDefault();
 		togglePlay();
 		return;
@@ -136,8 +143,12 @@ function newTerminal(cols: number, rows: number): Terminal {
 		allowProposedApi: true,
 		...(profile.fontSize !== undefined && { fontSize: profile.fontSize }),
 		...(profile.fontFamily !== undefined && { fontFamily: profile.fontFamily }),
+		scrollback: profile.scrollback ?? 5000,
 		theme: colors ? useThemeStore().toXtermTheme(colors) : {},
 	});
+	// The same character widths as a live terminal (useTerminal.ts).
+	term.loadAddon(new Unicode11Addon());
+	term.unicode.activeVersion = "11";
 	if (screen.value) {
 		screen.value.replaceChildren();
 		term.open(screen.value);
@@ -209,8 +220,19 @@ function clock(seconds: number): string {
 	return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${rest}` : `${m}:${rest}`;
 }
 
+/** Where the keyboard was before the player opened: it goes back there when the player closes. */
+let returnTo: Element | null = null;
+
 onMounted(async () => {
-	const parsed = parseCast(props.text);
+	returnTo = document.activeElement;
+	opened.value = true;
+	let parsed: ParsedCast | { error: string };
+	try {
+		parsed = await parseCastChunks(props.chunks());
+	} catch {
+		error.value = "The recording could not be read.";
+		return;
+	}
 	if ("error" in parsed) {
 		error.value = parsed.error ?? NOT_A_CAST;
 		return;
@@ -224,8 +246,10 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+	opened.value = false;
 	observer?.disconnect();
 	playback.value?.dispose();
+	if (returnTo instanceof HTMLElement && returnTo.isConnected) returnTo.focus();
 });
 </script>
 

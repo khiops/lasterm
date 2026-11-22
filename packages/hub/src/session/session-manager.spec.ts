@@ -11431,7 +11431,9 @@ describe("SessionManager recordings (#80)", () => {
 
 	// AC-REC-AUTO variants. Mutations caught: profile ignored, default on, layers ORed.
 	describe("by the terminal's profile", () => {
+		// Through a real resolver, so DEFAULT_PROFILE decides. Mutation caught: a default of true.
 		it("records nothing by default", async () => {
+			await hubWithToml("");
 			await spawnLocal();
 			expect(sm.recorder.list().recordings).toEqual([]);
 		});
@@ -11508,6 +11510,131 @@ describe("SessionManager recordings (#80)", () => {
 		await flushImmediate();
 		expect(sm.recordingIdOf(channelId)).toBeNull();
 		expect(exportOf(sm, first).length).toBeGreaterThan(0);
+	});
+
+	// AC-REC-AUTO-RESTART / respawn: a re-spawn that succeeds opens a new recording by the profile.
+	it("opens a new recording when a reconnection spawns its terminal again and it starts", async () => {
+		await hubWithToml("[terminal]\nrecord_terminals = true\n");
+		const channelId = await spawnLocal();
+		const first = sm.recordingIdOf(channelId) ?? "";
+		const lifecycle = (
+			sm as unknown as {
+				lifecycle: { reAttachChannels: (h: string, s: string, a: unknown) => void };
+			}
+		).lifecycle;
+		lifecycle.reAttachChannels(
+			await sm.ensureLocalHost(),
+			dal.listSessions()[0]?.id ?? "",
+			mockLocalAgents[0],
+		);
+		await flushImmediate();
+		await flushImmediate();
+		expect(sm.recorder.listed(first)?.end_reason).toBe("restarted");
+		const second = sm.recordingIdOf(channelId);
+		expect(second).not.toBeNull();
+		expect(second).not.toBe(first);
+	});
+
+	// AC-NO-AUTO-ADOPT through the hub's start: a terminal restored from the database is adopted, not started.
+	it("starts no recording for a terminal the hub adopts at its start", async () => {
+		await hubWithToml("[terminal]\nrecord_terminals = true\n");
+		const host = dal.createHost({ type: "local", label: "adopt-host" });
+		dal.createSession({ id: "ADOPTSESS0AAAAAAAAAAAAAAAAA", hostId: host.id, status: "active" });
+		dal.createChannel({
+			id: "ADOPTCH00AAAAAAAAAAAAAAAAAA",
+			sessionId: "ADOPTSESS0AAAAAAAAAAAAAAAAA",
+			status: "live",
+			cols: 80,
+			rows: 24,
+		});
+		await sm.startup();
+		expect(sm.recordingIdOf("ADOPTCH00AAAAAAAAAAAAAAAAAA")).toBeNull();
+	});
+
+	// AC-START-UNAVAILABLE / old-agent through the hub's own version check.
+	it("asks no screen of an agent of another version", async () => {
+		const channelId = await spawnLocal();
+		(mockLocalAgents[0] as unknown as { helloMessage: unknown }).helloMessage = {
+			type: "HELLO",
+			version: 1,
+			agentVersion: "0.0.1",
+		};
+		const attachesBefore =
+			mockLocalAgents[0]?.send.mock.calls.filter(([m]) => m.type === "ATTACH").length ?? 0;
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		const attachesAfter =
+			mockLocalAgents[0]?.send.mock.calls.filter(([m]) => m.type === "ATTACH").length ?? 0;
+		expect(attachesAfter).toBe(attachesBefore);
+		expect(exportOf(sm, started.id)[1]).toBe(
+			'[0.000, "m", "lasterm: the screen before this point is not available"]',
+		);
+	});
+
+	// AC-SHUTDOWN and AC-START-UNAVAILABLE / shutdown through SessionManager.shutdown.
+	it("writes recordings out and ends them interrupted when the hub shuts down", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+		emitLocal({ type: "OUTPUT", channelId, data: new TextEncoder().encode("buffered") });
+		const ended = sm;
+		await ended.shutdown();
+		sm = new SessionManager(dbManager); // the next hub, over the same databases
+		const { RecordingsDAL } = await import("../storage/recordings.js");
+		const store = new RecordingsDAL(dbManager.spool);
+		expect(store.get(started.id)?.endReason).toBe("interrupted");
+		expect(exportOf(sm, started.id).join("\n")).toContain("buffered");
+	});
+
+	it("writes a waiting recording's held output when the hub shuts down", async () => {
+		const channelId = await spawnLocal();
+		holdLocalAttach = true;
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		emitLocal({ type: "OUTPUT", channelId, data: new TextEncoder().encode("held") });
+		const ended = sm;
+		await ended.shutdown();
+		sm = new SessionManager(dbManager);
+		const lines = exportOf(sm, started.id);
+		expect(lines[1]).toBe('[0.000, "m", "lasterm: the screen before this point is not available"]');
+		expect(lines.join("\n")).toContain('"held"');
+	});
+
+	// AC-EVENTS: a resize to the size the terminal already has is not recorded.
+	it("records a size change once, not a resize to the same size", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+		sm.handleResize("c1", channelId, 120, 40);
+		sm.handleResize("c1", channelId, 120, 40);
+		const sizes = exportOf(sm, started.id).filter((l) => l.includes('"r"'));
+		expect(sizes).toHaveLength(1);
+	});
+
+	// AC-CONTROL-ERRORS / open-fails: a failed open leaves the terminal's start alone.
+	it("starts the terminal as usual when its recording cannot be opened", async () => {
+		await hubWithToml("[terminal]\nrecord_terminals = true\n");
+		const { RecordingsDAL } = await import("../storage/recordings.js");
+		const open = vi.spyOn(RecordingsDAL.prototype, "open").mockImplementationOnce(() => {
+			throw Object.assign(new Error("full"), { code: "SQLITE_FULL" });
+		});
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-open", received));
+		const channelId = await sm.handleSpawn("c-open", { type: "SPAWN", hostId: "local" });
+		expect(channelId).not.toBeNull();
+		expect(received).toContainEqual(expect.objectContaining({ type: "CHANNEL_CREATED" }));
+		expect(received).toContainEqual(
+			expect.objectContaining({
+				type: "RECORDING_STATE",
+				channelId,
+				recordingId: null,
+				refused: "storage",
+			}),
+		);
+		expect(dal.getChannel(channelId ?? "")?.status).toBe("live");
+		open.mockRestore();
 	});
 
 	// AC-NO-AUTO-ADOPT. Mutation caught: automatic start on every trackChannel.

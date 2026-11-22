@@ -45,7 +45,7 @@ installs on your hosts ([below](#on-the-hosts-you-add)):
 | Your terminals: title, shell, command, working directory and the environment changes you set; your launch profiles | `meta.db` |
 | Browser pairings: a hash of each token and of each pairing code, when they were used, and the addresses that used or tried them | `meta.db` |
 | What your terminals print, kept so a screen can be restored when you come back | `spool.db` in the state folder |
-| Recordings you started, or set to start, of what a terminal printed (never what you typed), until you save or discard them; saved, in the file you chose | `spool.db` in the state folder |
+| Recordings you started, or set to start, of what a terminal printed, until you save or discard them; saved, in the file you chose. Keystrokes are not recorded, but what the terminal shows of them is: a command you type, echoed by the shell, is in the recording; a password a program does not echo is not | `spool.db` in the state folder |
 | What the app needs to find and verify its hub: its port, keys and certificate | `runtime.json`, `hub-key`, `hub-tls-key.pem` and `hub-tls-generated-cert.pem` in the state folder; for the desktop app, also `identity\known_hubs.json` in `%LOCALAPPDATA%\lasterm` |
 | Logs | the `logs` folder and the `.log` and `.log.old` files in the state folder |
 | The agents downloaded for your remote hosts | `binaries` in the state folder |
@@ -155,6 +155,9 @@ The installers from GitHub leave the `lasterm` folders above in place when you u
 what Lasterm kept, quit it with *Quit completely*, then delete those folders and
 `%LOCALAPPDATA%\app.lasterm.desktop`. On a remote host, delete the agent and
 `~/.local/state/lasterm`.
+
+Recordings waiting to be saved are deleted one by one with *Discard* in *Recordings*; a saved
+recording is the file you chose, yours to delete.
 
 ## Children
 

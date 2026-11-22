@@ -311,7 +311,9 @@ describe("SessionRecorder", () => {
 			h.at(10);
 			h.rec.onOutput(CHANNEL, enc("a".repeat(256 * 1024)));
 			lateScreen(handler, requestId);
-			expect(h.rec.exportPart(id)?.body.split("\n")[1]).toBe(MARKER);
+			const lines = h.body(id);
+			expect(lines[0]).toBe(MARKER);
+			expect(lines[1]).toBe(`[0.010, "o", "${"a".repeat(256 * 1024)}"]`);
 		});
 
 		// Mutation caught: an end that leaves the held output behind.
@@ -655,6 +657,7 @@ describe("SessionRecorder", () => {
 				type: "RECORDING_STATE",
 				channelId: CHANNEL,
 				recordingId: null,
+				title: "build",
 				refused: "cap",
 			});
 		});
@@ -833,6 +836,7 @@ describe("SessionRecorder", () => {
 				type: "RECORDING_STATE",
 				channelId: CHANNEL,
 				recordingId: null,
+				title: "build",
 				refused: "storage",
 			});
 			vi.spyOn(h.dal, "open").mockImplementationOnce(() => {
@@ -850,6 +854,149 @@ describe("SessionRecorder", () => {
 				refused: "RECORDING_STORAGE_ERROR",
 			});
 		});
+	});
+
+	// AC-WFAIL / fixed-at-first-part: a loss after the first request belongs to no part of that export.
+	it("leaves out of an export a loss that happened after its first request", () => {
+		const id = startAuto(h);
+		h.rec.onOutput(CHANNEL, enc("a".repeat(5 * MiB)));
+		const first = h.rec.exportPart(id);
+		expect(first?.lost).toBe(0);
+		h.rec.onOutput(CHANNEL, enc("late"));
+		vi.spyOn(h.dal, "writeBlock").mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		h.rec.stop(id); // its last flush fails: 4 bytes lost after the first request
+		const again = h.rec.exportPart(id, {
+			fromSeq: 1,
+			lastSeq: first?.lastSeq ?? 0,
+			lost: first?.lost ?? 0,
+		});
+		expect(again?.body).not.toContain("bytes not recorded");
+	});
+
+	// AC-UI-SAVE / name: the start time is the open's, even when the screen comes the next second.
+	it("names the file after the open's time, not the screen's", () => {
+		h.at(990);
+		const { id, requestId } = startManual(h);
+		h.at(1010);
+		answerAttach(h, requestId, { serialized: "S", cols: 80, rows: 24, cursorX: 0, cursorY: 0 });
+		h.rec.stop(id);
+		const part = h.rec.exportPart(id);
+		expect(part?.fileName).toBe("lasterm-build-20261122-100000.cast");
+		expect(JSON.parse(part?.body.split("\n")[0] ?? "").timestamp).toBe(1795341600);
+	});
+
+	// An ended recording keeps what its row still owes: the lost count and the screen's size.
+	it("marks bytes lost at a Stop whose last write and lost count both failed", () => {
+		const id = startAuto(h);
+		h.rec.onOutput(CHANNEL, enc("tail"));
+		vi.spyOn(h.dal, "writeBlock").mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		vi.spyOn(h.dal, "setUnmarkedLost").mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		h.rec.stop(id);
+		expect(h.body(id)).toEqual(['[0.000, "m", "lasterm: 4 bytes not recorded (storage error)"]']);
+	});
+
+	it("keeps the screen's size when no block carried it before the Stop", () => {
+		h.at(0);
+		const { id, requestId } = startManual(h);
+		answerAttach(h, requestId, { serialized: "S", cols: 100, rows: 30, cursorX: 0, cursorY: 0 });
+		vi.spyOn(h.dal, "writeBlock").mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		h.rec.stop(id);
+		expect(JSON.parse(h.cast(id).split("\n")[0] as string).term).toMatchObject({
+			cols: 100,
+			rows: 30,
+		});
+		expect(h.dal.get(id)).toMatchObject({ cols: 100, rows: 30 });
+	});
+
+	it("writes a pending end with its own time and title at the next start", () => {
+		h.at(0);
+		const old = startAuto(h);
+		h.at(5000);
+		h.setTitle("at-stop");
+		vi.spyOn(h.dal, "end").mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		h.rec.stop(old);
+		h.at(15000);
+		h.setTitle("next");
+		startAuto(h);
+		expect(h.dal.get(old)).toMatchObject({
+			endedAt: "2026-11-22T10:00:05.000Z",
+			endReason: "stopped",
+			title: "at-stop",
+		});
+	});
+
+	it("refuses a start when what recordings hold cannot be read", () => {
+		vi.spyOn(h.dal, "usedBytes").mockImplementation(() => {
+			throw sqliteFull();
+		});
+		expect(
+			h.rec.startManual({
+				channelId: CHANNEL,
+				hostId: "host-1",
+				hostLabel: "pi",
+				cols: 80,
+				rows: 24,
+			}),
+		).toEqual({
+			refused: "RECORDING_CAP",
+		});
+	});
+
+	it("logs a failure to mark a recording for deletion", () => {
+		const id = startAuto(h);
+		h.rec.stop(id);
+		vi.spyOn(h.dal, "markDeleting").mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		expect(() => h.rec.delete(id)).toThrow();
+		expect(h.logs.at(-1)).toBe(
+			`[lasterm-recording] deleting failed (SQLITE_FULL) for channel ${CHANNEL}`,
+		);
+		expect(h.purged).toEqual([]);
+	});
+
+	it("keeps a BOM the program printed", () => {
+		const id = startAuto(h);
+		h.rec.onOutput(CHANNEL, enc("A"));
+		h.rec.onOutput(CHANNEL, new Uint8Array([0xef, 0xbb, 0xbf, 0x42]));
+		expect(h.body(id)).toEqual(['[0.000, "o", "A"]', '[0.000, "o", "\uFEFFB"]']);
+	});
+
+	it("writes at once a prefix that can no longer become valid UTF-8", () => {
+		const id = startAuto(h);
+		h.rec.onOutput(CHANNEL, new Uint8Array([0xe0, 0x80]));
+		h.at(120);
+		h.rec.onOutput(CHANNEL, enc("X"));
+		expect(h.body(id)).toEqual(['[0.000, "o", "\uFFFD\uFFFD"]', '[0.120, "o", "X"]']);
+	});
+
+	it("keeps the space used right across writes and deletions", async () => {
+		const a = startAuto(h, "A");
+		h.rec.onOutput("A", enc("x".repeat(1000)));
+		h.rec.stop(a);
+		const b = startAuto(h, "B");
+		h.rec.onOutput("B", enc("y".repeat(500)));
+		h.rec.stop(b);
+		const sum = () =>
+			(
+				h.dbs.spool.prepare("SELECT COALESCE(SUM(bytes), 0) AS s FROM recordings").get() as {
+					s: number;
+				}
+			).s;
+		expect(h.dal.usedBytes()).toBe(sum());
+		h.rec.delete(a);
+		await h.gc.purgeRecordings([a]);
+		expect(h.dal.usedBytes()).toBe(sum());
 	});
 
 	// ─── Hub start, list, deletion ──────────────────────────────────────────
@@ -966,6 +1113,7 @@ describe("SessionRecorder", () => {
 					cols: 80,
 					rows: 24,
 				},
+				[],
 				{ reason: "crashed", endedAt: new Date(0).toISOString() },
 			);
 			for (let seq = 1; seq <= count; seq++) {

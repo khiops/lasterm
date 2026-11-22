@@ -142,6 +142,16 @@ describe("recordings store", () => {
 			]);
 		});
 
+		it("says so when the dialog cannot open for another reason, and sends nothing", async () => {
+			const requests = hub();
+			(globalThis as { showSaveFilePicker?: unknown }).showSaveFilePicker = vi.fn(async () => {
+				throw new DOMException("denied", "SecurityError");
+			});
+			await useRecordingsStore().save(rec, true);
+			expect(requests).toEqual([]);
+			expect(useToastStore().messages.at(-1)?.text).toContain("The save dialog could not open");
+		});
+
 		it("(b) sends nothing when the dialog is cancelled", async () => {
 			const requests = hub();
 			picker({ cancel: true });
@@ -165,7 +175,10 @@ describe("recordings store", () => {
 			);
 			if (pickOpts !== undefined && "closeFails" in pickOpts)
 				expect(state.writable?.aborted).toBe(true);
-			if ("stop" in hubOpts) expect(requests.some((r) => r.includes("/cast"))).toBe(false);
+			if ("stop" in hubOpts) {
+				expect(requests.some((r) => r.includes("/cast"))).toBe(false);
+				expect(state.writable?.aborted).toBe(true);
+			}
 		});
 
 		// (f)
@@ -264,17 +277,41 @@ describe("recordings store", () => {
 			expect(store.open.has("ended")).toBe(false);
 		});
 
-		// AC-UI-CAP. Mutation caught: a refusal ignored.
-		it("says when a terminal was not recorded for lack of space", () => {
+		// AC-UI-CAP. Mutation caught: a refusal ignored, or a toast that does not name the terminal.
+		it("says which terminal was not recorded for lack of space", () => {
 			hub();
 			useRecordingsStore().onState({
 				type: "RECORDING_STATE",
 				channelId: "ch-1",
 				recordingId: null,
+				title: "build",
 				refused: "cap",
 			});
-			expect(useToastStore().messages.at(-1)?.text).toContain(
-				"recordings take all the space allowed",
+			expect(useToastStore().messages.at(-1)?.text).toBe(
+				"“build” was not recorded: recordings take all the space allowed. Save or discard some in Recordings.",
+			);
+		});
+
+		// K1/CONC2: an older list answer arriving last changes nothing.
+		it("drops a list answer older than one already applied", async () => {
+			const answers: Array<(r: Response) => void> = [];
+			mocks.hubFetch.mockImplementation(() => new Promise((resolve) => answers.push(resolve)));
+			const store = useRecordingsStore();
+			const older = store.refresh();
+			const newer = store.refresh();
+			answers[1]?.(Response.json({ recordings: [], used_bytes: 0, cap_bytes: 1 }));
+			await newer;
+			answers[0]?.(Response.json({ recordings: [row()], used_bytes: 0, cap_bytes: 1 }));
+			await older;
+			expect(store.rows).toEqual([]);
+			expect(store.open.has("ch-1")).toBe(false);
+		});
+
+		it("says so when the hub does not answer a start", async () => {
+			mocks.hubFetch.mockRejectedValue(new TypeError("network"));
+			await useRecordingsStore().start("ch-1");
+			expect(useToastStore().messages.at(-1)?.text).toBe(
+				"The recording could not start: the hub did not answer.",
 			);
 		});
 	});

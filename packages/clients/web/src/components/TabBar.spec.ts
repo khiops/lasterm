@@ -477,3 +477,21 @@ describe("TabBar, when a tab closes under the menu or a drag", () => {
 		expect(reorderTab).not.toHaveBeenCalled();
 	});
 });
+
+// AC-UI-MENU (#80): a tab whose terminal records shows a dot. Mutation caught: the dot not following the store.
+describe("TabBar recording dot", () => {
+	it("marks the tab whose terminal records", async () => {
+		mountBar(["t0", "t1"]);
+		const { useRecordingsStore } = await import("../stores/recordings.js");
+		expect(tab("t1").querySelector(".tab__rec-dot")).toBeNull();
+		useRecordingsStore().open = new Map([
+			[
+				"ch-t1",
+				{ recordingId: "01REC", title: "t", hostLabel: "h", startedAt: "2026-11-22T10:00:00.000Z" },
+			],
+		]);
+		await nextTick();
+		expect(tab("t1").querySelector(".tab__rec-dot")).not.toBeNull();
+		expect(tab("t0").querySelector(".tab__rec-dot")).toBeNull();
+	});
+});

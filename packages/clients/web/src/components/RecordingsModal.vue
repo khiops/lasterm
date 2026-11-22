@@ -30,7 +30,12 @@
 								{{ row.host_label }} · {{ started(row.started_at) }} · {{ duration(row.duration_ms) }} · {{ size(row.bytes) }}
 							</span>
 						</div>
-						<div class="rec-row__actions">
+						<div v-if="discarding === row.id" class="rec-row__actions rec-row__confirm" role="group" :aria-label="`Discard ${row.title || 'Terminal'}?`">
+							<span class="rec-row__ask">Delete it from this computer? This cannot be undone.</span>
+							<button ref="confirmButton" class="btn btn-danger" @click="confirmDiscard(row)">Discard</button>
+							<button class="btn btn-secondary" @click="discarding = null">Keep</button>
+						</div>
+						<div v-else class="rec-row__actions">
 							<button class="btn btn-secondary" @click="replay(row)">Replay</button>
 							<button class="btn btn-primary" @click="save(row)">Save…</button>
 							<button class="btn btn-secondary" @click="askDiscard(row)">Discard</button>
@@ -50,26 +55,18 @@
 			</div>
 		</div>
 
-		<ConfirmDialog
-			:visible="discarding !== null"
-			title="Discard this recording?"
-			:message="`“${discarding?.title || 'Terminal'}” on ${discarding?.host_label ?? ''} will be deleted from this computer. This cannot be undone.`"
-			confirm-label="Discard"
-			@confirm="confirmDiscard"
-			@cancel="discarding = null"
-		/>
-		<CastPlayer v-if="playing" :text="playing.text" :title="playing.title" @close="playing = null" />
+		<CastPlayer v-if="playing" :chunks="playing.chunks" :title="playing.title" @close="playing = null" />
 	</Teleport>
 </template>
 
 <script setup lang="ts">
 import { CAST_FILE_MAX_BYTES } from "@lasterm/shared";
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { useModalFocus } from "../composables/useModalFocus.js";
 import { type RecordingRow, useRecordingsStore } from "../stores/recordings.js";
 import { useToastStore } from "../stores/toast.js";
+import { fileChunks } from "../utils/cast-parse.js";
 import CastPlayer from "./CastPlayer.vue";
-import ConfirmDialog from "./ConfirmDialog.vue";
 
 const emit = defineEmits<{ close: [] }>();
 
@@ -77,18 +74,32 @@ const recordings = useRecordingsStore();
 const root = ref<HTMLElement | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 const fileError = ref<string | null>(null);
-const discarding = ref<RecordingRow | null>(null);
-const playing = ref<{ text: string; title: string } | null>(null);
+/** The row asking whether to discard it, inline: no dialog over the dialog. */
+const discarding = ref<string | null>(null);
+const confirmButton = ref<HTMLButtonElement[] | HTMLButtonElement | null>(null);
+const playing = ref<{ chunks: () => AsyncIterable<string>; title: string } | null>(null);
+const opened = ref(false);
+let returnTo: Element | null = null;
 
 const full = computed(() => recordings.capBytes > 0 && recordings.usedBytes >= recordings.capBytes);
 
 const { onKeydown } = useModalFocus({
-	open: () => playing.value === null && discarding.value === null,
+	open: () => opened.value,
 	root,
-	close: () => emit("close"),
+	close: () => {
+		if (playing.value === null) emit("close");
+	},
 });
 
-onMounted(() => void recordings.refresh());
+onMounted(() => {
+	returnTo = document.activeElement;
+	opened.value = true;
+	void recordings.refresh();
+});
+
+onUnmounted(() => {
+	if (returnTo instanceof HTMLElement && returnTo.isConnected) returnTo.focus();
+});
 
 function size(bytes: number): string {
 	if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
@@ -108,12 +119,9 @@ function started(iso: string): string {
 	return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-async function replay(row: RecordingRow): Promise<void> {
-	try {
-		playing.value = { text: await recordings.castText(row.id), title: row.title || "Terminal" };
-	} catch {
-		useToastStore().show("error", "The recording could not be read.");
-	}
+/** The player reads the export part by part, with GETs only: replaying never stops a recording. */
+function replay(row: RecordingRow): void {
+	playing.value = { chunks: () => recordings.castParts(row.id), title: row.title || "Terminal" };
 }
 
 /** The save dialog opens in this click, before any request. */
@@ -122,13 +130,16 @@ function save(row: RecordingRow): void {
 }
 
 function askDiscard(row: RecordingRow): void {
-	discarding.value = row;
+	discarding.value = row.id;
+	void nextTick(() => {
+		const button = Array.isArray(confirmButton.value) ? confirmButton.value[0] : confirmButton.value;
+		button?.focus();
+	});
 }
 
-async function confirmDiscard(): Promise<void> {
-	const row = discarding.value;
+async function confirmDiscard(row: RecordingRow): Promise<void> {
 	discarding.value = null;
-	if (row && !(await recordings.discard(row.id))) {
+	if (!(await recordings.discard(row.id))) {
 		useToastStore().show("error", "The recording could not be discarded.");
 	}
 }
@@ -143,7 +154,7 @@ async function onFile(event: Event): Promise<void> {
 		fileError.value = "This file is larger than 1 GiB";
 		return;
 	}
-	playing.value = { text: await file.text(), title: file.name };
+	playing.value = { chunks: () => fileChunks(file), title: file.name };
 }
 </script>
 
@@ -254,8 +265,19 @@ async function onFile(event: Event): Promise<void> {
 
 .rec-row__actions {
 	display: flex;
+	align-items: center;
 	gap: 6px;
 	flex-shrink: 0;
+}
+
+.rec-row__ask {
+	font-size: 12px;
+	color: var(--nt-text-secondary);
+}
+
+.btn-danger {
+	background: var(--nt-red, #e06c75);
+	color: #fff;
 }
 
 .rec-empty {

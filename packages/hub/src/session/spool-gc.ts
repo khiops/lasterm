@@ -383,11 +383,6 @@ export class SpoolGarbageCollector {
 		}
 	}
 
-	/**
-	 * Give the freed pages back, a bounded step at a time, and say how many are
-	 * still free. A database whose auto_vacuum is not incremental frees
-	 * nothing: stop when nothing moves.
-	 */
 	/** Delete one marked recording's blocks, a bounded batch per step, its row with the last. */
 	private async collectRecording(slicer: Slicer, stats: GcPassStats, id: string): Promise<void> {
 		const recordings = this.recordings;
@@ -400,6 +395,11 @@ export class SpoolGarbageCollector {
 		}
 	}
 
+	/**
+	 * Give the freed pages back, a bounded step at a time, and say how many are
+	 * still free. A database whose auto_vacuum is not incremental frees
+	 * nothing: stop when nothing moves.
+	 */
 	private async vacuum(slicer: Slicer): Promise<number> {
 		let free = Number.POSITIVE_INFINITY;
 		for (;;) {

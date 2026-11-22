@@ -18,7 +18,7 @@ export const NOT_A_CAST = "Not an asciicast v2 or v3 file";
 
 const SIZE = /^(\d+)x(\d+)$/;
 
-function validSize(cols: unknown, rows: unknown): cols is number {
+function validSize(cols: unknown, rows: unknown): boolean {
 	return (
 		typeof cols === "number" &&
 		typeof rows === "number" &&
@@ -31,85 +31,164 @@ function validSize(cols: unknown, rows: unknown): cols is number {
 	);
 }
 
-/**
- * Read an asciicast v3 or v2 file (#80). v2's absolute times become delays
- * (a time below the previous one is a delay of 0). Positions are kept before
- * filtering: an `i` event or an unknown code is skipped and its delay added to
- * the next kept event. Blank lines and v3 `#` comments are skipped. A header
- * or a size outside 1–500 columns and rows, a malformed line or a bad `r`
- * value make the whole file unreadable, before any terminal is built.
- */
-export function parseCast(text: string): ParsedCast | { error: string } {
-	const lines = text.split(/\r?\n/);
-	let header: Record<string, unknown>;
-	try {
-		header = JSON.parse(lines[0] ?? "") as Record<string, unknown>;
-	} catch {
-		return { error: NOT_A_CAST };
-	}
-	if (header === null || typeof header !== "object") return { error: NOT_A_CAST };
-	const version = header.version;
-	let cols: unknown;
-	let rows: unknown;
-	if (version === 3) {
-		const term = header.term as Record<string, unknown> | undefined;
-		cols = term?.cols;
-		rows = term?.rows;
-	} else if (version === 2) {
-		cols = header.width;
-		rows = header.height;
-	} else {
-		return { error: NOT_A_CAST };
-	}
-	if (!validSize(cols, rows)) return { error: NOT_A_CAST };
+class NotACast extends Error {}
 
-	const events: CastEvent[] = [];
-	let carried = 0;
-	let previousTime = 0;
-	for (let i = 1; i < lines.length; i++) {
-		const line = lines[i] as string;
-		if (line.trim() === "") continue;
-		if (version === 3 && line.startsWith("#")) continue;
+/**
+ * Reads an asciicast v3 or v2 file chunk by chunk (#80), so a file of any
+ * size the player accepts is never held as one string. Each event line is
+ * `[time, code, data]`, exactly three elements, `data` a string. v3 delays are
+ * never negative; v2's absolute times become delays (a time below the
+ * previous one is a delay of 0, and the next delay counts from it). Positions
+ * are kept before filtering: an `i` event or an unknown code is skipped and
+ * its delay added to the next kept event. Blank lines and v3 `#` comments are
+ * skipped. A header or a size outside 1–500 columns and rows, a malformed line
+ * or a bad `r` value make the whole file unreadable, before any terminal is
+ * built.
+ */
+export class CastParser {
+	private rest = "";
+	private header: { version: 2 | 3; cols: number; rows: number; title: string | null } | null =
+		null;
+	private readonly events: CastEvent[] = [];
+	private carried = 0;
+	private previousTime = 0;
+	private failed = false;
+
+	/** Feed the next chunk of text. */
+	push(chunk: string): void {
+		if (this.failed) return;
+		const text = this.rest + chunk;
+		const lines = text.split(/\r?\n/);
+		this.rest = lines.pop() ?? "";
+		try {
+			for (const line of lines) this.line(line);
+		} catch (err) {
+			if (!(err instanceof NotACast)) throw err;
+			this.failed = true;
+		}
+	}
+
+	/** The cast, or why it cannot be read. */
+	finish(): ParsedCast | { error: string } {
+		if (!this.failed && this.rest !== "") {
+			try {
+				this.line(this.rest);
+			} catch (err) {
+				if (!(err instanceof NotACast)) throw err;
+				this.failed = true;
+			}
+			this.rest = "";
+		}
+		if (this.failed || this.header === null) return { error: NOT_A_CAST };
+		return {
+			cols: this.header.cols,
+			rows: this.header.rows,
+			title: this.header.title,
+			events: this.events,
+		};
+	}
+
+	private line(line: string): void {
+		if (this.header === null) {
+			this.readHeader(line);
+			return;
+		}
+		if (line.trim() === "") return;
+		if (this.header.version === 3 && line.startsWith("#")) return;
 		let event: unknown;
 		try {
 			event = JSON.parse(line);
 		} catch {
-			return { error: NOT_A_CAST };
+			throw new NotACast();
 		}
 		if (
 			!Array.isArray(event) ||
-			event.length < 3 ||
+			event.length !== 3 ||
 			typeof event[0] !== "number" ||
-			typeof event[1] !== "string"
+			!Number.isFinite(event[0]) ||
+			typeof event[1] !== "string" ||
+			typeof event[2] !== "string"
 		) {
-			return { error: NOT_A_CAST };
+			throw new NotACast();
 		}
-		const [time, code, data] = event as [number, string, unknown];
-		if (!Number.isFinite(time)) return { error: NOT_A_CAST };
+		const [time, code, data] = event as [number, string, string];
 		let delay: number;
-		if (version === 3) {
-			delay = Math.max(0, time);
+		if (this.header.version === 3) {
+			if (time < 0) throw new NotACast();
+			delay = time;
 		} else {
-			delay = Math.max(0, time - previousTime);
-			previousTime = Math.max(previousTime, time);
+			delay = Math.max(0, time - this.previousTime);
+			this.previousTime = time;
 		}
 		if (code !== "o" && code !== "r" && code !== "m" && code !== "x") {
-			carried += delay;
-			continue;
+			this.carried += delay;
+			return;
 		}
-		const value = typeof data === "number" ? String(data) : data;
-		if (typeof value !== "string") return { error: NOT_A_CAST };
 		if (code === "r") {
-			const match = SIZE.exec(value);
-			if (!match || !validSize(Number(match[1]), Number(match[2]))) return { error: NOT_A_CAST };
+			const match = SIZE.exec(data);
+			if (!match || !validSize(Number(match[1]), Number(match[2]))) throw new NotACast();
 		}
-		events.push({ d: carried + delay, c: code, t: value });
-		carried = 0;
+		this.events.push({ d: this.carried + delay, c: code, t: data });
+		this.carried = 0;
 	}
-	return {
-		cols: cols as number,
-		rows: rows as number,
-		title: typeof header.title === "string" ? header.title : null,
-		events,
-	};
+
+	private readHeader(line: string): void {
+		let header: unknown;
+		try {
+			header = JSON.parse(line);
+		} catch {
+			throw new NotACast();
+		}
+		if (header === null || typeof header !== "object") throw new NotACast();
+		const h = header as Record<string, unknown>;
+		let cols: unknown;
+		let rows: unknown;
+		if (h.version === 3) {
+			const term = h.term as Record<string, unknown> | undefined;
+			cols = term?.cols;
+			rows = term?.rows;
+		} else if (h.version === 2) {
+			cols = h.width;
+			rows = h.height;
+		} else {
+			throw new NotACast();
+		}
+		if (!validSize(cols, rows)) throw new NotACast();
+		this.header = {
+			version: h.version as 2 | 3,
+			cols: cols as number,
+			rows: rows as number,
+			title: typeof h.title === "string" ? h.title : null,
+		};
+	}
+}
+
+/** Read a whole cast held as one string (small casts, tests). */
+export function parseCast(text: string): ParsedCast | { error: string } {
+	const parser = new CastParser();
+	parser.push(text);
+	return parser.finish();
+}
+
+/** Read a cast from chunks as they arrive: parts from the hub, or a file's stream. */
+export async function parseCastChunks(
+	chunks: AsyncIterable<string>,
+): Promise<ParsedCast | { error: string }> {
+	const parser = new CastParser();
+	for await (const chunk of chunks) parser.push(chunk);
+	return parser.finish();
+}
+
+/** A file's text, chunk by chunk, never whole. */
+export async function* fileChunks(file: Blob): AsyncGenerator<string> {
+	const reader = file.stream().pipeThrough(new TextDecoderStream()).getReader();
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) return;
+			yield value;
+		}
+	} finally {
+		reader.releaseLock();
+	}
 }

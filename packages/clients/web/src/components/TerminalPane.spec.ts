@@ -2733,6 +2733,8 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 		await settle();
 
 		expect(searchShown()).toBe(false);
+		// Past the 300 ms a "fade" would clear after.
+		await vi.advanceTimersByTimeAsync(400);
 		expect(addon.clearDecorations).not.toHaveBeenCalled();
 		expect(searchInput()?.value).toBe("needle");
 	});
@@ -4143,6 +4145,7 @@ describe("TerminalPane follows the setting over an end it found (#592)", () => {
 
 		expect(useNotificationStore().bellCounts.get(T)).toBeUndefined();
 		expect(bellSound).toHaveBeenCalledTimes(1);
+		expect(bellSound).toHaveBeenCalledWith({ sound: "system" });
 	});
 
 	it("counts a badge for a bell when the profile turns the badge on", async () => {

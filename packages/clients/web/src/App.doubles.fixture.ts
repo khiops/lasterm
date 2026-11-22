@@ -263,6 +263,14 @@ export class FakeHub {
 				this.channels.filter((c) => hostId === null || c.hostId === hostId).map(channelListing),
 			);
 		}
+		if (method === "DELETE" && path === "/api/channels/dead") {
+			const hostId = (body as { host_id?: string } | undefined)?.host_id;
+			const purged = this.channels
+				.filter((c) => c.status === "dead" && (hostId === undefined || c.hostId === hostId))
+				.map((c) => c.id);
+			this.channels = this.channels.filter((c) => !purged.includes(c.id));
+			return json({ ok: true, purged: purged.length, purged_ids: purged });
+		}
 		if (method === "DELETE" && parts[1] === "channels" && parts.length === 3) {
 			this.channels = this.channels.filter((c) => c.id !== parts[2]);
 			return json({ ok: true });

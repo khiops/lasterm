@@ -295,7 +295,7 @@ NODE-SQLITE (#893).
   started just before can still be starting.
 - **The hub goes by the exit status, and words its answer by the line.** `/api/quit` answers 200
   either way, with "Local agent stopped" or "No local agent was running". The remote callers of
-  `--stop` (a refused socket forward, stop-keeping, Replace) count both as the daemon being gone.
+  `--stop` (stop-keeping, Replace) count both as the daemon being gone.
 
 ## UPLOAD-RESUME-CLIENT — a resume after a restart starts from a click, checks every file, and asks before resending a changed one (#837, 2026-11-06)
 
@@ -663,6 +663,15 @@ table (APP-SHORTCUTS), which the window and the terminals still both read. The r
 - It registers only in a browser, in a secure context, and a browser registers none over a certificate error, so with the hub's generated certificate the web UI stays an ordinary tab. Installing it takes an operator certificate from a CA the browser trusts, and a fixed port (SPEC.md § 3.4).
 
 ---
+
+## REMOTE-DAEMON-RELAY — a daemon the SSH channel cannot reach goes through a relay (#755, 2026-11-22)
+
+- Where the SSH server refuses `direct-streamlocal` (`DisableForwarding`, `AllowStreamLocalForwarding no`, a key's `restrict`), the hub runs `lasterm-agent --attach` in an exec channel. It connects to the daemon's socket as the account and copies bytes both ways, as Docker's `docker system dial-stdio` does for `ssh://` hosts.
+- Chosen over loopback TCP with `direct-tcpip`, which any local account could reach and which forwarding refusals block too. Also chosen over AF_UNIX on Windows, which depends on Win32-OpenSSH serving `direct-streamlocal` and does nothing for hardened hosts.
+- The channel stays first where it works: it needs no process on the host. Only a proven refusal (the channel type refused outright, or the socket seen listening and the channel still failing) is remembered, so that a first connection to a stopped daemon on a host without `/proc/net/unix` does not mark a working server as refusing.
+- The hub decides by the relay's `lasterm-attach:` lines on stderr, never by its exit status: a PowerShell `DefaultShell` turns every non-zero status into 1.
+- A relay failure fails the connection. It never falls back to stdio: on a reconnection that would start new shells under the ids of terminals the daemon still holds.
+- "Keep the agent left here and connect" deploys nothing, so its relay runs only an agent it verified: the file the deploy would use, accepted with the deploy's own priority (this hub's agent when it has one, else the pin or the hash trusted this session), never the bare `lasterm-agent` of PATH (#43).
 
 ## REMOTE-DAEMON — a remote agent that outlives its SSH connection, on request (#79, 2026-09-22)
 

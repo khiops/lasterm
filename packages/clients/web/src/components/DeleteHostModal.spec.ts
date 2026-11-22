@@ -9,6 +9,7 @@ import type { Host } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick, ref } from "vue";
+import { useChannelsStore } from "../stores/channels.js";
 import { useHostsStore } from "../stores/hosts.js";
 import DeleteHostModal from "./DeleteHostModal.vue";
 
@@ -219,6 +220,77 @@ describe("DeleteHostModal hub consent (#910)", () => {
 		expect(onDeleted).not.toHaveBeenCalled();
 		expect(onClose).not.toHaveBeenCalled();
 	});
+	// D7 (#957): what the dialog says before the hub has answered.
+	it("D7 opens with its own sentence and the label, and ignores the client's channels", async () => {
+		const fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValueOnce(new Response(null, { status: 204 }));
+		const { onClose } = mountModal("nas");
+		useChannelsStore().channelHostMap = new Map([["01K580CHAN0000000000000001", "nas"]]);
+		useChannelsStore().channels = [
+			{
+				id: "01K580CHAN0000000000000001",
+				sessionId: "session-1",
+				cols: 80,
+				rows: 24,
+				status: "live",
+				createdAt: STAMP,
+				updatedAt: STAMP,
+			},
+		];
+		await nextTick();
+		expect(
+			document.body.querySelector(".confirm-text")?.textContent?.replace(/\s+/g, " ").trim(),
+		).toBe("Are you sure you want to delete NAS?");
+		expect(document.body.querySelector(".confirm-text strong")?.textContent).toBe("NAS");
+		expect(input()).toBeNull();
+		expect(button().disabled).toBe(false);
+		await clickDelete();
+		expect(fetchSpy.mock.calls[0]?.[0]).toBe("/api/hosts/nas");
+		expect(onClose).toHaveBeenCalledOnce();
+	});
+
+	it("D7 shows HOST_BUSY as the hub's message, with no label to type", async () => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+			refusal(409, "HOST_BUSY", "This host's agent is being stopped."),
+		);
+		mountModal();
+		await clickDelete();
+		expect(alert()?.textContent).toBe("This host's agent is being stopped.");
+		expect(input()).toBeNull();
+		expect(document.body.querySelector(".warning-text")).toBeNull();
+	});
+
+	it.each([
+		["a count that is a string", { terminals: "2" }],
+		["no count", {}],
+		["a count that is null", { terminals: null }],
+	])("D7 does not ask for the label when TERMINALS_WOULD_END carries %s", async (_, counts) => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+			new Response(
+				JSON.stringify({ error: { code: "TERMINALS_WOULD_END", message: "hub count", ...counts } }),
+				{ status: 409 },
+			),
+		);
+		mountModal();
+		await clickDelete();
+		expect(input()).toBeNull();
+		expect(alert()?.textContent).toBe("hub count");
+	});
+
+	it.each([" NAS", "NAS ", " NAS ", "nas"])(
+		"D7 keeps Delete disabled for %j, which is not the label as it is",
+		async (typed) => {
+			vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(counted(1));
+			mountModal("nas");
+			await clickDelete();
+			input()!.value = typed;
+			input()!.dispatchEvent(new Event("input"));
+			await nextTick();
+			expect(button().disabled).toBe(true);
+		},
+	);
+
 	it("V4 shows an upload refusal without asking for the label", async () => {
 		vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
 			refusal(409, "TRANSFERS_RUNNING", "Wait for the upload."),

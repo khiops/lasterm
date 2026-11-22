@@ -630,6 +630,35 @@ describe("holding the host's connection", () => {
 			expect(s.service.activeOn("01HZ0000000000000000000HO1")).toBe(0);
 		}));
 
+	// What DELETE /api/hosts/:id asks through this count (#910, #957): a start
+	// still being prepared and files that are only queued hold the host as well.
+	it("counts a start still being prepared, before its upload exists", () =>
+		on(LOCAL_BACKEND, async (h, s) => {
+			let open!: () => void;
+			const gate = new Promise<void>((resolve) => {
+				open = resolve;
+			});
+			s.world.wrap = () => ({
+				freeSpace: async () => {
+					await gate;
+					return { available: 1e12, total: 1e12 };
+				},
+			});
+			const starting = startUpload(s, h.dir, [file("x", content("x"))]);
+			expect(s.service.activeOn("01HZ0000000000000000000HO1")).toBe(1);
+			expect(s.service.activeOn("01HZ0000000000000000000HO2")).toBe(0);
+			open();
+			await starting;
+		}));
+
+	it("counts an upload whose files are all still queued", () =>
+		on(LOCAL_BACKEND, async (h, s) => {
+			s.world.maxConcurrent = 0;
+			const { transferId } = await startUpload(s, h.dir, [file("x", content("x"))]);
+			expect(itemOf(s, transferId, "x")).toMatchObject({ state: "queued" });
+			expect(s.service.activeOn("01HZ0000000000000000000HO1")).toBe(1);
+		}));
+
 	it("interrupts what runs when the connection is closed on purpose, and resumes it on a retry", () =>
 		on(sftpBackend("posix", ["hardlink@openssh.com"]), async (h, s) => {
 			const big = content("big", 300_000);

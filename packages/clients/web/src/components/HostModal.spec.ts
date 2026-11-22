@@ -387,6 +387,19 @@ describe("HostModal for an SSH host", () => {
 });
 
 describe("HostModal on a host whose SSH server refuses socket forwarding (#765)", () => {
+	it("says the agent is reached through a relay and its terminals outlive the connection (#755)", async () => {
+		mountModal(SSH);
+		useHostsStore().rememberSocketForwardingRefused(SSH.id, true);
+		await nextTick();
+
+		const note = [...document.body.querySelectorAll(".auth-note")]
+			.map((p) => p.textContent?.replace(/\s+/g, " ").trim() ?? "")
+			.find((text) => text.includes("refuses socket forwarding"));
+		expect(note).toBe(
+			"This host's SSH server refuses socket forwarding (AllowStreamLocalForwarding or DisableForwarding in its sshd_config). Lasterm reaches the agent through a relay over the SSH command channel instead: one more process on the host while connected. Its terminals still outlive the connection. See Configuring an SSH server for Lasterm.",
+		);
+	});
+
 	it("links to the guide to configuring an SSH server for Lasterm", async () => {
 		mountModal(SSH);
 		useHostsStore().rememberSocketForwardingRefused(SSH.id, true);

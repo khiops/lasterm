@@ -38,25 +38,27 @@ export function registerChannelRoutes(
 		},
 	);
 
-	// DELETE /api/channels/dead — bulk delete all dead channels (optionally scoped to a host)
+	// DELETE /api/channels/dead — bulk delete all dead channels (optionally scoped to a host).
+	// The answer names the ids it deleted: a client removes exactly those (#1108).
+	// A dead terminal being started again is not one of them: its row is the
+	// one its SPAWN_OK brings back (#1118).
 	// MUST be registered before /:id routes to avoid matching as a channel ID param.
 	server.delete<{ Body: { host_id?: string } }>("/api/channels/dead", async (request, reply) => {
 		const { host_id } = request.body ?? {};
 
-		let deadChannelIds: string[];
-		if (host_id) {
-			const allChannels = metaDal.listChannelsOnHost(host_id);
-			deadChannelIds = allChannels.filter((c) => c.status === "dead").map((c) => c.id);
-		} else {
-			const allChannels = metaDal.listChannels();
-			deadChannelIds = allChannels.filter((c) => c.status === "dead").map((c) => c.id);
-		}
+		const deadChannelIds = metaDal
+			.listDeadChannelIds(host_id || undefined)
+			.filter((id) => !sessionManager.isChannelStarting(id));
 
 		for (const id of deadChannelIds) metaDal.deleteChannel(id);
 		// Their output follows in bounded batches, after the answer (#786).
 		if (deadChannelIds.length > 0) void sessionManager.purgeChannelOutput(deadChannelIds);
 
-		return reply.code(200).send({ ok: true, purged: deadChannelIds.length });
+		return reply.code(200).send({
+			ok: true,
+			purged: deadChannelIds.length,
+			purged_ids: deadChannelIds,
+		});
 	});
 
 	// GET /api/channels/:id
@@ -258,6 +260,12 @@ export function registerChannelRoutes(
 		// whole history froze the hub on a spool grown before #785 (#786). If
 		// the hub stops first, a GC pass finds it orphaned and deletes it.
 		if (channel.status === "dead") {
+			// Being started again: its SPAWN_OK needs this row (#1118).
+			if (sessionManager.isChannelStarting(id)) {
+				return reply.code(409).send({
+					error: { code: "CHANNEL_STARTING", message: "That terminal is being started again." },
+				});
+			}
 			metaDal.deleteChannel(id);
 			void sessionManager.purgeChannelOutput([id]);
 			return reply.code(200).send({ ok: true, purged: true });

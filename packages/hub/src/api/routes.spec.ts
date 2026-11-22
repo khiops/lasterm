@@ -1548,7 +1548,12 @@ describe("purging a dead channel's output (#786)", () => {
 			payload: { host_id: hostId },
 		});
 		expect(res.statusCode).toBe(200);
-		expect(res.json()).toEqual({ ok: true, purged: 2 });
+		const body = res.json<{ purged_ids: string[] }>();
+		expect({ ...body, purged_ids: [...body.purged_ids].sort() }).toEqual({
+			ok: true,
+			purged: 2,
+			purged_ids: [deadA, deadB].sort(),
+		});
 
 		await vi.waitFor(
 			() => {
@@ -3070,7 +3075,13 @@ describe("a host's terminals across its sessions (#911)", () => {
 		});
 
 		expect(res.statusCode).toBe(200);
-		expect(res.json()).toEqual({ ok: true, purged: 2 });
+		// Exactly the channels the hub deleted (#1108).
+		const body = res.json<{ purged_ids: string[] }>();
+		expect({ ...body, purged_ids: [...body.purged_ids].sort() }).toEqual({
+			ok: true,
+			purged: 2,
+			purged_ids: [C0, C1],
+		});
 		expect([C0, C1, C2, C3].map((id) => dal.getChannel(id)?.status ?? "gone")).toEqual([
 			"gone",
 			"gone",
@@ -3085,6 +3096,50 @@ describe("a host's terminals across its sessions (#911)", () => {
 			],
 		);
 	});
+
+	// Wrong implementation: the all-hosts branch answers no ids, or another host's (#1108).
+	it("DELETE /api/channels/dead without a host_id names every host's dead terminals (#1108)", async () => {
+		twoHosts({ c0: "dead", c1: "dead", c2: "live" });
+
+		const res = await server.inject({ method: "DELETE", url: "/api/channels/dead" });
+
+		expect(res.statusCode).toBe(200);
+		const body = res.json<{ purged_ids: string[] }>();
+		expect({ ...body, purged_ids: [...body.purged_ids].sort() }).toEqual({
+			ok: true,
+			purged: 3,
+			purged_ids: [C0, C1, C3],
+		});
+		expect(dal.getChannel(C2)?.status).toBe("live");
+	});
+
+	// Wrong implementation: either branch reads every channel and keeps the
+	// dead ones itself (41 rows read, not 1) (#1119).
+	it.each([
+		["with a host_id", true],
+		["without one", false],
+	])(
+		"DELETE /api/channels/dead %s reads only the dead terminals' rows (#1119)",
+		async (_, scoped) => {
+			const h = host("h");
+			session(S1, h, "active");
+			channel(C1, S1, "dead");
+			for (let n = 10; n < 50; n++) channel(`01K1119CHANNEL000000000L${n}`, S1, "live");
+			const all = vi.spyOn(Statement.prototype, "all");
+			try {
+				const res = await server.inject({
+					method: "DELETE",
+					url: "/api/channels/dead",
+					...(scoped && { payload: { host_id: h } }),
+				});
+				expect(res.json()).toEqual({ ok: true, purged: 1, purged_ids: [C1] });
+				const read = all.mock.results.reduce((sum, r) => sum + (r.value as unknown[]).length, 0);
+				expect(read).toBe(1);
+			} finally {
+				all.mockRestore();
+			}
+		},
+	);
 
 	// Mutations: either route left on one channel query per session (H2's count
 	// 22 higher); a channel statement prepared once and run per session (22
@@ -3127,7 +3182,7 @@ describe("a host's terminals across its sessions (#911)", () => {
 				url: "/api/channels/dead",
 				payload: { host_id: h },
 			});
-			expect(res.json()).toEqual({ ok: true, purged: 0 });
+			expect(res.json()).toEqual({ ok: true, purged: 0, purged_ids: [] });
 		};
 
 		expect(await executions(list(h2))).toBe(await executions(list(h1)));

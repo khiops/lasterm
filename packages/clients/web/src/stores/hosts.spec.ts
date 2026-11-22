@@ -48,6 +48,54 @@ afterEach(() => {
 });
 
 describe("host delete consent (#910)", () => {
+	// D7 (#957): the URL a plain delete asks for, and the counts a hub's refusal may carry.
+	it.each([[undefined], [{}], [{ force: false }]])(
+		"puts no force in the URL when it is asked with %j",
+		async (options) => {
+			const store = load();
+			const fetchSpy = vi
+				.spyOn(globalThis, "fetch")
+				.mockResolvedValueOnce(new Response(null, { status: 204 }));
+			await store.deleteHost("pi", options);
+			expect(fetchSpy.mock.calls[0]?.[0]).toBe("/api/hosts/pi");
+		},
+	);
+
+	it.each([
+		["not numbers", { terminals: "2", unreachable: null }],
+		["absent", {}],
+	])("returns no counts from a refusal whose counts are %s", async (_, counts) => {
+		const store = load();
+		vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+			new Response(JSON.stringify({ error: { code: "HOST_BUSY", message: "busy", ...counts } }), {
+				status: 409,
+			}),
+		);
+		const answer = await store.deleteHost("pi");
+		expect(answer).toEqual({ ok: false, status: 409, code: "HOST_BUSY", message: "busy" });
+		expect(answer).not.toHaveProperty("terminals");
+		expect(answer).not.toHaveProperty("unreachable");
+	});
+
+	it.each([
+		["terminals alone", { terminals: 2, unreachable: "2" }, { terminals: 2 }],
+		["unreachable alone", { terminals: "2", unreachable: 2 }, { unreachable: 2 }],
+	])("keeps only the count that is a number: %s", async (_, counts, kept) => {
+		const store = load();
+		vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+			new Response(JSON.stringify({ error: { code: "HOST_BUSY", message: "busy", ...counts } }), {
+				status: 409,
+			}),
+		);
+		expect(await store.deleteHost("pi")).toEqual({
+			ok: false,
+			status: 409,
+			code: "HOST_BUSY",
+			message: "busy",
+			...kept,
+		});
+	});
+
 	it("sends force=true and preserves the hub's numerical counts", async () => {
 		const store = load();
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(

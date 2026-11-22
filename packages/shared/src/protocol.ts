@@ -794,8 +794,9 @@ export interface SessionStateMessage {
 	/**
 	 * Set only when the host keeps a daemon (#79) and this hub saw its SSH
 	 * server refuse the socket forwarding a daemon is reached through (#765).
-	 * The hub runs the agent on stdio there, so the host's terminals end with
-	 * its connection, and a client says so as a note on the host.
+	 * The hub reaches the daemon through a relay there, and the host's
+	 * terminals still outlive its connection (#755); a client says so as a
+	 * note on the host.
 	 */
 	socketForwardingRefused?: boolean;
 	/**

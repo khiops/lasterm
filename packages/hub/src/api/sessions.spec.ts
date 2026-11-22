@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
 import { ConfigResolver } from "../config.js";
 import type { ChannelLifecycleManager } from "../session/channel-lifecycle-manager.js";
+import { reconnectContextId } from "../session/prompt-context.js";
 import { captureQuitFence } from "../session/quit-fence.js";
 import {
 	REMOTE_STATE_DIR_COMMAND,
@@ -554,6 +555,438 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 	});
 });
 
+// What #910 decided about this route and no test held (#957): each case below
+// names the wrong implementation it turns red.
+describe("DELETE /api/hosts/:id, the decisions no test held (#957)", () => {
+	const internals = () =>
+		sm as unknown as {
+			ctx: SharedSessionContext;
+			retirement: { startOn(id: string): () => void };
+		};
+
+	function remove(query = "", id = hostId) {
+		return server.inject({ method: "DELETE", url: `/api/hosts/${id}${query}` });
+	}
+
+	const uploads = (count: number) =>
+		sm.setTransfers({ activeOn: (id) => (id === hostId ? count : 0), interruptOn: vi.fn() });
+
+	/** A channel the hub tracks for `on`, as liveTerminalsOn builds one. */
+	function trackChannel(channelId: string, on: string, status: "live" | "dead" | "orphan") {
+		internals().ctx.channels.set(channelId, {
+			sessionId: SESSION_ID,
+			hostId: on,
+			status,
+			clients: new Set(),
+			shell: "bash",
+			cols: 80,
+			rows: 24,
+			dynamicTitle: null,
+			processTitle: null,
+			displayTitle: "bash",
+		});
+	}
+
+	function logsOf(ctx: SharedSessionContext) {
+		const log = vi.fn();
+		ctx.hubLogger = { log } as never;
+		return () =>
+			log.mock.calls.filter(([, message]) => message === "session-manager: host deleted");
+	}
+
+	it("D1 answers an unknown id with its own code and message", async () => {
+		const response = await remove("", "01K580NOSUCHHOST000000000");
+		expect(response.statusCode).toBe(404);
+		expect(response.json()).toEqual({ error: { code: "NOT_FOUND", message: "Host not found" } });
+	});
+
+	// Wrong implementations: two steps swapped. Each case holds two refusing
+	// conditions at once and says which one answers.
+	it.each([
+		{
+			name: "404 before 400",
+			query: "?force=yes",
+			id: "01K580NOSUCHHOST000000000",
+			setup: () => {},
+			status: 404,
+			code: "NOT_FOUND",
+		},
+		{
+			name: "400 before quitting",
+			query: "?force=yes",
+			setup: () => sm.beginQuit(),
+			status: 400,
+			code: "VALIDATION_ERROR",
+		},
+		{
+			name: "quitting before busy",
+			query: "",
+			setup: () => {
+				sm.beginQuit();
+				internals().ctx.stoppingAgents.add(hostId);
+			},
+			status: 409,
+			code: "HUB_QUITTING",
+		},
+		{
+			name: "busy before uploads",
+			query: "",
+			setup: () => {
+				internals().ctx.stoppingAgents.add(hostId);
+				uploads(2);
+			},
+			status: 409,
+			code: "HOST_BUSY",
+		},
+		{
+			name: "uploads before terminals",
+			query: "",
+			setup: () => {
+				uploads(1);
+				liveTerminalOn(connectedAgent());
+			},
+			status: 409,
+			code: "TRANSFERS_RUNNING",
+		},
+	])("D1 order: $name", async ({ query, id, setup, status, code }) => {
+		setup();
+		const response = await remove(query, id);
+		expect(response.statusCode).toBe(status);
+		expect(response.json().error.code).toBe(code);
+		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+	});
+
+	it("D1 tells the marker before the starting hold when both are there", async () => {
+		internals().ctx.stoppingAgents.add(hostId);
+		const end = internals().retirement.startOn(hostId);
+		const response = await remove();
+		end();
+		expect(response.statusCode).toBe(409);
+		expect(response.json().error).toEqual({
+			code: "HOST_BUSY",
+			message: "This host's agent is being stopped.",
+		});
+	});
+
+	it("D1 lets running uploads win over force, and sends nothing to the terminals", async () => {
+		const agent = connectedAgent();
+		const { channelId, ctx } = liveTerminalOn(agent);
+		uploads(1);
+		const response = await remove("?force=true");
+		expect(response.statusCode).toBe(409);
+		expect(response.json().error).toEqual({
+			code: "TRANSFERS_RUNNING",
+			transfers: 1,
+			message:
+				"1 upload to this host is running. Wait for them to end or cancel them, then delete the host.",
+		});
+		expect(agent.sent).toEqual([]);
+		expect(ctx.channels.has(channelId)).toBe(true);
+		expect(new MetaDAL(dbs.meta).getChannel(channelId)).toBeDefined();
+		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+	});
+
+	it("D1 counts the uploads to a local host too", async () => {
+		hostId = new MetaDAL(dbs.meta).createHost({ type: "local", label: "this machine" }).id;
+		uploads(1);
+		const response = await remove();
+		expect(response.statusCode).toBe(409);
+		expect(response.json().error).toMatchObject({ code: "TRANSFERS_RUNNING", transfers: 1 });
+		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+	});
+
+	it.each(["", "?force=true"])(
+		"R4 says the hub is quitting in these words with %s",
+		async (query) => {
+			sm.beginQuit();
+			expect((await remove(query)).json().error).toEqual({
+				code: "HUB_QUITTING",
+				message: "The hub is quitting.",
+			});
+		},
+	);
+
+	it("D1 treats force=false as no force: a live terminal is asked about, and nothing is sent", async () => {
+		const agent = connectedAgent();
+		const { channelId, ctx } = liveTerminalOn(agent);
+		const response = await remove("?force=false");
+		expect(response.statusCode).toBe(409);
+		expect(response.json().error).toMatchObject({ code: "TERMINALS_WOULD_END", terminals: 1 });
+		expect(agent.sent).toEqual([]);
+		expect(ctx.channels.has(channelId)).toBe(true);
+		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeDefined();
+	});
+
+	describe("the answer", () => {
+		let announced: string[];
+		let other: FastifyInstance;
+
+		beforeEach(async () => {
+			announced = [];
+			other = Fastify({ logger: false });
+			// What the client is told, and when the answer is sent, in one list.
+			other.addHook("onSend", async (_request, _reply, payload) => {
+				announced.push("answer");
+				return payload;
+			});
+			registerHostRoutes(other, new MetaDAL(dbs.meta), sm, (scope) =>
+				announced.push(`announce:${scope}`),
+			);
+			await other.ready();
+		});
+
+		afterEach(async () => {
+			await other.close();
+		});
+
+		it("D1 announces the hosts before it answers, and answers with an empty 204", async () => {
+			const response = await other.inject({ method: "DELETE", url: `/api/hosts/${hostId}` });
+			expect(response.statusCode).toBe(204);
+			expect(response.body).toBe("");
+			expect(announced).toEqual(["announce:hosts", "answer"]);
+		});
+
+		it("D1 announces nothing for a refusal", async () => {
+			liveTerminalOn(connectedAgent());
+			const response = await other.inject({ method: "DELETE", url: `/api/hosts/${hostId}` });
+			expect(response.statusCode).toBe(409);
+			expect(announced).toEqual(["answer"]);
+		});
+	});
+
+	it("D1 returns its outcome at once: deleteHost is not a Promise, and the row is gone when it returns", () => {
+		const outcome = sm.deleteHost(hostId, { force: true });
+		expect(outcome).not.toBeInstanceOf(Promise);
+		expect(new MetaDAL(dbs.meta).getHost(hostId)).toBeUndefined();
+	});
+
+	// R3, as the hub holds a host busy (#957): each refusal leaves every row, on
+	// an SSH host and on a local one, whose daemon attach is under way.
+	describe.each([
+		["an ssh host", "ssh"],
+		["a local host", "local"],
+	] as const)("R3 on %s", (_, type) => {
+		it.each(["stop", "acquisition", "start", "attach"])(
+			"refuses while %s is held, with every row kept",
+			async (kind) => {
+				if (type === "local")
+					hostId = new MetaDAL(dbs.meta).createHost({ type: "local", label: "this machine" }).id;
+				const agent = connectedAgent();
+				const { channelId, ctx } = liveTerminalOn(agent);
+				const attach = (
+					sm as unknown as { agentMgr: { daemonAttachPromises: Map<string, unknown> } }
+				).agentMgr.daemonAttachPromises;
+				const end = kind === "start" ? internals().retirement.startOn(hostId) : () => {};
+				try {
+					if (kind === "stop") ctx.stoppingAgents.add(hostId);
+					if (kind === "acquisition") {
+						ctx.acquisitions.set(hostId, {
+							id: "held-acquisition",
+							hostId,
+							state: "CONNECTING",
+							controller: new AbortController(),
+							connectPromise: new Promise(() => {}),
+							_resolve: vi.fn(),
+							_reject: vi.fn(),
+							leases: new Set(),
+						});
+					}
+					if (kind === "attach") attach.set(hostId, new Promise(() => {}));
+					for (const query of ["", "?force=false", "?force=true"]) {
+						const response = await remove(query);
+						expect(response.statusCode).toBe(409);
+						expect(response.json().error.code).toBe("HOST_BUSY");
+					}
+					const dal = new MetaDAL(dbs.meta);
+					expect(dal.getHost(hostId)).toBeDefined();
+					expect(dal.getSession(SESSION_ID)).toBeDefined();
+					expect(dal.getChannel(channelId)).toBeDefined();
+					expect(agent.sent).toEqual([]);
+				} finally {
+					ctx.acquisitions.delete(hostId);
+					ctx.stoppingAgents.delete(hostId);
+					end();
+					attach.delete(hostId);
+				}
+			},
+		);
+	});
+
+	describe("D2, what it counts", () => {
+		it("counts neither a dead terminal nor another host's, and ends only the live ones of this host", async () => {
+			const agent = connectedAgent();
+			const { channelId, heard, ctx } = liveTerminalOn(agent);
+			const otherHost = new MetaDAL(dbs.meta).createHost({
+				type: "ssh",
+				label: "elsewhere",
+				sshHost: "x@elsewhere.test",
+			}).id;
+			trackChannel("01K580CHANDEAD0000000000001", hostId, "dead");
+			trackChannel("01K580CHANELSE0000000000001", otherHost, "live");
+			const refusal = await remove();
+			expect(refusal.statusCode).toBe(409);
+			expect(refusal.json().error).toMatchObject({ code: "TERMINALS_WOULD_END", terminals: 1 });
+			const logged = logsOf(ctx);
+			expect((await remove("?force=true")).statusCode).toBe(204);
+			// D3: a DESTROY for the live terminal only, and no report for the dead one.
+			expect(agent.sent).toEqual([{ type: "DESTROY", channelId }]);
+			expect(
+				heard
+					.filter((m) => m.type === "CHANNEL_STATE")
+					.map((m) => (m as { channelId: string }).channelId),
+			).toEqual([channelId]);
+			expect(ctx.channels.has("01K580CHANDEAD0000000000001")).toBe(false);
+			expect(ctx.channels.has("01K580CHANELSE0000000000001")).toBe(true);
+			expect(logged()).toEqual([
+				["info", "session-manager: host deleted", { hostId, ended: 1, unreachable: 0 }],
+			]);
+		});
+
+		it("calls a terminal unreachable when its agent is there but not connected", async () => {
+			const agent = connectedAgent();
+			liveTerminalOn(agent);
+			agent.connected = false;
+			const response = await remove();
+			expect(response.statusCode).toBe(409);
+			expect(response.json().error).toEqual({
+				code: "TERMINALS_WOULD_END",
+				terminals: 1,
+				unreachable: 1,
+				message:
+					"1 terminal on this host has not ended, and this hub is not connected to its agent: nothing can be sent to it, and it may keep running. Connecting the host first may reach it; or send force=true to delete it anyway.",
+			});
+		});
+	});
+
+	describe("D3, ending and deleting", () => {
+		it("R1 keeps the host's rows, its session and its terminal's row, when it refuses", async () => {
+			const { channelId } = liveTerminalOn(connectedAgent());
+			expect((await remove()).statusCode).toBe(409);
+			const dal = new MetaDAL(dbs.meta);
+			expect(dal.getChannel(channelId)).toMatchObject({ status: "live" });
+			expect(dal.getSession(SESSION_ID)).toBeDefined();
+		});
+
+		it("reports each unreachable terminal killed, once, and logs them as unreachable", async () => {
+			const agent = connectedAgent();
+			const { channelIds, heard, ctx } = liveTerminalsOn(agent, 2);
+			ctx.agents.delete(hostId);
+			const logged = logsOf(ctx);
+			expect((await remove("?force=true")).statusCode).toBe(204);
+			expect(agent.sent).toEqual([]);
+			for (const id of channelIds) {
+				expect(endsOf(heard, id)).toEqual([
+					expect.objectContaining({ status: "dead", endReason: "killed", sessionId: SESSION_ID }),
+				]);
+			}
+			expect(logged()).toEqual([
+				["info", "session-manager: host deleted", { hostId, ended: 0, unreachable: 2 }],
+			]);
+		});
+
+		it("takes each destroyed terminal out of the snapshot scheduler and the chunker", async () => {
+			const { channelIds, ctx } = liveTerminalsOn(connectedAgent(), 2);
+			const scheduler = vi.spyOn(ctx.scheduler, "untrackChannel");
+			const chunker = vi.spyOn(ctx.chunker, "untrackChannel");
+			expect((await remove("?force=true")).statusCode).toBe(204);
+			for (const id of channelIds) {
+				expect(scheduler).toHaveBeenCalledWith(id);
+				expect(chunker).toHaveBeenCalledWith(id);
+			}
+		});
+
+		// With a session entry, closing it calls the reconnect off as well; a host
+		// the hub reconnects to without one depends on deleteHost doing it.
+		it.each([
+			["with its session entry", true],
+			["with no session entry", false],
+		])("calls off a reconnect that was waiting, and one under way, %s", async (_, withSession) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const { ctx } = liveTerminalOn(connectedAgent());
+				if (!withSession) ctx.sessions.delete(hostId);
+				const fire = vi.fn();
+				ctx.reconnectTimers.set(hostId, setTimeout(fire, 5_000) as unknown as NodeJS.Timeout);
+				const underway = new AbortController();
+				ctx.reconnectAbortControllers.set(hostId, underway);
+				expect((await remove("?force=true")).statusCode).toBe(204);
+				expect(ctx.reconnectTimers.has(hostId)).toBe(false);
+				expect(ctx.reconnectAbortControllers.has(hostId)).toBe(false);
+				expect(underway.signal.aborted).toBe(true);
+				await vi.advanceTimersByTimeAsync(10_000);
+				expect(fire).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		it("reports the session closed, and closes its prompt contexts", async () => {
+			const { heard, ctx } = liveTerminalOn(connectedAgent());
+			const contextId = reconnectContextId(SESSION_ID);
+			ctx.promptContexts.set(contextId, {
+				id: contextId,
+				kind: "session",
+				hostId,
+				routeClientId: "c-window",
+				state: "OPEN",
+				prompts: new Set(),
+			});
+			heard.length = 0;
+			expect((await remove("?force=true")).statusCode).toBe(204);
+			const states = heard.filter((m) => m.type === "SESSION_STATE");
+			expect(states.at(-1)).toMatchObject({ sessionId: SESSION_ID, hostId, status: "closed" });
+			expect(states.filter((m) => (m as { status: string }).status === "closed")).toHaveLength(1);
+			expect(ctx.promptContexts.get(contextId)?.state ?? "CLOSED").toBe("CLOSED");
+		});
+
+		it("forgets, without a word, the terminals it finds when the host has no session entry", async () => {
+			const { heard, ctx } = liveTerminalOn(connectedAgent());
+			ctx.channels.clear();
+			ctx.sessions.delete(hostId);
+			trackChannel("01K580CHANDEAD0000000000002", hostId, "dead");
+			heard.length = 0;
+			expect((await remove("?force=true")).statusCode).toBe(204);
+			expect(ctx.channels.has("01K580CHANDEAD0000000000002")).toBe(false);
+			expect(heard).toEqual([]);
+		});
+
+		it("deletes its rows only after the connection is closed", async () => {
+			const agent = connectedAgent();
+			const { channelId } = liveTerminalOn(agent);
+			const dal = new MetaDAL(dbs.meta);
+			const atClose: { host: boolean; channel: boolean }[] = [];
+			vi.spyOn(agent, "close").mockImplementation(async () => {
+				atClose.push({
+					host: dal.getHost(hostId) !== undefined,
+					channel: dal.getChannel(channelId) !== undefined,
+				});
+				agent.connected = false;
+			});
+			expect((await remove("?force=true")).statusCode).toBe(204);
+			expect(atClose).toEqual([{ host: true, channel: true }]);
+			expect(dal.getHost(hostId)).toBeUndefined();
+		});
+
+		it("V2 logs a delete with nothing to end, and drops the host's secrets", async () => {
+			const ctx = internals().ctx;
+			const logged = logsOf(ctx);
+			ctx.passphraseCache.set(hostId, { secret: "secret", expiresAt: Infinity });
+			ctx.passphraseCache.set("other", { secret: "other", expiresAt: Infinity });
+			ctx.elevationCache.set(`${hostId}:window`, { secret: "secret", expiresAt: Infinity });
+			ctx.elevationCache.set("other:window", { secret: "other", expiresAt: Infinity });
+			ctx.trustedAgentSha256.set(hostId, "hash");
+			ctx.trustedAgentSha256.set("other", "other-hash");
+			expect((await remove()).statusCode).toBe(204);
+			expect(logged()).toEqual([
+				["info", "session-manager: host deleted", { hostId, ended: 0, unreachable: 0 }],
+			]);
+			expect([...ctx.passphraseCache.keys()]).toEqual(["other"]);
+			expect([...ctx.elevationCache.keys()]).toEqual(["other:window"]);
+			expect([...ctx.trustedAgentSha256.keys()]).toEqual(["other"]);
+		});
+	});
+});
+
 describe("terminal work arriving after deletion or a lost connection (#910)", () => {
 	function fixture() {
 		const agent = connectedAgent();
@@ -764,6 +1197,100 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 		},
 	);
 
+	// D4b: a handler that says nothing still frees what it held (#957).
+	it("R10 frees the timer of a reconnect answer it ignores, and settles the batch", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const { agent, ctx, lifecycle, channelId } = fixture();
+			const timersBefore = vi.getTimerCount();
+			const batch = lifecycle.spawnChannelsForHost(hostId, agent, vi.fn(), vi.fn());
+			const request = agent.sent.find((m) => m.type === "SPAWN")!;
+			if (request.type !== "SPAWN") throw new Error("expected SPAWN");
+			expect(vi.getTimerCount()).toBe(timersBefore + 1);
+			lifecycle.destroyChannel(channelId);
+			let settled = false;
+			void batch.then(() => {
+				settled = true;
+			});
+			agent.emit("message", { type: "SPAWN_OK", requestId: request.requestId, channelId, pid: 1 });
+			await vi.advanceTimersByTimeAsync(0);
+			expect(settled).toBe(true);
+			expect(vi.getTimerCount()).toBe(timersBefore);
+			expect(ctx.pendingRequests.size).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// D4b: whichever way a reconnect's SPAWN stops speaking for its terminal,
+	// the batch it belongs to still settles (#957).
+	it.each(["forgotten terminal", "replaced connection"])(
+		"R10 settles the batch when the timeout of a %s fires",
+		async (mode) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const { agent, ctx, lifecycle, channelId } = fixture();
+				const batch = lifecycle.spawnChannelsForHost(hostId, agent, vi.fn(), vi.fn());
+				let settled = false;
+				void batch.then(() => {
+					settled = true;
+				});
+				if (mode === "forgotten terminal") lifecycle.destroyChannel(channelId);
+				else ctx.agents.delete(hostId);
+				await vi.advanceTimersByTimeAsync(10_001);
+				expect(settled).toBe(true);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	// D4b: an old SPAWN speaks for the state object it was sent for, not for
+	// whatever is tracked under the same id by the time it answers.
+	it.each(["timeout", "answer"])(
+		"R10 ignores the %s of a SPAWN once another state is tracked under its id",
+		async (mode) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const { agent, ctx, lifecycle, channelId, heard } = fixture();
+				const old = ctx.channels.get(channelId)!;
+				lifecycle.reAttachChannels(hostId, SESSION_ID, agent);
+				const request = agent.sent.find((m) => m.type === "SPAWN")!;
+				if (request.type !== "SPAWN") throw new Error("expected SPAWN");
+				const replacement = { ...old, clients: new Set<string>() };
+				ctx.channels.set(channelId, replacement);
+				heard.length = 0;
+				const track = vi.spyOn(ctx.scheduler, "trackChannel");
+				if (mode === "answer")
+					agent.emit("message", {
+						type: "SPAWN_OK",
+						requestId: request.requestId,
+						channelId,
+						pid: 1,
+					});
+				else await vi.advanceTimersByTimeAsync(10_001);
+				expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([]);
+				expect(track).not.toHaveBeenCalled();
+				expect(ctx.channels.get(channelId)).toBe(replacement);
+				expect(replacement.status).toBe("live");
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	it("R7 answers an open for a host the hub does not know with its one message", async () => {
+		const { heard } = fixture();
+		const unknown = "01K580NOSUCHHOST000000000";
+		await sm.handleSpawn("c-window", { type: "SPAWN", hostId: unknown });
+		expect(heard).toContainEqual({
+			type: "ERROR",
+			code: "HOST_NOT_FOUND",
+			message: "That host is no longer in this hub's list.",
+			hostId: unknown,
+		});
+	});
+
 	it.each(["new-spawn", "new-spawn, old answer early", "lost", "adopted"])(
 		"R10 keeps the terminal after the old connection is %s",
 		async (mode) => {
@@ -821,19 +1348,194 @@ describe("terminal work arriving after deletion or a lost connection (#910)", ()
 				agent.emit("message", { type: "SPAWN_OK", requestId: old.requestId, channelId, pid: 1 });
 				expect(heard.filter((m) => m.type === "CHANNEL_STATE")).toEqual([]);
 				expect(ctx.channels.get(channelId)).toBe(state);
-				expect(state.status).not.toBe("dead");
-				if (mode === "lost") {
-					const next = connectedAgent();
-					const batch = lifecycle.spawnChannelsForHost(hostId, next, vi.fn(), vi.fn());
-					expect(next.sent.some((m) => m.type === "SPAWN")).toBe(true);
-					await vi.advanceTimersByTimeAsync(10_001);
-					await batch;
-				}
+				// Not dead, and not some other status the old timeout chose without a word (#957).
+				expect(state.status).toBe("live");
+				// Whichever the old connection's end, the next connection starts it again.
+				const next = connectedAgent();
+				const batch = lifecycle.spawnChannelsForHost(hostId, next, vi.fn(), vi.fn());
+				expect(next.sent.some((m) => m.type === "SPAWN")).toBe(true);
+				await vi.advanceTimersByTimeAsync(10_001);
+				await batch;
 			} finally {
 				vi.useRealTimers();
 			}
 		},
 	);
+
+	// D5 (#957): a snapshot for a channel the hub no longer tracks is dropped
+	// at the one place that writes it, whoever brings it, and the scheduler's
+	// slot is freed all the same.
+	it.each([false, true])(
+		"D5 frees the scheduler's slot for a forgotten channel's SNAPSHOT_RES, and stores nothing, row present=%s",
+		(rowPresent) => {
+			const { agent, ctx, lifecycle, channelId, dal } = fixture();
+			lifecycle.destroyChannel(channelId);
+			if (!rowPresent) dal.deleteCascadeForHost(hostId);
+			const slot = vi.spyOn(ctx.scheduler, "onSnapshotResponse");
+			const write = vi.spyOn(ctx.spoolDal, "insertSnapshot");
+			agent.emit("message", { type: "SNAPSHOT_RES", channelId, snapshot: { rows: [] } });
+			expect(slot).toHaveBeenCalledWith(channelId);
+			expect(write).not.toHaveBeenCalled();
+		},
+	);
+
+	it("D5 stores nothing for an ATTACH answer that comes after its channel is forgotten", async () => {
+		const { ctx, lifecycle, channelId } = fixture();
+		const write = vi.spyOn(ctx.spoolDal, "insertSnapshot");
+		const attaching = sm.handleAttach("c-window", channelId);
+		// The fake agent answers on the next microtask: the channel goes first.
+		lifecycle.destroyChannel(channelId);
+		await attaching;
+		expect(write).not.toHaveBeenCalled();
+		expect(
+			dbs.meta.prepare("SELECT * FROM cache_index WHERE channel_id = ?").all(channelId),
+		).toEqual([]);
+	});
+
+	it("R8 leaves an existing cache index alone when a forgotten channel's snapshot comes", () => {
+		const { agent, ctx, lifecycle, channelId } = fixture();
+		expect(lifecycle.storeSnapshot(channelId, { rows: ["kept"] })).toBeDefined();
+		const index = () =>
+			dbs.meta.prepare("SELECT * FROM cache_index WHERE channel_id = ?").all(channelId);
+		const kept = index();
+		expect(kept).toHaveLength(1);
+		const chunks = () => ctx.spoolDal.getMaxSeq(channelId);
+		const seq = chunks();
+		lifecycle.destroyChannel(channelId);
+		agent.emit("message", { type: "SNAPSHOT_RES", channelId, snapshot: { rows: ["late"] } });
+		expect(index()).toEqual(kept);
+		expect(chunks()).toBe(seq);
+	});
+
+	// R7 (#957): the open path itself, as a client's SPAWN takes it, with the
+	// row deleted after the checks and before the SPAWN is sent.
+	it("R7 answers a client's open with HOST_NOT_FOUND, and sends no SPAWN, when the row goes mid-open", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const { agent, ctx, lifecycle, heard, dal } = fixture();
+			const send = lifecycle.sendSpawnAndWait.bind(lifecycle);
+			vi.spyOn(lifecycle, "sendSpawnAndWait").mockImplementationOnce((...args) => {
+				dal.deleteCascadeForHost(hostId);
+				dal.deleteHost(hostId);
+				return send(...args);
+			});
+			const opening = sm.handleSpawn("c-window", { type: "SPAWN", hostId });
+			await vi.advanceTimersByTimeAsync(10_001);
+			await opening;
+			expect(agent.sent.filter((m) => m.type === "SPAWN")).toEqual([]);
+			expect(heard).toContainEqual({
+				type: "ERROR",
+				code: "HOST_NOT_FOUND",
+				hostId,
+				message: "That host is no longer in this hub's list.",
+			});
+			expect(ctx.pendingRequests.size).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// R11 (#957): the answer reaches the target's connection by the route the
+	// client's PROMPT_RESPONSE takes, and caches nothing under the deleted bastion.
+	it("R11 delivers the bastion's answer through the client's PROMPT_RESPONSE, and does not cache it", async () => {
+		const { ctx, dal } = fixture();
+		const target = dal.createHost({
+			type: "ssh",
+			label: "target",
+			sshHost: "target.test",
+			sshProxyHostId: hostId,
+		});
+		ctx.acquisitions.set(target.id, {
+			id: "target-acquisition",
+			hostId: target.id,
+			state: "CONNECTING",
+			controller: new AbortController(),
+			connectPromise: new Promise(() => {}),
+			_resolve: vi.fn(),
+			_reject: vi.fn(),
+			leases: new Set(),
+		});
+		const mgr = (sm as unknown as { sshMgr: SshConnectionManager }).sshMgr;
+		const auth = mgr.buildPromptAuth(ctx.clients.get("c-window")!, undefined, "target-acquisition");
+		const answer = auth(hostId, "passphrase", "Enter bastion passphrase");
+		const [promptId, pending] = [...ctx.pendingPrompts.entries()][0]!;
+		expect(
+			(await server.inject({ method: "DELETE", url: `/api/hosts/${hostId}?force=true` }))
+				.statusCode,
+		).toBe(204);
+		sm.handleAuthPromptResponse("c-window", {
+			hostId,
+			secret: "answer",
+			rememberSession: true,
+			promptId,
+			deliveryEpoch: pending.deliveryEpoch!,
+		});
+		await expect(answer).resolves.toBe("answer");
+		expect(ctx.passphraseCache.has(hostId)).toBe(false);
+	});
+});
+
+// What DELETE /api/sessions/:id sends, and in what order (#957).
+describe("DELETE /api/sessions/:id, the DESTROYs it sends (#910)", () => {
+	function end() {
+		return server.inject({ method: "DELETE", url: `/api/sessions/${SESSION_ID}` });
+	}
+
+	it("D6 sends each DESTROY before it reports any terminal killed", async () => {
+		const agent = connectedAgent();
+		const { channelIds } = liveTerminalsOn(agent, 2);
+		const order: string[] = [];
+		agent.send.mockImplementation((msg: ProtocolMessage) => {
+			if (msg.type === "DESTROY") order.push(`destroy ${msg.channelId}`);
+		});
+		sm.addClient({
+			id: "c-order",
+			send: (msg) => {
+				if (msg.type === "CHANNEL_STATE") order.push(`${msg.status} ${msg.channelId}`);
+			},
+			attachedChannels: new Set(),
+		});
+		expect((await end()).statusCode).toBe(204);
+		expect(order).toEqual([
+			`destroy ${channelIds[0]}`,
+			`destroy ${channelIds[1]}`,
+			`dead ${channelIds[0]}`,
+			`dead ${channelIds[1]}`,
+		]);
+	});
+
+	// An agent older than this hub, on the local host, is stopped once the
+	// session's terminals are gone: its STOP comes after their DESTROYs.
+	it("V3 sends every DESTROY before the STOP that retires an outdated local daemon", async () => {
+		hostId = new MetaDAL(dbs.meta).createHost({ type: "local", label: "this machine" }).id;
+		const agent = connectedAgent();
+		agent.helloMessage = OUTDATED_DAEMON_HELLO;
+		const { channelIds } = liveTerminalsOn(agent, 2);
+		const order: string[] = [];
+		agent.send.mockImplementation((msg: ProtocolMessage) => {
+			order.push(msg.type === "DESTROY" ? `DESTROY ${msg.channelId}` : msg.type);
+		});
+		expect((await end()).statusCode).toBe(204);
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(order).toEqual([`DESTROY ${channelIds[0]}`, `DESTROY ${channelIds[1]}`, "STOP"]);
+	});
+
+	it("D6 sends nothing to an agent that is not connected, and still reports the terminals", async () => {
+		const agent = connectedAgent();
+		const { channelId, heard } = liveTerminalOn(agent);
+		agent.connected = false;
+		expect((await end()).statusCode).toBe(204);
+		expect(agent.sent).toEqual([]);
+		expect(endsOf(heard, channelId)).toHaveLength(1);
+	});
+
+	it("D6 sends no DESTROY for a terminal that has ended", async () => {
+		const agent = connectedAgent();
+		const { channelIds, ctx } = liveTerminalsOn(agent, 2);
+		ctx.channels.get(channelIds[1]!)!.status = "dead";
+		expect((await end()).statusCode).toBe(204);
+		expect(agent.sent).toEqual([{ type: "DESTROY", channelId: channelIds[0] }]);
+	});
 });
 
 // Replacing the agent ends its terminals, and on purpose: a pane set to
@@ -1719,6 +2421,33 @@ describe("POST stop-keeping", () => {
 		expect(f.agent.sent).toContainEqual({ type: "STOP", force: true });
 	});
 
+	it("leaves the uploads running when the daemon refuses a stop consented for them, and interrupts them once it stops (#1102)", async () => {
+		const f = fixture();
+		f.agent.othersHold = 3;
+		const uploads = recordUploads(f);
+		const declined = await stop({ end_terminals: true, stop_transfers: true });
+		expect(declined.statusCode).toBe(409);
+		expect(declined.json()).toMatchObject({
+			error: { code: "OTHER_HUBS_HOLD_CHANNELS", other_owner_channels: 3 },
+		});
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(409);
+		expect(replace.json()).toMatchObject({
+			error: { code: "OTHER_HUBS_HOLD_CHANNELS", other_owner_channels: 3 },
+		});
+		expect(uploads.interrupted).toEqual([]);
+		unchanged(f);
+
+		const forced = await stop({ end_terminals: true, stop_transfers: true, force: true });
+		expect(forced.json()).toMatchObject({ outcome: "stopped", ended: 2 });
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
 	// A STOP with no connection to say it on: only a forced request goes on to
 	// the agent's own --stop, over SSH.
 	function stopCannotBeSent(f: ReturnType<typeof fixture>): void {
@@ -1727,8 +2456,178 @@ describe("POST stop-keeping", () => {
 		});
 	}
 
+	// What the uploads saw: interrupted for which host, and whether the hub
+	// still held the connection they run over when they were. `counted` uploads
+	// run to the host until they are interrupted.
+	function recordUploads(f: ReturnType<typeof fixture>, counted = 1) {
+		const seen = { interrupted: [] as string[], held: [] as boolean[] };
+		sm.setTransfers({
+			activeOn: (id) => (id === hostId && seen.interrupted.length === 0 ? counted : 0),
+			interruptOn: (id) => {
+				seen.held.push(sm.agents.get(hostId) === f.agent);
+				seen.interrupted.push(id);
+			},
+		});
+		return seen;
+	}
+
+	it("Replace interrupts the uploads it was told about once the daemon stops, before letting go of the connection (#1102)", async () => {
+		const f = fixture();
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(200);
+		expect(replace.json()).toMatchObject({ replaced: true });
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
+	it("Stop keeping with no upload counted interrupts none once the daemon stops (#1102)", async () => {
+		const f = fixture();
+		const uploads = recordUploads(f, 0);
+		const response = await stop({ end_terminals: true });
+		expect(response.json()).toMatchObject({ outcome: "stopped", ended: 2 });
+		expect(uploads.interrupted).toEqual([]);
+	});
+
+	it("Replace with no upload counted interrupts none once the daemon stops (#1102)", async () => {
+		const f = fixture();
+		const uploads = recordUploads(f, 0);
+		const response = await replace({});
+		expect(response.statusCode).toBe(200);
+		expect(response.json()).toMatchObject({ replaced: true });
+		expect(uploads.interrupted).toEqual([]);
+	});
+
+	it("Stop keeping whose STOP cannot be sent still interrupts the uploads before the connection is let go (#1102)", async () => {
+		const f = fixture();
+		stopCannotBeSent(f);
+		const uploads = recordUploads(f);
+		const response = await stop({ end_terminals: true, stop_transfers: true });
+		expect(response.json()).toMatchObject({ outcome: "disabled_not_stopped" });
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
+	it("Replace whose STOP is answered with an error leaves the uploads running (#1102)", async () => {
+		const f = fixture();
+		f.agent.send.mockImplementation((msg: ProtocolMessage) => {
+			if (msg.type !== "STOP") return;
+			setImmediate(() =>
+				f.agent.emit("message", { type: "ERROR", code: "INTERNAL_ERROR", message: "no" }),
+			);
+		});
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(409);
+		expect(replace.json()).toMatchObject({
+			error: { message: expect.stringContaining("Nothing was changed") },
+		});
+		expect(uploads.interrupted).toEqual([]);
+	});
+
+	it.each([
+		[
+			"timeout",
+			"The agent did not say it had stopped. Its terminals may be ending; look again before asking twice.",
+		],
+		["unconfirmed", "The connection ended without confirming the agent stopped."],
+		["closed_by_hub", "The connection ended without confirming the agent stopped."],
+		["displaced", "The connection ended without confirming the agent stopped."],
+	] as const)(
+		"Replace whose STOP ends %s: the uploads are interrupted, the agent may be ending or its connection ended (#1102)",
+		async (mode, message) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const f = fixture();
+				if (mode === "unconfirmed") {
+					f.agent.helloMessage = {
+						...DAEMON_HELLO,
+						capabilities: [...(DAEMON_HELLO.capabilities ?? []), "stop-accepted"],
+					};
+				}
+				f.agent.send.mockImplementation((msg: ProtocolMessage) => {
+					if (msg.type !== "STOP" || mode === "timeout") return;
+					queueMicrotask(() => {
+						if (mode === "closed_by_hub") void f.agent.close();
+						else if (mode === "unconfirmed") {
+							f.agent.connected = false;
+							f.agent.emit("close");
+						} else {
+							f.agent.emit("message", {
+								type: "ERROR",
+								code: "DISPLACED",
+								message: "displaced",
+							});
+						}
+					});
+				});
+				const uploads = recordUploads(f);
+				const replace = server.inject({
+					method: "POST",
+					url: `/api/hosts/${hostId}/agent/replace`,
+					payload: { stop_transfers: true },
+				});
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				await vi.advanceTimersByTimeAsync(15_001);
+				const response = await replace;
+				expect(response.statusCode).toBe(409);
+				expect(response.json()).toEqual({ error: { code: "AGENT_NOT_REPLACED", message } });
+				expect(uploads.interrupted).toEqual([hostId]);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	it("Replace whose STOP cannot be sent interrupts the uploads before its own --stop lets go (#1102)", async () => {
+		const f = fixture();
+		stopCannotBeSent(f);
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.json()).toMatchObject({ replaced: true });
+		expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
+	it.each([
+		["missing-path", "This hub does not know where that agent is installed."],
+		["state-exit", "The host could not say where its agent's socket is."],
+		["nonzero", "The agent would not stop (exit 1)."],
+	] as const)(
+		"Replace whose STOP cannot be sent and whose --stop fails on %s still interrupts the uploads, their link being gone (#1102)",
+		async (mode, message) => {
+			const f = fixture();
+			stopCannotBeSent(f);
+			if (mode === "missing-path") f.agent.remoteAgentPath = null;
+			f.agent.execOnHost.mockImplementation(async (command: string) =>
+				command === REMOTE_STATE_DIR_COMMAND
+					? { stdout: "/state", exitCode: mode === "state-exit" ? 1 : 0 }
+					: { stdout: "", exitCode: 1 },
+			);
+			const uploads = recordUploads(f);
+			const response = await replace({ stop_transfers: true });
+			expect(response.statusCode).toBe(409);
+			expect(response.json()).toEqual({ error: { code: "AGENT_NOT_REPLACED", message } });
+			expect(uploads.interrupted).toEqual([hostId]);
+		},
+	);
+
 	it.each(["exit-zero", "daemon-close"])(
-		"--stop after an unsent STOP confirms on %s",
+		"--stop after an unsent STOP confirms on %s, the uploads interrupted before it runs (#1102)",
 		async (mode) => {
 			const f = fixture();
 			stopCannotBeSent(f);
@@ -1740,45 +2639,67 @@ describe("POST stop-keeping", () => {
 					return { stdout: "", exitCode: 1 };
 				});
 			}
-			const response = await stop({ end_terminals: true, force: true });
+			const uploads = recordUploads(f);
+			const response = await stop({ end_terminals: true, force: true, stop_transfers: true });
 			expect(response.statusCode).toBe(200);
 			expect(response.json()).toMatchObject({ outcome: "stopped", ended: 2 });
 			expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
 			expect(f.agent.sent).toEqual([]);
 			for (const id of f.channelIds) expect(f.dal.getChannel(id)?.endReason).toBe("stopped");
+			expect(uploads.interrupted).toEqual([hostId]);
+			expect(uploads.held).toEqual([true]);
 		},
 	);
 
-	it.each(["timeout", "error", "displaced", "closed_by_hub", "unsent"])(
-		"unconfirmed STOP %s disables and disconnects",
-		async (mode) => {
-			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-			try {
-				const f = fixture();
-				f.agent.send.mockImplementation(() => {
-					if (mode === "unsent") throw new Error("transport unavailable");
-					if (mode === "timeout") return;
-					queueMicrotask(() => {
-						if (mode === "closed_by_hub") void f.agent.close();
-						else
-							f.agent.emit("message", {
-								type: "ERROR",
-								code: mode === "displaced" ? "DISPLACED" : "STOP_FAILED",
-								message: "unconfirmed",
-							});
-					});
-				});
-				const result = disabled(f, { end_terminals: true });
-				await new Promise<void>((resolve) => setImmediate(resolve));
-				await new Promise<void>((resolve) => setImmediate(resolve));
-				await vi.advanceTimersByTimeAsync(15_001);
-				await result;
-				expect(f.agent.execOnHost).not.toHaveBeenCalled();
-			} finally {
-				vi.useRealTimers();
+	// `held`: the uploads are interrupted before the hub lets go of a
+	// connection still up at the answer; null where it had already ended.
+	it.each([
+		["timeout", [true]],
+		["error", [true]],
+		["displaced", null],
+		["closed_by_hub", null],
+		["unconfirmed", null],
+		["unsent", [true]],
+	] as const)("unconfirmed STOP %s disables and disconnects", async (mode, held) => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const f = fixture();
+			if (mode === "unconfirmed") {
+				f.agent.helloMessage = {
+					...DAEMON_HELLO,
+					capabilities: [...(DAEMON_HELLO.capabilities ?? []), "stop-accepted"],
+				};
 			}
-		},
-	);
+			f.agent.send.mockImplementation(() => {
+				if (mode === "unsent") throw new Error("transport unavailable");
+				if (mode === "timeout") return;
+				queueMicrotask(() => {
+					if (mode === "closed_by_hub") void f.agent.close();
+					else if (mode === "unconfirmed") {
+						f.agent.connected = false;
+						f.agent.emit("close");
+					} else
+						f.agent.emit("message", {
+							type: "ERROR",
+							code: mode === "displaced" ? "DISPLACED" : "STOP_FAILED",
+							message: "unconfirmed",
+						});
+				});
+			});
+			const uploads = recordUploads(f);
+			const result = disabled(f, { end_terminals: true, stop_transfers: true });
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			await vi.advanceTimersByTimeAsync(15_001);
+			await result;
+			expect(f.agent.execOnHost).not.toHaveBeenCalled();
+			// The connection is dropped whatever the answer: the uploads stop (#1102).
+			expect(uploads.interrupted).toEqual([hostId]);
+			if (held !== null) expect(uploads.held).toEqual(held);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 
 	it.each([
 		"missing-path",
@@ -1790,35 +2711,41 @@ describe("POST stop-keeping", () => {
 		"exec-timeout",
 		"nonzero",
 		"hub-close",
-	])("--stop after an unsent STOP: %s is unconfirmed", async (mode) => {
-		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-		try {
-			const f = fixture();
-			stopCannotBeSent(f);
-			if (mode === "missing-path") f.agent.remoteAgentPath = null;
-			f.agent.execOnHost.mockImplementation(async (command: string) => {
-				if (command === REMOTE_STATE_DIR_COMMAND) {
-					if (mode === "state-reject") throw new Error("state command failed");
-					if (mode === "state-close") {
-						f.agent.connected = false;
-						f.agent.emit("close");
-						return { stdout: "", exitCode: 1 };
+	])(
+		"--stop after an unsent STOP: %s is unconfirmed, the uploads interrupted before it runs (#1102)",
+		async (mode) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const f = fixture();
+				stopCannotBeSent(f);
+				if (mode === "missing-path") f.agent.remoteAgentPath = null;
+				f.agent.execOnHost.mockImplementation(async (command: string) => {
+					if (command === REMOTE_STATE_DIR_COMMAND) {
+						if (mode === "state-reject") throw new Error("state command failed");
+						if (mode === "state-close") {
+							f.agent.connected = false;
+							f.agent.emit("close");
+							return { stdout: "", exitCode: 1 };
+						}
+						return {
+							stdout: mode === "state-relative" ? "relative" : "/state",
+							exitCode: mode === "state-exit" ? 1 : 0,
+						};
 					}
-					return {
-						stdout: mode === "state-relative" ? "relative" : "/state",
-						exitCode: mode === "state-exit" ? 1 : 0,
-					};
-				}
-				if (mode === "exec-reject" || mode === "exec-timeout") throw new Error(mode);
-				if (mode === "hub-close") await f.agent.close();
-				return { stdout: "", exitCode: mode.startsWith("state-") ? 0 : 1 };
-			});
-			await disabled(f, { end_terminals: true, force: true });
-			if (mode === "missing-path") expect(f.agent.execOnHost).not.toHaveBeenCalled();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
+					if (mode === "exec-reject" || mode === "exec-timeout") throw new Error(mode);
+					if (mode === "hub-close") await f.agent.close();
+					return { stdout: "", exitCode: mode.startsWith("state-") ? 0 : 1 };
+				});
+				const uploads = recordUploads(f);
+				await disabled(f, { end_terminals: true, force: true, stop_transfers: true });
+				if (mode === "missing-path") expect(f.agent.execOnHost).not.toHaveBeenCalled();
+				expect(uploads.interrupted).toEqual([hostId]);
+				expect(uploads.held).toEqual([true]);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
 
 	it("allows only a forced unsent STOP to fall back to --stop", async () => {
 		const f = fixture();
@@ -2397,5 +3324,93 @@ describe("GET /api/sessions/:id (#932)", () => {
 		expect(body.channels).toHaveLength(1);
 		expect(body.channels[0]).toMatchObject({ id: channelId, status: "dead", exit_code: 2 });
 		expect(body.channels[0]).not.toHaveProperty("end_id");
+	});
+});
+
+// ─── A purge leaves a terminal being brought back alone (#1118) ─────────────
+//
+// A SPAWN bringing a dead terminal back claims its id until the agent
+// answers. Either purge used to delete the still-dead row meanwhile, and the
+// SPAWN_OK then announced a live terminal the hub had no row for.
+
+describe("a purge while a dead terminal is being brought back (#1118)", () => {
+	/** A dead terminal of the Pi, a SPAWN bringing it back sent and unanswered. */
+	async function respawnSent() {
+		const agent = connectedAgent();
+		const { channelId, heard } = liveTerminalOn(agent);
+		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
+		const dal = new MetaDAL(dbs.meta);
+		expect(dal.getChannel(channelId)?.status).toBe("dead");
+		const spawning = sm.handleSpawn("c-window", {
+			type: "SPAWN",
+			hostId,
+			reuseChannelId: channelId,
+		});
+		await vi.waitFor(() => expect(agent.sent.some((m) => m.type === "SPAWN")).toBe(true));
+		const spawn = agent.sent.find((m) => m.type === "SPAWN") as { requestId: string };
+		const answer = async () => {
+			agent.emit("message", { type: "SPAWN_OK", requestId: spawn.requestId, channelId });
+			return spawning;
+		};
+		return { channelId, dal, heard, answer };
+	}
+
+	// Wrong implementation: the bulk purge selects every dead row, the
+	// reserved one included, on either branch (row gone, purged_ids [channelId]).
+	it.each([
+		["a host's", true],
+		["every host's", false],
+	])(
+		"the bulk purge of %s dead terminals leaves it out, and it comes back with its row",
+		async (_, scoped) => {
+			const { channelId, dal, answer } = await respawnSent();
+
+			const res = await server.inject({
+				method: "DELETE",
+				url: "/api/channels/dead",
+				...(scoped && { payload: { host_id: hostId } }),
+			});
+
+			expect(res.json()).toEqual({ ok: true, purged: 0, purged_ids: [] });
+			expect(await answer()).toBe(channelId);
+			expect(dal.getChannel(channelId)?.status).toBe("live");
+		},
+	);
+
+	// Wrong implementation: the single delete purges a dead row whatever
+	// starts it (200, row gone).
+	it("the single delete refuses it, and it comes back with its row", async () => {
+		const { channelId, dal, answer } = await respawnSent();
+
+		const res = await server.inject({ method: "DELETE", url: `/api/channels/${channelId}` });
+
+		expect(res.statusCode).toBe(409);
+		expect(res.json()).toEqual({
+			error: { code: "CHANNEL_STARTING", message: "That terminal is being started again." },
+		});
+		expect(await answer()).toBe(channelId);
+		expect(dal.getChannel(channelId)?.status).toBe("live");
+	});
+
+	// Wrong implementation: reviveChannel()'s false result ignored, as before
+	// (SPAWN_OK and CHANNEL_CREATED announced, no DESTROY, no row).
+	it("a row gone by another path ends the started terminal instead of announcing it", async () => {
+		const { channelId, dal, heard, answer } = await respawnSent();
+		const agent = (sm.agents as unknown as Map<string, FakeSshAgent>).get(hostId)!;
+		dal.deleteChannel(channelId);
+		heard.length = 0;
+
+		expect(await answer()).toBeNull();
+
+		expect(agent.sent.at(-1)).toEqual({ type: "DESTROY", channelId });
+		expect(heard).toEqual([
+			{
+				type: "ERROR",
+				code: "CHANNEL_NOT_REUSABLE",
+				message: "Cannot bring that terminal back: it is not a terminal this hub knows.",
+				channelId,
+			},
+		]);
+		expect(dal.getChannel(channelId)).toBeUndefined();
 	});
 });

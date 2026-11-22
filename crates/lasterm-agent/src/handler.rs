@@ -700,11 +700,13 @@ pub(crate) async fn handle_message(
                             None
                         }
                     },
-                    // Its program ended and its exit is not sent yet: the hub
-                    // asked for its end, and a restart's SPAWN follows (#1089).
+                    // Its program ended and its exit is not sent yet: the id is
+                    // free for a restart's SPAWN (#1089), and its exit is owed
+                    // as a torn-down workload's, the end of the terminal if
+                    // that restart fails (#1113).
                     false => {
-                        if mgr.withdraw_ending(&channel_id, owner) {
-                            tracing::debug!(%channel_id, "DESTROY of an ended channel: its exit is withdrawn");
+                        if mgr.tear_down_ending(&channel_id, owner) {
+                            tracing::debug!(%channel_id, "DESTROY of an ended channel: its exit goes as a torn-down one");
                         }
                         None
                     }
@@ -1411,7 +1413,7 @@ fn spawn_reader_task(
         let msg = exit_message(
             &channel_id,
             exit_code,
-            signal,
+            signal.clone(),
             (at_pty_end && ended_by_itself).then_some(&mirror),
         );
         // Its id is held until its exit has been routed to its hub, so
@@ -1420,20 +1422,28 @@ fn spawn_reader_task(
         // or a SPAWN takes.
         let mut routed = {
             let mut mgr = pty_manager.lock().await;
-            let routed_tx = if ended_by_itself {
-                // Held from the take above: a DESTROY either withdraws it
-                // first or finds it on its way.
+            let (routed_tx, msg) = if ended_by_itself {
+                // Held from the take above: a DESTROY either makes it a
+                // torn-down workload first or finds its exit on its way.
                 match mgr.send_ending(&channel_id, pty_pid) {
-                    EndingSend::Send(routed_tx) => routed_tx,
-                    // The hub asked for its end, or the id is another workload's.
+                    EndingSend::Send(routed_tx) => (routed_tx, msg),
+                    // The hub destroyed it before its exit went: a restart's
+                    // SPAWN may follow, which waits for this exit, and the
+                    // screen goes only with a program that ended by itself
+                    // (#933, #1113).
+                    EndingSend::TornDown(routed_tx) => (
+                        routed_tx,
+                        exit_message(&channel_id, exit_code, signal, None),
+                    ),
+                    // A restart has put another workload under this id since.
                     EndingSend::Withdrawn => return,
                 }
             } else {
                 // Torn down before this reader took it back. A live restart's
                 // SPAWN may come right after its DESTROY: it waits for this
                 // exit, which reaches the hub before its SPAWN_OK (#1113).
-                match mgr.send_torn_down(&channel_id, pty_pid, &owner) {
-                    Some(routed_tx) => routed_tx,
+                match mgr.send_torn_down(&channel_id, pty_pid) {
+                    Some(routed_tx) => (routed_tx, msg),
                     // A restart has put another workload under this id since.
                     None => return,
                 }

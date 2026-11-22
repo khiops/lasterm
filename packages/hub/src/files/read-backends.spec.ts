@@ -350,6 +350,10 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 			expect(response.rawPayload.equals(bytes)).toBe(true);
 			expect(response.headers.etag).toMatch(/^"3145728-(ms|s|t)\d+"$/);
 			expect(response.headers["accept-ranges"]).toBe("bytes");
+			expect(response.headers["content-type"]).toBe("application/octet-stream");
+			expect(response.headers["cache-control"]).toBe("no-store");
+			expect(response.headers["x-content-type-options"]).toBe("nosniff");
+			expect(Number.isNaN(Date.parse(String(response.headers["last-modified"])))).toBe(false);
 		});
 
 		it("serves a single range", async () => {
@@ -678,6 +682,25 @@ describe("a download's read side, cases of one backend (#840)", () => {
 			if (!match) return stdout;
 			return Buffer.from(`${text.slice(0, match.index)}${replacement}`, "latin1");
 		};
+		it("an exec read whose first look changed: 409", async () => {
+			// The read script's own first look, after its marker, says another size.
+			const otherSize = (stdout: Buffer) => {
+				const text = stdout.toString("latin1");
+				if (text.length < 1000) return stdout;
+				return Buffer.from(
+					text.replace(/([0-9a-f]{32}\r?\n)(\d+) /, (_all, marker: string, size: string) => {
+						return `${marker}${Number(size) + 1} `;
+					}),
+					"latin1",
+				);
+			};
+			harness = await execKind(machineStyle).start({ rewriteStdout: otherSize });
+			writeFileSync(harness.local("small.bin"), "x".repeat(2000));
+			const response = await content(harness, harness.at("small.bin"));
+			expect(response.statusCode).toBe(409);
+			expect(response.json().error.code).toBe("FILE_CHANGED");
+		});
+
 		for (const [variant, replacement] of [
 			["missing", ""],
 			["malformed", "\n12 abc\n"],

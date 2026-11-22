@@ -473,6 +473,46 @@ describe("Download… (#840)", () => {
 		platform.mockRestore();
 	});
 
+	it("download a file as a reader: each download has its own id, after a reload too", async () => {
+		mocks.tauri = true;
+		showEntries([file("report.txt")]);
+		mocks.listen.mockResolvedValue(() => {});
+		mocks.invoke.mockImplementation(async (command: string) =>
+			command === "pick_download_target"
+				? { outcome: "chosen", root_id: "R", display: "C:Downloads", name: "report.txt" }
+				: null,
+		);
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_732_190_000_000);
+		const ids = () =>
+			mocks.invoke.mock.calls
+				.filter(([command]) => command === "download_hub_file_to")
+				.map(([, args]) => (args as { request: { download_id: string } }).request.download_id);
+		try {
+			mountBrowser({ writer: false });
+			await settle();
+			// Two downloads at the same instant.
+			downloadButton().click();
+			await vi.waitFor(() => expect(ids()).toHaveLength(1));
+			downloadButton().click();
+			await vi.waitFor(() => expect(ids()).toHaveLength(2));
+			// The page reloaded a moment later: its module, and its count, start again.
+			now.mockReturnValue(1_732_190_000_001);
+			vi.resetModules();
+			const reloaded = await import("../../utils/host-download.js");
+			await reloaded.downloadHostFile({
+				channelId: A,
+				hostId: "H",
+				path: "/srv/drop/report.txt",
+				name: "report.txt",
+				windows: false,
+			});
+			expect(ids()).toHaveLength(3);
+			expect(new Set(ids()).size).toBe(3);
+		} finally {
+			now.mockRestore();
+		}
+	});
+
 	it("download a file as a reader: a Cancel during the setup starts nothing", async () => {
 		mocks.tauri = true;
 		showEntries([file("report.txt")]);

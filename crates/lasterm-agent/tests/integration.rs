@@ -2346,8 +2346,53 @@ async fn detach_survives_the_job() {
     assert_eq!(hello["type"].as_str(), Some("HELLO"), "{hello:?}");
 }
 
+/// AC-D1, launched as a hub launches it on a Windows host: by PowerShell's
+/// `Process.Start`, with nothing redirected, under a parent whose output is a
+/// pipe, as an SSH exec channel is. The launcher's output must end once it has
+/// said `started`, while the daemon runs on. Mutation: a daemon that inherits
+/// the launcher's handles holds the pipe open (seen on Win32-OpenSSH, V2).
+#[cfg(windows)]
+#[tokio::test]
+async fn detach_lets_a_powershell_launch_end() {
+    if !detach_tests_run("detach_lets_a_powershell_launch_end") {
+        return;
+    }
+    let fixture = StopFixture::new("detach-powershell");
+    let _stop = detach::StopOnDrop(&fixture);
+    let script = format!(
+        "$c=[Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]@{{FileName='{}';\
+         Arguments='--daemon --detach --socket {} --idle-timeout 60';UseShellExecute=$false}});\
+         $c.WaitForExit();exit $c.ExitCode",
+        env!("CARGO_BIN_EXE_lasterm-agent"),
+        fixture.socket
+    );
+    let mut launch = std::process::Command::new("powershell.exe");
+    launch
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .env("XDG_STATE_HOME", &fixture.dir)
+        .env("XDG_CONFIG_HOME", &fixture.dir)
+        .env("LOCALAPPDATA", &fixture.dir)
+        .env("APPDATA", &fixture.dir)
+        .stdin(std::process::Stdio::null());
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || launch.output()),
+    )
+    .await
+    .expect("the launch's output ended while its daemon runs")
+    .expect("launch task")
+    .expect("run powershell");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        detach::stderr_lines(&output).contains(&"lasterm-detach: started".to_owned()),
+        "{output:?}"
+    );
+    pipe_appears(&fixture).await;
+}
+
 /// AC-D2: a job that forbids breaking away gives exit 5 and its line, and no
-/// daemon. Mutation: that refusal classified as 1.
+/// daemon, looked for while the job still lives (its close would kill one
+/// started inside it). Mutation: that refusal classified as 1.
 #[cfg(windows)]
 #[tokio::test]
 async fn detach_refused_without_breakaway() {
@@ -2358,7 +2403,7 @@ async fn detach_refused_without_breakaway() {
     let _stop = detach::StopOnDrop(&fixture);
     let job = detach::Job::new(false);
     let launch = detach::detach_command(&fixture, "60");
-    let output = tokio::task::spawn_blocking(move || job.run(launch))
+    let (output, job) = tokio::task::spawn_blocking(move || (job.run(launch), job))
         .await
         .expect("launcher task");
     assert_eq!(output.status.code(), Some(5), "{output:?}");
@@ -2369,9 +2414,11 @@ async fn detach_refused_without_breakaway() {
             "this SSH session's job does not allow a process to break away; the daemon would end with the connection",
         ]
     );
-    let relay = spawn_relay(&fixture, &[]);
+    // A second for a daemon that would still be binding.
+    let relay = spawn_relay(&fixture, &["--wait", "1000"]);
     let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
     assert_eq!(status, 3, "{stderr:?}");
+    drop(job);
 }
 
 /// Start a detached daemon with `idle_timeout`, outside any job of the test's.

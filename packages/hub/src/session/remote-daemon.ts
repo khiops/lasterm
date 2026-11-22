@@ -661,6 +661,12 @@ export function openRelay(conn: Client, command: string): Promise<Duplex> {
 			const stderr: Buffer[] = [];
 			let stderrBytes = 0;
 			let settled = false;
+			// Said in the log of a relay that ends before HELLO, beside what it
+			// wrote: a PowerShell shell turns every non-zero status into 1.
+			let exitStatus: unknown = null;
+			const onExit = (code: unknown): void => {
+				exitStatus = code;
+			};
 			const seeker = new HelloSeeker();
 			const onStderr = (chunk: Buffer): void => {
 				// Counted in bytes, and past the limit for good: what is said
@@ -688,6 +694,7 @@ export function openRelay(conn: Client, command: string): Promise<Duplex> {
 				channel.stderr.off("data", onStderr);
 				channel.off("close", onClose);
 				channel.off("error", onError);
+				channel.off("exit", onExit);
 			};
 			const onData = (chunk: Buffer): void => {
 				const seek = seeker.push(chunk);
@@ -713,6 +720,13 @@ export function openRelay(conn: Client, command: string): Promise<Duplex> {
 				if (settled) return;
 				settled = true;
 				finish();
+				const said =
+					stderrBytes > RELAY_STDERR_LIMIT
+						? null
+						: parseRelayStderr(Buffer.concat(stderr).toString("utf8")).outcome;
+				console.error(
+					`[lasterm-ssh] the relay ended before HELLO: ${said ?? "no outcome said"}, exit status ${String(exitStatus ?? "none")}`,
+				);
 				reject(
 					stderrBytes > RELAY_STDERR_LIMIT
 						? new RelayFailed("the relay's stderr was too long to read before HELLO")
@@ -723,6 +737,7 @@ export function openRelay(conn: Client, command: string): Promise<Duplex> {
 			channel.stderr.on("data", onStderr);
 			channel.on("close", onClose);
 			channel.on("error", onError);
+			channel.on("exit", onExit);
 		});
 	});
 }

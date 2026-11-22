@@ -539,6 +539,9 @@ describe("HostModal remote daemon choice", () => {
 		await nextTick();
 		choose(selectWithOption("Yes — terminals survive the connection"), "yes");
 		expect(el("#panel-connection")?.textContent).not.toContain("Not available on Windows hosts");
+		// No systemd advice for a Windows host.
+		expect(el("#panel-connection")?.textContent).not.toContain("loginctl");
+		expect(el("#panel-connection")?.textContent).not.toContain("systemd");
 		expect(await save()).toHaveProperty("ssh_remote_daemon", true);
 	});
 

@@ -304,10 +304,11 @@
 								<p class="field-hint auth-note">
 									Lasterm keeps a small agent running on this host, so its terminals
 									survive a dropped connection. It stops by itself after 30 minutes with
-									no terminal and no hub connected. On a systemd host without lingering,
-									logging out may end it. Choose No to end the shells with the connection.
+									no terminal and no hub connected.<template v-if="form.os !== 'windows'">
+										On a systemd host without lingering, logging out may end it.</template>
+									Choose No to end the shells with the connection.
 								</p>
-								<p class="field-hint auth-note">
+								<p v-if="form.os !== 'windows'" class="field-hint auth-note">
 									If logging out of that machine ends your processes, run
 									<code>loginctl enable-linger</code> there so the agent survives logout.
 								</p>

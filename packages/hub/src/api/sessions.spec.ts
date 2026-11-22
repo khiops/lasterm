@@ -130,6 +130,18 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 	return { ...actual, SshAgent: FakeSshAgent };
 });
 
+/** The arguments an encoded Windows launch passes, decoded, written out to compare (#755). */
+function windowsArgsOf(command: string): string | null {
+	const prefix = "powershell -NoProfile -NonInteractive -EncodedCommand ";
+	if (!command.startsWith(prefix)) return null;
+	const script = Buffer.from(command.slice(prefix.length), "base64").toString("utf16le");
+	const found =
+		/\$a=\[Text\.Encoding\]::UTF8\.GetString\(\[Convert\]::FromBase64String\('([^']*)'\)\)/.exec(
+			script,
+		)?.[1];
+	return found === undefined ? null : Buffer.from(found, "base64").toString("utf8");
+}
+
 type FakeSshAgent = SshAgent & {
 	connected: boolean;
 	othersHold: number;
@@ -1759,6 +1771,7 @@ describe("POST /api/hosts/:id/agent/replace, on an agent other hubs use (#127)",
 		expect(agent.execOnHost.mock.calls).toEqual([
 			[windowsDaemonStopCommand("/home/pi/.local/bin/lasterm-agent")],
 		]);
+		expect(windowsArgsOf(agent.execOnHost.mock.calls[0]?.[0] as string)).toBe("--stop");
 		expect(sm.agents.has(hostId)).toBe(false);
 	});
 
@@ -2799,6 +2812,9 @@ describe("POST stop-keeping", () => {
 		const response = await stop({ end_terminals: true, force: true });
 		expect(response.json()).toMatchObject({ outcome: "stopped" });
 		expect(f.agent.execOnHost.mock.calls).toEqual(calls("/home/pi/.local/bin/lasterm-agent"));
+		if (os === "windows") {
+			expect(windowsArgsOf(f.agent.execOnHost.mock.calls[0]?.[0] as string)).toBe("--stop");
+		}
 	});
 
 	it.each([

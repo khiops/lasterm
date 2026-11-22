@@ -1021,6 +1021,9 @@ export class SshAgent extends AgentConnection {
 									if (err instanceof RemoteDaemonUnavailable) {
 										this.remoteDaemonUnavailable = err.reason;
 										this.reachedThrough = "stdio";
+										// A stdio agent is the shell's command, which
+										// may print first (#749): seek its HELLO.
+										seeker = new HelloSeeker();
 										console.error(
 											`[lasterm-ssh] ${err.message} The agent runs on stdio on this connection, and its terminals end with it.`,
 										);

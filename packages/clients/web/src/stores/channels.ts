@@ -440,12 +440,17 @@ export const useChannelsStore = defineStore("channels", () => {
 	 *
 	 * `listed` is what a host list published into the index while the fetch was in
 	 * flight: those entries stay over the response's rows, which the hub may have
-	 * read before the list did (#1148). Titles heard still go over them.
+	 * read before the list did (#1148). Titles heard still go over them. Only a list
+	 * whose request started after the index fetch's publishes there (`startedAt`,
+	 * from `requestSeq`): an earlier one was read by the hub before the index was.
 	 */
 	interface IndexHeard {
+		startedAt: number;
 		titles: Map<string, string>;
 		listed: Map<string, ChannelIndexEntry>;
 	}
+	/** Orders the starts of list and index requests, which the hub reads in that order. */
+	let requestSeq = 0;
 	const indexTitlesDuringFetch = new Set<IndexHeard>();
 
 	/**
@@ -499,6 +504,10 @@ export const useChannelsStore = defineStore("channels", () => {
 	function deletedDuringFetch(channelIds: Iterable<string>): void {
 		for (const heardHere of statusesDuringFetch.values()) {
 			for (const id of channelIds) heardHere.set(id, "deleted");
+		}
+		// An index fetch in flight must not bring back what a list published for it (#1148).
+		for (const heardHere of indexTitlesDuringFetch) {
+			for (const id of channelIds) heardHere.listed.delete(id);
 		}
 	}
 
@@ -636,7 +645,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	async function fetchChannelIndex(): Promise<void> {
 		if (authStore.token === null) return;
 		const myIndexGeneration = ++indexGeneration;
-		const myHeard: IndexHeard = { titles: new Map(), listed: new Map() };
+		const myHeard: IndexHeard = { startedAt: ++requestSeq, titles: new Map(), listed: new Map() };
 		indexTitlesDuringFetch.add(myHeard);
 		try {
 			const res = await hubFetch(`${hubBaseUrl()}/api/channels`, {
@@ -675,7 +684,7 @@ export const useChannelsStore = defineStore("channels", () => {
 				});
 				nextHostMap.set(id, rowHostId);
 			}
-			// What a host list published meanwhile is newer than these rows (#1148);
+			// What a host list requested after this fetch published meanwhile is newer than these rows (#1148);
 			// a title heard since goes over it.
 			for (const [id, listed] of myHeard.listed) {
 				const title = myHeard.titles.get(id);
@@ -700,6 +709,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		// per-generation lifecycle (loading start → loading end) is fully
 		// bracketed by the same generation value.
 		const myGeneration = ++fetchGeneration.value;
+		const myStart = ++requestSeq;
 
 		loading.value = true;
 		error.value = null;
@@ -828,7 +838,17 @@ export const useChannelsStore = defineStore("channels", () => {
 				nextIndex.set(ch.id, entry);
 				// An index fetch in flight reads rows the hub may have listed before
 				// this list: what this list publishes stays over them (#1148).
-				for (const heardHere of indexTitlesDuringFetch) heardHere.listed.set(ch.id, entry);
+				for (const heardHere of indexTitlesDuringFetch) {
+					if (heardHere.startedAt < myStart) heardHere.listed.set(ch.id, entry);
+				}
+			}
+			// This list is the whole host: what an earlier list of it published for
+			// a channel it no longer holds goes (#1148).
+			const mergedIds = new Set(merged.map((c) => c.id));
+			for (const heardHere of indexTitlesDuringFetch) {
+				for (const [id, listed] of heardHere.listed) {
+					if (listed.hostId === hostId && !mergedIds.has(id)) heardHere.listed.delete(id);
+				}
 			}
 			channelHostMap.value = nextHostMap;
 			channelIndex.value = nextIndex;

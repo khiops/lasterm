@@ -12014,6 +12014,21 @@ describe("SessionManager recordings (#80)", () => {
 	});
 
 	// Wiring of OUTPUT, resize and CHANNEL_EXIT; AC-NO-FINAL-REDRAW.
+	// AC-HEADER / end-title through the hub's own title: a program that names its
+	// terminal during the recording names the cast and its file. Mutation caught:
+	// a title taken from anything but the terminal's resolved title.
+	it("names the cast and its file after the program's title at the end", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+		emitLocal({ type: "TITLE_CHANGE", channelId, title: "vim foo.c" });
+		sm.recorder.stop(started.id);
+		const part = sm.recorder.exportPart(started.id);
+		expect(JSON.parse(part?.body.split("\n")[0] ?? "{}").title).toBe("vim foo.c — local");
+		expect(part?.fileName).toMatch(/^lasterm-vim-foo-c-\d{8}-\d{6}\.cast$/);
+	});
+
 	it("records the agent's output, the hub's size changes and the exit, not the final-screen redraw", async () => {
 		const channelId = await spawnLocal();
 		const started = sm.startRecording(channelId);
@@ -12132,6 +12147,38 @@ describe("SessionManager recordings (#80)", () => {
 			24,
 		);
 		expect(sm.recorder.listed(started.id)?.end_reason).toBe("restarted");
+	});
+
+	// Mutation caught: the restarted end read after the entry is replaced, which
+	// stores the new run's default title instead of the ending run's.
+	it("keeps the ending run's title on a recording a restart ends", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		emitLocal({ type: "TITLE_CHANGE", channelId, title: "vim foo.c" });
+		const lifecycle = (
+			sm as unknown as { lifecycle: { applyRestartState: (...args: unknown[]) => void } }
+		).lifecycle;
+		const ch = (
+			sm as unknown as { ctx: { channels: Map<string, { hostId: string; sessionId: string }> } }
+		).ctx.channels.get(channelId);
+		lifecycle.applyRestartState(
+			channelId,
+			channelId,
+			dal.getChannel(channelId),
+			ch?.hostId,
+			{ id: ch?.sessionId, status: "active" },
+			ch,
+			undefined,
+			[],
+			undefined,
+			80,
+			24,
+		);
+		expect(sm.recorder.listed(started.id)).toMatchObject({
+			end_reason: "restarted",
+			title: "vim foo.c",
+		});
 	});
 
 	// AC-REC-AUTO-RESTART / respawn and respawn-fails.

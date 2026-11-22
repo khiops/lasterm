@@ -181,6 +181,9 @@ function load(cast: ParsedCast): void {
 		onTerminal: () => void nextTick(fit),
 		onTime: (s) => {
 			time.value = s;
+			// A Skip idle change made during a seek applies when it ends.
+			total.value = p.totalTime;
+			markers.value = p.markers();
 		},
 		onEnd: () => {
 			playing.value = false;

@@ -180,6 +180,16 @@ const utf8 = new TextDecoder("utf-8", { ignoreBOM: true });
  * terminal at most, fed where the hub receives the agent's OUTPUT, written in
  * blocks of asciicast v3 event lines, kept until the user saves or discards it.
  */
+/** The bytes of output among events: what a lost-bytes marker counts. */
+function outputBytes(events: readonly PendingEvent[]): number {
+	let bytes = 0;
+	for (const event of events) {
+		if (event.code !== "o") continue;
+		bytes += typeof event.data === "string" ? Buffer.byteLength(event.data) : event.data.byteLength;
+	}
+	return bytes;
+}
+
 export class SessionRecorder {
 	private readonly byChannel = new Map<string, Active>();
 	private readonly byId = new Map<string, Active>();
@@ -587,7 +597,6 @@ export class SessionRecorder {
 		}
 		if (active.buffer.length === 0) return;
 		const events = active.buffer;
-		const sourceBytes = active.bufferSourceBytes;
 		active.buffer = [];
 		active.bufferSourceBytes = 0;
 		let lines = "";
@@ -614,7 +623,8 @@ export class SessionRecorder {
 				...(active.sizePending && { size: { cols: active.cols, rows: active.rows } }),
 			});
 		} catch (err) {
-			const dropped = sourceBytes + active.heldUtf8.length;
+			// What the terminal printed, in bytes: sizes, markers and exits are not output.
+			const dropped = outputBytes(events) + active.heldUtf8.length;
 			active.heldUtf8 = new Uint8Array(0);
 			active.lost += dropped;
 			const code = (err as { code?: unknown } | null)?.code;

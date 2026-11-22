@@ -301,6 +301,28 @@ describe("CastPlayback", () => {
 		expect((term as FakeTerminal | null)?.text).toBe("AB");
 	});
 
+	// Mutation caught: Skip idle changed under a seek, which then replays on the
+	// old played times and leaves a position that does not match its screen.
+	it("applies a Skip idle change made during a seek once the seek ends", async () => {
+		const text = [
+			'{"version":3,"term":{"cols":80,"rows":24}}',
+			'[10, "o", "A"]',
+			'[1, "o", "B"]',
+		].join("\n");
+		const { playback, last } = player(text, false);
+		const seeking = playback.seek(3); // Skip idle on: A at 2 s, B at 3 s
+		playback.setSkipIdle(false); // while A's write waits
+		for (let i = 0; i < 5; i++) {
+			last().flush();
+			await Promise.resolve();
+		}
+		await seeking;
+		// The seek replayed A and B; with Skip idle now off they end at 11 s.
+		expect(last().text).toBe("AB");
+		expect(playback.skipIdle).toBe(false);
+		expect(playback.currentTime).toBe(11);
+	});
+
 	// A wait asked while the seek runs would be left behind and play a later event early.
 	it("leaves no wait behind when Play is pressed during a seek", async () => {
 		const text = [

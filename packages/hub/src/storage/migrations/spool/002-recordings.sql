@@ -20,6 +20,8 @@ CREATE TABLE recordings (
 
 -- At most one open recording per terminal.
 CREATE UNIQUE INDEX idx_recordings_open_channel ON recordings(channel_id) WHERE ended_at IS NULL;
+-- The list (newest first, without the ones being deleted) and the deletions left to do.
+CREATE INDEX idx_recordings_deleting_started ON recordings(deleting, started_at DESC, id DESC);
 
 CREATE TABLE recording_blocks (
   recording_id  TEXT NOT NULL,

@@ -304,6 +304,17 @@ describe("meta.db and its baseline", () => {
 			);
 		insert("r1", "c1");
 		expect(() => insert("r2", "c1")).toThrow(); // one open recording per terminal
+		// The list and the deletions left to do read an index, not every row.
+		const plan = (sql: string) =>
+			(dbs?.spool.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>)
+				.map((row) => row.detail)
+				.join("; ");
+		expect(
+			plan("SELECT id FROM recordings WHERE deleting = 0 ORDER BY started_at DESC, id DESC"),
+		).toBe("SEARCH recordings USING COVERING INDEX idx_recordings_deleting_started (deleting=?)");
+		expect(plan("SELECT id FROM recordings WHERE deleting = 1")).toBe(
+			"SEARCH recordings USING COVERING INDEX idx_recordings_deleting_started (deleting=?)",
+		);
 	});
 
 	it("comes out new at version 26, with the final schema", () => {

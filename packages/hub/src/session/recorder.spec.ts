@@ -299,7 +299,13 @@ describe("SessionRecorder", () => {
 		});
 
 		it("(c) the agent connection closes", () => {
-			const { lines } = heldThen(() => h.rec.onAgentLost("host-1"));
+			let waiting = true;
+			const { lines } = heldThen((rid) => {
+				h.rec.onAgentLost("host-1");
+				// The wait ends at the close itself, not at the export that reads it.
+				waiting = h.pending.has(rid);
+			});
+			expect(waiting).toBe(false);
 			expect(lines).toEqual([
 				MARKER,
 				'[0.010, "o", "held"]',
@@ -545,6 +551,67 @@ describe("SessionRecorder", () => {
 		expect(second?.body.startsWith("{")).toBe(false);
 		expect(whole).not.toContain("later");
 		expect(reads.mock.calls.slice(-2).map((c) => c[1])).toEqual([2, 3]);
+	});
+
+	// AC-PARTS / bounded-read: a part loads its own blocks only, never the rest of
+	// the recording. Mutation caught: blocks loaded before the bound is checked.
+	it("loads only a part's own blocks", () => {
+		const id = "01RECBOUNDED";
+		h.dal.open(
+			{
+				id,
+				channelId: CHANNEL,
+				hostLabel: "pi",
+				title: "t",
+				startedAt: new Date(0).toISOString(),
+				cols: 80,
+				rows: 24,
+			},
+			[],
+			{ reason: "crashed", endedAt: new Date(0).toISOString() },
+		);
+		for (let seq = 1; seq <= 3; seq++) {
+			h.dal.writeBlock({
+				recordingId: id,
+				seq,
+				lines: Buffer.alloc(3 * MiB, 0x61),
+				durationMs: 0,
+				resetLost: false,
+			});
+		}
+		h.dal.end(id, "stopped", new Date(0).toISOString(), "t");
+		const loaded: number[] = [];
+		const prepare = h.dbs.spool.prepare.bind(h.dbs.spool);
+		vi.spyOn(h.dbs.spool, "prepare").mockImplementation((sql: string) => {
+			const statement = prepare(sql);
+			if (!sql.includes("data_blob FROM recording_blocks")) return statement;
+			const get = statement.get.bind(statement);
+			return Object.assign(Object.create(statement), {
+				get: (...args: unknown[]) => {
+					const row = get(...(args as never[])) as { seq: number } | undefined;
+					if (row !== undefined) loaded.push(row.seq);
+					return row;
+				},
+			}) as typeof statement;
+		});
+		const part = h.rec.exportPart(id, { fromSeq: 2, lastSeq: 3, lost: 0 });
+		expect(part?.nextSeq).toBe(3);
+		expect(loaded).toEqual([2]);
+	});
+
+	// Mutation caught: a lost count that adds the text of size changes and markers
+	// to the output bytes.
+	it("counts only output bytes in a failed block's loss", () => {
+		const id = startAuto(h);
+		h.rec.onOutput(CHANNEL, enc("ab"));
+		h.rec.onResize(CHANNEL, 120, 40);
+		h.rec.onAgentLost("host-1");
+		vi.spyOn(h.dal, "writeBlock").mockImplementationOnce(() => {
+			throw sqliteFull();
+		});
+		h.rec.exportPart(id); // its flush fails
+		h.rec.stop(id);
+		expect(h.body(id)).toContain('[0.000, "m", "lasterm: 2 bytes not recorded (storage error)"]');
 	});
 
 	// AC-PART-DELETED. Mutation caught: a missing block read as the end.

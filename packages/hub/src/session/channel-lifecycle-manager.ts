@@ -1223,6 +1223,9 @@ export class ChannelLifecycleManager {
 			}
 		}
 
+		// A new workload under the same id: the previous run's recording ends
+		// here, before its entry is replaced, so its title is that run's (#80).
+		this.ctx.recorder?.endChannel(channelId, "restarted");
 		this.ctx.metaDal.updateChannelStatus(channelId, "live");
 		this.ctx.channels.set(channelId, {
 			sessionId: sessionEntry.id,
@@ -1242,8 +1245,6 @@ export class ChannelLifecycleManager {
 		});
 		this.ctx.scheduler.trackChannel(channelId);
 		this.ctx.chunker.trackChannel(channelId);
-		// A new workload under the same id: the previous run's recording ends here (#80).
-		this.ctx.recorder?.endChannel(channelId, "restarted");
 		this.startRecordingIfAsked(channelId, hostId, cols, rows);
 
 		if (channelIdChanged) {

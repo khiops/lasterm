@@ -37,8 +37,8 @@ class NotACast extends Error {}
  * Reads an asciicast v3 or v2 file chunk by chunk (#80), so the file is never
  * held as one string; each line is, so a line longer than a JavaScript string
  * can hold cannot be read (the hub writes none: its lines are bounded far
- * below that). A chunk is scanned once for line ends, and a line still open
- * is joined only when it ends, so a long line costs its length. Each event line is
+ * below that). A line still open is kept in pieces and joined only when it
+ * ends, so a long line costs its length. Each event line is
  * `[time, code, data]`, exactly three elements, `data` a string. v3 delays are
  * never negative; v2's absolute times become delays (a time below the
  * previous one is a delay of 0, and the next delay counts from it). Positions

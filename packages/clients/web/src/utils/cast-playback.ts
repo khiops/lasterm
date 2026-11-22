@@ -64,6 +64,9 @@ export class CastPlayback {
 	private playing = false;
 	/** A seek or a step is writing: no second consumer may start. */
 	private busy = false;
+	/** A seek is replaying: a Skip idle change waits for it, then applies. */
+	private seeking = false;
+	private pendingSkipIdle: boolean | null = null;
 	private timer: unknown = null;
 	/** The played clock: `clockBase` played seconds at `clockAt`, running only while playing. */
 	private clockBase = 0;
@@ -149,6 +152,12 @@ export class CastPlayback {
 	 * already due (being written, or late) stays due, and keeps how late it is.
 	 */
 	setSkipIdle(on: boolean): void {
+		// A seek replays on the played times it started with: changed under it,
+		// the screen and the position would disagree.
+		if (this.seeking) {
+			this.pendingSkipIdle = on;
+			return;
+		}
 		const clock = this.playedClock();
 		const due = this.due();
 		const sinceLast = clock - this.position;
@@ -171,6 +180,7 @@ export class CastPlayback {
 		this.position = 0;
 		this.partial = null;
 		this.busy = true;
+		this.seeking = true;
 		try {
 			while (this.index < this.cast.events.length) {
 				const event = this.cast.events[this.index] as CastEvent;
@@ -184,8 +194,14 @@ export class CastPlayback {
 			// The clock starts from the target, whatever time the replay took.
 			this.setClock(Math.min(Math.max(seconds, this.position), this.due()));
 		} finally {
-			if (gen === this.generation) this.busy = false;
+			if (gen === this.generation) {
+				this.busy = false;
+				this.seeking = false;
+			}
 		}
+		const pending = this.pendingSkipIdle;
+		this.pendingSkipIdle = null;
+		if (pending !== null && pending !== this.skipIdleValue) this.setSkipIdle(pending);
 		this.options.onTime?.(this.currentTime);
 		if (this.playing) this.pump(gen);
 	}

@@ -43,6 +43,8 @@ function hub(
 		/** The export's cursor headers kept from the page, as a cross-origin page without them exposed. */
 		noCursor?: boolean;
 		deleteStatus?: number;
+		/** The export's last seq, when not the number of parts (a recording without blocks: 0). */
+		lastSeq?: string;
 	} = {},
 ) {
 	const requests: string[] = [];
@@ -61,7 +63,7 @@ function hub(
 			const headers: Record<string, string> = answers.noCursor
 				? {}
 				: {
-						"X-Lasterm-Cast-Last-Seq": String(parts.length),
+						"X-Lasterm-Cast-Last-Seq": answers.lastSeq ?? String(parts.length),
 						"X-Lasterm-Cast-Lost": "0",
 					};
 			if (!answers.noCursor && index + 1 < parts.length)
@@ -228,6 +230,18 @@ describe("recordings store", () => {
 				globalThis.URL.createObjectURL = createObjectURL;
 				globalThis.URL.revokeObjectURL = revokeObjectURL;
 			}
+		});
+
+		// AC-EMPTY-EXPORT: a recording without blocks exports its header alone, with
+		// last seq 0, and Save deletes the copy. Mutation caught: a cursor of "0"
+		// taken as missing.
+		it("saves a recording without blocks, then deletes the copy", async () => {
+			const requests = hub({ parts: ["header\n"], lastSeq: "0" });
+			const state = picker();
+			await useRecordingsStore().save(rec, false);
+			expect(state.writable?.written).toEqual(["header\n"]);
+			expect(state.writable?.closed).toBe(true);
+			expect(requests).toContain(`DELETE /api/recordings/${ID}`);
 		});
 
 		// (g) The pane suggests the hub's name from what RECORDING_STATE said.

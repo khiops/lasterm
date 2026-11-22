@@ -88,6 +88,8 @@ export class LocalReadBackend implements ReadBackend {
 			readonly onRead?: (bytes: number) => void;
 			/** Called before the second look, for tests that change the file there. */
 			readonly beforeRecheck?: (path: string) => Promise<void>;
+			/** Told when an opened file is closed, for tests. */
+			readonly onClose?: () => void;
 		} = {},
 	) {}
 
@@ -118,8 +120,12 @@ export class LocalReadBackend implements ReadBackend {
 			) {
 				throw fileChanged(WHAT);
 			}
-			return new LocalOpenedFile(handle, lookOf(opened), this.hooks.onRead, async () =>
-				this.hooks.beforeRecheck?.(path),
+			return new LocalOpenedFile(
+				handle,
+				lookOf(opened),
+				this.hooks.onRead,
+				async () => this.hooks.beforeRecheck?.(path),
+				this.hooks.onClose,
 			);
 		} catch (error) {
 			await handle.close().catch(() => {});
@@ -141,6 +147,7 @@ class LocalOpenedFile implements OpenedFile {
 		readonly look: FileLook,
 		private readonly onRead?: (bytes: number) => void,
 		private readonly beforeRecheck?: () => Promise<void>,
+		private readonly onClose?: () => void,
 	) {}
 
 	async read(start: number, length: number): Promise<Readable> {
@@ -171,5 +178,6 @@ class LocalOpenedFile implements OpenedFile {
 		if (this.closed) return;
 		this.closed = true;
 		await this.handle.close().catch(() => {});
+		this.onClose?.();
 	}
 }

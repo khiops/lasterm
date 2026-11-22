@@ -452,6 +452,7 @@ describe("downloads from a terminal's host, over REST (#840)", () => {
 				"filename*=UTF-8''say%20%22hi%22%20100%25.txt",
 			],
 		];
+		names.push(["100% sure.txt", 'filename="100_ sure.txt"', "filename*=UTF-8''100%25%20sure.txt"]);
 		if (style === "posix") {
 			names.push(["new\nline.txt", 'filename="new_line.txt"', "filename*=UTF-8''new%0Aline.txt"]);
 		}

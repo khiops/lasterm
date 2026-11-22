@@ -58,6 +58,8 @@ export interface HostFilesDeps {
 	onExecRead?: (bytes: number) => void;
 	/** Called between an SFTP download's LSTAT and its OPEN, for tests (#840). */
 	sftpBetweenLookAndOpen?: (path: string) => Promise<void>;
+	/** Told when a download read's SSH command closes, for tests (#840). */
+	onExecClose?: () => void;
 }
 
 /** What the settings say of the folder a panel opens at, for one terminal. */
@@ -119,6 +121,7 @@ class RemoteFiles implements FileBackend {
 		idleMs: number,
 		private readonly onExecRead?: (bytes: number) => void,
 		private readonly sftpBetweenLookAndOpen?: (path: string) => Promise<void>,
+		private readonly onExecClose?: () => void,
 	) {
 		this.shared = new SharedSftp(client, idleMs);
 		this.sftp = new SftpFileBackend(this.shared, style);
@@ -185,6 +188,7 @@ class RemoteFiles implements FileBackend {
 			this.style,
 			() => this.shared.lost,
 			this.onExecRead,
+			this.onExecClose,
 		);
 		return this.either<OpenedFile>((backend) => (backend === this.sftp ? sftp : exec).open(path));
 	}
@@ -441,6 +445,7 @@ export class HostFilesService {
 					this.sftpIdleMs,
 					this.deps.onExecRead,
 					this.deps.sftpBetweenLookAndOpen,
+					this.deps.onExecClose,
 				);
 			this.remotes.set(client, remote);
 		}

@@ -152,6 +152,8 @@ export class ExecReadBackend implements ReadBackend {
 		private readonly lost: () => boolean,
 		/** Told the body bytes each read received from the host, for tests that bound the read-ahead. */
 		readonly onRead?: (bytes: number) => void,
+		/** Told when a read's channel closes, for tests. */
+		readonly onClose?: () => void,
 	) {}
 
 	async open(path: string): Promise<OpenedFile> {
@@ -267,6 +269,7 @@ class ExecStream {
 	private exitCode: number | null = null;
 	private settled = false;
 	private received = 0;
+	private closing = false;
 	private tail = Buffer.alloc(0);
 	readonly ended: Promise<{ exitCode: number | null; stderr: string }>;
 
@@ -292,6 +295,7 @@ class ExecStream {
 		});
 		channel.on("error", () => {});
 		channel.on("close", () => {
+			this.backend.onClose?.();
 			endedResolve({ exitCode: this.exitCode, stderr: this.stderr });
 			if (!this.settled) {
 				this.settle(this.backend.refusal(this.exitCode, this.stderr));
@@ -318,6 +322,10 @@ class ExecStream {
 
 	close(): void {
 		try {
+			// A paused channel says it closed only once what it holds is read:
+			// let it flow, into nothing, so that it closes at once.
+			this.closing = true;
+			this.channel.resume();
 			this.channel.close();
 		} catch {
 			// The connection is gone, and the channel with it.
@@ -383,13 +391,14 @@ class ExecStream {
 	}
 
 	private write(chunk: Buffer): void {
+		if (this.closing) return;
 		const room = this.length - this.received;
 		const body = chunk.subarray(0, Math.max(0, room));
 		const after = chunk.subarray(body.length);
 		if (after.length > 0 && this.tail.length < 256) {
 			this.tail = Buffer.concat([this.tail, after]).subarray(0, 256);
 		}
-		if (body.length === 0) return;
+		if (body.length === 0 || this.body.destroyed) return;
 		this.received += body.length;
 		this.backend.onRead?.(body.length);
 		const more = this.body.write(body);

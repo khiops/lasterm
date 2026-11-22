@@ -127,6 +127,8 @@ export interface SftpServerOptions {
 	fstat?: boolean;
 	/** Told the bytes each READ answered (#840), for tests that bound what a download reads ahead. */
 	onRead?: (bytes: number) => void;
+	/** Told each time a file handle is closed (#840). */
+	onCloseFile?: () => void;
 }
 
 /** A path as the client sent it, mapped on to this machine's; null for one the view does not serve. */
@@ -480,6 +482,7 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 							if (dirs.delete(handle.toString())) return;
 							await file(handle).close();
 							handles.delete(handle.toString());
+							options.onCloseFile?.();
 						}),
 					);
 					sftp.on("SETSTAT", (id, path, attrs) => {

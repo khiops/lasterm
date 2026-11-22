@@ -39,6 +39,10 @@ interface ReadHarness {
 	local(...names: string[]): string;
 	/** Bytes the source read so far. */
 	read(): number;
+	/** How many opened sources were closed so far. */
+	closed(): number;
+	/** List the harness's folder through the same host's files, as the panel does. */
+	list(): Promise<unknown>;
 	readonly host: MockSshHost | null;
 	/** Set what runs between the `lstat` and the open (local only). */
 	between(hook: ((path: string) => Promise<void>) | null): void;
@@ -86,6 +90,7 @@ const LOCAL: ReadBackendKind = {
 		let count = 0;
 		let between: ((path: string) => Promise<void>) | null = null;
 		let beforeRecheck: ((path: string) => Promise<void>) | null = null;
+		let closes = 0;
 		const files = new HostFilesService({
 			channelHost: () => ({ hostId: "local", hostType: "local" }),
 			hostOs: () => null,
@@ -103,6 +108,9 @@ const LOCAL: ReadBackendKind = {
 					onRead: (bytes) => {
 						count += bytes;
 					},
+					onClose: () => {
+						closes++;
+					},
 				}),
 			},
 		});
@@ -113,6 +121,8 @@ const LOCAL: ReadBackendKind = {
 			at: (...names) => names.reduce((path, name) => joinHostPath(path, name, machineStyle), dir),
 			local: (...names) => join(root, ...names),
 			read: () => count,
+			closed: () => closes,
+			list: () => files.list(CHANNEL, dir, false),
 			host: null,
 			between: (hook) => {
 				between = hook;
@@ -136,10 +146,14 @@ function sftpKind(style: PathStyle): ReadBackendKind {
 		start: async (options = {}) => {
 			const root = makeTempDir("lasterm-read-sftp-");
 			let count = 0;
+			let closes = 0;
 			const host = await startMockSshHost({
 				view: { style, root },
 				onRead: (bytes) => {
 					count += bytes;
+				},
+				onCloseFile: () => {
+					closes++;
 				},
 				...(options.fstat === false ? { fstat: false } : {}),
 			});
@@ -161,6 +175,8 @@ function sftpKind(style: PathStyle): ReadBackendKind {
 				at: (...names) => names.reduce((path, name) => joinHostPath(path, name, style), dir),
 				local: (...names) => join(base, ...names),
 				read: () => count,
+				closed: () => closes,
+				list: () => files.list(CHANNEL, dir, false),
 				host,
 				between: () => {
 					throw new Error("local only");
@@ -186,6 +202,7 @@ function execKind(style: PathStyle): ReadBackendKind {
 		start: async (options = {}) => {
 			const root = makeTempDir("lasterm-read-exec-");
 			let count = 0;
+			let closes = 0;
 			const host = await startMockSshHost({
 				sftp: false,
 				...(style === "windows" ? { shell: "cmd" as const } : {}),
@@ -201,6 +218,9 @@ function execKind(style: PathStyle): ReadBackendKind {
 				onExecRead: (bytes) => {
 					count += bytes;
 				},
+				onExecClose: () => {
+					closes++;
+				},
 			});
 			const server = await serverFor(files);
 			const dir = hostPath(root, style);
@@ -209,6 +229,8 @@ function execKind(style: PathStyle): ReadBackendKind {
 				at: (...names) => names.reduce((path, name) => joinHostPath(path, name, style), dir),
 				local: (...names) => join(root, ...names),
 				read: () => count,
+				closed: () => closes,
+				list: () => files.list(CHANNEL, dir, false),
 				host,
 				between: () => {
 					throw new Error("local only");
@@ -445,7 +467,8 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 				request.on("error", () => {});
 				request.on("timeout", reject);
 			});
-			await new Promise((resolve) => setTimeout(resolve, 500));
+			const h = harness;
+			await vi.waitFor(() => expect(h.closed()).toBe(1), { timeout: 2000 });
 			const after = harness.read();
 			await new Promise((resolve) => setTimeout(resolve, 1000));
 			expect(harness.read()).toBe(after);
@@ -535,6 +558,9 @@ describe("a download's read side, cases of one backend (#840)", () => {
 		const bytes = randomBytes(16 * MiB);
 		writeFileSync(h.local("huge.bin"), bytes);
 		const { got, promised } = await pausedDownload(h, "huge.bin", async () => {
+			// A listing takes the session and gives it back meanwhile: unless the
+			// paused read holds it, the idle close then runs under that read.
+			await h.list();
 			await new Promise((resolve) => setTimeout(resolve, 800));
 		});
 		expect(promised).toBe(16 * MiB);

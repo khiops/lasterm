@@ -634,10 +634,11 @@ export type AgentUploadTransport = "sftp" | "exec";
  * enough that nobody can still be writing it (`sweepStaleUploads`).
  *
  * A Windows remote gets the same temporary, and PowerShell moves it into place
- * (`windowsReplaceScript`, #725). Its agent runs on stdio and lives as long as
- * its connection, so another hub's session on the same account may be running
- * it. Windows refuses to open a running executable for writing, or to delete
- * it or rename anything over it, but lets it be renamed: the running file is
+ * (`windowsReplaceScript`, #725). Its agent, a stdio one for as long as its
+ * connection or a daemon that outlives it (#755), may be running from another
+ * hub's session on the same account, or as that daemon. Windows refuses to
+ * open a running executable for writing, or to delete it or rename anything
+ * over it, but lets it be renamed: the running file is
  * set aside, and the new one takes its name. The file set aside is deleted
  * once nothing runs it, by that upload or a later one.
  *

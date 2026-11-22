@@ -85,8 +85,7 @@ function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyRep
 			return reply.code(409).send({
 				error: {
 					code: ErrorCode.DAEMON_NOT_POSSIBLE,
-					message:
-						"Only a Linux or macOS host keeps an agent this hub can reach, and this host's system is not known to be one.",
+					message: "Lasterm does not know this host's system yet; Connect once first",
 				},
 			});
 		case "no-daemon-connection":

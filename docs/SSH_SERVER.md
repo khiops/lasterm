@@ -57,9 +57,12 @@ daemon it reaches is used, and one it does not find is started, then reached thr
 through the relay once more if the channel never answers. A daemon that was already listening before
 the hub tried is used as it is, never stopped.
 
-Windows hosts stay on stdio: no SSH channel carries a named pipe, so their terminals end with the
-connection. The same relay, planned for them in
-[#755](https://github.com/khiops/lasterm/issues/755), would lift that limit.
+A Windows host's daemon listens on a named pipe, which no SSH channel carries: the hub always
+reaches it through the relay, whatever `AllowStreamLocalForwarding` says (#755). The daemon must
+outlive the SSH session, whose processes Win32-OpenSSH puts in a job that kills them at its end:
+the agent starts it broken away from that job, which Win32-OpenSSH allows. Where the job does not,
+the host runs its agent on stdio, its terminals end with the connection, and its dialog and tooltip
+say why.
 
 ## Windows: the default shell
 

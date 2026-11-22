@@ -21,9 +21,10 @@
  * Where the daemon runs on the remote, a systemd scope of its own or the SSH
  * login session that started it, is `remoteDaemonLaunchCommand`'s (#600).
  *
- * Windows remotes are not served by this: their daemon listens on a named pipe,
- * and OpenSSH has no channel type that carries one. They stay on stdio, and
- * their terminals still end with the connection.
+ * A Windows daemon listens on a named pipe, which no SSH channel type carries:
+ * a Windows host is reached through the relay alone, and its daemon is started
+ * by `lasterm-agent --daemon --detach`, which breaks away from the SSH
+ * session's job (#755).
  *
  * A host whose SSH server refuses socket forwarding
  * (`AllowStreamLocalForwarding no`, `DisableForwarding yes`, a key's
@@ -37,6 +38,7 @@ import { randomBytes } from "node:crypto";
 import type { Duplex } from "node:stream";
 import { DEFAULT_AGENT_LOG_FILES_KEPT, type Host } from "@lasterm/shared";
 import type { Client } from "ssh2";
+import { windowsLaunchCommand } from "./agent-deployer.js";
 import { HelloSeeker } from "./hello-seeker.js";
 
 /**
@@ -46,15 +48,14 @@ import { HelloSeeker } from "./hello-seeker.js";
  * about *that* machine: yes for a Raspberry Pi at home, no for a customer's
  * server. No answer defers to the global setting.
  *
- * Windows never qualifies, whatever either says: its daemon listens on a named
- * pipe and no SSH channel carries one, so there would be nothing to reach.
+ * A Windows host qualifies as any other: its daemon is reached through the
+ * relay (#755).
  */
 export function hostKeepsDaemon(
 	host: { os?: string | null; sshRemoteDaemon?: boolean | null } | undefined,
 	globalDefault: boolean,
 ): boolean {
 	if (host === undefined) return false;
-	if (host.os === "windows") return false;
 	return host.sshRemoteDaemon ?? globalDefault;
 }
 
@@ -133,7 +134,7 @@ export function remoteDaemonPaths(stateDir: string): RemoteDaemonPaths {
 	return { dir, socket: `${dir}/agent.sock`, log: `${dir}/agent-daemon.log` };
 }
 
-/** Quote for a POSIX shell. Windows remotes never reach this module. */
+/** Quote for a POSIX shell. A Windows command goes through `windowsLaunchCommand`. */
 export function quotePosix(value: string): string {
 	if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
 	return `'${value.replace(/'/g, "'\\''")}'`;
@@ -361,6 +362,14 @@ export function remoteDaemonStopCommand(agentPath: string, paths: RemoteDaemonPa
 }
 
 /**
+ * The same on a Windows host: no state directory to resolve, since `--stop`
+ * finds the daemon of the account's default pipe by itself (#755).
+ */
+export function windowsDaemonStopCommand(agentPath: string): string {
+	return windowsLaunchCommand(agentPath, ["--stop"]);
+}
+
+/**
  * Open a stream to a socket on the remote.
  *
  * Rejects rather than throwing asynchronously: a socket nobody listens on is
@@ -485,13 +494,120 @@ export class RelayFailed extends Error {
 }
 
 /**
- * The command that relays the exec channel to the daemon's socket, waiting up
- * to `waitMs` for a daemon still starting. Windows remotes never reach this
- * module (yet).
+ * The command that relays the exec channel to the daemon's endpoint, waiting
+ * up to `waitMs` for a daemon still starting. A Windows host passes no
+ * endpoint (`null`): the relay resolves the default pipe the daemon listens
+ * on, by the same function (#755).
  */
-export function relayCommand(agentPath: string, socketPath: string, waitMs: number): string {
-	const wait = Math.max(0, Math.trunc(waitMs));
-	return `${quotePosix(agentPath)} --attach --socket ${quotePosix(socketPath)} --wait ${wait}`;
+export function relayCommand(
+	agentPath: string,
+	endpoint: string | null,
+	os: string | null,
+	waitMs: number,
+): string {
+	const wait = String(Math.max(0, Math.trunc(waitMs)));
+	if (os === "windows") {
+		return windowsLaunchCommand(agentPath, [
+			"--attach",
+			...(endpoint === null ? [] : ["--socket", endpoint]),
+			"--wait",
+			wait,
+		]);
+	}
+	if (endpoint === null) throw new Error("A POSIX relay needs the daemon's socket.");
+	return `${quotePosix(agentPath)} --attach --socket ${quotePosix(endpoint)} --wait ${wait}`;
+}
+
+/**
+ * Where a Windows daemon lives, for messages: it listens on the account's
+ * default pipe and logs to the agent's own directory, with no `--socket` on
+ * either side (#755).
+ */
+export const WINDOWS_DAEMON_PATHS: RemoteDaemonPaths = {
+	dir: "%LOCALAPPDATA%\\lasterm",
+	socket: "the account's default named pipe",
+	log: "%LOCALAPPDATA%\\lasterm\\logs",
+};
+
+/**
+ * The command that starts a Windows daemon: `--daemon --detach`, which breaks
+ * away from the SSH session's job, with the arguments a POSIX launch passes.
+ */
+export function windowsDaemonLaunchCommand(launch: Omit<RemoteDaemonLaunch, "paths">): string {
+	const idle = Math.max(0, Math.trunc(launch.idleTimeoutSeconds ?? IDLE_TIMEOUT_SECONDS));
+	const kept = Math.max(0, Math.trunc(launch.logFilesKept ?? DEFAULT_AGENT_LOG_FILES_KEPT));
+	return windowsLaunchCommand(launch.agentPath, [
+		"--daemon",
+		"--detach",
+		"--log-level",
+		launch.logLevel ?? "info",
+		"--format",
+		launch.logFormat ?? "jsonl",
+		"--idle-timeout",
+		String(idle),
+		"--log-files-kept",
+		String(kept),
+	]);
+}
+
+/** What starts every line `lasterm-agent --daemon --detach` writes on stderr. */
+const DETACH_MARKER = "lasterm-detach:";
+
+/**
+ * The Windows host does not let a process outlive the SSH session: its job
+ * forbids breaking away (#755). The connection runs the agent on stdio, and
+ * the host says why (`remoteDaemonUnavailable`).
+ */
+export class RemoteDaemonUnavailable extends Error {
+	constructor(readonly reason: string) {
+		super(`This host does not let Lasterm keep its agent running (${reason}).`);
+		this.name = "RemoteDaemonUnavailable";
+	}
+}
+
+/**
+ * What `--daemon --detach` said it did, from its stderr: `started`, a
+ * `RemoteDaemonUnavailable` for a refused breakaway, or the error for any
+ * other outcome. The exit status only goes into that error: a PowerShell
+ * `DefaultShell` hands every non-zero one on as 1, and an exit 0 without the
+ * marker is no proof of a start.
+ */
+export function detachOutcome(
+	stderr: string,
+	exitCode: number,
+): "started" | RemoteDaemonUnavailable | Error {
+	const logs = WINDOWS_DAEMON_PATHS.log;
+	// Past the limit, it says nothing, as for the relay.
+	const lines = Buffer.byteLength(stderr, "utf8") > RELAY_STDERR_LIMIT ? [] : stderr.split(/\r?\n/);
+	let said: string | null = null;
+	let after: string | undefined;
+	for (const [index, line] of lines.entries()) {
+		if (!line.startsWith(DETACH_MARKER)) continue;
+		const outcome = line.slice(DETACH_MARKER.length).trim();
+		if (outcome === "") continue;
+		said = outcome;
+		after = lines[index + 1];
+	}
+	if (said === "started") return "started";
+	if (said === "breakaway-refused") {
+		const why = after?.trim();
+		return new RemoteDaemonUnavailable(
+			why === undefined || why === "" || why.startsWith(DETACH_MARKER)
+				? "its SSH session's job does not allow a process to break away"
+				: why,
+		);
+	}
+	if (said?.startsWith("failed")) {
+		const text = said.slice("failed".length).trim();
+		return new Error(
+			`The remote agent daemon would not start (exit ${exitCode}): ${text === "" ? "the launch failed" : text}. ` +
+				`Its log is in ${logs}.`,
+		);
+	}
+	return new Error(
+		`The remote agent daemon would not start (exit ${exitCode}), and did not say why. ` +
+			`Its log is in ${logs}.`,
+	);
 }
 
 /**
@@ -545,6 +661,12 @@ export function openRelay(conn: Client, command: string): Promise<Duplex> {
 			const stderr: Buffer[] = [];
 			let stderrBytes = 0;
 			let settled = false;
+			// Said in the log of a relay that ends before HELLO, beside what it
+			// wrote: a PowerShell shell turns every non-zero status into 1.
+			let exitStatus: unknown = null;
+			const onExit = (code: unknown): void => {
+				exitStatus = code;
+			};
 			const seeker = new HelloSeeker();
 			const onStderr = (chunk: Buffer): void => {
 				// Counted in bytes, and past the limit for good: what is said
@@ -572,6 +694,7 @@ export function openRelay(conn: Client, command: string): Promise<Duplex> {
 				channel.stderr.off("data", onStderr);
 				channel.off("close", onClose);
 				channel.off("error", onError);
+				channel.off("exit", onExit);
 			};
 			const onData = (chunk: Buffer): void => {
 				const seek = seeker.push(chunk);
@@ -597,6 +720,13 @@ export function openRelay(conn: Client, command: string): Promise<Duplex> {
 				if (settled) return;
 				settled = true;
 				finish();
+				const said =
+					stderrBytes > RELAY_STDERR_LIMIT
+						? null
+						: parseRelayStderr(Buffer.concat(stderr).toString("utf8")).outcome;
+				console.error(
+					`[lasterm-ssh] the relay ended before HELLO: ${said ?? "no outcome said"}, exit status ${String(exitStatus ?? "none")}`,
+				);
 				reject(
 					stderrBytes > RELAY_STDERR_LIMIT
 						? new RelayFailed("the relay's stderr was too long to read before HELLO")
@@ -607,6 +737,7 @@ export function openRelay(conn: Client, command: string): Promise<Duplex> {
 			channel.stderr.on("data", onStderr);
 			channel.on("close", onClose);
 			channel.on("error", onError);
+			channel.on("exit", onExit);
 		});
 	});
 }
@@ -630,14 +761,17 @@ export interface AttachRemoteDaemonOptions {
 	/** Daemon log files a daemon this call starts keeps. See `RemoteDaemonLaunch`. */
 	logFilesKept?: number;
 	/** Injected in tests; defaults to the real `sshExec`. */
-	exec?: (client: Client, command: string) => Promise<{ stdout: string; exitCode: number }>;
+	exec?: (
+		client: Client,
+		command: string,
+	) => Promise<{ stdout: string; stderr?: string; exitCode: number }>;
 	/** Injected in tests; defaults to a real `direct-streamlocal` channel. */
 	open?: (client: Client, socketPath: string) => Promise<Duplex>;
 	/**
 	 * Injected in tests; defaults to `openRelay` running `relayCommand`. Rejects
 	 * with `NothingListens` or `RelayFailed`.
 	 */
-	relay?: (client: Client, socketPath: string, waitMs: number) => Promise<Duplex>;
+	relay?: (client: Client, endpoint: string | null, waitMs: number) => Promise<Duplex>;
 	now?: () => number;
 	sleep?: (ms: number) => Promise<void>;
 	/**
@@ -659,6 +793,11 @@ export interface AttachRemoteDaemonOptions {
 	 * saw refuse socket forwarding (#755). The relay's binary is `agentPath`.
 	 */
 	route?: "streamlocal" | "relay";
+	/**
+	 * The host's system. `"windows"` always takes the relay route, with no
+	 * endpoint on either side, and starts the daemon with `--detach` (#755).
+	 */
+	os?: string | null;
 }
 
 /** Nothing listens on the daemon's socket, and none was started (#701). */
@@ -731,22 +870,31 @@ export async function attachRemoteDaemon(
 			? READY_DEADLINE_MS
 			: options.connectTimeoutMs - DAEMON_DIAGNOSIS_MARGIN_MS;
 	const open = options.open ?? openRemoteSocket;
+	const windows = options.os === "windows";
 	const relay =
 		options.relay ??
-		((client: Client, socketPath: string, waitMs: number) =>
-			openRelay(client, relayCommand(options.agentPath, socketPath, waitMs)));
+		((client: Client, endpoint: string | null, waitMs: number) =>
+			openRelay(client, relayCommand(options.agentPath, endpoint, options.os ?? null, waitMs)));
 	const now = options.now ?? Date.now;
 	const sleep = options.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
 
-	const resolved = await exec(options.conn, REMOTE_STATE_DIR_COMMAND);
-	const stateDir = resolved.stdout.trim();
-	if (resolved.exitCode !== 0 || stateDir === "" || !stateDir.startsWith("/")) {
-		throw new Error(
-			`The remote could not say where its state directory is (exit ${resolved.exitCode}). ` +
-				"A daemon needs an absolute path for its socket.",
-		);
+	let paths: RemoteDaemonPaths;
+	if (windows) {
+		paths = WINDOWS_DAEMON_PATHS;
+	} else {
+		const resolved = await exec(options.conn, REMOTE_STATE_DIR_COMMAND);
+		const stateDir = resolved.stdout.trim();
+		if (resolved.exitCode !== 0 || stateDir === "" || !stateDir.startsWith("/")) {
+			throw new Error(
+				`The remote could not say where its state directory is (exit ${resolved.exitCode}). ` +
+					"A daemon needs an absolute path for its socket.",
+			);
+		}
+		paths = remoteDaemonPaths(stateDir);
 	}
-	const paths = remoteDaemonPaths(stateDir);
+	// The relay's endpoint: none on Windows, where both sides resolve the
+	// account's default pipe.
+	const endpoint = windows ? null : paths.socket;
 	const socketState = async (): Promise<RemoteSocketState> => {
 		try {
 			return parseRemoteSocketState(
@@ -771,7 +919,7 @@ export async function attachRemoteDaemon(
 	/** One relay attempt; `RelayFailed` is final, `NothingListens` is the caller's. */
 	const relayOnce = async (waitMs: number, refusalProven: boolean) => {
 		try {
-			const stream = await relay(options.conn, paths.socket, waitMs);
+			const stream = await relay(options.conn, endpoint, waitMs);
 			const attachment: RemoteDaemonAttachment = {
 				stream,
 				paths,
@@ -789,6 +937,21 @@ export async function attachRemoteDaemon(
 		}
 	};
 	const launchDaemon = async (): Promise<void> => {
+		if (windows) {
+			const launched = await exec(
+				options.conn,
+				windowsDaemonLaunchCommand({
+					agentPath: options.agentPath,
+					...(options.logLevel !== undefined && { logLevel: options.logLevel }),
+					...(options.logFormat !== undefined && { logFormat: options.logFormat }),
+					...(options.logFilesKept !== undefined && { logFilesKept: options.logFilesKept }),
+				}),
+			);
+			const outcome = detachOutcome(launched.stderr ?? "", launched.exitCode);
+			if (outcome !== "started") throw outcome;
+			started = true;
+			return;
+		}
 		const launched = await exec(
 			options.conn,
 			remoteDaemonLaunchCommand({
@@ -811,8 +974,11 @@ export async function attachRemoteDaemon(
 	const notAnswering = async (lastError: unknown, hint: string): Promise<Error> =>
 		new Error(
 			`The remote agent daemon did not answer on ${paths.socket} within ${readyDeadlineMs}ms. ` +
-				`Its log is at ${paths.log}. Last error: ${String(lastError)}` +
-				(await logTail(exec, options.conn, paths.log)) +
+				// No tail is read on Windows: the log is a directory of daily files.
+				(windows
+					? `Its log is in ${paths.log}. Last error: ${String(lastError)}`
+					: `Its log is at ${paths.log}. Last error: ${String(lastError)}` +
+						(await logTail(exec, options.conn, paths.log))) +
 				hint,
 		);
 	/**
@@ -835,6 +1001,8 @@ export async function attachRemoteDaemon(
 		}
 	};
 
+	// Windows: the relay alone, and nothing about forwarding is learnt (#755).
+	if (windows) return throughRelay(false);
 	if (options.route === "relay") return throughRelay(true);
 
 	// What listened before anything was started. Only `silent` makes the
@@ -928,7 +1096,9 @@ async function logTail(
 /** The real exec, loaded lazily so this module stays testable without ssh2. */
 async function defaultExec(
 	timeoutMs?: number,
-): Promise<(client: Client, command: string) => Promise<{ stdout: string; exitCode: number }>> {
+): Promise<
+	(client: Client, command: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>
+> {
 	const { sshExec } = await import("./ssh-exec.js");
 	return (client, command) => sshExec(client, command, timeoutMs);
 }

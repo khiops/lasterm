@@ -528,9 +528,16 @@ function getTooltip(host: Host): string {
 	if (hostsStore.getHostStatus(host.id) === "disconnected") parts.push("Disconnected");
 	// A note, not an error: the agent went over the SSH command channel (#722).
 	if (hostsStore.isSftpUnavailable(host.id)) parts.push("No SFTP: agent sent over SSH commands");
-	// Meant to keep an agent running, and its SSH server will not let it (#765).
+	// Its SSH server refuses socket forwarding (#765): the agent is reached
+	// through a relay instead (#755).
 	if (hostsStore.isSocketForwardingRefused(host.id))
-		parts.push("Socket forwarding refused: terminals end with the connection");
+		parts.push("Socket forwarding refused: agent reached through a relay");
+	// A Windows host whose SSH session lets nothing outlive it (#755).
+	const unavailable = hostsStore.remoteDaemonUnavailable(host.id);
+	if (unavailable !== null)
+		parts.push(
+			`This host does not let Lasterm keep its agent running (${unavailable}); its terminals run over the connection and end with it.`,
+		);
 
 	// Channel count
 	const channelCount = getChannelCount(host.id);

@@ -360,9 +360,15 @@ jobs:
       # shell the build script below needs; cargo test does not care, and
       # gating on it left every cfg(windows) path compiled, linted and never
       # once executed.
+      #
+      # The `--detach` agent tests start daemons outside every job, so they run
+      # only here and in a windows-sandbox run, and fail under CI without the
+      # variable (#755).
       - name: Test
         if: matrix.triple != 'aarch64-unknown-linux-gnu'
         run: cargo test
+        env:
+          LASTERM_TEST_DETACH: ${{ matrix.os == 'windows' && '1' || '' }}
       - name: Build (bash)
         if: matrix.shell_sh
         run: ./scripts/build-agent.sh

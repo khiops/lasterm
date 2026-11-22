@@ -91,16 +91,16 @@ export const ErrorCode = {
 	/** REST stop-keeping: the connected agent did not reach a remote daemon. */
 	NO_DAEMON_CONNECTION: "NO_DAEMON_CONNECTION",
 	/**
-	 * REST connect with `daemon_only` (#701): the host's stored OS is not one
-	 * whose daemon a socket reaches (linux or darwin), unknown included.
+	 * REST connect with `daemon_only` (#701): the host's stored OS is not
+	 * known yet, and which way a daemon is reached depends on it (#755).
 	 */
 	DAEMON_NOT_POSSIBLE: "DAEMON_NOT_POSSIBLE",
 	/** Connect with `daemon_only` (#701): nothing listens on the daemon's socket. */
 	NO_AGENT_RUNNING: "NO_AGENT_RUNNING",
 	/**
 	 * Connect with `daemon_only` (#701): the daemon's socket could not be
-	 * reached, and the host cannot say whether one listens; also an inventory
-	 * the daemon did not send in time.
+	 * reached, and the host cannot say whether one listens, or its relay
+	 * failed (#755); also an inventory the daemon did not send in time.
 	 */
 	DAEMON_UNREACHABLE: "DAEMON_UNREACHABLE",
 	/** Connect with `daemon_only` (#701): the daemon answered, then refused this hub's AUTH. */

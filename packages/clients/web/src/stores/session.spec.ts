@@ -1125,6 +1125,49 @@ describe("a server that refuses socket forwarding (#765)", () => {
 	});
 });
 
+describe("a Windows host that keeps no daemon (#755)", () => {
+	beforeEach(() => {
+		localStorageMap.clear();
+		localStorageMap.set("lasterm_token", "test-token");
+		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = false;
+		setActivePinia(createPinia());
+	});
+
+	// AC-W2 / cleared-by-daemon: the store forgets the reason once the hub
+	// stops saying it. Mutation: a store that keeps it.
+	it("remembers why from SESSION_STATE and STATE_SYNC, and forgets it when they stop saying it", async () => {
+		await useSessionStore().connect();
+		const hosts = useHostsStore();
+		const ws = wsHarness.instances[0];
+		const state = {
+			type: "SESSION_STATE",
+			sessionId: "s",
+			hostId: "pc",
+			status: "active",
+		} as const;
+		ws?.emit({ ...state, remoteDaemonUnavailable: "its job forbids it" });
+		expect(hosts.remoteDaemonUnavailable("pc")).toBe("its job forbids it");
+		ws?.emit(state);
+		expect(hosts.remoteDaemonUnavailable("pc")).toBeNull();
+		ws?.emit({ ...state, remoteDaemonUnavailable: "its job forbids it" });
+		ws?.emit({
+			type: "STATE_SYNC",
+			sessions: [
+				{
+					sessionId: "s2",
+					hostId: "box",
+					status: "active",
+					remoteDaemonUnavailable: "no breakaway",
+				},
+			],
+			channels: [],
+		});
+		expect(hosts.remoteDaemonUnavailable("pc")).toBeNull();
+		expect(hosts.remoteDaemonUnavailable("box")).toBe("no breakaway");
+	});
+});
+
 // AC-UI-STATE-ORDER / other-host-resync, missed-end (#80): every authentication reads the list again.
 describe("useSessionStore — recordings", () => {
 	beforeEach(() => {

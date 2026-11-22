@@ -359,7 +359,6 @@ export function useHostForm(editHost?: Host) {
 		message?: string;
 		platform?: TestConnectPlatform;
 	} | null>(null);
-	const lastCompletedTestPlatformOs = ref<string | undefined>(undefined);
 	const testing = ref(false);
 	const saving = ref(false);
 	/**
@@ -369,29 +368,8 @@ export function useHostForm(editHost?: Host) {
 	const saveError = ref<string | null>(null);
 	let latestTestConnection = 0;
 
-	// A completed test only describes the connection details it tested. Clear
-	// it before a synchronous save can use it after any detail changes.
-	watch(
-		() => [
-			form.value.sshHost,
-			form.value.sshPort,
-			form.value.sshUser,
-			form.value.sshProxy,
-			form.value.sshProxyUser,
-			form.value.sshProxyPort,
-		],
-		() => {
-			lastCompletedTestPlatformOs.value = undefined;
-		},
-		{ flush: "sync" },
-	);
-
 	const connectedThroughRemoteDaemon = computed(
 		() => !!editHost && hostsStore.isConnectedThroughRemoteDaemon(editHost.id),
-	);
-
-	const sshRemoteDaemonUnavailable = computed(
-		() => form.value.os === "windows" || lastCompletedTestPlatformOs.value === "windows",
 	);
 
 	// New group creation inline
@@ -534,7 +512,6 @@ export function useHostForm(editHost?: Host) {
 			const sshKeyPath = form.value.sshKeyPath;
 			const sshUser = form.value.sshUser;
 			const sshProxy = form.value.sshProxy;
-			const { sshProxyUser, sshProxyPort } = form.value;
 			const proxy = formProxyFields(sshProxy);
 			const proxyUser = proxy.ssh_proxy_user;
 			const proxyPort = proxy.ssh_proxy_port;
@@ -591,21 +568,10 @@ export function useHostForm(editHost?: Host) {
 			if (result === null) return;
 			if (testConnection === latestTestConnection) {
 				testResult.value = result;
-				lastCompletedTestPlatformOs.value =
-					result.ok &&
-					form.value.sshHost === host &&
-					form.value.sshPort === sshPort &&
-					form.value.sshUser === sshUser &&
-					form.value.sshProxy === sshProxy &&
-					form.value.sshProxyUser === sshProxyUser &&
-					form.value.sshProxyPort === sshProxyPort
-						? result.platform?.os
-						: undefined;
 			}
 		} catch {
 			if (testConnection === latestTestConnection) {
 				testResult.value = { ok: false, message: "Connection test failed" };
-				lastCompletedTestPlatformOs.value = undefined;
 			}
 		} finally {
 			if (testConnection === latestTestConnection) testing.value = false;
@@ -640,14 +606,10 @@ export function useHostForm(editHost?: Host) {
 				// anything else is an address written the way ssh_config writes
 				// it. Empty clears whichever was set.
 				...formProxyFields(f.sshProxy, f),
-				// An unavailable setting is recorded as null for a new Windows host.
-				// On an existing one, leave the stored answer alone instead.
-				...(!connectedThroughRemoteDaemon.value && (!isEdit || !sshRemoteDaemonUnavailable.value)
+				// A Windows host stores its answer as any other (#755).
+				...(!connectedThroughRemoteDaemon.value
 					? {
-							ssh_remote_daemon:
-								sshRemoteDaemonUnavailable.value || f.sshRemoteDaemon === ""
-									? null
-									: f.sshRemoteDaemon === "yes",
+							ssh_remote_daemon: f.sshRemoteDaemon === "" ? null : f.sshRemoteDaemon === "yes",
 						}
 					: {}),
 			}),
@@ -804,7 +766,6 @@ export function useHostForm(editHost?: Host) {
 		testing,
 		saving,
 		saveError,
-		sshRemoteDaemonUnavailable,
 		connectedThroughRemoteDaemon,
 		labelError,
 		// Read-only: setPortText is the one way to write it, which keeps form.sshPort with it.

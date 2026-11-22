@@ -1084,3 +1084,37 @@ describe("resuming after a crash or a restart", () => {
 		expect([...handles.uploads.keys()].sort()).toEqual([T1, "01ARZ3NDEKTSV4RRFFQ69G5FT3"].sort());
 	});
 });
+
+// The settings that reach the hub and the sender (#937).
+describe("the settings an upload carries", () => {
+	const allSending = () =>
+		socket.hear({
+			type: "TRANSFER_PROGRESS",
+			transferId: T1,
+			channelId: C1,
+			items: [1, 2, 3].map((itemId) => ({ itemId, state: "sending", acked: 0 })),
+			folders: [],
+			totals: { files: 3, bytes: 2 * MiB + 31, acked: 0, states: { sending: 3 } },
+		});
+
+	it("sends the target's onConflict in TRANSFER_START", async () => {
+		const { start } = await startPhotos(target({ onConflict: "skip" }));
+		expect(start.onConflict).toBe("skip");
+	});
+
+	it("sends one file at a time when transfer.maxConcurrent is 1", async () => {
+		useConfigStore().uiConfig = { onChannelDead: "readonly", transfer: { maxConcurrent: 1 } };
+		await startPhotos();
+		allSending();
+		await flush();
+		expect(puts.map((p) => p.itemId)).toEqual([1]);
+	});
+
+	it("sends three files at once when transfer.maxConcurrent is 3", async () => {
+		useConfigStore().uiConfig = { onChannelDead: "readonly", transfer: { maxConcurrent: 3 } };
+		await startPhotos();
+		allSending();
+		await flush();
+		expect(puts.map((p) => p.itemId)).toEqual([1, 2, 3]);
+	});
+});

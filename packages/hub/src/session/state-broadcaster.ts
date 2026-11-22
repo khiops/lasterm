@@ -127,6 +127,7 @@ export class StateBroadcaster {
 		| "connectedThroughRemoteDaemon"
 		| "sftpUnavailable"
 		| "socketForwardingRefused"
+		| "remoteDaemonUnavailable"
 	> {
 		const agent = this.ctx.agents.get(hostId);
 		const connectedThroughRemoteDaemon =
@@ -144,6 +145,9 @@ export class StateBroadcaster {
 				this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
 				refusals,
 			);
+		// A fact of the connection that is the host's, as SFTP's (#755).
+		const remoteDaemonUnavailable =
+			agent instanceof SshAgent && agent.connected ? agent.remoteDaemonUnavailable : null;
 		const outdatedAgent = this.outdatedAgentOn(hostId);
 		const otherOwnerChannels = this.otherOwnerChannelsOn(hostId);
 		return {
@@ -152,6 +156,7 @@ export class StateBroadcaster {
 			...(otherOwnerChannels !== null && { otherOwnerChannels }),
 			...(sftpUnavailable && { sftpUnavailable: true }),
 			...(socketForwardingRefused && { socketForwardingRefused: true }),
+			...(remoteDaemonUnavailable !== null && { remoteDaemonUnavailable }),
 		};
 	}
 

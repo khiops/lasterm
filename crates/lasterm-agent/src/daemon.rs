@@ -373,7 +373,7 @@ const IDLE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(10)
 /// How often the idle check runs for `idle_timeout`: every `IDLE_CHECK_EVERY`,
 /// or sooner for a shorter timeout, so a caller asking for a second does not
 /// wait ten. A connection that begins and ends between two checks is not
-/// seen; at most one period of use goes uncounted.
+/// seen.
 fn idle_check_period(idle_timeout: Option<std::time::Duration>) -> std::time::Duration {
     idle_timeout.map_or(IDLE_CHECK_EVERY, |limit| limit.min(IDLE_CHECK_EVERY))
 }

@@ -292,8 +292,9 @@ hubs hold (`other_owner_channels`, § 3.16, § 3.17): the hub that destroyed it
 let it go.
 
 From its DESTROY on, a destroyed workload's reader
-sends nothing but its CHANNEL_EXIT: no OUTPUT, LOG, title, directory, bell, notification or snapshot
-reply (an ATTACH reaching it then gets `CHANNEL_NOT_FOUND`) (#1121). The SPAWN_OK
+sends nothing but its CHANNEL_EXIT: no OUTPUT, LOG, title, directory, bell,
+notification or snapshot reply (an ATTACH reaching it then gets
+`CHANNEL_NOT_FOUND`) (#1121). The SPAWN_OK
 of a SPAWN of the id handled after that DESTROY comes after every frame that
 workload sent before it, when that connection is its owner's current one; no
 order is promised against a refusal (SPAWN_ERR), as for the exit. A kill or a

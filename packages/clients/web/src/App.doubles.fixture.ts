@@ -49,6 +49,8 @@ export interface ChannelRow {
 	 * this one (`CLIENT_HERE`) unless another is named.
 	 */
 	writer?: string;
+	/** Whether it is its host's welcome terminal. */
+	welcome?: boolean;
 }
 
 /** The client id the hub gives the window under test. */
@@ -369,6 +371,7 @@ function channelListing(channel: ChannelRow): Record<string, unknown> {
 		updated_at: AT,
 		display_title: channel.title ?? channel.id.slice(-4),
 		...(channel.status === "dead" && { exit_code: 1 }),
+		...(channel.welcome === true && { is_welcome: true }),
 	};
 }
 

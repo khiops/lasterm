@@ -24,12 +24,14 @@ vi.mock("../../utils/host-files.js", () => ({
 vi.mock("../../utils/hub-fetch.js", () => ({ hubFetch: mocks.hubFetch }));
 
 import type { PaneBox } from "../../composables/usePaneBox.js";
+import { useAuthStore } from "../../stores/auth.js";
 import { useChannelsStore } from "../../stores/channels.js";
 import { useConfigStore } from "../../stores/config.js";
 import { useFilesPanelStore } from "../../stores/files-panel.js";
 import { useHostsStore } from "../../stores/hosts.js";
 import { useThemeStore } from "../../stores/theme.js";
 import type { FilesPanelForm } from "../../utils/files-panel.js";
+import { initHubPort } from "../../utils/hub-url.js";
 import FilesPanel from "./FilesPanel.vue";
 
 const RPI = "01ARZ3NDEKTSV4RRFFQ69G5FR1";
@@ -489,3 +491,57 @@ async function mountWithCards(): Promise<void> {
 	follow.dispatchEvent(new Event("change"));
 	await settle();
 }
+
+// Settings that reach the browser through the panel (#937).
+describe("the panel's settings", () => {
+	/** The panel with the terminal's resolved profile saying `transferFollowCwd`, as the hub's cascade does. */
+	async function mountFollowing(transferFollowCwd: boolean): Promise<void> {
+		// The cascade is asked for only once signed in and the hub's address is known.
+		useAuthStore().token = "test-token";
+		await initHubPort();
+		mocks.hubFetch.mockImplementation(async (url: string) => {
+			if (!String(url).includes("/api/config/cascade")) return new Response("{}", { status: 503 });
+			const layers = { global: {}, host: {}, channel: { transferFollowCwd } };
+			const resolved = { ...DEFAULT_PROFILE, ...layers.channel };
+			return new Response(
+				JSON.stringify({ terminal: { defaults: DEFAULT_PROFILE, ...layers, resolved } }),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		});
+		await mountPanel();
+		for (let i = 0; i < 8; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			await nextTick();
+		}
+	}
+
+	const followPressed = (): string | null =>
+		root.querySelector(".files-follow")?.getAttribute("aria-pressed") ?? null;
+
+	it("lists hidden files when transfer.showHidden is true", async () => {
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			experimental: { fileTransfer: true },
+			transfer: { showHidden: true },
+		} as never;
+		await mountPanel();
+		expect(mocks.listHostFiles).toHaveBeenCalled();
+		expect(mocks.listHostFiles.mock.calls.at(-1)?.[2]).toBe(true);
+	});
+
+	it("leaves hidden files out when transfer.showHidden is unset", async () => {
+		await mountPanel();
+		expect(mocks.listHostFiles).toHaveBeenCalled();
+		expect(mocks.listHostFiles.mock.calls.at(-1)?.[2]).toBe(false);
+	});
+
+	it("starts paused when the terminal's transferFollowCwd is false", async () => {
+		await mountFollowing(false);
+		expect(followPressed()).toBe("false");
+	});
+
+	it("starts following when the terminal's transferFollowCwd is true", async () => {
+		await mountFollowing(true);
+		expect(followPressed()).toBe("true");
+	});
+});

@@ -4,6 +4,7 @@ use window_material::WindowSurface;
 #[path = "../build_channel.rs"]
 mod build_channel;
 mod channel;
+mod downloads;
 pub mod hub_log;
 pub mod tls_identity;
 mod uploads;
@@ -5957,6 +5958,295 @@ async fn cancel_quit_when_finished(app: tauri::AppHandle) -> Result<bool, String
         .map_err(|error| format!("the waiting quit was not cancelled: {error}"))
 }
 
+// ─── Downloads (#840) ────────────────────────────────────────────────────────
+
+/// The folders a native dialog chose for downloads, by the id the page holds.
+static DOWNLOAD_ROOTS: OnceLock<Mutex<HashMap<String, DownloadRoot>>> = OnceLock::new();
+/// Downloads running, by download and item id.
+static DOWNLOADS: OnceLock<Mutex<HashMap<(String, String), downloads::Running>>> = OnceLock::new();
+
+#[derive(Clone)]
+struct DownloadRoot {
+    dir: PathBuf,
+    /// What the file the save dialog named was then, for a single file.
+    existing: Option<(String, Option<downloads::Identity>)>,
+}
+
+fn download_roots() -> &'static Mutex<HashMap<String, DownloadRoot>> {
+    DOWNLOAD_ROOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn running_downloads_map() -> &'static Mutex<HashMap<(String, String), downloads::Running>> {
+    DOWNLOADS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", tag = "outcome")]
+enum DownloadTarget {
+    Cancelled,
+    Chosen {
+        root_id: String,
+        display: String,
+        name: String,
+    },
+}
+
+/// The native save dialog for one file (#840 D1): where it goes, and what was there.
+#[tauri::command]
+async fn pick_download_target(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<DownloadTarget, String> {
+    let (tx, mut rx) = tauri::async_runtime::channel(1);
+    app.dialog()
+        .file()
+        .set_title("Save download")
+        .set_file_name(&name)
+        .save_file(move |file_path| {
+            let _ = tx.blocking_send(file_path);
+        });
+    let Some(selected) = rx.recv().await else {
+        return Err("DIALOG_CLOSED: the save dialog did not answer".to_string());
+    };
+    let Some(path) = selected else {
+        return Ok(DownloadTarget::Cancelled);
+    };
+    let path = path
+        .into_path()
+        .map_err(|error| format!("INVALID_PATH: {error}"))?;
+    // Taken at once: the dialog's overwrite prompt covered the file as it is now.
+    let existing = downloads::identity_of(&path);
+    let (Some(dir), Some(file_name)) = (path.parent(), path.file_name()) else {
+        return Err("INVALID_PATH: the chosen path has no folder".to_string());
+    };
+    let file_name = file_name.to_string_lossy().into_owned();
+    let root_id = downloads::random_hex();
+    download_roots()
+        .lock()
+        .map_err(|_| "download roots poisoned".to_string())?
+        .insert(
+            root_id.clone(),
+            DownloadRoot {
+                dir: dir.to_path_buf(),
+                existing: Some((file_name.clone(), existing)),
+            },
+        );
+    Ok(DownloadTarget::Chosen {
+        root_id,
+        display: dir.display().to_string(),
+        name: file_name,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadFileRequest {
+    download_id: String,
+    item_id: String,
+    root_id: String,
+    rel_path: String,
+    /// The hub path the page asks for: `/api/channels/:id/files/content?path=…`
+    /// or its host form, checked below.
+    hub_path: String,
+    port: u16,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadProgress {
+    download_id: String,
+    item_id: String,
+    written: u64,
+    total: Option<u64>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadEnded {
+    download_id: String,
+    item_id: String,
+    #[serde(flatten)]
+    outcome: downloads::Outcome,
+}
+
+/// Whether `path` is one of the hub's download routes, and nothing else.
+fn is_download_route(path: &str) -> bool {
+    let Some((route, _query)) = path.split_once('?') else {
+        return false;
+    };
+    let parts: Vec<&str> = route.split('/').collect();
+    matches!(
+        parts.as_slice(),
+        ["", "api", "channels" | "hosts", id, "files", "content"]
+            if !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())
+    )
+}
+
+/// A relative path under a download root: `/`-separated names, none empty,
+/// `.` or `..`, no drive or root, and on Windows nothing Windows refuses.
+fn checked_rel_path(rel: &str) -> Result<Vec<&str>, String> {
+    let parts: Vec<&str> = rel.split('/').collect();
+    for part in &parts {
+        if part.is_empty() || *part == "." || *part == ".." {
+            return Err("INVALID_PATH: the path is not a plain relative path".to_string());
+        }
+        if part.contains('\\') || part.contains('\0') {
+            return Err("INVALID_PATH: the path is not a plain relative path".to_string());
+        }
+        if cfg!(windows)
+            && part
+                .chars()
+                .any(|c| matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*') || (c as u32) < 32)
+        {
+            return Err("INVALID_PATH: a name holds a character Windows refuses".to_string());
+        }
+    }
+    Ok(parts)
+}
+
+/// Write one file of a download under a root a dialog chose (#840 D4, the one-file part of A).
+#[tauri::command]
+async fn download_hub_file_to(
+    app: tauri::AppHandle,
+    request: DownloadFileRequest,
+) -> Result<(), String> {
+    if !is_download_route(&request.hub_path) {
+        return Err("INVALID_PATH: not a download route".to_string());
+    }
+    let parts = checked_rel_path(&request.rel_path)?;
+    let root = download_roots()
+        .lock()
+        .map_err(|_| "download roots poisoned".to_string())?
+        .get(&request.root_id)
+        .cloned()
+        .ok_or_else(|| "UNKNOWN_ROOT: that folder was not chosen in this run".to_string())?;
+    let (name, folders) = parts.split_last().expect("split gives at least one part");
+    let mut dir = root.dir.clone();
+    for folder in folders {
+        dir.push(folder);
+    }
+    let existing_at_dialog = match &root.existing {
+        Some((file_name, identity)) if folders.is_empty() && file_name == name => *identity,
+        _ => None,
+    };
+    let connection = established_hub_connection()?;
+    if request.port != connection.port {
+        return Err("download names a different hub endpoint".to_string());
+    }
+    let token = read_hub_auth_token()?.ok_or_else(|| "no hub token".to_string())?;
+    let client = downloads::download_client(
+        pinned_hub_tls_config(connection.expected_spki.clone())?,
+        same_endpoint_redirects(),
+        downloads::IDLE_LIMIT,
+    )?;
+    let url = relay_hub_url(connection.port, &request.hub_path)?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let key = (request.download_id.clone(), request.item_id.clone());
+    running_downloads_map()
+        .lock()
+        .map_err(|_| "downloads poisoned".to_string())?
+        .insert(
+            key.clone(),
+            downloads::Running {
+                cancel: cancel.clone(),
+            },
+        );
+    let job = downloads::FileJob {
+        dir,
+        name: (*name).to_string(),
+        partial: None,
+        existing_at_dialog,
+    };
+    std::thread::spawn(move || {
+        let outcome = match client.get(&url).bearer_auth(&token).send() {
+            Ok(response) => downloads::write_file(
+                &job,
+                response,
+                &cancel,
+                |written, total| {
+                    let _ = app.emit(
+                        "download-progress",
+                        DownloadProgress {
+                            download_id: key.0.clone(),
+                            item_id: key.1.clone(),
+                            written,
+                            total,
+                        },
+                    );
+                },
+                &downloads::RealOps,
+            ),
+            Err(error) => downloads::Outcome::Failed {
+                error: format!(
+                    "The hub could not be reached: {}",
+                    error_with_sources(&error)
+                ),
+                code: None,
+            },
+        };
+        if let Ok(mut running) = running_downloads_map().lock() {
+            running.remove(&key);
+        }
+        let _ = app.emit(
+            "download-ended",
+            DownloadEnded {
+                download_id: key.0,
+                item_id: key.1,
+                outcome,
+            },
+        );
+    });
+    Ok(())
+}
+
+/// Stop one file of a download, or every file of it.
+#[tauri::command]
+fn cancel_hub_download(download_id: String, item_id: Option<String>) -> Result<(), String> {
+    let running = running_downloads_map()
+        .lock()
+        .map_err(|_| "downloads poisoned".to_string())?;
+    for ((download, item), job) in running.iter() {
+        if *download == download_id && item_id.as_ref().map_or(true, |wanted| wanted == item) {
+            job.cancel.store(true, Ordering::SeqCst);
+        }
+    }
+    Ok(())
+}
+
+/// Show a downloaded file in Explorer, selected.
+#[tauri::command]
+fn reveal_downloaded(root_id: String, rel_path: String) -> Result<(), String> {
+    let parts = checked_rel_path(&rel_path)?;
+    let root = download_roots()
+        .lock()
+        .map_err(|_| "download roots poisoned".to_string())?
+        .get(&root_id)
+        .cloned()
+        .ok_or_else(|| "UNKNOWN_ROOT: that folder was not chosen in this run".to_string())?;
+    let mut path = root.dir;
+    for part in parts {
+        path.push(part);
+    }
+    #[cfg(windows)]
+    {
+        let mut select = std::ffi::OsString::from("/select,");
+        select.push(path.as_os_str());
+        std::process::Command::new("explorer")
+            .arg(select)
+            .spawn()
+            .map_err(|error| format!("Explorer could not be opened: {error}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        let folder = path.parent().unwrap_or(&path).to_path_buf();
+        std::process::Command::new("xdg-open")
+            .arg(folder)
+            .spawn()
+            .map_err(|error| format!("the folder could not be opened: {error}"))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn pick_and_read_agent_file(
     app: tauri::AppHandle,
@@ -6589,7 +6879,11 @@ pub fn run() {
             apply_window_tone,
             restart_desktop,
             set_uploads_in_progress,
-            cancel_quit_when_finished
+            cancel_quit_when_finished,
+            pick_download_target,
+            download_hub_file_to,
+            cancel_hub_download,
+            reveal_downloaded
         ])
         .on_window_event(|window, event| {
             if window.label() == "main" {

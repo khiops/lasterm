@@ -215,6 +215,19 @@
 					<FilesIcon name="folder" />
 					Upload folder…
 				</button>
+				<!-- Reading is anyone's: a reader downloads too (#840). -->
+				<button
+					type="button"
+					class="files-btn"
+					:disabled="downloadBlocked !== null || downloading"
+					:title="downloadBlocked ?? undefined"
+					:aria-describedby="downloadBlocked !== null ? downloadNoteId : undefined"
+					@click="download"
+				>
+					<FilesIcon name="download" />
+					Download…
+				</button>
+				<span :id="downloadNoteId" hidden>{{ downloadBlocked }}</span>
 			</template>
 			<p v-if="!writer" :id="readerNoteId" class="files-actions__note">
 				Only the writer can upload or create folders here.
@@ -222,6 +235,9 @@
 			</p>
 			<p v-if="createFailure !== null" class="files-actions__note files-actions__note--warn" role="alert">
 				{{ createFailure }}
+			</p>
+			<p v-if="downloadFailure !== null" class="files-actions__note files-actions__note--warn" role="alert">
+				{{ downloadFailure }}
 			</p>
 		</div>
 	</div>
@@ -248,6 +264,7 @@ import {
 import { listMove } from "../../utils/focus-zones.js";
 import { useUploadDrop } from "../../composables/useUploadDrop.js";
 import { useTransfersStore } from "../../stores/transfers.js";
+import { downloadHostFile } from "../../utils/host-download.js";
 import { createHostFolder, type FileListingView, listHostFiles } from "../../utils/host-files.js";
 import { hostConnectionFailure } from "../../utils/host-connection.js";
 import { overlayText, refusalText } from "../../utils/upload-drop.js";
@@ -664,6 +681,46 @@ function pick(kind: "files" | "folder"): void {
 	const at = listing.value?.path;
 	if (at === undefined) return;
 	void transfers.pickAndUpload(kind, { channelId: props.channelId, paneId: null, dir: at, place: "panel" });
+}
+
+const downloadNoteId = useId();
+const downloading = ref(false);
+const downloadFailure = ref<string | null>(null);
+
+/** Why "Download…" cannot act on the selected row, or null when it can (#840). */
+const downloadBlocked = computed<string | null>(() => {
+	const entry = listing.value?.entries[current.value];
+	if (listing.value === null || entry === undefined) return "Select a file to download";
+	if (entry.kind === "symlink") return "Links are not followed — open the folder the link points to";
+	if (entry.kind === "directory") return "Downloading folders is not available yet";
+	if (entry.kind !== "file") return "Select a file to download";
+	return null;
+});
+
+/** Whether this browser or desktop runs on Windows, for the names its files may hold. */
+function onWindows(): boolean {
+	const data = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData;
+	return /win/i.test(data?.platform ?? navigator.platform ?? "");
+}
+
+/** "Download…": the selected file, through the desktop's dialog or the browser's downloads. */
+async function download(): Promise<void> {
+	const shown = listing.value;
+	const entry = shown?.entries[current.value];
+	if (shown === null || shown === undefined || entry === undefined || downloadBlocked.value !== null) return;
+	downloading.value = true;
+	downloadFailure.value = null;
+	try {
+		const started = await downloadHostFile({
+			channelId: props.channelId,
+			path: joinPath(shown.path, entry.name, style.value),
+			name: entry.name,
+			windows: onWindows(),
+		});
+		if (started.kind === "failed") downloadFailure.value = started.message;
+	} finally {
+		downloading.value = false;
+	}
 }
 
 /** The confirmation went: the keyboard goes back to the list. */

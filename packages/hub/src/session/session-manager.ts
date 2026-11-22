@@ -3000,9 +3000,11 @@ export class SessionManager {
 			return {
 				replaced: false,
 				message:
-					run.exitCode === null || agent.closedByHub || !agent.connected
+					agent.closedByHub || !agent.connected
 						? "The connection ended without confirming the agent stopped."
-						: `The agent would not stop (exit ${run.exitCode}).`,
+						: run.exitCode === null
+							? "The stop command failed without confirming the agent stopped."
+							: `The agent would not stop (exit ${run.exitCode}).`,
 			};
 		}
 

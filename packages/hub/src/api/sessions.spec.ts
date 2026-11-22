@@ -2683,7 +2683,7 @@ describe("POST stop-keeping", () => {
 		["state-reject", "The host could not say where its agent's socket is."],
 		["state-relative", "The host could not say where its agent's socket is."],
 		["nonzero", "The agent would not stop (exit 1)."],
-		["exec-reject", "The connection ended without confirming the agent stopped."],
+		["exec-reject", "The stop command failed without confirming the agent stopped."],
 		["hub-close", "The connection ended without confirming the agent stopped."],
 	] as const)(
 		"Replace whose STOP cannot be sent and whose --stop fails on %s still interrupts the uploads, their link being gone (#1102)",

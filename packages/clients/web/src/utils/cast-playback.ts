@@ -43,30 +43,31 @@ function pieceEnd(text: string, start: number): number {
  * Plays a parsed cast into xterm (#80). One consumer at a time: an event is
  * written in pieces, each after the previous one's callback, a size change
  * only after the write before it was parsed, and no control starts a second
- * consumer while one writes. Time is continuous: a seek lands on its target
- * even between two events, and pause or a speed change keep what was already
- * waited. A seek drops what was under way (a generation counter), builds a
- * fresh terminal at the header's size and replays up to the target.
+ * consumer while one writes. Time is one played clock: it stands still while
+ * paused and runs at the speed of each moment. Each event is due at its own
+ * played time, the sum of the played delays up to it; after a write or a
+ * timer the player waits only for what remains until the next event is due,
+ * and plays one already due at once, so neither parse time nor a late timer
+ * adds up over events. A seek drops what was under way (a generation
+ * counter), builds a fresh terminal at the header's size, replays up to the
+ * target and sets the clock there.
  */
 export class CastPlayback {
 	private terminal: PlaybackTerminal;
 	private generation = 0;
 	/** The next event to apply. */
 	private index = 0;
-	/** Played seconds at the last event applied. */
+	/** Played seconds at the last event applied: the next event is due its played delay later. */
 	private position = 0;
-	/** Played seconds waited since then (paused, or at the last reschedule). */
-	private offset = 0;
 	/** An event whose pieces were cut by a pause: where to go on. */
 	private partial: { index: number; start: number } | null = null;
 	private playing = false;
 	/** A seek or a step is writing: no second consumer may start. */
 	private busy = false;
 	private timer: unknown = null;
-	/** Played seconds counted while playing only, at the speed of each moment. */
+	/** The played clock: `clockBase` played seconds at `clockAt`, running only while playing. */
 	private clockBase = 0;
 	private clockAt = 0;
-	private waitStartedAt = 0;
 	private speedValue = 1;
 	private skipIdleValue = true;
 	private readonly setTimer: (fn: () => void, ms: number) => unknown;
@@ -96,9 +97,9 @@ export class CastPlayback {
 		return this.skipIdleValue;
 	}
 
-	/** Where playback is, in played seconds, between events included. */
+	/** Where playback is, in played seconds, between events included; never past the next event. */
 	get currentTime(): number {
-		return this.position + this.waited();
+		return Math.min(this.playedClock(), this.due());
 	}
 
 	/** The played length: with Skip idle on, long pauses count as 2 s. */
@@ -126,31 +127,37 @@ export class CastPlayback {
 			void this.seek(0);
 			return;
 		}
-		this.scheduleNext(this.generation);
+		this.pump(this.generation);
 	}
 
 	pause(): void {
 		if (!this.playing) return;
-		this.offset = this.waited();
 		this.rebaseClock();
 		this.playing = false;
 		this.cancelTimer();
 	}
 
 	setSpeed(speed: number): void {
-		this.offset = this.waited();
 		this.rebaseClock();
 		this.speedValue = speed;
 		if (this.playing) this.reschedule();
 	}
 
-	/** Changing Skip idle changes the played times: the place is kept by event. */
+	/**
+	 * Changing Skip idle changes the played times: the place is kept by event.
+	 * A wait under way keeps what was waited, up to the new delay; an event
+	 * already due (being written, or late) stays due, and keeps how late it is.
+	 */
 	setSkipIdle(on: boolean): void {
-		const waited = this.waited();
+		const clock = this.playedClock();
+		const due = this.due();
+		const sinceLast = clock - this.position;
 		this.skipIdleValue = on;
 		this.position = this.cast.events.slice(0, this.index).reduce((s, e) => s + this.played(e), 0);
 		const next = this.cast.events[this.index];
-		this.offset = next === undefined ? 0 : Math.min(waited, this.played(next));
+		if (next === undefined) this.setClock(this.position);
+		else if (clock >= due) this.setClock(this.due() + (clock - due));
+		else this.setClock(this.position + Math.min(sinceLast, this.played(next)));
 		if (this.playing) this.reschedule();
 	}
 
@@ -162,7 +169,6 @@ export class CastPlayback {
 		this.terminal = this.freshTerminal();
 		this.index = 0;
 		this.position = 0;
-		this.offset = 0;
 		this.partial = null;
 		this.busy = true;
 		try {
@@ -175,14 +181,13 @@ export class CastPlayback {
 				this.position = at;
 				this.index++;
 			}
-			const next = this.cast.events[this.index];
-			this.offset =
-				next === undefined ? 0 : Math.min(Math.max(0, seconds - this.position), this.played(next));
+			// The clock starts from the target, whatever time the replay took.
+			this.setClock(Math.min(Math.max(seconds, this.position), this.due()));
 		} finally {
 			if (gen === this.generation) this.busy = false;
 		}
 		this.options.onTime?.(this.currentTime);
-		if (this.playing) this.scheduleNext(gen);
+		if (this.playing) this.pump(gen);
 	}
 
 	dispose(): void {
@@ -196,12 +201,10 @@ export class CastPlayback {
 		return this.skipIdleValue ? Math.min(event.d, IDLE_CAP_S) : event.d;
 	}
 
-	/** Played seconds waited since the last event, the wait under way included. */
-	private waited(): number {
-		if (!this.playing || this.timer === null) return this.offset;
+	/** When the next event is due, in played seconds; at the end, the last event's time. */
+	private due(): number {
 		const next = this.cast.events[this.index];
-		const live = this.offset + ((this.now() - this.waitStartedAt) / 1000) * this.speedValue;
-		return next === undefined ? live : Math.min(live, this.played(next));
+		return next === undefined ? this.position : this.position + this.played(next);
 	}
 
 	private freshTerminal(): PlaybackTerminal {
@@ -217,35 +220,42 @@ export class CastPlayback {
 
 	private reschedule(): void {
 		this.cancelTimer();
-		this.scheduleNext(this.generation);
+		this.pump(this.generation);
 	}
 
-	private scheduleNext(gen: number): void {
+	/**
+	 * The one queue: play the next event if it is due on the played clock,
+	 * otherwise wait for what remains, then look again. A timer that fires late
+	 * or a write that took long leaves the clock further on, so the next wait
+	 * is shorter, or none: lateness is never added to the following delays.
+	 */
+	private pump(gen: number): void {
 		if (!this.playing || gen !== this.generation || this.busy) return;
+		this.cancelTimer();
 		if (this.partial !== null) {
 			void this.step(gen);
 			return;
 		}
-		const event = this.cast.events[this.index];
-		if (event === undefined) {
+		if (this.cast.events[this.index] === undefined) {
+			this.setClock(this.position);
 			this.playing = false;
-			this.offset = 0;
 			this.options.onEnd?.();
 			return;
 		}
-		const wait = (Math.max(0, this.played(event) - this.offset) / this.speedValue) * 1000;
-		const step = Math.min(wait, MAX_TIMER_MS);
-		this.waitStartedAt = this.now();
+		const left = this.due() - this.playedClock();
+		if (left <= 0) {
+			void this.step(gen);
+			return;
+		}
+		// Rounded up: a timer never fires before the event is due (a browser
+		// drops a delay's fraction), and always lets time move on, so the check
+		// above is never repeated at the same instant. A long wait is taken in
+		// several timers.
+		const ms = Math.min(Math.ceil((left / this.speedValue) * 1000), MAX_TIMER_MS);
 		this.timer = this.setTimer(() => {
 			this.timer = null;
-			if (step < wait) {
-				// Part of a long wait: count it, and wait for the rest.
-				this.offset += (step / 1000) * this.speedValue;
-				this.scheduleNext(gen);
-				return;
-			}
-			void this.step(gen);
-		}, step);
+			this.pump(gen);
+		}, ms);
 	}
 
 	/** The played clock: it stands still while paused, and follows each speed change. */
@@ -254,9 +264,14 @@ export class CastPlayback {
 		return this.clockBase + ((this.now() - this.clockAt) / 1000) * this.speedValue;
 	}
 
-	private rebaseClock(): void {
-		this.clockBase = this.playedClock();
+	private setClock(seconds: number): void {
+		this.clockBase = seconds;
 		this.clockAt = this.now();
+	}
+
+	/** Before a change of play state or speed: what was played so far keeps its speed. */
+	private rebaseClock(): void {
+		this.setClock(this.playedClock());
 	}
 
 	private async step(gen: number): Promise<void> {
@@ -265,7 +280,6 @@ export class CastPlayback {
 		const start = this.partial?.index === this.index ? this.partial.start : 0;
 		this.partial = null;
 		this.busy = true;
-		const began = this.playedClock();
 		let done = false;
 		try {
 			done = await this.apply(event, gen, start, true);
@@ -275,13 +289,8 @@ export class CastPlayback {
 		if (gen !== this.generation || !done) return;
 		this.position += this.played(event);
 		this.index++;
-		// The time xterm took to parse it is part of the wait for the next
-		// event, so parsing never adds to the recording's own delays.
-		const next = this.cast.events[this.index];
-		const spent = this.playedClock() - began;
-		this.offset = next === undefined ? 0 : Math.min(spent, this.played(next));
 		this.options.onTime?.(this.currentTime);
-		this.scheduleNext(gen);
+		this.pump(gen);
 	}
 
 	/**

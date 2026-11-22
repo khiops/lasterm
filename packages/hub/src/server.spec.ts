@@ -465,6 +465,28 @@ describe("Hub Server — CORS allowlist", () => {
 		expect(response.headers["access-control-allow-origin"]).toBe("http://localhost:5173");
 	});
 
+	// A recording's export says its file name and where its parts go on in response
+	// headers, which a page of another allowed origin (the desktop's) reads only once
+	// exposed (#80). Mutation caught: one of the four left out of `exposedHeaders`.
+	it("exposes the export's file name and cursor headers to an allowed origin", async () => {
+		server = await createServer({ tls: getTestTls(), logger: false });
+		const response = await server.inject({
+			method: "GET",
+			url: "/api/health",
+			headers: { origin: "tauri://localhost" },
+		});
+		const exposed = String(response.headers["access-control-expose-headers"] ?? "")
+			.split(",")
+			.map((name) => name.trim())
+			.sort();
+		expect(exposed).toEqual([
+			"Content-Disposition",
+			"X-Lasterm-Cast-Last-Seq",
+			"X-Lasterm-Cast-Lost",
+			"X-Lasterm-Cast-Next-Seq",
+		]);
+	});
+
 	it("disallowed origin (http://evil.com) gets no CORS allow header", async () => {
 		server = await createServer({ tls: getTestTls(), logger: false });
 		const response = await server.inject({

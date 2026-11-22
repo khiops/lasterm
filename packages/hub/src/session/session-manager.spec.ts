@@ -11871,4 +11871,203 @@ describe("SessionManager recordings (#80)", () => {
 			await next.shutdown();
 		}
 	});
+
+	// AC-EVENTS and AC-TIMING-ROUND on the hub's own clock: an event's time is
+	// performance.now() when the hub handles it. The clock is scripted; nothing else
+	// in a recording's path reads it. Mutation caught: the recorder built with
+	// `now: () => 0`, or with any clock other than performance.now().
+	describe("on the hub's monotonic clock", () => {
+		let mono = 0;
+		let clock: { mockRestore: () => void } | null = null;
+
+		beforeEach(() => {
+			clock = vi.spyOn(performance, "now").mockImplementation(() => mono);
+		});
+
+		afterEach(() => {
+			clock?.mockRestore();
+			clock = null;
+		});
+
+		it("times output, a size change and the exit from the recording's start (AC-EVENTS)", async () => {
+			await hubWithToml("[terminal]\nrecord_terminals = true\n");
+			mono = 5000; // the spawn opens the recording: its position 0
+			const channelId = await spawnLocal();
+			const id = sm.recordingIdOf(channelId) ?? "";
+			emitLocal({ type: "OUTPUT", channelId, data: new TextEncoder().encode("a") });
+			mono = 5120;
+			emitLocal({ type: "OUTPUT", channelId, data: new TextEncoder().encode("b") });
+			mono = 5250;
+			sm.handleResize("c1", channelId, 100, 30);
+			mono = 5260;
+			sm.handleResize("c1", channelId, 100, 30);
+			mono = 6000;
+			emitLocal({ type: "CHANNEL_EXIT", channelId, exitCode: 3 });
+
+			expect(exportOf(sm, id).slice(1)).toEqual([
+				'[0.000, "o", "a"]',
+				'[0.120, "o", "b"]',
+				'[0.130, "r", "100x30"]',
+				'[0.750, "x", "3"]',
+			]);
+			expect(sm.recorder.listed(id)?.end_reason).toBe("exited");
+		});
+
+		it("rounds positions, not delays (AC-TIMING-ROUND)", async () => {
+			await hubWithToml("[terminal]\nrecord_terminals = true\n");
+			mono = 1000;
+			const channelId = await spawnLocal();
+			const id = sm.recordingIdOf(channelId) ?? "";
+			for (const [at, text] of [
+				[1016.6, "1"],
+				[1033.2, "2"],
+				[1049.8, "3"],
+				[1066.4, "4"],
+				[1083.0, "5"],
+			] as const) {
+				mono = at;
+				emitLocal({ type: "OUTPUT", channelId, data: new TextEncoder().encode(text) });
+			}
+
+			expect(exportOf(sm, id).slice(1)).toEqual([
+				'[0.016, "o", "1"]',
+				'[0.017, "o", "2"]',
+				'[0.016, "o", "3"]',
+				'[0.017, "o", "4"]',
+				'[0.017, "o", "5"]',
+			]);
+		});
+	});
+
+	function blocksOf(recordingId: string): number {
+		return (
+			dbManager.spool
+				.prepare("SELECT COUNT(*) AS n FROM recording_blocks WHERE recording_id = ?")
+				.get(recordingId) as { n: number }
+		).n;
+	}
+
+	/** A manual recording of `text`, stopped: one block. */
+	async function recordAndStop(channelId: string, text: string): Promise<string> {
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+		emitLocal({ type: "OUTPUT", channelId, data: new TextEncoder().encode(text) });
+		sm.recorder.stop(started.id);
+		return started.id;
+	}
+
+	// AC-DELETE / removed through the hub: the recorder's deletion reaches the spool
+	// GC's queue. Mutation caught: `purge: () => {}` where session-manager.ts builds
+	// the recorder.
+	it("deletes a discarded recording's blocks and row through the spool GC", async () => {
+		const channelId = await spawnLocal();
+		const id = await recordAndStop(channelId, "gone");
+		const { RecordingsDAL } = await import("../storage/recordings.js");
+		const store = new RecordingsDAL(dbManager.spool);
+		expect(blocksOf(id)).toBe(1);
+
+		expect(sm.recorder.delete(id)).toBe(true);
+
+		await vi.waitFor(() => {
+			expect(store.get(id)).toBeUndefined();
+			expect(blocksOf(id)).toBe(0);
+		});
+	});
+
+	// AC-DELETE-RETRY / hub-start: a row a stopped hub left marked is deleted after the
+	// next hub's start, and an unmarked one beside it keeps everything. Mutation
+	// caught: `purge: () => {}` where session-manager.ts builds the recorder.
+	it("finishes at the next hub start a deletion a stopped hub left marked", async () => {
+		const channelId = await spawnLocal();
+		const marked = await recordAndStop(channelId, "marked");
+		const kept = await recordAndStop(channelId, "kept");
+		const { RecordingsDAL } = await import("../storage/recordings.js");
+		const store = new RecordingsDAL(dbManager.spool);
+		store.markDeleting(marked); // the hub stopped before its purge ran
+		await sm.shutdown();
+
+		sm = new SessionManager(dbManager); // the next hub, over the same databases
+
+		await vi.waitFor(() => {
+			expect(store.get(marked)).toBeUndefined();
+			expect(blocksOf(marked)).toBe(0);
+		});
+		expect(store.get(kept)?.deleting).toBe(false);
+		expect(blocksOf(kept)).toBe(1);
+	});
+
+	// AC-REC-START-MANUAL / no-pane-attached: the screen a manual start asks for is the
+	// recorder's alone. Mutation caught: the start re-attaching the terminal's panes
+	// (each gets an ATTACH_OK and redraws), or adding a client to the terminal.
+	it("attaches no pane and redraws none when a recording starts", async () => {
+		const channelId = await spawnLocal();
+		const paneReceived: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c2", paneReceived));
+		expect(await sm.handleAttach("c2", channelId)).toBe(true);
+		const channel = (
+			sm as unknown as { ctx: { channels: Map<string, { clients: Set<string> }> } }
+		).ctx.channels.get(channelId);
+		const clientsBefore = [...(channel?.clients ?? [])].sort();
+		expect(clientsBefore).toEqual(["c1", "c2"]); // the spawning window and this pane
+		paneReceived.length = 0;
+
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+
+		// The recorder took the screen…
+		expect(exportOf(sm, started.id)[1]).toBe('[0.000, "o", "<mock-snapshot>"]');
+		// …and the pane heard only that a recording started.
+		expect(paneReceived.map((m) => m.type)).toEqual(["RECORDING_STATE"]);
+		expect([...(channel?.clients ?? [])].sort()).toEqual(clientsBefore);
+	});
+
+	// AC-LOST-CONNECTION-MARKER on the two drops whose close comes after as a stale
+	// one: the marker is written at the drop, once. Mutation caught: no marker at the
+	// drop (dropDisplacedConnection / attachDaemon's eviction in
+	// agent-connection-manager.ts).
+	const LOST =
+		"lasterm: connection to the agent lost; output until it returns may be missing or late";
+
+	it("marks once a connection the daemon says a newer one displaced", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+
+		emitLocal({ type: "ERROR", code: "DISPLACED", message: "a newer connection has taken over" });
+		// Its close comes after, stale by then.
+		(mockLocalAgents[0] as unknown as { emit: (e: string) => void }).emit("close");
+
+		const data = exportOf(sm, started.id)
+			.slice(1)
+			.map((l) => (JSON.parse(l) as [number, string, string]).slice(1));
+		expect(data).toEqual([
+			["o", "<mock-snapshot>"],
+			["m", LOST],
+		]);
+	});
+
+	it("marks once a stale daemon connection the hub evicts for a new one", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+		const old = mockLocalAgents[0] as unknown as { close: () => void; emit: (e: string) => void };
+		old.close(); // its socket went without a close event: still the host's, not connected
+
+		// The next terminal connects again, evicting it.
+		expect(await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" })).not.toBeNull();
+		expect(mockLocalAgents).toHaveLength(2);
+		old.emit("close"); // stale by then
+
+		const data = exportOf(sm, started.id)
+			.slice(1)
+			.map((l) => (JSON.parse(l) as [number, string, string]).slice(1));
+		expect(data).toEqual([
+			["o", "<mock-snapshot>"],
+			["m", LOST],
+		]);
+	});
 });

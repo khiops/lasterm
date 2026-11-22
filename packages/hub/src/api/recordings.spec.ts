@@ -171,6 +171,90 @@ describe("recording routes", () => {
 		expect(res.json().error.code).toBe("RECORDING_CAP");
 	});
 
+	// AC-PARTS / cursor and AC-WFAIL / fixed-at-first-part over HTTP: the client follows
+	// X-Lasterm-Cast-Next-Seq with ?from_seq=&last_seq=&lost= until it is absent, and the
+	// loss the first response fixed ends the last part, though a block written meanwhile
+	// reset the stored count. Mutations caught: the Next-Seq header renamed or dropped;
+	// from_seq and last_seq swapped; `lost: 0` passed to the recorder.
+	it("serves a recording in parts that follow the cursor, the first part's loss marked last", async () => {
+		await build();
+		live();
+		const MiB = 1024 * 1024;
+		const clock = vi.spyOn(performance, "now").mockReturnValue(0); // every delay 0.000
+		const writeBlock = vi.spyOn(RecordingsDAL.prototype, "writeBlock");
+		try {
+			const start = await server.inject({
+				method: "POST",
+				url: `/api/channels/${CHANNEL}/recording`,
+			});
+			const id = start.json().id as string;
+			const { requestId } = agentSend.mock.calls[0]?.[0] ?? {};
+			ctx().pendingRequests.get(requestId)?.({
+				type: "ATTACH_OK",
+				channelId: CHANNEL,
+				requestId,
+				snapshot: { serialized: "S", cols: 80, rows: 24, cursorX: 0, cursorY: 0 },
+				lastSeq: 0,
+			} as never);
+			// Each 3 MiB output fills a block of its own: 3 blocks, over 4 MiB in all.
+			for (const letter of ["a", "b", "c"]) {
+				sm.recorder.onOutput(CHANNEL, new TextEncoder().encode(letter.repeat(3 * MiB)));
+			}
+			// Four bytes buffered, whose block the first request's flush fails to write.
+			writeBlock.mockImplementationOnce(() => {
+				throw Object.assign(new Error("disk full"), { code: "SQLITE_FULL" });
+			});
+			sm.recorder.onOutput(CHANNEL, new TextEncoder().encode("lost"));
+
+			const first = await server.inject({ method: "GET", url: `/api/recordings/${id}/cast` });
+			expect(first.statusCode).toBe(200);
+			expect(first.headers["x-lasterm-cast-last-seq"]).toBe("3");
+			expect(first.headers["x-lasterm-cast-lost"]).toBe("4");
+			// Written after the first request: it opens with the loss marker and resets the
+			// stored count, past last_seq, so in no part of this export.
+			sm.recorder.onOutput(CHANNEL, new TextEncoder().encode("d".repeat(3 * MiB)));
+			expect(new RecordingsDAL(dbs.spool).get(id)?.unmarkedLostBytes).toBe(0);
+
+			const lastSeq = String(first.headers["x-lasterm-cast-last-seq"]);
+			const lost = String(first.headers["x-lasterm-cast-lost"]);
+			const bodies = [first.body];
+			let next = first.headers["x-lasterm-cast-next-seq"];
+			while (next !== undefined && bodies.length < 10) {
+				const part = await server.inject({
+					method: "GET",
+					url: `/api/recordings/${id}/cast?from_seq=${next}&last_seq=${lastSeq}&lost=${lost}`,
+				});
+				expect(part.statusCode).toBe(200);
+				bodies.push(part.body);
+				next = part.headers["x-lasterm-cast-next-seq"];
+			}
+
+			const whole = bodies.join("");
+			const [header, ...events] = whole.split("\n");
+			expect(header).toMatch(
+				/^\{"version":3,"term":\{"cols":80,"rows":24,"type":"xterm-256color"\},"timestamp":\d+,"title":"Terminal — pi"\}$/,
+			);
+			const expected = [
+				'[0.000, "o", "S"]',
+				`[0.000, "o", "${"a".repeat(3 * MiB)}"]`,
+				`[0.000, "o", "${"b".repeat(3 * MiB)}"]`,
+				`[0.000, "o", "${"c".repeat(3 * MiB)}"]`,
+				'[0.000, "m", "lasterm: 4 bytes not recorded (storage error)"]',
+				"",
+			];
+			// Long lines shown by their start and length, so a failure stays readable.
+			const brief = (lines: string[]) =>
+				lines.map((l) => (l.length > 64 ? `${l.slice(0, 16)}…(${l.length})` : l));
+			expect(brief(events)).toEqual(brief(expected));
+			expect(events.join("\n") === expected.join("\n")).toBe(true);
+			// One part a block: none of 3 MiB joins another under the 4 MiB part.
+			expect(bodies).toHaveLength(3);
+		} finally {
+			clock.mockRestore();
+			writeBlock.mockRestore();
+		}
+	});
+
 	// AC-CONTROL-ERRORS / open-fails through the route. Mutation caught: the storage error answered 409.
 	it("answers 500 when the recording cannot be stored", async () => {
 		await build();
@@ -202,14 +286,18 @@ describe("recording routes", () => {
 			sm.recorder.onOutput(CHANNEL, new TextEncoder().encode("hello"));
 		});
 
-		// AC-LIST.
+		// AC-LIST. Mutation caught: `used_bytes` other than the sum of the rows' bytes (the cap).
 		it("is listed with the space used and allowed", async () => {
+			// The export's flush writes the abandoned wait's marker and the held "hello" as
+			// one block: 71 + 22 bytes of export lines. The recording stays open.
+			await server.inject({ method: "GET", url: `/api/recordings/${id}/cast` });
 			const res = await server.inject({ method: "GET", url: "/api/recordings" });
 			expect(res.statusCode).toBe(200);
 			const body = res.json();
 			expect(body.recordings.map((r: { id: string }) => r.id)).toEqual([id]);
+			expect(body.recordings[0]).toMatchObject({ ended_at: null, bytes: 93 });
+			expect(body.used_bytes).toBe(93);
 			expect(body.cap_bytes).toBe(1024 * 1024 * 1024);
-			expect(typeof body.used_bytes).toBe("number");
 		});
 
 		// AC-CHANNELS-FIELD. Mutation caught: the field kept after the end.

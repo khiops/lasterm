@@ -1150,6 +1150,22 @@ describe("SessionRecorder", () => {
 		expect(h.dal.lastSeq(id)).toBe(1);
 	});
 
+	// After the shutdown's last flush nothing opens: a row left open would be read as
+	// a crash at the next start. Mutation caught: the latch `shutdown` sets left out of
+	// either start.
+	it("opens no recording after the hub's shutdown, manual or automatic", () => {
+		h.rec.shutdown();
+		const input = { channelId: CHANNEL, hostId: "host-1", hostLabel: "pi", cols: 80, rows: 24 };
+
+		expect(h.rec.startManual(input)).toEqual({ refused: "RECORDING_STORAGE_ERROR" });
+		h.rec.startAutomatic(input);
+
+		expect(h.rec.recordingIdOf(CHANNEL)).toBeNull();
+		expect(h.dal.list()).toEqual([]);
+		expect(h.attaches).toEqual([]);
+		expect(h.broadcasts).toEqual([]);
+	});
+
 	// AC-LIST. Mutation caught: a row being deleted listed.
 	it("lists recordings newest first without the ones being deleted", () => {
 		const a = startAuto(h, "A");
@@ -1215,12 +1231,25 @@ describe("SessionRecorder", () => {
 			expect(h.dal.get(id)).toBeUndefined();
 		});
 
-		// Mutation caught: an unbounded batch.
+		// Mutations caught: an unbounded batch; a block over the byte bound let into the
+		// batch of the small blocks before it.
 		it.each([
-			[600, 100, (rows: number) => rows <= 256, 3],
-			[20, 200 * 1024, (_rows: number, bytes: number) => bytes <= MiB, 4],
-			[1, 3 * MiB, (rows: number) => rows === 1, 1],
-		])("keeps each transaction bounded: %i blocks of %i bytes", async (count, size, ok, calls) => {
+			["600 blocks of 100 bytes", Array<number>(600).fill(100), (rows: number) => rows <= 256, 3],
+			[
+				"20 blocks of 204800 bytes",
+				Array<number>(20).fill(200 * 1024),
+				(_rows: number, bytes: number) => bytes <= MiB,
+				4,
+			],
+			["a block of 3 MiB", [3 * MiB], (rows: number) => rows === 1, 1],
+			// AC-DELETE / large-block: the batch holding the 3 MiB block holds it alone.
+			[
+				"100 bytes, 3 MiB, 100 bytes",
+				[100, 3 * MiB, 100],
+				(rows: number, bytes: number) => bytes <= MiB || rows === 1,
+				3,
+			],
+		])("keeps each transaction bounded: %s", async (_label, sizes, ok, calls) => {
 			const id = "01REC";
 			h.dal.open(
 				{
@@ -1235,10 +1264,10 @@ describe("SessionRecorder", () => {
 				[],
 				{ reason: "crashed", endedAt: new Date(0).toISOString() },
 			);
-			for (let seq = 1; seq <= count; seq++) {
+			for (const [index, size] of sizes.entries()) {
 				h.dal.writeBlock({
 					recordingId: id,
-					seq,
+					seq: index + 1,
 					lines: Buffer.alloc(size, 0x61),
 					durationMs: 0,
 					resetLost: false,
@@ -1279,6 +1308,35 @@ describe("SessionRecorder", () => {
 			const next = harness({}, h.dbs);
 			next.rec.recoverAtStart();
 			expect(next.purged).toEqual([b]);
+		});
+
+		// A deletion that keeps failing holds back only itself: the other marked
+		// recordings and the vacuum go on in the same pass. Mutation caught: the pass
+		// ending at the first recording whose deletion throws.
+		it("goes on with the other deletions and the vacuum when one keeps failing", async () => {
+			for (const channelId of ["A", "B"]) {
+				const id = startAuto(h, channelId);
+				h.rec.onOutput(channelId, enc(channelId));
+				h.rec.stop(id);
+				h.dal.markDeleting(id);
+			}
+			// The one the pass meets first keeps failing.
+			const [failing, other] = h.dal.deletingIds() as [string, string];
+			const deleteBatch = h.dal.deleteBatch.bind(h.dal);
+			vi.spyOn(h.dal, "deleteBatch").mockImplementation((id, limits) => {
+				if (id === failing) throw sqliteFull();
+				return deleteBatch(id, limits);
+			});
+			const vacuum = vi.spyOn(SpoolDAL.prototype, "incrementalVacuum");
+
+			const pass = await h.gc.collect();
+
+			expect(h.dal.get(other)).toBeUndefined();
+			expect(blocks(other)).toBe(0);
+			expect(h.dal.get(failing)?.deleting).toBe(true);
+			expect(blocks(failing)).toBe(1);
+			expect(vacuum).toHaveBeenCalled();
+			expect(pass.completed).toBe(true);
 		});
 	});
 

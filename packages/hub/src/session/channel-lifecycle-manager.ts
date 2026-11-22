@@ -399,7 +399,7 @@ export class ChannelLifecycleManager {
 						status: "live",
 						displayTitle: resolvedDisplayTitle,
 						createdAt: now,
-						updatedAt: now,
+						updatedAt: dbChannel?.updatedAt ?? now,
 					};
 					this.broadcaster.broadcastChannelCreated(channelCreatedMsg);
 

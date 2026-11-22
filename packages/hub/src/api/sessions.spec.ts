@@ -1644,6 +1644,80 @@ describe("POST /api/hosts/:id/agent/replace, when no end is reported (#599)", ()
 		expectEveryOneStopped(channelIds, heard);
 	});
 
+	// The daemon's stop closes its channel, and that ends the SSH client the
+	// `--stop` exec runs on, before the exec has an exit status (#1111).
+	it.each([
+		["a non-zero exit", async () => ({ stdout: "", exitCode: 255 })],
+		[
+			"a rejection",
+			async () => {
+				throw new Error("SSH agent not connected");
+			},
+		],
+	])(
+		"counts the connection closing during its own --stop as the stop, with %s",
+		async (_name, answer) => {
+			const agent = connectedAgent();
+			const { channelIds, heard } = liveTerminalsOn(agent, 2);
+			agent.send.mockImplementation((msg: ProtocolMessage) => {
+				if (msg.type === "STOP") throw new Error("SSH agent not connected");
+			});
+			agent.execOnHost.mockImplementation(async (command: string) => {
+				if (command === REMOTE_STATE_DIR_COMMAND) {
+					return { stdout: "/home/pi/.local/state/lasterm", exitCode: 0 };
+				}
+				agent.connected = false;
+				agent.emit("close");
+				return answer();
+			});
+
+			const res = await replace();
+
+			expect(res.statusCode).toBe(200);
+			expect(res.json()).toMatchObject({ replaced: true });
+			expectEveryOneStopped(channelIds, heard);
+			expect(sm.agents.has(hostId)).toBe(false);
+		},
+	);
+
+	// An unsent STOP means the agent channel is closed, so the agent is no
+	// longer `connected` while its SSH client may still run the `--stop`.
+	it("runs its own --stop when the STOP cannot be sent because the agent channel is closed", async () => {
+		const agent = connectedAgent();
+		agent.send.mockImplementation((msg: ProtocolMessage) => {
+			if (msg.type === "STOP") {
+				agent.connected = false;
+				throw new Error("SSH agent not connected");
+			}
+		});
+
+		const res = await replace();
+
+		expect(res.statusCode).toBe(200);
+		expect(res.json()).toMatchObject({ replaced: true });
+		expect(agent.execOnHost).toHaveBeenCalledTimes(2);
+	});
+
+	it("says nothing was changed only when it is known, not after a --stop whose connection stayed up and failed", async () => {
+		const agent = connectedAgent();
+		agent.send.mockImplementation((msg: ProtocolMessage) => {
+			if (msg.type === "STOP") throw new Error("SSH agent not connected");
+		});
+		agent.execOnHost.mockImplementation(async (command: string) =>
+			command === REMOTE_STATE_DIR_COMMAND
+				? { stdout: "/home/pi/.local/state/lasterm", exitCode: 0 }
+				: { stdout: "", exitCode: 1 },
+		);
+
+		const res = await replace();
+
+		expect(res.statusCode).toBe(409);
+		expect(res.json()).toMatchObject({
+			error: { code: "AGENT_NOT_REPLACED", message: "The agent would not stop (exit 1)." },
+		});
+		expect(sm.agents.get(hostId)).toBe(agent);
+	});
+
 	// On stdio the agent is not stopped, and nothing it runs ends.
 	it("ends nothing when the agent is not stopped", async () => {
 		const agent = connectedAgent();
@@ -2641,18 +2715,29 @@ describe("POST stop-keeping", () => {
 	it.each([
 		["missing-path", "This hub does not know where that agent is installed."],
 		["state-exit", "The host could not say where its agent's socket is."],
+		["state-reject", "The host could not say where its agent's socket is."],
+		["state-relative", "The host could not say where its agent's socket is."],
 		["nonzero", "The agent would not stop (exit 1)."],
+		["exec-reject", "The stop command failed without confirming the agent stopped."],
+		["hub-close", "The connection ended without confirming the agent stopped."],
 	] as const)(
 		"Replace whose STOP cannot be sent and whose --stop fails on %s still interrupts the uploads, their link being gone (#1102)",
 		async (mode, message) => {
 			const f = fixture();
 			stopCannotBeSent(f);
 			if (mode === "missing-path") f.agent.remoteAgentPath = null;
-			f.agent.execOnHost.mockImplementation(async (command: string) =>
-				command === REMOTE_STATE_DIR_COMMAND
-					? { stdout: "/state", exitCode: mode === "state-exit" ? 1 : 0 }
-					: { stdout: "", exitCode: 1 },
-			);
+			f.agent.execOnHost.mockImplementation(async (command: string) => {
+				if (command === REMOTE_STATE_DIR_COMMAND) {
+					if (mode === "state-reject") throw new Error("state command failed");
+					return {
+						stdout: mode === "state-relative" ? "relative" : "/state",
+						exitCode: mode === "state-exit" ? 1 : 0,
+					};
+				}
+				if (mode === "exec-reject") throw new Error("exec failed");
+				if (mode === "hub-close") await f.agent.close();
+				return { stdout: "", exitCode: 1 };
+			});
 			const uploads = recordUploads(f);
 			const response = await replace({ stop_transfers: true });
 			expect(response.statusCode).toBe(409);

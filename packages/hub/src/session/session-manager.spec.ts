@@ -12013,6 +12013,66 @@ describe("SessionManager recordings (#80)", () => {
 		expect(exportOf(sm, started.id)[1]).toBe('[0.000, "o", "MINE"]');
 	});
 
+	// AC-START-UNAVAILABLE (a) and (b) through the hub's own dispatch: the agent's
+	// ERROR reaches the wait by its request id, and the 5 s timer runs in the hub.
+	// Mutations caught: the ERROR not dispatched to the wait; no timer (a late
+	// screen is then taken). What the recorder does with the ERROR it receives is
+	// recorder.spec.ts's "(a) an ERROR answering the request".
+	describe("when the screen does not come", () => {
+		const MARKER = "lasterm: the screen before this point is not available";
+		const late = (channelId: string, requestId: string | undefined) => ({
+			type: "ATTACH_OK",
+			channelId,
+			requestId,
+			snapshot: { serialized: "LATE", cols: 80, rows: 24, cursorX: 0, cursorY: 0 },
+			lastSeq: 0,
+		});
+		const events = (id: string) =>
+			exportOf(sm, id)
+				.slice(1)
+				.map((l) => (JSON.parse(l) as [number, string, string]).slice(1));
+
+		it("(a) ends the wait at the agent's ERROR answering the request", async () => {
+			const channelId = await spawnLocal();
+			holdLocalAttach = true;
+			const started = sm.startRecording(channelId);
+			if (!started.ok) throw new Error(started.code);
+			const mine = heldLocalAttaches.at(-1);
+			emitLocal({ type: "OUTPUT", channelId, data: new TextEncoder().encode("held") });
+			emitLocal({
+				type: "ERROR",
+				code: "CHANNEL_NOT_FOUND",
+				message: "x",
+				requestId: mine?.requestId,
+			});
+			emitLocal(late(channelId, mine?.requestId));
+			expect(events(started.id)).toEqual([
+				["m", MARKER],
+				["o", "held"],
+			]);
+		});
+
+		it("(b) ends the wait after 5 s without an answer", async () => {
+			const channelId = await spawnLocal();
+			holdLocalAttach = true;
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const started = sm.startRecording(channelId);
+				if (!started.ok) throw new Error(started.code);
+				const mine = heldLocalAttaches.at(-1);
+				emitLocal({ type: "OUTPUT", channelId, data: new TextEncoder().encode("held") });
+				vi.advanceTimersByTime(5000);
+				emitLocal(late(channelId, mine?.requestId));
+				expect(events(started.id)).toEqual([
+					["m", MARKER],
+					["o", "held"],
+				]);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+	});
+
 	// Wiring of OUTPUT, resize and CHANNEL_EXIT; AC-NO-FINAL-REDRAW.
 	// AC-HEADER / end-title through the hub's own title: a program that names its
 	// terminal during the recording names the cast and its file. Mutation caught:

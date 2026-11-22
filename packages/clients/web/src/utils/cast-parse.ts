@@ -17,7 +17,7 @@ export interface ParsedCast {
 export const NOT_A_CAST = "Not an asciicast v2 or v3 file";
 export const EVENT_TOO_LARGE = "This file has an event too large to replay";
 /**
- * The longest line read, in UTF-16 units: half the smaller of V8's string caps
+ * The longest line read, in UTF-16 units: 2^27, about half the smaller of V8's string caps
  * (2^28 - 16 on 32-bit builds, 2^29 - 24 on 64-bit ones), leaving room for the
  * text decoding a line builds besides the line itself. The hub's own lines
  * are under 61 MiB.

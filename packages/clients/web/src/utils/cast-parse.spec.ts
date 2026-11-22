@@ -201,8 +201,25 @@ describe("parseCastChunks — the line limit", () => {
 		expect(await parse(HEAD, `${line(N + 1)}\n`, "not json\n")).toEqual(TOO_LARGE);
 	});
 
-	// line-limit-default.
-	it("reads lines up to 134,217,728 units by default", () => {
+	// line-limit-default, through the parser as the player calls it (no option).
+	// Mutation caught: another default, or none.
+	it("reads lines up to 134,217,728 units by default", async () => {
 		expect(DEFAULT_MAX_LINE_UNITS).toBe(134_217_728);
+		const mib = "a".repeat(2 ** 20); // one shared 1 Mi-unit string, never joined
+		let pulled = 0;
+		async function* open(): AsyncGenerator<string> {
+			pulled++;
+			yield HEAD;
+			for (let i = 0; i < 128; i++) {
+				pulled++;
+				yield mib; // 128 Mi units held: exactly the limit, still read
+			}
+			pulled++;
+			yield "a"; // one more: over it
+			pulled++;
+			yield "never read";
+		}
+		expect(await parseCastChunks(open())).toEqual(TOO_LARGE);
+		expect(pulled).toBe(130);
 	});
 });

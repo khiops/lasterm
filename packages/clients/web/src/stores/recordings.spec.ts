@@ -190,6 +190,24 @@ describe("recordings store", () => {
 			if ("stop" in hubOpts) expect(requests.some((r) => r.includes("/cast"))).toBe(false);
 		});
 
+		// AC-UI-LIST: Discard deletes the id it was given, and keeps the row when
+		// the hub refuses. Mutations caught: no request, another method or id, the
+		// row dropped on a failed DELETE.
+		it("discards the recording asked for, and keeps it when the hub refuses", async () => {
+			const store = useRecordingsStore();
+			hub({ deleteStatus: 500 });
+			store.rows = [row(), row({ id: "01K80OTHER0000000000000000" })];
+			expect(await store.discard(ID)).toBe(false);
+			expect(store.rows).toHaveLength(2);
+
+			const requests = hub();
+			expect(await store.discard(ID)).toBe(true);
+			expect(requests.filter((r) => r !== "GET /api/recordings")).toEqual([
+				`DELETE /api/recordings/${ID}`,
+			]);
+			expect(store.rows.map((r) => r.id)).toEqual(["01K80OTHER0000000000000000"]);
+		});
+
 		// Mutation caught: the export's first part taken as the whole when its cursor is missing.
 		it("deletes nothing when the export's cursor headers do not reach the page", async () => {
 			const requests = hub({ parts: ["header\n", "part-2\n"], noCursor: true });

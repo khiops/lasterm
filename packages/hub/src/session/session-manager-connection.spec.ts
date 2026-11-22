@@ -1012,6 +1012,22 @@ describe("a Windows host that keeps its daemon (#755)", { timeout: 30_000 }, () 
 			expect.not.objectContaining({ remoteDaemonUnavailable: expect.anything() }),
 		]);
 	});
+	// The system the deploy detects picks the route, not the host as this
+	// connection read it before (#755: `remoteOs` is the deploy's `os`, else
+	// the host's). Mutation: the stored, still unknown, system used instead.
+	it("takes the relay on a host whose system only the deploy detected", async () => {
+		deployFindsWindows();
+		const h = await hubWith({ daemon: true, os: null });
+		h.remote.daemonSocket = "silent";
+
+		const agent = await connected(h);
+
+		expect(agent.reachedThrough).toBe("relay");
+		expect(agent.remoteOs).toBe("windows");
+		expect(h.remote.windowsArgs[0]).toBe("--attach --wait 0");
+		expect(h.remote.execs.filter((c) => !c.startsWith(ENCODED_POWERSHELL))).toEqual([]);
+	});
+
 	// AC-W2 / cleared-by-daemon: the field goes with the daemon reach itself,
 	// on the reconnect after a lost link, with no Disconnect in between.
 	// Mutation: the reason kept per host and cleared only by a Disconnect.
@@ -1970,7 +1986,7 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		expect(h.remote.connections).toBe(0);
 	});
 
-	it("tries a Windows host, through the relay", async () => {
+	it("accepts a Windows host whose system is known", async () => {
 		const h = await leftOn({ os: "windows" });
 		const outcome = keepAndConnect(h);
 		expect(outcome.kind).toBe("connecting");

@@ -278,8 +278,27 @@ it gets the CHANNEL_EXIT too, before or after that state (§ 3.16 allows an exit
 before CHANNEL_STATE_END). A SPAWN reusing the id is refused while the exit is not
 sent yet, and once the exit is sent it waits until the exit is routed, so the
 exit always comes before that SPAWN's SPAWN_OK. A DESTROY of the channel while
-its exit is not sent yet withdraws that exit and frees the id for the restart's
-SPAWN that follows.
+its exit is not sent yet frees the id for the restart's SPAWN that follows, and
+turns that workload into a torn-down one, whose exit follows the rules below
+(#1113).
+
+A workload torn down before its CHANNEL_EXIT was sent (DESTROY, or the agent
+ending) still sends that exit (#1113). Once sent, it comes before the SPAWN_OK
+of any SPAWN of that id handled after it: such a SPAWN waits until the exit is
+routed. No order is promised against a refusal of that SPAWN. None is sent once
+a SPAWN has started a workload under the id. It is not listed to a connecting
+hub (`AGENT_CHANNEL_STATE`, § 3.16) and does not count among the channels other
+hubs hold (`other_owner_channels`, § 3.16, § 3.17): the hub that destroyed it
+let it go.
+
+The hub, which sent the DESTROY, does not apply that exit while the restart can
+still succeed. It drops it once the restart's SPAWN_OK says a new workload holds
+the id; otherwise it records it as the terminal's end, with `end_reason:
+"killed"`, or `"stopped"` while the host's agent is being stopped or the hub
+quits (§ 4.7). An exit that comes only after the restart failed is recorded the
+same way. An agent older than this ordering may send the destroyed shell's exit after
+the SPAWN_OK; the hub then reads it as the new run's end, until that agent is
+replaced (SPEC.md § 3.3, #805).
 
 **The environment a terminal starts with (`env-modes`, #576).** The agent builds it whole and
 starts the PTY from a cleared environment, in this order:
@@ -525,6 +544,9 @@ stops the end from being recorded: a storage error is logged by its code, and th
 ```typescript
 { type: "DESTROY", channel_id: string }
 ```
+
+The destroyed workload's CHANNEL_EXIT follows, unless a SPAWN under the id
+started a workload first (§ 3.2, #1113).
 
 ### 3.10 HEARTBEAT
 
@@ -1386,7 +1408,9 @@ absent from `channels` has ended, or is unknown.
 //   - DELETE /api/channels/:id on a live channel (the UI's Kill), including one
 //     this hub run does not hold, which it marks dead with the reason directly;
 //   - DELETE /api/sessions/:id, for every terminal of that session;
-//   - DELETE /api/hosts/:id?force=true, for every terminal of that host (#910).
+//   - DELETE /api/hosts/:id?force=true, for every terminal of that host (#910);
+//   - POST /api/channels/:id/restart on a live channel whose restart failed after
+//     ending its shell: that shell's exit is the terminal's end (§ 3.2, #1113).
 // end_reason "stopped": it ended with its agent or its hub, which nobody aimed at it.
 //   - POST /api/hosts/:id/agent/replace, for each CHANNEL_EXIT the stopping agent
 //     sends while the hub stops it, and, once the stop is confirmed, for every other
@@ -2504,7 +2528,7 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 | GET | `/api/channels` | ● | `Channel[]`, each with `display_title` and `host_id` (query: `?host_id=X` or `?session_id=Y`). A dead channel the hub ended itself carries `end_reason`: `"killed"` or `"stopped"` (§ 4.7, #592) |
 | GET | `/api/channels/:id` | ● | `Channel`, with `display_title`, and `end_reason` as in the list |
 | PATCH | `/api/channels/:id` | ● | At least one of `{ title?, group_id?, icon?, shell?, args?, cwd?, direct_process? }`, and no other key → `Channel`. A `null` clears `title`, `group_id`, `icon`, `shell` or `cwd` |
-| POST | `/api/channels/:id/restart` | ● | Restart dead channel → `{ channel_id }`; 503 while a SPAWN or another restart is already starting it (§ 4.4); 503 `{ error: { code: "HOST_UNREACHABLE", message, host_id, host_status } }` while the hub is reconnecting its host, refused at once, or when the host dropped while it started (§ 4.4, #605); 503 `RESTART_FAILED` otherwise; 500 `RESTART_ERROR` when the restart threw |
+| POST | `/api/channels/:id/restart` | ● | Restart a channel: a live one is ended (DESTROY) and started again under its id, and its end is not reported unless the restart fails, with an agent that orders that end before its answer (§ 3.2); a dead one is started again → `{ channel_id }`; 503 while a SPAWN or another restart is already starting it (§ 4.4); 503 `{ error: { code: "HOST_UNREACHABLE", message, host_id, host_status } }` while the hub is reconnecting its host, refused at once, or when the host dropped while it started (§ 4.4, #605); 503 `RESTART_FAILED` otherwise; 500 `RESTART_ERROR` when the restart threw |
 | DELETE | `/api/channels/:id` | ● | `{ ok: true }`. A live channel is ended, and stored `dead` with `end_reason: "killed"`. A dead one is removed with its output: `{ ok: true, purged: true }`, answered once its row is gone; the output follows in the spool GC's bounded batches (STORAGE.md § 7.2). 409 `{ error: { code: "CHANNEL_STARTING", message } }` while a SPAWN or a restart is starting it again (§ 4.4) |
 | DELETE | `/api/channels/dead` | ● | Remove all dead channels, or a host's with `{ host_id }` → `{ ok: true, purged, purged_ids }`: the count and the ids of the channels the hub deleted, chosen when it handled the request; a client removes exactly those. A dead channel a SPAWN or a restart is starting again is left out (§ 4.4). Their output as above |
 

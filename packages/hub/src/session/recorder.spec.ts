@@ -29,6 +29,8 @@ interface Harness {
 	/** Monotonic ms since the harness started. */
 	at(ms: number): void;
 	setTitle(title: string): void;
+	/** Make the terminal's title unreadable, as a failing meta.db read does. */
+	failTitle(on: boolean): void;
 	cast(id: string): string;
 	body(id: string): string[];
 	gc: SpoolGarbageCollector;
@@ -47,6 +49,7 @@ function harness(
 	const dal = new RecordingsDAL(dbs.spool);
 	let mono = 0;
 	let title = "build";
+	let titleFails = false;
 	const wallBase = Date.UTC(2026, 10, 22, 10, 0, 0, 0);
 	const broadcasts: RecordingStateMessage[] = [];
 	const logs: string[] = [];
@@ -73,7 +76,10 @@ function harness(
 		},
 		agentMatchesHub: () => opts.agentMatches ?? true,
 		pendingRequests: pending,
-		titleOf: () => title,
+		titleOf: () => {
+			if (titleFails) throw Object.assign(new Error("read"), { code: "SQLITE_IOERR" });
+			return title;
+		},
 		purge: (ids) => {
 			purged.push(...ids);
 		},
@@ -107,6 +113,9 @@ function harness(
 		gc,
 		at: (ms) => {
 			mono = ms;
+		},
+		failTitle: (on) => {
+			titleFails = on;
 		},
 		setTitle: (t) => {
 			title = t;
@@ -316,6 +325,17 @@ describe("SessionRecorder", () => {
 		it("(d) the terminal exits while awaiting", () => {
 			const { lines } = heldThen(() => h.rec.endChannel(CHANNEL, "exited", 2));
 			expect(lines).toEqual([MARKER, '[0.010, "o", "held"]', '[0.010, "x", "2"]']);
+		});
+
+		// The limit from below: output under 256 KiB keeps the wait, and the screen
+		// then drops it. Mutation caught: a smaller limit, which loses the screen.
+		it("keeps waiting with 1 byte under 256 KiB held, and takes the screen", () => {
+			h.at(0);
+			const { id, requestId } = startManual(h);
+			h.rec.onOutput(CHANNEL, enc("a".repeat(256 * 1024 - 1)));
+			expect(h.pending.has(requestId)).toBe(true);
+			answerAttach(h, requestId, { serialized: "S", cols: 80, rows: 24, cursorX: 0, cursorY: 0 });
+			expect(h.body(id)).toEqual(['[0.000, "o", "S"]']);
 		});
 
 		// Mutation caught: an unbounded hold (a later screen is then taken and the output dropped).
@@ -624,6 +644,20 @@ describe("SessionRecorder", () => {
 		h.rec.stop(id);
 		expect(h.body(id)).toContain(
 			`[0.000, "m", "lasterm: ${bytes} bytes not recorded (storage error)"]`,
+		);
+	});
+
+	// A title that cannot be read at the end keeps the one read at the open: the
+	// row is ended and the clients hear it. Mutation caught: the read left to throw
+	// after the recording was taken out of the open ones.
+	it("ends a recording whose title cannot be read at the Stop", () => {
+		const id = startAuto(h);
+		h.failTitle(true);
+		h.rec.stop(id);
+		expect(h.dal.get(id)).toMatchObject({ endReason: "stopped", title: "build" });
+		expect(h.broadcasts.at(-1)).toMatchObject({ recordingId: null, endReason: "stopped" });
+		expect(h.logs.at(-1)).toBe(
+			`[lasterm-recording] title failed (SQLITE_IOERR) for channel ${CHANNEL}`,
 		);
 	});
 

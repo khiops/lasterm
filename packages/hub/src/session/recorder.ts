@@ -49,6 +49,8 @@ interface Active {
 	hostId: string;
 	hostLabel: string;
 	startedAt: string;
+	/** The title read at the open: the one kept when a later read fails. */
+	title: string;
 	/** Monotonic ms of position 0. */
 	t0: number;
 	cols: number;
@@ -290,7 +292,7 @@ export class SessionRecorder {
 				type: "RECORDING_STATE",
 				channelId: input.channelId,
 				recordingId: null,
-				title: this.deps.titleOf(input.channelId),
+				title: this.titleNow(input.channelId, ""),
 				refused: "storage",
 			});
 			return;
@@ -304,7 +306,7 @@ export class SessionRecorder {
 				type: "RECORDING_STATE",
 				channelId: input.channelId,
 				recordingId: null,
-				title: this.deps.titleOf(input.channelId),
+				title: this.titleNow(input.channelId, ""),
 				refused: "cap",
 			});
 			return;
@@ -315,7 +317,7 @@ export class SessionRecorder {
 				type: "RECORDING_STATE",
 				channelId: input.channelId,
 				recordingId: null,
-				title: this.deps.titleOf(input.channelId),
+				title: this.titleNow(input.channelId, ""),
 				refused: "storage",
 			});
 			return;
@@ -326,13 +328,14 @@ export class SessionRecorder {
 	private open(input: StartInput): Active | null {
 		const id = generateId();
 		const startedAt = this.deps.wallNow().toISOString();
+		const title = this.titleNow(input.channelId, "");
 		try {
 			this.deps.dal.open(
 				{
 					id,
 					channelId: input.channelId,
 					hostLabel: input.hostLabel,
-					title: this.deps.titleOf(input.channelId),
+					title,
 					startedAt,
 					cols: input.cols,
 					rows: input.rows,
@@ -356,6 +359,7 @@ export class SessionRecorder {
 			hostId: input.hostId,
 			hostLabel: input.hostLabel,
 			startedAt,
+			title,
 			t0: this.deps.now(),
 			cols: input.cols,
 			rows: input.rows,
@@ -382,7 +386,7 @@ export class SessionRecorder {
 			type: "RECORDING_STATE",
 			channelId: active.channelId,
 			recordingId: active.id,
-			title: this.deps.titleOf(active.channelId),
+			title: active.title,
 			hostLabel: active.hostLabel,
 			startedAt: active.startedAt,
 		});
@@ -517,7 +521,9 @@ export class SessionRecorder {
 
 	private finishRow(active: Active, reason: RecordingEndReason): void {
 		const endedAt = this.deps.wallNow().toISOString();
-		const title = this.deps.titleOf(active.channelId);
+		// A title that cannot be read now keeps the one read at the open: the end
+		// still reaches the row, the memory it is retried from, and the clients.
+		const title = this.titleNow(active.channelId, active.title);
 		const owed: EndedInMemory = {
 			channelId: active.channelId,
 			endedAt,
@@ -693,7 +699,6 @@ export class SessionRecorder {
 		}
 	}
 
-	/** What all recordings hold; a failed read counts as full, so nothing starts past the cap. */
 	/** What recordings hold, or null when it cannot be read (logged): no start then. */
 	private usedBytes(): number | null {
 		try {
@@ -866,6 +871,16 @@ export class SessionRecorder {
 	private forgetIfSettled(id: string, ended: EndedInMemory): void {
 		if (ended.endPersisted && ended.lostPersisted && ended.size === null)
 			this.endedInMemory.delete(id);
+	}
+
+	/** The terminal's title now, or `fallback` when it cannot be read (logged). */
+	private titleNow(channelId: string, fallback: string): string {
+		try {
+			return this.deps.titleOf(channelId);
+		} catch (err) {
+			this.logFailure("title", channelId, err);
+			return fallback;
+		}
 	}
 
 	private logFailure(operation: string, channelId: string, err: unknown): void {

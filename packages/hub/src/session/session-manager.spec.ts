@@ -11623,6 +11623,7 @@ describe("SessionManager recordings (#80)", () => {
 		sm.destroyChannel(channelId);
 		dal.deleteChannel(channelId);
 		await sm.purgeChannelOutput([channelId]);
+		await (sm as unknown as { gc: { collect: () => Promise<unknown> } }).gc.collect();
 		expect(sm.recorder.listed(started.id)).toBeDefined();
 		expect(exportOf(sm, started.id).join("\n")).toContain("kept");
 	});

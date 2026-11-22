@@ -2440,3 +2440,30 @@ describe("Keep the agent left here and connect, failing after Yes (#701)", {
 		expect(agentOf(h)).toBeUndefined();
 	});
 });
+
+describe("a SPAWN while the connecting one takes up the daemon's list (#1165)", {
+	timeout: 20_000,
+}, () => {
+	it("joins the acquisition: nothing is spawned until the adoption is over, then both are", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		h.remote.holdsList = true;
+		h.remote.held = [generateId()];
+
+		const leader = h.sm.handleSpawn(h.window.id, { type: "SPAWN", hostId: h.host.id });
+		await until("the daemon is asked for its list", () => h.remote.listStream !== null);
+		// The agent is published and connected, the acquisition still open.
+		expect(agentOf(h)).toBeDefined();
+		expect(h.ctx.acquisitions.has(h.host.id)).toBe(true);
+		const second = h.sm.handleSpawn(h.window.id, { type: "SPAWN", hostId: h.host.id });
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(h.remote.spawns).toBe(0);
+
+		h.remote.releaseList();
+
+		expect(await leader).not.toBeNull();
+		expect(await second).not.toBeNull();
+		expect(h.remote.spawns).toBe(2);
+		expect(h.ctx.acquisitions.has(h.host.id)).toBe(false);
+		expect(h.remote.connections).toBe(1);
+	});
+});

@@ -1234,7 +1234,9 @@ export class SessionManager {
 		// Invariant 3: release checks leases.size===0 && no channels → reap if needed.
 		try {
 			// B1: outer try wraps all paths that hold a lease (B1 fix — every early return hits this finally)
-			if (!agent?.connected && host.type === "ssh") {
+			// A connected agent whose acquisition is still open has its daemon list being
+			// taken up (#1165): it is not the host's yet, so this SPAWN joins the acquisition.
+			if ((!agent?.connected || this.ctx.acquisitions.has(hostId)) && host.type === "ssh") {
 				// ── SSH: no live agent — use acquisition state machine ────────────────
 				const existing = this.ctx.acquisitions.get(hostId);
 
@@ -1370,8 +1372,9 @@ export class SessionManager {
 							!connectingAcq.controller.signal.aborted &&
 							this.ctx.sessions.get(hostId)?.id === sessionState.id
 						) {
-							// P2: set agent + commit atomically — agent becomes visible only when
-							// the acq is simultaneously deleted (no dual-authority window).
+							// P2: the agent is visible (connected) while the adoption below runs and
+							// the acq stays open until it is over: a SPAWN meeting both joins the
+							// acq instead of taking the fast path (#1165).
 							this.ctx.commits.adoptAgent(spawnFence, hostId, connectedAgent);
 							await this.lifecycle.adoptWhatTheDaemonHolds(hostId, connectedAgent);
 							Acq.commit(this.ctx, connectingAcq, sessionState);

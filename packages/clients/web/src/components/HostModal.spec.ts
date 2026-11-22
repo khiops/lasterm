@@ -417,6 +417,33 @@ describe("HostModal on a host whose SSH server refuses socket forwarding (#765)"
 	});
 });
 
+describe("HostModal on a Windows host that keeps no daemon (#755)", () => {
+	/** The host dialog's note on it, whitespace folded, or undefined. */
+	function note(): string | undefined {
+		return [...document.body.querySelectorAll(".auth-note")]
+			.map((p) => p.textContent?.replace(/\s+/g, " ").trim() ?? "")
+			.find((text) => text.includes("keep its agent running"));
+	}
+
+	// AC-W2. Mutation: a note that does not follow the store.
+	it("says why while the hub says so, and not after", async () => {
+		mountModal({ ...SSH, os: "windows", sshRemoteDaemon: true });
+		const store = useHostsStore();
+		store.rememberRemoteDaemonUnavailable(
+			SSH.id,
+			"this SSH session's job does not allow a process to break away; the daemon would end with the connection",
+		);
+		await nextTick();
+		expect(note()).toBe(
+			"This host does not let Lasterm keep its agent running (this SSH session's job does not allow a process to break away; the daemon would end with the connection); its terminals run over the connection and end with it.",
+		);
+
+		store.rememberRemoteDaemonUnavailable(SSH.id, undefined);
+		await nextTick();
+		expect(note()).toBeUndefined();
+	});
+});
+
 describe("HostModal on a host served by an agent from before an update (#805)", () => {
 	it("says the hub replaces it once none of its terminals runs there, and what Replace now ends", async () => {
 		mountModal(SSH);
@@ -505,19 +532,19 @@ describe("HostModal remote daemon choice", () => {
 		expect(await save()).toHaveProperty("ssh_remote_daemon", null);
 	});
 
-	it("hides the choice and saves null when Windows is selected", async () => {
+	// #755 AC-W4. Mutation: the M3 exclusion, which hid the choice for Windows.
+	it("offers the choice for Windows and saves the answer", async () => {
 		const save = await prepareNewHost();
 		choose(selectWithOption("Windows"), "windows");
 		await nextTick();
-		expect(el("#panel-connection")?.textContent).toContain("Not available on Windows hosts");
-		expect(document.body.querySelector("select option[value='yes']")).toBeNull();
-		expect(await save()).toHaveProperty("ssh_remote_daemon", null);
+		choose(selectWithOption("Yes — terminals survive the connection"), "yes");
+		expect(el("#panel-connection")?.textContent).not.toContain("Not available on Windows hosts");
+		expect(await save()).toHaveProperty("ssh_remote_daemon", true);
 	});
 
-	it("shows the setting as unavailable when editing a Windows host", () => {
+	it("offers the choice when editing a Windows host", () => {
 		mountModal({ ...SSH, os: "windows", sshRemoteDaemon: true });
-		expect(el("#panel-connection")?.textContent).toContain("Not available on Windows hosts");
-		expect(document.body.querySelector("select option[value='yes']")).toBeNull();
+		expect(document.body.querySelector("select option[value='yes']")).not.toBeNull();
 	});
 });
 

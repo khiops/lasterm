@@ -328,11 +328,15 @@ describe("quit-protected revival capabilities", () => {
 			expect(ctx.channels.get("chan-1")?.status).toBe("dead");
 		});
 
-		it("declares them dead on a Windows remote, which has no socket to reach", async () => {
+		it("leaves them orphan on a Windows remote too, whose daemon a relay reaches (#755)", async () => {
 			const { ctx, manager } = setup({ remoteDaemon: true, os: "windows" });
 			await manager.startup();
 
-			expect(ctx.metaDal.updateChannelStatus).toHaveBeenCalledWith("chan-1", "dead");
+			const updateChannelStatus = ctx.metaDal.updateChannelStatus as unknown as {
+				mock: { calls: unknown[][] };
+			};
+			expect(updateChannelStatus.mock.calls.filter((c) => c[1] === "dead")).toHaveLength(0);
+			expect(ctx.channels.get("chan-1")?.status).toBe("orphan");
 		});
 	});
 

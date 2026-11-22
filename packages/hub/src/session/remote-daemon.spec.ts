@@ -21,6 +21,7 @@ import {
 	DaemonUnreachable,
 	DETACH_SCRIPT,
 	describeRemoteDaemonPlacement,
+	detachOutcome,
 	hostKeepsDaemon,
 	IDLE_TIMEOUT_SECONDS,
 	NoRunningDaemon,
@@ -31,6 +32,7 @@ import {
 	parseRemoteSocketState,
 	quotePosix,
 	RelayFailed,
+	RemoteDaemonUnavailable,
 	relayCommand,
 	rememberSocketForwardingRefused,
 	remoteDaemonLaunchCommand,
@@ -39,6 +41,7 @@ import {
 	remoteSocketStateCommand,
 	type SocketForwardingRefusals,
 	socketForwardingRefusedOn,
+	windowsDaemonStopCommand,
 } from "./remote-daemon.js";
 
 const conn = {} as Client;
@@ -75,8 +78,10 @@ describe("hostKeepsDaemon", () => {
 		expect(hostKeepsDaemon({ os: "linux", sshRemoteDaemon: true }, false)).toBe(true);
 	});
 
-	it("refuses Windows whatever anyone says: no SSH channel carries a named pipe", () => {
-		expect(hostKeepsDaemon({ os: "windows", sshRemoteDaemon: true }, true)).toBe(false);
+	it("keeps one on Windows as elsewhere, reached through the relay (#755)", () => {
+		expect(hostKeepsDaemon({ os: "windows", sshRemoteDaemon: true }, false)).toBe(true);
+		expect(hostKeepsDaemon({ os: "windows", sshRemoteDaemon: null }, true)).toBe(true);
+		expect(hostKeepsDaemon({ os: "windows", sshRemoteDaemon: false }, true)).toBe(false);
 	});
 
 	it("says no for a host it does not know", () => {
@@ -874,7 +879,7 @@ describe("attachRemoteDaemon — through the relay (#765, #755)", () => {
 	) {
 		let listening = options.listening ?? false;
 		const commands: string[] = [];
-		const relays: { socket: string; waitMs: number }[] = [];
+		const relays: { socket: string | null; waitMs: number }[] = [];
 		const exec = async (_c: Client, command: string) => {
 			commands.push(command);
 			if (command.includes("/proc/net/unix")) {
@@ -887,7 +892,7 @@ describe("attachRemoteDaemon — through the relay (#765, #755)", () => {
 			}
 			return stateDirReply(dir);
 		};
-		const relay = async (_c: Client, socketPath: string, waitMs: number) => {
+		const relay = async (_c: Client, socketPath: string | null, waitMs: number) => {
 			relays.push({ socket: socketPath, waitMs });
 			if (options.relayFails !== undefined && relays.length === (options.relayFailsAt ?? 1)) {
 				throw new RelayFailed(options.relayFails);
@@ -1284,7 +1289,7 @@ describe("openRelay (#755)", () => {
 
 	it("decides by the markers, not the exit status a PowerShell shell flattens to 1", async () => {
 		const { client, channel } = fakeConn();
-		const opened = openRelay(client, relayCommand("/a/lasterm-agent", "/s/agent.sock", 0));
+		const opened = openRelay(client, relayCommand("/a/lasterm-agent", "/s/agent.sock", "linux", 0));
 		channel.stderr.write(
 			"lasterm-attach: start\nlasterm-attach: nothing-listens\nnothing listens on /s\n",
 		);
@@ -1382,7 +1387,7 @@ describe("openRelay (#755)", () => {
 
 	it("builds the relay command with the socket and the wait", () => {
 		expect(
-			relayCommand("/home/pi/.local/bin/lasterm-agent", "/home/pi/x y/agent.sock", 5000.7),
+			relayCommand("/home/pi/.local/bin/lasterm-agent", "/home/pi/x y/agent.sock", "linux", 5000.7),
 		).toBe(
 			"/home/pi/.local/bin/lasterm-agent --attach --socket '/home/pi/x y/agent.sock' --wait 5000",
 		);
@@ -1512,5 +1517,183 @@ describe("remembering a refused forwarding (#765)", () => {
 		expect(socketForwardingRefusedOn(host({ sshRemoteDaemon: null }), false, refusals)).toBe(false);
 		expect(socketForwardingRefusedOn(host({ sshRemoteDaemon: null }), true, refusals)).toBe(true);
 		expect(socketForwardingRefusedOn(undefined, true, refusals)).toBe(false);
+	});
+});
+
+describe("a Windows host keeps its daemon through the relay (#755)", () => {
+	const HELLO = Buffer.from(
+		encodeFrame({
+			type: "HELLO",
+			version: 1,
+			agentVersion: "0.0.0-test",
+			capabilities: ["multiplex"],
+		} as ProtocolMessage),
+	);
+	const AGENT = "C:\\Users\\me\\AppData\\Local\\lasterm\\lasterm-agent.exe";
+	const ENCODED = "powershell -NoProfile -NonInteractive -EncodedCommand ";
+
+	/** The PowerShell script inside an encoded command. */
+	function script(command: string): string {
+		expect(command.startsWith(ENCODED), command).toBe(true);
+		return Buffer.from(command.slice(ENCODED.length), "base64").toString("utf16le");
+	}
+
+	/** The arguments an encoded launch passes to the program. */
+	function argsOf(command: string): string {
+		const encoded =
+			/\$a=\[Text\.Encoding\]::UTF8\.GetString\(\[Convert\]::FromBase64String\('([^']*)'\)\)/.exec(
+				script(command),
+			)?.[1];
+		expect(encoded, script(command)).toBeDefined();
+		return Buffer.from(encoded ?? "", "base64").toString("utf8");
+	}
+
+	/**
+	 * A connection whose relays answer in turn: `"nothing"` says nothing
+	 * listens, `"hello"` relays the daemon's HELLO. Every outcome closes with
+	 * exit status 1, as a PowerShell `DefaultShell` hands it on.
+	 */
+	function windowsConn(answers: ("nothing" | "hello")[]) {
+		const relays: string[] = [];
+		const client = {
+			exec(command: string, cb: (err: Error | undefined, ch?: unknown) => void) {
+				relays.push(command);
+				const channel = Object.assign(new PassThrough(), {
+					stderr: new PassThrough(),
+					close() {
+						channel.emit("close");
+					},
+				});
+				cb(undefined, channel);
+				const answer = answers.shift() ?? "nothing";
+				setImmediate(() => {
+					channel.stderr.write("lasterm-attach: start\n");
+					if (answer === "hello") {
+						channel.write(HELLO);
+						return;
+					}
+					channel.stderr.write("lasterm-attach: nothing-listens\nnothing listens there\n");
+					channel.emit("exit", 1);
+					channel.emit("close");
+				});
+			},
+		} as unknown as Client;
+		return { client, relays };
+	}
+
+	/** An exec whose launch says `stderr`, with `exitCode`; every command recorded. */
+	function launchExec(stderr: string, exitCode: number) {
+		const commands: string[] = [];
+		const exec = async (_c: Client, command: string) => {
+			commands.push(command);
+			return { stdout: "", stderr, exitCode };
+		};
+		return { exec, commands };
+	}
+
+	it("relays, launches with --detach, then relays with --wait, with no --socket and no POSIX command", async () => {
+		const { client, relays } = windowsConn(["nothing", "hello"]);
+		const { exec, commands } = launchExec("lasterm-detach: started\n", 0);
+		const attachment = await attachRemoteDaemon({
+			conn: client,
+			agentPath: AGENT,
+			exec,
+			os: "windows",
+			connectTimeoutMs: 25_000,
+		});
+
+		expect(attachment.reachedThrough).toBe("relay");
+		expect(attachment.started).toBe(true);
+		expect(attachment.refusalProven).toBe(false);
+		expect(relays).toHaveLength(2);
+		expect(argsOf(relays[0] ?? "")).toBe("--attach --wait 0");
+		expect(argsOf(relays[1] ?? "")).toBe("--attach --wait 10000");
+		expect(commands).toHaveLength(1);
+		expect(argsOf(commands[0] ?? "")).toBe(
+			"--daemon --detach --log-level info --format jsonl --idle-timeout 1800 --log-files-kept 7",
+		);
+	});
+
+	it("reaches a daemon already running with no launch", async () => {
+		const { client, relays } = windowsConn(["hello"]);
+		const { exec, commands } = launchExec("", 0);
+		const attachment = await attachRemoteDaemon({
+			conn: client,
+			agentPath: AGENT,
+			exec,
+			os: "windows",
+		});
+		expect(attachment.started).toBe(false);
+		expect(relays).toHaveLength(1);
+		expect(commands).toEqual([]);
+	});
+
+	it("says the host forbids keeping it when breakaway is refused, whatever the exit status", async () => {
+		const { client, relays } = windowsConn(["nothing"]);
+		const { exec } = launchExec(
+			"lasterm-detach: breakaway-refused\nthis SSH session's job does not allow a process to break away; the daemon would end with the connection\n",
+			1,
+		);
+		const err = await attachRemoteDaemon({
+			conn: client,
+			agentPath: AGENT,
+			exec,
+			os: "windows",
+		}).catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(RemoteDaemonUnavailable);
+		expect((err as RemoteDaemonUnavailable).reason).toBe(
+			"this SSH session's job does not allow a process to break away; the daemon would end with the connection",
+		);
+		expect(relays).toHaveLength(1);
+	});
+
+	it.each([
+		[
+			"a launch that failed",
+			"lasterm-detach: failed access is denied\n",
+			1,
+			/exit 1\): access is denied/,
+		],
+		["no marker, exit 0", "", 0, /exit 0\), and did not say why/],
+		["no marker, exit 1", "something else\n", 1, /exit 1\), and did not say why/],
+	])(
+		"fails on %s, naming the log directory, with no stdio",
+		async (_what, stderr, exitCode, said) => {
+			const { client, relays } = windowsConn(["nothing"]);
+			const { exec } = launchExec(stderr, exitCode);
+			const err = await attachRemoteDaemon({
+				conn: client,
+				agentPath: AGENT,
+				exec,
+				os: "windows",
+			}).catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(Error);
+			expect(err).not.toBeInstanceOf(RemoteDaemonUnavailable);
+			expect((err as Error).message).toMatch(said);
+			expect((err as Error).message).toContain("%LOCALAPPDATA%\\lasterm\\logs");
+			expect(relays).toHaveLength(1);
+		},
+	);
+
+	it("a daemon-only reach finds nothing running, and launches nothing", async () => {
+		const { client, relays } = windowsConn(["nothing"]);
+		const { exec, commands } = launchExec("", 0);
+		await expect(
+			attachRemoteDaemon({ conn: client, agentPath: AGENT, exec, os: "windows", launch: false }),
+		).rejects.toBeInstanceOf(NoRunningDaemon);
+		expect(relays).toHaveLength(1);
+		expect(commands).toEqual([]);
+	});
+
+	it("builds the Windows stop command with no socket", () => {
+		expect(argsOf(windowsDaemonStopCommand(AGENT))).toBe("--stop");
+	});
+});
+
+describe("detachOutcome (#755)", () => {
+	it("cuts a stderr past 64 KiB and reads it as saying nothing", () => {
+		const long = `${"x".repeat(64 * 1024)}\nlasterm-detach: started\n`;
+		expect(detachOutcome(long, 0)).toBeInstanceOf(Error);
+		expect(detachOutcome("lasterm-detach: started\n", 0)).toBe("started");
 	});
 });

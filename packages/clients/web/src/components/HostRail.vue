@@ -499,6 +499,12 @@ function getTooltip(host: Host): string {
 	// through a relay instead (#755).
 	if (hostsStore.isSocketForwardingRefused(host.id))
 		parts.push("Socket forwarding refused: agent reached through a relay");
+	// A Windows host whose SSH session lets nothing outlive it (#755).
+	const unavailable = hostsStore.remoteDaemonUnavailable(host.id);
+	if (unavailable !== null)
+		parts.push(
+			`This host does not let Lasterm keep its agent running (${unavailable}); its terminals run over the connection and end with it.`,
+		);
 
 	// Channel count
 	const channelCount = getChannelCount(host.id);

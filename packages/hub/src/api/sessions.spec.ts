@@ -10,6 +10,7 @@ import {
 	REMOTE_STATE_DIR_COMMAND,
 	remoteDaemonPaths,
 	remoteDaemonStopCommand,
+	windowsDaemonStopCommand,
 } from "../session/remote-daemon.js";
 import type { SessionState, SharedSessionContext } from "../session/session-context.js";
 import { SessionManager } from "../session/session-manager.js";
@@ -61,6 +62,9 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 		connected = true;
 		usedRemoteDaemon = true;
 		remoteAgentPath = "/home/pi/.local/bin/lasterm-agent";
+		/** The host's system, as the connection ran its agent there (#755). */
+		remoteOs: string | null = null;
+		remoteDaemonUnavailable: string | null = null;
 		helloMessage: HelloMessage | undefined;
 		otherOwnerChannels: number | undefined;
 		/** How many terminals other hubs hold on this daemon. */
@@ -1740,6 +1744,24 @@ describe("POST /api/hosts/:id/agent/replace, on an agent other hubs use (#127)",
 		expect(sm.agents.has(hostId)).toBe(false);
 	});
 
+	// #755 AC-W3. Mutation: today's state-directory resolution, which a Windows
+	// host answers with no absolute path, and the stop refused.
+	it("on a Windows host, falls back to the agent's own --stop, with no state directory", async () => {
+		const agent = connectedAgent(2);
+		agent.remoteOs = "windows";
+		agent.send.mockImplementation(() => {
+			throw new Error("SSH agent not connected");
+		});
+
+		const res = await replace();
+
+		expect(res.statusCode).toBe(200);
+		expect(agent.execOnHost.mock.calls).toEqual([
+			[windowsDaemonStopCommand("/home/pi/.local/bin/lasterm-agent")],
+		]);
+		expect(sm.agents.has(hostId)).toBe(false);
+	});
+
 	it("refuses a force that is not a boolean, and asks the agent nothing", async () => {
 		const agent = connectedAgent(2);
 
@@ -2757,6 +2779,28 @@ describe("POST stop-keeping", () => {
 		expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
 	});
 
+	// #755 AC-W3: the Windows --stop, and the POSIX one where the system is not
+	// known. Mutation: today's `startsWith("/")` refusal on Windows.
+	it.each([
+		["windows", (path: string) => [[windowsDaemonStopCommand(path)]]],
+		[
+			null,
+			(path: string) => [
+				[REMOTE_STATE_DIR_COMMAND],
+				[remoteDaemonStopCommand(path, remoteDaemonPaths("/home/pi/.local/state/lasterm"))],
+			],
+		],
+	] as const)("a forced unsent STOP on a %s host runs that system's --stop", async (os, calls) => {
+		const f = fixture();
+		f.agent.remoteOs = os;
+		f.agent.send.mockImplementation(() => {
+			throw new Error("unsent");
+		});
+		const response = await stop({ end_terminals: true, force: true });
+		expect(response.json()).toMatchObject({ outcome: "stopped" });
+		expect(f.agent.execOnHost.mock.calls).toEqual(calls("/home/pi/.local/bin/lasterm-agent"));
+	});
+
 	it.each([
 		"unknown",
 		"local",
@@ -2987,17 +3031,16 @@ describe("POST stop-keeping", () => {
 		},
 	);
 
-	it("PUT refuses OS policy revocation but allows unrelated edits and unchanged policy", async () => {
-		const f = fixture();
-		const os = await server.inject({
-			method: "PUT",
-			url: `/api/hosts/${hostId}`,
-			payload: { os: "windows" },
-		});
-		expect(os.statusCode).toBe(409);
-		expect(os.json().error.code).toBe("DAEMON_CONNECTED");
-		unchanged(f);
-		for (const payload of [{ label: "renamed" }, { ssh_remote_daemon: true }, { os: "linux" }]) {
+	// #755: a Windows host keeps its daemon, so no system revokes one.
+	// Mutation: the old exclusion, which answered DAEMON_CONNECTED for Windows.
+	it("PUT lets the system change, Windows included, and unrelated edits", async () => {
+		fixture();
+		for (const payload of [
+			{ os: "windows" },
+			{ label: "renamed" },
+			{ ssh_remote_daemon: true },
+			{ os: "linux" },
+		]) {
 			const response = await server.inject({ method: "PUT", url: `/api/hosts/${hostId}`, payload });
 			expect(response.statusCode).toBe(200);
 		}

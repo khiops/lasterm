@@ -820,34 +820,151 @@ describe("SshAgent", () => {
 		}, 15_000);
 	});
 
-	it("keeps a Windows remote on stdio: no SSH channel carries a named pipe", async () => {
-		const commands: string[] = [];
-		const { server, port } = await createMockSshServerWithSocket(
-			(stream, command) => {
-				commands.push(command);
-				stream.write(makeHelloFrame());
+	// A Windows host keeps its daemon through the relay alone, started with
+	// --detach (#755). The mock decodes each PowerShell launch's arguments.
+	describe("a Windows host that keeps its daemon (#755)", () => {
+		const ENCODED = "powershell -NoProfile -NonInteractive -EncodedCommand ";
+
+		/** The arguments an encoded Windows launch passes, or null for another command. */
+		function windowsArgs(command: string): string | null {
+			if (!command.startsWith(ENCODED)) return null;
+			const script = Buffer.from(command.slice(ENCODED.length), "base64").toString("utf16le");
+			const encoded =
+				/\$a=\[Text\.Encoding\]::UTF8\.GetString\(\[Convert\]::FromBase64String\('([^']*)'\)\)/.exec(
+					script,
+				)?.[1];
+			return encoded === undefined ? null : Buffer.from(encoded, "base64").toString("utf8");
+		}
+
+		/**
+		 * A Windows host: the relay answers once a daemon runs, `--detach` says
+		 * `detach` (exit 1 for anything but `started`, as PowerShell flattens it),
+		 * and `--stdio` runs an agent.
+		 */
+		function windowsHost(detach: string) {
+			const args: string[] = [];
+			let running = false;
+			const server = new Promise<{ server: SshServer; port: number }>((resolve) => {
+				const srv = new Server({ hostKeys: [HOST_KEY] }, (client) => {
+					client.on("error", () => {});
+					client.on("authentication", (ctx) => ctx.accept());
+					client.on("ready", () => {
+						client.on("session", (accept) => {
+							accept().on("exec", (accept, _reject, info) => {
+								const stream = accept() as unknown as NodeJS.ReadWriteStream & {
+									stderr: NodeJS.WritableStream;
+									exit: (code: number) => void;
+								};
+								const said = windowsArgs(info.command) ?? `not windows: ${info.command}`;
+								args.push(said);
+								if (said.startsWith("--attach")) {
+									stream.stderr.write("lasterm-attach: start\n");
+									if (running) {
+										stream.write(makeHelloFrame());
+										return;
+									}
+									stream.stderr.write("lasterm-attach: nothing-listens\n");
+									stream.exit(1);
+									stream.end();
+									return;
+								}
+								if (said.startsWith("--daemon --detach")) {
+									stream.stderr.write(detach);
+									if (detach.startsWith("lasterm-detach: started")) running = true;
+									stream.exit(running ? 0 : 1);
+									stream.end();
+									return;
+								}
+								if (said === "--stdio") {
+									stream.write(makeHelloFrame());
+									return;
+								}
+								stream.exit(127);
+								stream.end();
+							});
+						});
+					});
+				});
+				srv.on("error", () => {});
+				srv.listen(0, "127.0.0.1", () => {
+					resolve({ server: srv, port: (srv.address() as { port: number }).port });
+				});
+			});
+			return { server, args };
+		}
+
+		async function start(detach: string) {
+			const host = windowsHost(detach);
+			const { server, port } = await host.server;
+			servers.push(server);
+			const fp = await getServerFingerprint(port, { os: "windows" });
+			const agent = new SshAgent(
+				makeHost(port, { os: "windows" }),
+				undefined,
+				undefined,
+				undefined,
+				true,
+			);
+			agents.push(agent);
+			const { hello } = await agent.start(fp);
+			return { agent, hello, args: host.args };
+		}
+
+		it("reaches it through the relay, launching it with --detach, with no --socket", async () => {
+			const { agent, hello, args } = await start("lasterm-detach: started\n");
+
+			expect(hello.type).toBe("HELLO");
+			expect(agent.usedRemoteDaemon).toBe(true);
+			expect(agent.reachedThrough).toBe("relay");
+			expect(agent.remoteDaemonUnavailable).toBeNull();
+			expect(agent.remoteOs).toBe("windows");
+			expect(args).toEqual([
+				"--attach --wait 0",
+				expect.stringMatching(
+					/^--daemon --detach --log-level \S+ --format \S+ --idle-timeout 1800 --log-files-kept \d+$/,
+				),
+				expect.stringMatching(/^--attach --wait [1-9]\d*$/),
+			]);
+		}, 15_000);
+
+		it("runs on stdio and says why when the session's job forbids breaking away", async () => {
+			const line =
+				"this SSH session's job does not allow a process to break away; the daemon would end with the connection";
+			const { agent, hello, args } = await start(`lasterm-detach: breakaway-refused\n${line}\n`);
+
+			expect(hello.type).toBe("HELLO");
+			expect(agent.usedRemoteDaemon).toBe(false);
+			expect(agent.reachedThrough).toBe("stdio");
+			expect(agent.remoteDaemonUnavailable).toBe(line);
+			expect(args.at(-1)).toBe("--stdio");
+		}, 15_000);
+
+		it.each([
+			["a failed launch", "lasterm-detach: failed access is denied\n"],
+			["a launch that says nothing", ""],
+		])(
+			"fails on %s, with no stdio",
+			async (_what, detach) => {
+				const host = windowsHost(detach);
+				const { server, port } = await host.server;
+				servers.push(server);
+				const fp = await getServerFingerprint(port, { os: "windows" });
+				const agent = new SshAgent(
+					makeHost(port, { os: "windows" }),
+					undefined,
+					undefined,
+					undefined,
+					true,
+				);
+				agents.push(agent);
+
+				await expect(agent.start(fp)).rejects.toThrow(/%LOCALAPPDATA%\\lasterm\\logs/);
+				expect(host.args).not.toContain("--stdio");
+				expect(agent.remoteDaemonUnavailable).toBeNull();
 			},
-			() => false,
-			() => {},
+			15_000,
 		);
-		servers.push(server);
-
-		const fp = await getServerFingerprint(port, { os: "windows" });
-		const agent = new SshAgent(
-			makeHost(port, { os: "windows" }),
-			undefined,
-			undefined,
-			undefined,
-			true,
-		);
-		agents.push(agent);
-
-		const { hello } = await agent.start(fp);
-
-		expect(hello.type).toBe("HELLO");
-		expect(commands).toEqual([windowsLaunchCommand("lasterm-agent", ["--stdio"])]);
-		expect(commands.some((c) => c.includes("--daemon"))).toBe(false);
-	}, 15_000);
+	});
 
 	// A host whose sshd refuses socket forwarding (#765): the daemon cannot be
 	// reached, however long the hub waits for it.

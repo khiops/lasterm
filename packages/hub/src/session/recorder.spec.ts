@@ -224,6 +224,28 @@ describe("SessionRecorder", () => {
 	describe("when the screen does not come", () => {
 		const MARKER = '[0.000, "m", "lasterm: the screen before this point is not available"]';
 
+		/** The ATTACH_OK the agent sends after the wait ended: it must change nothing. */
+		function lateScreen(
+			handler: ((msg: ProtocolMessage) => void) | undefined,
+			requestId: string,
+		): void {
+			handler?.({
+				type: "ATTACH_OK",
+				channelId: CHANNEL,
+				requestId,
+				snapshot: { serialized: "LATE", cols: 1, rows: 1, cursorX: 0, cursorY: 0 },
+				lastSeq: 0,
+			} as unknown as ProtocolMessage);
+		}
+
+		/** The blocks written so far, read from the store without an export (which would end a wait itself). */
+		function stored(id: string): string[] {
+			const read = h.dal.readBlocks(id, 1, h.dal.lastSeq(id), Number.MAX_SAFE_INTEGER);
+			return (read?.blocks ?? []).flatMap((b) =>
+				b.lines.toString("utf8").split("\n").filter(Boolean),
+			);
+		}
+
 		function heldThen(trigger: (requestId: string) => void): { id: string; lines: string[] } {
 			h.at(0);
 			const { id, requestId } = startManual(h);
@@ -234,15 +256,18 @@ describe("SessionRecorder", () => {
 			return { id, lines: h.body(id) };
 		}
 
+		// Mutation caught: an ERROR that leaves the wait open (a later screen is then taken).
 		it("(a) an ERROR answering the request", () => {
-			const { lines } = heldThen((rid) =>
-				h.pending.get(rid)?.({
+			const { lines } = heldThen((rid) => {
+				const handler = h.pending.get(rid);
+				handler?.({
 					type: "ERROR",
 					code: "CHANNEL_NOT_FOUND",
 					message: "x",
 					requestId: rid,
-				} as unknown as ProtocolMessage),
-			);
+				} as unknown as ProtocolMessage);
+				lateScreen(handler, rid);
+			});
 			expect(lines).toEqual([MARKER, '[0.010, "o", "held"]']);
 		});
 
@@ -278,18 +303,25 @@ describe("SessionRecorder", () => {
 			expect(lines).toEqual([MARKER, '[0.010, "o", "held"]', '[0.010, "x", "2"]']);
 		});
 
+		// Mutation caught: an unbounded hold (a later screen is then taken and the output dropped).
 		it("(e) 256 KiB of output held", () => {
 			h.at(0);
-			const { id } = startManual(h);
+			const { id, requestId } = startManual(h);
+			const handler = h.pending.get(requestId);
 			h.at(10);
 			h.rec.onOutput(CHANNEL, enc("a".repeat(256 * 1024)));
+			lateScreen(handler, requestId);
 			expect(h.rec.exportPart(id)?.body.split("\n")[1]).toBe(MARKER);
 		});
 
+		// Mutation caught: an end that leaves the held output behind.
 		it("(f) Stop while awaiting keeps the held output", () => {
-			const { id } = heldThen(() => undefined);
+			h.at(0);
+			const { id } = startManual(h);
+			h.at(10);
+			h.rec.onOutput(CHANNEL, enc("held"));
 			h.rec.stop(id);
-			expect(h.body(id)).toEqual([MARKER, '[0.010, "o", "held"]']);
+			expect(stored(id)).toEqual([MARKER, '[0.010, "o", "held"]']);
 		});
 
 		it("(g) an export while awaiting keeps the held output", () => {
@@ -307,16 +339,21 @@ describe("SessionRecorder", () => {
 		});
 
 		it("(i) DELETE while awaiting resolves the wait first", () => {
-			const { id } = heldThen(() => undefined);
-			const lines = h.cast(id);
+			h.at(0);
+			const { id } = startManual(h);
+			h.at(10);
+			h.rec.onOutput(CHANNEL, enc("held"));
 			expect(h.rec.delete(id)).toBe(true);
-			expect(lines.split("\n")[1]).toBe(MARKER);
+			expect(stored(id)).toEqual([MARKER, '[0.010, "o", "held"]']);
 		});
 
 		it("(j) hub shutdown while awaiting resolves the wait first", () => {
-			const { id } = heldThen(() => undefined);
+			h.at(0);
+			const { id } = startManual(h);
+			h.at(10);
+			h.rec.onOutput(CHANNEL, enc("held"));
 			h.rec.shutdown();
-			expect(h.body(id)).toEqual([MARKER, '[0.010, "o", "held"]']);
+			expect(stored(id)).toEqual([MARKER, '[0.010, "o", "held"]']);
 			expect(h.dal.get(id)?.endReason).toBe("interrupted");
 		});
 	});
@@ -505,6 +542,9 @@ describe("SessionRecorder", () => {
 		h.rec.stop(id);
 		const first = h.rec.exportPart(id);
 		expect(first?.nextSeq).toBe(2);
+		// A block gone while its row is still listed: the part is refused, never cut short.
+		h.dbs.spool.prepare("DELETE FROM recording_blocks WHERE recording_id = ? AND seq = 2").run(id);
+		expect(h.rec.exportPart(id, { fromSeq: 2, lastSeq: 2, lost: 0 })).toBeUndefined();
 		h.rec.delete(id);
 		await h.gc.purgeRecordings([id]);
 		expect(h.rec.exportPart(id, { fromSeq: 2, lastSeq: 2, lost: 0 })).toBeUndefined();
@@ -712,27 +752,26 @@ describe("SessionRecorder", () => {
 		});
 	});
 
-	// AC-WFAIL / fixed-at-first-part.
+	// AC-WFAIL / fixed-at-first-part. Mutation caught: the last part reading the lost count again.
 	it("keeps the lost count fixed by an export's first request", () => {
 		const id = startAuto(h);
-		h.rec.onOutput(CHANNEL, enc("lost"));
+		h.rec.onOutput(CHANNEL, enc("a".repeat(5 * MiB))); // block 1
+		h.rec.onOutput(CHANNEL, enc("b".repeat(5 * MiB))); // block 2
+		h.rec.onOutput(CHANNEL, enc("x"));
 		vi.spyOn(h.dal, "writeBlock").mockImplementationOnce(() => {
 			throw sqliteFull();
 		});
-		h.rec.exportPart(id); // fails: 4 lost, nothing written
-		h.rec.onOutput(CHANNEL, enc("a".repeat(5 * MiB)));
-		h.rec.exportPart(id); // seq 1, with the marker: the count goes back to 0
-		vi.spyOn(h.dal, "writeBlock").mockImplementationOnce(() => {
-			throw sqliteFull();
-		});
-		h.rec.onOutput(CHANNEL, enc("b".repeat(5 * MiB))); // its block fails: a new loss
-		const first = h.rec.exportPart(id);
-		expect(first?.lost).toBe(5 * MiB);
-		expect(first?.lastSeq).toBe(1);
-		expect(first?.nextSeq).toBeUndefined();
-		expect(first?.body.trimEnd().split("\n").at(-1)).toBe(
-			`[0.000, "m", "lasterm: ${5 * MiB} bytes not recorded (storage error)"]`,
+		const first = h.rec.exportPart(id); // its flush fails: 1 byte lost, before this export
+		expect(first).toMatchObject({ lastSeq: 2, nextSeq: 2, lost: 1 });
+		h.rec.onOutput(CHANNEL, enc("y"));
+		h.rec.exportPart(id); // block 3 carries the marker: the column goes back to 0
+		expect(h.dal.get(id)?.unmarkedLostBytes).toBe(0);
+		const last = h.rec.exportPart(id, { fromSeq: 2, lastSeq: 2, lost: first?.lost ?? 0 });
+		expect(last?.nextSeq).toBeUndefined();
+		expect(last?.body.trimEnd().split("\n").at(-1)).toBe(
+			'[0.000, "m", "lasterm: 1 bytes not recorded (storage error)"]',
 		);
+		expect(last?.body).not.toContain('"y"');
 	});
 
 	describe("control rows", () => {
@@ -891,6 +930,7 @@ describe("SessionRecorder", () => {
 			const gone = startAuto(h);
 			h.rec.onOutput(CHANNEL, enc("gone"));
 			expect(h.rec.delete(gone)).toBe(true); // open: ended first
+			expect(h.rec.isRecording(CHANNEL)).toBe(false);
 			expect(h.rec.listed(gone)).toBeUndefined();
 			expect(h.rec.exportPart(gone)).toBeUndefined();
 			expect(h.purged).toEqual([gone]);
@@ -911,7 +951,7 @@ describe("SessionRecorder", () => {
 
 		// Mutation caught: an unbounded batch.
 		it.each([
-			[600, 4 * 1024, (rows: number, bytes: number) => rows <= 256 && bytes <= 4 * 1024 * 256],
+			[600, 100, (rows: number) => rows <= 256],
 			[20, 200 * 1024, (_rows: number, bytes: number) => bytes <= MiB],
 			[1, 3 * MiB, (rows: number) => rows === 1],
 		])("keeps each transaction bounded: %i blocks of %i bytes", async (count, size, ok) => {

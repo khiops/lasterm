@@ -531,10 +531,13 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 				});
 				request.on("error", reject);
 			});
-			await new Promise((resolve) => setTimeout(resolve, 1500));
-			const settled = harness.read();
-			await new Promise((resolve) => setTimeout(resolve, 1000));
-			// Reading stopped while the consumer waits.
+			// Reading stops while the consumer waits: two counts half a second apart
+			// agree (a slow machine may take a while to fill what it buffers).
+			let settled = -1;
+			for (let waited = 0; waited < 10_000 && settled !== harness.read(); waited += 500) {
+				settled = harness.read();
+				await new Promise((resolve) => setTimeout(resolve, 500));
+			}
 			expect(harness.read()).toBe(settled);
 			// The hub's own read-ahead, plus what the system's socket buffers took
 			// (on Linux loopback the send buffer alone may grow to 4 MiB).

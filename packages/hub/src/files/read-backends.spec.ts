@@ -51,7 +51,12 @@ interface ReadBackendKind {
 	readonly name: string;
 	readonly runs: boolean;
 	readonly transport: "local" | "sftp" | "exec";
-	start(options?: { fstat?: boolean; prelude?: string }): Promise<ReadHarness>;
+	start(options?: {
+		fstat?: boolean;
+		prelude?: string;
+		sftpIdleMs?: number;
+		sftpBetween?: (path: string) => Promise<void>;
+	}): Promise<ReadHarness>;
 }
 
 async function serverFor(files: HostFilesService): Promise<FastifyInstance> {
@@ -142,6 +147,10 @@ function sftpKind(style: PathStyle): ReadBackendKind {
 				channelHost: () => ({ hostId: "remote", hostType: "ssh" }),
 				hostOs: () => (style === "windows" ? "windows" : "linux"),
 				sshHost: () => ({ sshConnection: host.client, sftpSupport: { offered: true } }),
+				...(options.sftpIdleMs !== undefined ? { sftpIdleMs: options.sftpIdleMs } : {}),
+				...(options.sftpBetween !== undefined
+					? { sftpBetweenLookAndOpen: options.sftpBetween }
+					: {}),
 			});
 			const server = await serverFor(files);
 			const base = style === "windows" ? join(root, "C", "dl") : join(root, "dl");
@@ -502,6 +511,34 @@ describe("a download's read side, cases of one backend (#840)", () => {
 		const response = await content(harness, harness.at("f.bin"));
 		expect(response.statusCode).toBe(200);
 		expect(response.rawPayload.equals(bytes)).toBe(true);
+	});
+
+	it("sftp lstat and fstat disagree", async () => {
+		let local: (name: string) => string = (name) => name;
+		harness = await sftpKind("posix").start({
+			sftpBetween: async () => {
+				await appendFile(local("f.bin"), "grown");
+			},
+		});
+		const h = harness;
+		local = (name) => h.local(name);
+		writeFileSync(h.local("f.bin"), randomBytes(1000));
+		const response = await content(h, h.at("f.bin"));
+		expect(response.statusCode).toBe(409);
+		expect(response.json().error.code).toBe("FILE_CHANGED");
+	});
+
+	it("sftp read holds its session", async () => {
+		// An idle close of 200 ms, and a client that stops reading for 800 ms.
+		harness = await sftpKind("posix").start({ sftpIdleMs: 200 });
+		const h = harness;
+		const bytes = randomBytes(16 * MiB);
+		writeFileSync(h.local("huge.bin"), bytes);
+		const { got, promised } = await pausedDownload(h, "huge.bin", async () => {
+			await new Promise((resolve) => setTimeout(resolve, 800));
+		});
+		expect(promised).toBe(16 * MiB);
+		expect(got).toBe(promised);
 	});
 
 	it("the ETag carries the backend's unit of time", () => {

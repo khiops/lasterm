@@ -56,6 +56,8 @@ export interface HostFilesDeps {
 	sftpIdleMs?: number;
 	/** Told the bytes each download read over SSH commands received, for tests (#840). */
 	onExecRead?: (bytes: number) => void;
+	/** Called between an SFTP download's LSTAT and its OPEN, for tests (#840). */
+	sftpBetweenLookAndOpen?: (path: string) => Promise<void>;
 }
 
 /** What the settings say of the folder a panel opens at, for one terminal. */
@@ -116,6 +118,7 @@ class RemoteFiles implements FileBackend {
 		private readonly support: () => SftpSupport | null,
 		idleMs: number,
 		private readonly onExecRead?: (bytes: number) => void,
+		private readonly sftpBetweenLookAndOpen?: (path: string) => Promise<void>,
 	) {
 		this.shared = new SharedSftp(client, idleMs);
 		this.sftp = new SftpFileBackend(this.shared, style);
@@ -176,7 +179,7 @@ class RemoteFiles implements FileBackend {
 	 * file, changed) is not asked again the other way.
 	 */
 	async openForRead(path: string): Promise<OpenedFile> {
-		const sftp = new SftpReadBackend(this.shared, this.style);
+		const sftp = new SftpReadBackend(this.shared, this.style, this.sftpBetweenLookAndOpen);
 		const exec = new ExecReadBackend(
 			this.client,
 			this.style,
@@ -437,6 +440,7 @@ export class HostFilesService {
 					() => host.sftpSupport,
 					this.sftpIdleMs,
 					this.deps.onExecRead,
+					this.deps.sftpBetweenLookAndOpen,
 				);
 			this.remotes.set(client, remote);
 		}

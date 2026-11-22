@@ -51,6 +51,8 @@ export class SftpReadBackend implements ReadBackend {
 	constructor(
 		private readonly shared: SharedSftp,
 		private readonly style: PathStyle,
+		/** Called between the LSTAT and the OPEN, for tests that change the file there. */
+		private readonly betweenLookAndOpen?: (path: string) => Promise<void>,
 	) {}
 
 	async open(path: string): Promise<OpenedFile> {
@@ -64,6 +66,7 @@ export class SftpReadBackend implements ReadBackend {
 			const type = before.mode & S_IFMT;
 			if (type === S_IFLNK) throw linkNotFollowed(WHAT);
 			if (type !== S_IFREG) throw notAFile(WHAT);
+			await this.betweenLookAndOpen?.(path);
 			const handle = await this.request<Buffer>(session, (done) =>
 				session.channel.open(wire, "r", done),
 			);

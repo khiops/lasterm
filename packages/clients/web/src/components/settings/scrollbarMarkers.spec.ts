@@ -23,6 +23,7 @@ import { createApp, defineComponent, nextTick, ref, watch } from "vue";
 import { useResolvedProfile } from "../../composables/useResolvedProfile.js";
 import { useTerminal } from "../../composables/useTerminal.js";
 import type { IWsClient } from "../../services/ws-client.js";
+import { useConfigStore } from "../../stores/config.js";
 import { useSettingsStore } from "../../stores/settings.js";
 import { useThemeStore } from "../../stores/theme.js";
 import { initHubPort } from "../../utils/hub-url.js";
@@ -310,4 +311,79 @@ describe("Settings' Scrollbar Markers reach the terminal", () => {
 		expect(neighbour.profile.value.scrollbarMarkers).toBe(true);
 		expect(neighbour.marksScrollbar()).toBe(true);
 	});
+});
+
+// ─── Every setting, from the panel to where its readers look (#937) ──────────
+//
+// Each reader has a test of its own that sees what the setting does. This is
+// the link they share: a value set the way the panel sets it, at each scope the
+// setting offers, ends up in the place the readers read. Settings wrote
+// `[search] scrollbar_markers` while terminals read `[terminal]` (#614): every
+// reader test was green and the toggle did nothing.
+
+describe("every setting Settings offers lands where its readers read it", () => {
+	let pinia: Pinia;
+	const mounted: { unmount: () => void }[] = [];
+
+	beforeEach(async () => {
+		xterm.searchAddons.length = 0;
+		localStorage.setItem("lasterm_token", "test-token");
+		vi.stubGlobal("fetch", fakeHub().fetch);
+		pinia = createPinia();
+		setActivePinia(pinia);
+		await initHubPort();
+	});
+
+	afterEach(() => {
+		for (const pane of mounted.splice(0)) pane.unmount();
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+		localStorage.clear();
+	});
+
+	/** A value the setting does not hold by default, of its own type. */
+	function valueFor(def: (typeof settingsSchema)[number]): unknown {
+		switch (def.type) {
+			case "toggle":
+				return true;
+			case "number":
+				return (def.max ?? 100) - 1;
+			case "select":
+				return def.options?.at(-1)?.value;
+			default:
+				return "distinct-text";
+		}
+	}
+
+	for (const def of settingsSchema) {
+		for (const scope of def.scopes) {
+			it(`${def.section}.${def.key} set at ${scope} scope`, async () => {
+				const { storeSection, storeKey } = toStoreParams(def);
+				const value = valueFor(def);
+				const settings = useSettingsStore();
+				await settings.loadCascade("host-1", "chan-1");
+				vi.useFakeTimers();
+				void settings.updateSetting(scope, storeSection, storeKey, value);
+				await vi.advanceTimersByTimeAsync(600);
+				vi.useRealTimers();
+				await settle();
+
+				if (storeSection === "ui") {
+					// Read as the web client reads it: the UI config it loads.
+					const config = useConfigStore();
+					await config.loadUiConfig();
+					const [uiSection, uiKey] = storeKey.split(".") as [string, string];
+					const sections = config.uiConfig as unknown as Record<string, Record<string, unknown>>;
+					expect(sections[uiSection]?.[uiKey]).toEqual(value);
+					return;
+				}
+				// A terminal profile key: the resolved profile of the terminal it was set for.
+				const pane = mountTerminal(pinia, "host-1", "chan-1");
+				mounted.push(pane);
+				await settle();
+				const resolved = pane.profile.value as unknown as Record<string, unknown>;
+				expect(resolved[storeKey]).toEqual(value);
+			});
+		}
+	}
 });

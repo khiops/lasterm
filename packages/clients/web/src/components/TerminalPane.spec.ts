@@ -26,6 +26,7 @@ import { useNotificationStore } from "../stores/notifications.js";
 import { useSessionStore } from "../stores/session.js";
 import { contrastRatio, TEXT_CONTRAST_AA, useThemeStore } from "../stores/theme.js";
 import { useToastStore } from "../stores/toast.js";
+import { useTransfersStore } from "../stores/transfers.js";
 import { useWriteLockStore } from "../stores/writelock.js";
 import {
 	attaches,
@@ -999,6 +1000,55 @@ describe("TerminalPane takes what it draws with when it changes", () => {
 		paneProfile().profile.value = { ...paneProfile().profile.value, cursorStyle: "bar" };
 		await settle();
 		expect(terminal().options).toMatchObject({ cursorStyle: "bar", cursorBlink: true });
+	});
+
+	it("tells the transfers store the file-transfer settings of its profile, and again when they change", async () => {
+		xterm.profile = {
+			transferDrop: "off",
+			transferConfirmDrop: false,
+			transferOnConflict: "skip",
+		};
+		await openLive();
+		const transfers = useTransfersStore();
+		expect(transfers.settingsFor(T)).toEqual({
+			drop: "off",
+			confirmDrop: false,
+			onConflict: "skip",
+			ended: false,
+		});
+
+		paneProfile().profile.value = {
+			...paneProfile().profile.value,
+			transferDrop: "upload",
+			transferConfirmDrop: true,
+			transferOnConflict: "replace",
+		};
+		await settle();
+
+		expect(transfers.settingsFor(T)).toEqual({
+			drop: "upload",
+			confirmDrop: true,
+			onConflict: "replace",
+			ended: false,
+		});
+	});
+
+	it("takes the font and scrollback of its profile when they change", async () => {
+		await openLive();
+
+		paneProfile().profile.value = {
+			...paneProfile().profile.value,
+			fontSize: 18,
+			fontFamily: '"Fira Code"',
+			scrollback: 1234,
+		};
+		await settle();
+
+		expect(terminal().options).toMatchObject({
+			fontSize: 18,
+			fontFamily: expect.stringContaining('"Fira Code"'),
+			scrollback: 1234,
+		});
 	});
 
 	it("takes its host's theme when the host is given one while it is shown", async () => {
@@ -2642,6 +2692,78 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 		expect(left?.dispose).toHaveBeenCalled();
 	});
 
+	/** The search settings the Settings page writes, set before the pane is shown. */
+	function searchSettings(search: Record<string, unknown>): () => void {
+		return () => {
+			const config = useConfigStore();
+			config.uiConfig = { ...config.uiConfig, search: { ...config.uiConfig.search, ...search } };
+		};
+	}
+	const overlayClasses = () =>
+		[...(root.querySelector('[role="search"]')?.classList ?? [])].filter((c) =>
+			c.startsWith("search-overlay--"),
+		);
+	async function enter(): Promise<void> {
+		searchInput()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+		await settle();
+	}
+	const history = () =>
+		JSON.parse(localStorage.getItem("lasterm:search-history") ?? "[]").map(
+			(e: { query: string }) => e.query,
+		);
+
+	it("puts its search where the settings put it", async () => {
+		await showingT({ setUp: searchSettings({ position: "bottom-bar" }) });
+		expect(overlayClasses()).toEqual(["search-overlay--bottom-bar"]);
+	});
+
+	it("puts its search at the top right when the settings name no place", async () => {
+		await showingT();
+		expect(overlayClasses()).toEqual(["search-overlay--top-right"]);
+	});
+
+	it("keeps what it found when the search closes and the settings say persist", async () => {
+		await showingT({ setUp: searchSettings({ highlightOnClose: "persist" }) });
+		await openSearch();
+		await typeSearch("needle");
+		const addon = searches().at(-1) as unknown as { clearDecorations: ReturnType<typeof vi.fn> };
+		addon.clearDecorations.mockClear();
+
+		searchInput()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+		await settle();
+
+		expect(searchShown()).toBe(false);
+		expect(addon.clearDecorations).not.toHaveBeenCalled();
+		expect(searchInput()?.value).toBe("needle");
+	});
+
+	it("clears what it found when the search closes and the settings say clear", async () => {
+		await showingT({ setUp: searchSettings({ highlightOnClose: "clear" }) });
+		await openSearch();
+		await typeSearch("needle");
+		const addon = searches().at(-1) as unknown as { clearDecorations: ReturnType<typeof vi.fn> };
+		addon.clearDecorations.mockClear();
+
+		searchInput()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+		await settle();
+
+		expect(searchShown()).toBe(false);
+		expect(addon.clearDecorations).toHaveBeenCalledTimes(1);
+		expect(searchInput()?.value).toBe("");
+	});
+
+	it("remembers as many searches as the settings allow", async () => {
+		localStorage.removeItem("lasterm:search-history");
+		await showingT({ setUp: searchSettings({ historySize: 2 }) });
+		await openSearch();
+		for (const query of ["one", "two", "three"]) {
+			await typeSearch(query);
+			await enter();
+		}
+
+		expect(history()).toEqual(["three", "two"]);
+	});
+
 	it("searches an open query again in the terminal it switched to", async () => {
 		const channel = await showingT();
 		await openSearch();
@@ -3990,6 +4112,48 @@ describe("TerminalPane follows the setting over an end it found (#592)", () => {
 
 		expect(useNotificationStore().bellCounts.get(T)).toBe(1);
 		expect(bellSound).toHaveBeenCalledTimes(1);
+	});
+
+	// What the profile says of a bell, seen where the bell rings.
+	const ring = () => hear({ type: "OUTPUT", channelId: T, data: new TextEncoder().encode("") });
+
+	it("rings its sound but counts no badge for a bell when the profile turns the badge off", async () => {
+		xterm.profile = { bellBadge: false, bellSound: "system" };
+		await openLive();
+
+		ring();
+
+		expect(useNotificationStore().bellCounts.get(T)).toBeUndefined();
+		expect(bellSound).toHaveBeenCalledTimes(1);
+	});
+
+	it("counts a badge for a bell when the profile turns the badge on", async () => {
+		xterm.profile = { bellBadge: true, bellSound: "system" };
+		await openLive();
+
+		ring();
+
+		expect(useNotificationStore().bellCounts.get(T)).toBe(1);
+	});
+
+	it("rings the custom sound file the profile names", async () => {
+		xterm.profile = { bellSound: "custom", bellCustomFile: "bell.mp3" };
+		await openLive();
+
+		ring();
+
+		expect(bellSound).toHaveBeenCalledTimes(1);
+		expect(bellSound).toHaveBeenCalledWith({ sound: "custom", customSoundFile: "bell.mp3" });
+	});
+
+	it("rings no sound for a bell when the profile mutes it, and still counts the badge", async () => {
+		xterm.profile = { bellSound: "mute" };
+		await openLive();
+
+		ring();
+
+		expect(bellSound).not.toHaveBeenCalled();
+		expect(useNotificationStore().bellCounts.get(T)).toBe(1);
 	});
 });
 

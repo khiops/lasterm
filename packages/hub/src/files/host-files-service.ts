@@ -2,6 +2,7 @@ import type { HostOs } from "@lasterm/shared";
 import type { Client as SshClient } from "ssh2";
 import { readRemoteSystem, type SftpSupport } from "../session/agent-deployer.js";
 import { ExecFileBackend } from "./exec-files.js";
+import { ExecReadBackend } from "./exec-read.js";
 import { ExecUploadBackend } from "./exec-upload.js";
 import { expandVariables, lookupIn, referencedVariables } from "./expand-vars.js";
 import {
@@ -19,7 +20,9 @@ import {
 import { normaliseHostPath, type PathStyle, parentOf, pathStyleOf } from "./host-paths.js";
 import { LocalFileBackend, localHostOs } from "./local-files.js";
 import { LocalUploadBackend } from "./local-upload.js";
+import { LocalReadBackend, type OpenedFile, type ReadBackend } from "./read-backend.js";
 import { SFTP_IDLE_MS, SftpFileBackend, SharedSftp } from "./sftp-files.js";
+import { SftpReadBackend } from "./sftp-read.js";
 import { SftpUploadBackend } from "./sftp-upload.js";
 import type { UploadBackend } from "./upload-backend.js";
 
@@ -34,6 +37,8 @@ export interface SshFileHost {
 export interface HostFilesDeps {
 	/** The host a terminal runs on, and its type; null for an unknown terminal. */
 	channelHost(channelId: string): { hostId: string; hostType: string } | null;
+	/** A host's type (`local`, `ssh`), null for one this hub does not know (#840). */
+	hostType?(hostId: string): string | null;
 	/** The OS recorded for a host, null when no connection has detected it yet. */
 	hostOs(hostId: string): HostOs | null;
 	/** The connected SSH agent of a remote host, or null when none is connected to this hub. */
@@ -46,9 +51,17 @@ export interface HostFilesDeps {
 	 */
 	startFolder?(channelId: string): StartFolderSettings;
 	/** The local host's files; the hub's own file system unless a spec says otherwise. */
-	local?: { backend: FileBackend; os: HostOs; upload?: UploadBackend };
+	local?: { backend: FileBackend; os: HostOs; upload?: UploadBackend; read?: ReadBackend };
 	/** How long a host's SFTP session stays open unused; `SFTP_IDLE_MS` by default. */
 	sftpIdleMs?: number;
+	/** Told the bytes each download read over SSH commands received, for tests (#840). */
+	onExecRead?: (bytes: number) => void;
+	/** Called between an SFTP download's LSTAT and its OPEN, for tests (#840). */
+	sftpBetweenLookAndOpen?: (path: string) => Promise<void>;
+	/** Told when a download read's SSH command closes, for tests (#840). */
+	onExecClose?: () => void;
+	/** Called before an SFTP download's second look, for tests (#840). */
+	sftpBeforeRecheck?: (path: string) => Promise<void>;
 }
 
 /** What the settings say of the folder a panel opens at, for one terminal. */
@@ -71,6 +84,17 @@ const FALLBACK_REFUSALS: ReadonlySet<FileErrorCode> = new Set<FileErrorCode>([
 function fallbackProblem(shown: string, reason: string): string {
 	return `The fallback folder ${shown} cannot be opened: ${reason}`;
 }
+
+/** The host a download request names is not one this hub knows (#840). */
+export class HostNotFound extends Error {
+	constructor() {
+		super("Host not found");
+		this.name = "HostNotFound";
+	}
+}
+
+/** What a download names its host by: the terminal it was asked from, or the host (#840). */
+export type DownloadTarget = { readonly channelId: string } | { readonly hostId: string };
 
 /** The terminal a request names is not one this hub knows. */
 export class ChannelNotFound extends Error {
@@ -97,6 +121,10 @@ class RemoteFiles implements FileBackend {
 		readonly style: PathStyle,
 		private readonly support: () => SftpSupport | null,
 		idleMs: number,
+		private readonly onExecRead?: (bytes: number) => void,
+		private readonly sftpBetweenLookAndOpen?: (path: string) => Promise<void>,
+		private readonly onExecClose?: () => void,
+		private readonly sftpBeforeRecheck?: (path: string) => Promise<void>,
 	) {
 		this.shared = new SharedSftp(client, idleMs);
 		this.sftp = new SftpFileBackend(this.shared, style);
@@ -151,6 +179,28 @@ class RemoteFiles implements FileBackend {
 		return new ExecUploadBackend(this.client, this.style, () => this.shared.lost, this.exec);
 	}
 
+	/**
+	 * Open a file for a download (#840): over SFTP where the server offers it,
+	 * else over SSH commands; an answer that settles it (missing, a link, not a
+	 * file, changed) is not asked again the other way.
+	 */
+	async openForRead(path: string): Promise<OpenedFile> {
+		const sftp = new SftpReadBackend(
+			this.shared,
+			this.style,
+			this.sftpBetweenLookAndOpen,
+			this.sftpBeforeRecheck,
+		);
+		const exec = new ExecReadBackend(
+			this.client,
+			this.style,
+			() => this.shared.lost,
+			this.onExecRead,
+			this.onExecClose,
+		);
+		return this.either<OpenedFile>((backend) => (backend === this.sftp ? sftp : exec).open(path));
+	}
+
 	private async either<T>(request: (backend: FileBackend) => Promise<T>): Promise<T> {
 		const support = this.support();
 		let sftpSaid: string;
@@ -188,14 +238,23 @@ class RemoteFiles implements FileBackend {
  * listing is a routine request.
  */
 export class HostFilesService {
-	private readonly local: { backend: FileBackend; os: HostOs; upload: UploadBackend };
+	private readonly local: {
+		backend: FileBackend;
+		os: HostOs;
+		upload: UploadBackend;
+		read: ReadBackend;
+	};
 	private readonly sftpIdleMs: number;
 	private readonly remotes = new WeakMap<SshClient, RemoteFiles>();
 	private readonly detected = new WeakMap<SshClient, Promise<HostOs | null>>();
 
 	constructor(private readonly deps: HostFilesDeps) {
 		const local = deps.local ?? { backend: new LocalFileBackend(), os: localHostOs() };
-		this.local = { ...local, upload: local.upload ?? new LocalUploadBackend(local.os) };
+		this.local = {
+			...local,
+			upload: local.upload ?? new LocalUploadBackend(local.os),
+			read: local.read ?? new LocalReadBackend(),
+		};
 		this.sftpIdleMs = deps.sftpIdleMs ?? SFTP_IDLE_MS;
 	}
 
@@ -244,6 +303,44 @@ export class HostFilesService {
 		}
 		await backend.mkdir(target);
 		return { path: target };
+	}
+
+	/**
+	 * The host a download reads from, by its terminal or by the host itself
+	 * (#840: a folder download and a resume go by the host, so that closing the
+	 * terminal never breaks them), and `path` normalised for it.
+	 */
+	async downloadTarget(
+		target: DownloadTarget,
+		path: string,
+	): Promise<{ hostId: string; hostType: string; path: string; style: PathStyle }> {
+		const host = this.hostOf(target);
+		const style =
+			host.hostType === "local"
+				? pathStyleOf(this.local.os)
+				: (await this.remote(host.hostId)).style;
+		return { ...host, path: normalised(path, style), style };
+	}
+
+	/** Open the regular file `path` of a download's host (#840). */
+	async openForRead(
+		target: DownloadTarget,
+		path: string,
+	): Promise<{ hostId: string; path: string; style: PathStyle; file: OpenedFile }> {
+		const resolved = await this.downloadTarget(target, path);
+		const file =
+			resolved.hostType === "local"
+				? await this.local.read.open(resolved.path)
+				: await (await this.remote(resolved.hostId)).openForRead(resolved.path);
+		return { hostId: resolved.hostId, path: resolved.path, style: resolved.style, file };
+	}
+
+	/** The host a download target names; `ChannelNotFound` or `HostNotFound` otherwise. */
+	hostOf(target: DownloadTarget): { hostId: string; hostType: string } {
+		if ("channelId" in target) return this.channelHost(target.channelId);
+		const hostType = this.deps.hostType?.(target.hostId) ?? null;
+		if (hostType === null) throw new HostNotFound();
+		return { hostId: target.hostId, hostType };
 	}
 
 	/**
@@ -349,7 +446,16 @@ export class HostFilesService {
 			// Another request may have set it up while this one asked the host.
 			remote =
 				this.remotes.get(client) ??
-				new RemoteFiles(client, pathStyleOf(os), () => host.sftpSupport, this.sftpIdleMs);
+				new RemoteFiles(
+					client,
+					pathStyleOf(os),
+					() => host.sftpSupport,
+					this.sftpIdleMs,
+					this.deps.onExecRead,
+					this.deps.sftpBetweenLookAndOpen,
+					this.deps.onExecClose,
+					this.deps.sftpBeforeRecheck,
+				);
 			this.remotes.set(client, remote);
 		}
 		return remote;

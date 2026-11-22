@@ -27,6 +27,7 @@ import {
 } from "@lasterm/shared";
 import ssh2, { Server } from "ssh2";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { transfersText } from "../api/host-connection.js";
 import { HUB_VERSION } from "../build-version.js";
 import { openTestDatabases } from "../storage/db.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
@@ -1290,6 +1291,25 @@ describe("a host its user did not disconnect", { timeout: 20_000 }, () => {
 		// Nothing more is under test once the reconnect is seen waiting.
 		clearTimeout(timer);
 		h.ctx.reconnectTimers.delete(h.host.id);
+	});
+});
+
+describe("downloads from a host hold its connection (#840)", { timeout: 20_000 }, () => {
+	it("an open download holds the host", async () => {
+		const h = await hubWith({ daemon: true });
+		await connected(h);
+		h.sm.setTransfers({ activeOn: () => 0, interruptOn: () => {} });
+		const release = h.sm.downloadOpened(h.host.id);
+		expect(h.sm.disconnectHost(h.host.id)).toEqual({
+			kind: "transfers-would-stop",
+			transfers: 1,
+			downloads: 1,
+		});
+		expect(transfersText(0, 1)).toBe("1 download");
+		expect(transfersText(1, 2)).toBe("1 upload and 2 downloads");
+		release();
+		release();
+		expect(h.sm.disconnectHost(h.host.id)).toEqual({ kind: "disconnected", ended: 0 });
 	});
 });
 

@@ -2054,7 +2054,8 @@ function onDisconnectHost(hostId: string): Promise<void> {
 
 /**
  * Reconnect or Disconnect a host (#648): asked first when terminals would
- * end, which only a host with no daemon to keep them says.
+ * end (only a host with no daemon to keep them says so) or when uploads to the
+ * host or downloads from it would stop (#833, #840).
  */
 async function closeHostConnection(hostId: string, action: HostConnectionAction): Promise<void> {
 	const label = hostsStore.hosts.find((h) => h.id === hostId)?.label ?? 'this host';

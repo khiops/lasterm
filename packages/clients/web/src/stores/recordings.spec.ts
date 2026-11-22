@@ -465,15 +465,29 @@ describe("recordings store", () => {
 				expect(store.open.has("ch-new")).toBe(true);
 			});
 
-			// Mutation caught: a try of an older chain going on beside the new one.
-			it("leaves one chain of tries: a newer read takes over", async () => {
-				const requests = hub({ list: () => new Response("", { status: 503 }) });
+			// Mutation caught: an older read that fails late starting tries beside the
+			// newer chain's.
+			it("leaves one chain of tries: an older read failing late adds none", async () => {
+				let failOld: (r: Response) => void = () => {};
+				let first = true;
+				const requests = hub({
+					list: () => {
+						if (first) {
+							first = false;
+							return new Promise<Response>((resolve) => (failOld = resolve)) as never;
+						}
+						return new Response("", { status: 503 });
+					},
+				});
 				const store = useRecordingsStore();
+				const old = store.refresh(); // its answer waits
+				await vi.advanceTimersByTimeAsync(0);
 				await store.refresh(); // fails: a try in 1 s
-				await vi.advanceTimersByTimeAsync(500);
-				await store.refresh(); // fails too: its own try in 1 s
-				await vi.advanceTimersByTimeAsync(1000);
-				expect(lists(requests)).toBe(3); // the two reads and one try, not two
+				failOld(new Response("", { status: 503 })); // the older read fails now
+				await old;
+				// The current chain tries at 1 s, then at 3 s: by 2 s, one try only.
+				await vi.advanceTimersByTimeAsync(2000);
+				expect(lists(requests)).toBe(3);
 			});
 
 			// Mutation caught: tries going on after the connection is let go.

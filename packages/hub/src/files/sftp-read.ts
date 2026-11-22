@@ -195,7 +195,12 @@ class SftpOpenedFile implements OpenedFile {
 export class SftpReadStream extends Readable {
 	private next: number;
 	private readonly end: number;
-	private readonly queue: Array<{ offset: number; length: number; result: Promise<Buffer> }> = [];
+	private readonly queue: Array<{
+		offset: number;
+		length: number;
+		result: Promise<Buffer> | null;
+	}> = [];
+	private readonly onEnded: () => void;
 	private pumping = false;
 	private wanted = false;
 
@@ -209,11 +214,12 @@ export class SftpReadStream extends Readable {
 		super({ highWaterMark: SFTP_READ_BYTES });
 		this.next = start;
 		this.end = start + length;
-		// One watch of the session's end for the whole stream: a READ in flight
-		// when it ends never answers, so the stream fails here.
-		void session.endedSignal.then(() => {
+		// One watch of the session's end for the whole stream, removed with it: a
+		// READ in flight when it ends never answers, so the stream fails here.
+		this.onEnded = () => {
 			if (!this.destroyed && !this.readableEnded) this.destroy(hostNotConnected());
-		});
+		};
+		session.channel.once("close", this.onEnded);
 	}
 
 	override _read(): void {
@@ -258,17 +264,20 @@ export class SftpReadStream extends Readable {
 					this.push(null);
 					return;
 				}
-				let { offset, length } = head;
-				let data = await head.result;
-				while (!this.destroyed) {
-					if (data.length === 0) {
-						throw new FileAccessError("FILE_CHANGED", `${WHAT}: ${REASONS.FILE_CHANGED}`);
-					}
-					this.wanted = this.push(data);
-					if (data.length === length) break;
-					offset += data.length;
-					length -= data.length;
-					data = await this.ask(offset, length);
+				const { offset, length } = head;
+				const data = await (head.result ?? this.ask(offset, length));
+				if (this.destroyed) break;
+				if (data.length === 0) {
+					throw new FileAccessError("FILE_CHANGED", `${WHAT}: ${REASONS.FILE_CHANGED}`);
+				}
+				this.wanted = this.push(data);
+				// A short answer: its rest goes first, asked when the reader wants more.
+				if (data.length < length) {
+					this.queue.unshift({
+						offset: offset + data.length,
+						length: length - data.length,
+						result: this.wanted ? this.ask(offset + data.length, length - data.length) : null,
+					});
 				}
 			}
 		} catch (error) {
@@ -280,6 +289,7 @@ export class SftpReadStream extends Readable {
 
 	override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
 		this.queue.length = 0;
+		this.session.channel.removeListener("close", this.onEnded);
 		callback(error);
 	}
 }

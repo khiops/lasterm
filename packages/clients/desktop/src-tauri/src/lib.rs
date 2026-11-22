@@ -6094,7 +6094,7 @@ struct DownloadEnded {
 /// name the save dialog returned: one name, not empty, `.` or `..`, and on
 /// Windows nothing Windows refuses.
 fn checked_rel_path(rel: &str) -> Result<&str, String> {
-    if rel.contains('/') || rel.contains('\\') || rel.contains('\0') {
+    if rel.contains('/') || (cfg!(windows) && rel.contains('\\')) || rel.contains('\0') {
         return Err("INVALID_PATH: one name only".to_string());
     }
     if rel.is_empty() || rel == "." || rel == ".." {
@@ -8028,11 +8028,15 @@ mod tests {
     #[test]
     fn download_commands_refuse_what_phase_a_does_not_write() {
         assert!(checked_rel_path("report.pdf").is_ok());
-        for refused in ["a/b", "..", ".", "", "a\\b"] {
+        for refused in ["a/b", "..", ".", ""] {
             assert!(checked_rel_path(refused).is_err(), "{refused:?}");
         }
         if cfg!(windows) {
             assert!(checked_rel_path("a:b").is_err());
+            assert!(checked_rel_path("a\\b").is_err());
+        } else {
+            // One name on Linux, as its file system holds it.
+            assert!(checked_rel_path("report\\2026.txt").is_ok());
         }
         let error = download_root("0000000000000000").err().unwrap();
         assert!(error.starts_with("UNKNOWN_ROOT"), "{error}");

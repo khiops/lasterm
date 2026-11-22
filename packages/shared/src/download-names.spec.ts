@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { downloadRename, withSuffix } from "./download-names.js";
+import { windowsNameProblem } from "./transfer-protocol.js";
 
 describe("downloadRename (#840)", () => {
 	it.each([
@@ -15,6 +16,12 @@ describe("downloadRename (#840)", () => {
 		["tab\there", "tab_here"],
 	])("renames %j to %j", (name, renamed) => {
 		expect(downloadRename(name)).toBe(renamed);
+	});
+
+	it("never makes a device name by cutting", () => {
+		const renamed = downloadRename(`CONxy.${"é".repeat(124)}ab`);
+		expect(new TextEncoder().encode(renamed).length).toBeLessThanOrEqual(255);
+		expect(windowsNameProblem(renamed)).toBeNull();
 	});
 
 	it("never leaves a trailing space after cutting", () => {

@@ -132,6 +132,7 @@ export function registerSessionRoutes(
 								other_owner_channels: outcome.otherOwnerChannels,
 							}),
 							...(outcome.transfers !== undefined && { transfers: outcome.transfers }),
+							...(outcome.downloads !== undefined && { downloads: outcome.downloads }),
 						},
 					});
 				}

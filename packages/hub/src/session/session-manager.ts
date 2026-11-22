@@ -237,8 +237,10 @@ export type ReplaceAgentOutcome =
 				| typeof ErrorCode.TERMINALS_SHOWN_ENDED;
 			/** How many, when the agent said. */
 			readonly otherOwnerChannels?: number;
-			/** With TRANSFERS_WOULD_STOP: the uploads to the host that would stop (#833). */
+			/** With TRANSFERS_WOULD_STOP: the transfers of the host that would stop (#833). */
 			readonly transfers?: number;
+			/** How many of `transfers` are downloads (#840). */
+			readonly downloads?: number;
 	  };
 
 /** The uploads to each host, as the session manager weighs them (#833). */
@@ -323,6 +325,8 @@ export type StopKeepingAgentOutcome =
 			terminals?: number;
 			otherOwnerChannels?: number;
 			transfers?: number;
+			/** How many of `transfers` are downloads (#840). */
+			downloads?: number;
 	  };
 
 export class SessionManager {

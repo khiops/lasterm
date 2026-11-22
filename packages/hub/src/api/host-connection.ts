@@ -114,6 +114,7 @@ function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyRep
 							: `${terminalsText(outcome.terminals)} on this host would end, and ${transfersText(outcome.transfers - (outcome.downloads ?? 0), outcome.downloads ?? 0)} ${outcome.downloads ? "on" : "to"} it would stop. Send force: true to go on.`,
 					terminals: outcome.terminals,
 					...(outcome.transfers !== undefined && { transfers: outcome.transfers }),
+					...(outcome.downloads !== undefined && { downloads: outcome.downloads }),
 				},
 			});
 		case "transfers-would-stop":
@@ -173,6 +174,7 @@ export function registerHostConnectionRoutes(
 					message: outcome.message,
 					...(outcome.terminals !== undefined && { terminals: outcome.terminals }),
 					...(outcome.transfers !== undefined && { transfers: outcome.transfers }),
+					...(outcome.downloads !== undefined && { downloads: outcome.downloads }),
 					...(outcome.otherOwnerChannels !== undefined && {
 						other_owner_channels: outcome.otherOwnerChannels,
 					}),

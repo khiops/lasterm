@@ -11,6 +11,7 @@ import { type App, createApp, h, nextTick } from "vue";
 import type { IWsClient } from "../../services/ws-client.js";
 import { useAuthStore } from "../../stores/auth.js";
 import { useFilesPanelStore } from "../../stores/files-panel.js";
+import { useToastStore } from "../../stores/toast.js";
 import { useWriteLockStore } from "../../stores/writelock.js";
 import type { FileEntryView } from "../../utils/files-panel.js";
 import type { FileListingView, FilesAnswer } from "../../utils/host-files.js";
@@ -470,6 +471,40 @@ describe("Download… (#840)", () => {
 		});
 		expect(mocks.hubFetch).not.toHaveBeenCalled();
 		platform.mockRestore();
+	});
+
+	it("download a file as a reader: a Cancel during the setup starts nothing", async () => {
+		mocks.tauri = true;
+		showEntries([file("report.txt")]);
+		let release: () => void = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		mocks.listen.mockImplementationOnce(async () => {
+			await held;
+			return () => {};
+		});
+		mocks.listen.mockResolvedValue(() => {});
+		mocks.invoke.mockImplementation(async (command: string) =>
+			command === "pick_download_target"
+				? { outcome: "chosen", root_id: "R", display: "C:\\Downloads", name: "report.txt" }
+				: null,
+		);
+		mountBrowser({ writer: false });
+		await settle();
+		downloadButton().click();
+		await vi.waitFor(() => expect(mocks.listen).toHaveBeenCalledTimes(1));
+		const toasts = useToastStore();
+		const toast = toasts.messages.find((m) => m.text.startsWith("Downloading report.txt"));
+		expect(toast?.action?.label).toBe("Cancel");
+		toasts.act(toast?.id ?? -1);
+		release();
+		await vi.waitFor(() =>
+			expect(toasts.messages.some((m) => m.text.startsWith("Downloading"))).toBe(false),
+		);
+		await settle();
+		const commands = mocks.invoke.mock.calls.map(([command]) => command);
+		expect(commands).not.toContain("download_hub_file_to");
 	});
 
 	it("download a file as a reader: disabled on a link or a folder, with the reason", async () => {

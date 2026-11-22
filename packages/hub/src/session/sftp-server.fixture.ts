@@ -109,6 +109,8 @@ export interface SftpServerOptions {
 	shell?: "sh" | "cmd";
 	/** What every exec prints before its command does, as an account's profile may (#749). */
 	prelude?: string;
+	/** What a command's whole stdout becomes before the client gets it, held until the command ends. */
+	rewriteStdout?: (stdout: Buffer) => Buffer;
 	/** The environment exec requests run with under `/bin/sh`, as an account's would; this process's by default. */
 	execEnv?: NodeJS.ProcessEnv;
 	/**
@@ -272,9 +274,13 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 					// A channel that closes, with its connection or alone, ends the command's
 					// stdin, as sshd closes its pipes: a command that reads until then ends.
 					stream.once("close", () => child.stdin.end());
-					child.stdout.pipe(stream, { end: false });
+					const rewrite = options.rewriteStdout;
+					const held: Buffer[] = [];
+					if (rewrite) child.stdout.on("data", (chunk: Buffer) => held.push(chunk));
+					else child.stdout.pipe(stream, { end: false });
 					child.stderr.pipe(stream.stderr, { end: false });
 					child.on("close", (code) => {
+						if (rewrite) stream.write(rewrite(Buffer.concat(held)));
 						stream.unpipe(child.stdin);
 						// Killed by a signal, or never started (a negative errno): no status of its own.
 						stream.exit(code === null ? 1 : code < 0 ? 127 : code);

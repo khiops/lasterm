@@ -277,6 +277,7 @@ class ExecStream {
 	private stderr = "";
 	private exitCode: number | null = null;
 	private settled = false;
+	private resolved = false;
 	private received = 0;
 	private closing = false;
 	private startTimer: ReturnType<typeof setTimeout> | undefined;
@@ -314,8 +315,9 @@ class ExecStream {
 			endedResolve({ exitCode: this.exitCode, stderr: this.stderr });
 			if (!this.settled) {
 				this.settle(this.backend.refusal(this.exitCode, this.stderr));
-			} else if (this.received < this.length) {
+			} else if (this.resolved && this.received < this.length) {
 				// The host sent fewer bytes than it promised: the file ended early.
+				// A read already refused has no reader to tell.
 				this.body.destroy(fileChanged(WHAT));
 			}
 		});
@@ -354,7 +356,10 @@ class ExecStream {
 		if (error) {
 			this.reject(error);
 			this.close();
-		} else this.resolve(this);
+		} else {
+			this.resolved = true;
+			this.resolve(this);
+		}
 	}
 
 	private onData(chunk: Buffer): void {
@@ -365,7 +370,7 @@ class ExecStream {
 		this.head = Buffer.concat([this.head, chunk]);
 		if (this.state === "marker") {
 			const wanted = Buffer.from(`${this.marker}\n`);
-			const at = this.head.indexOf(wanted);
+			const at = this.head.subarray(0, PRELUDE_LIMIT + wanted.length).indexOf(wanted);
 			if (at === -1) {
 				if (this.head.length > PRELUDE_LIMIT) {
 					this.settle(
@@ -446,7 +451,8 @@ class ExecOpenedFile implements OpenedFile {
 		if (this.running === null) return (await this.backend.open(this.path)).look;
 		const look = await this.running.trailer();
 		if (look === null) {
-			throw new FileAccessError("FILE_ACCESS_FAILED", `${WHAT}: the host did not say how it ended`);
+			// No second look after the bytes: what came was not the file as it was seen (H3b).
+			throw fileChanged(WHAT);
 		}
 		return look;
 	}

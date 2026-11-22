@@ -209,6 +209,11 @@ async function downloadOnDesktop(
 			}
 		}),
 	);
+	if (cancelled) {
+		stop();
+		toasts.dismiss(toast);
+		return { kind: "cancelled" };
+	}
 	const port = Number(new URL(hubBaseUrl(), window.location.href).port || 443);
 	try {
 		await bridge.invoke(DOWNLOAD_COMMAND, {

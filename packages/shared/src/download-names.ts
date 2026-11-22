@@ -31,14 +31,24 @@ export function downloadRename(name: string): string {
 	if (windowsNameProblem(name) === null && encoder.encode(name).length <= MAX_NAME_BYTES) {
 		return name;
 	}
-	let renamed = name.replace(FORBIDDEN, "_").replace(/[. ]+$/, "");
+	// Cut to leave a byte for the `_` a device name takes, then strip what a cut
+	// may leave at the end, then look at the stem the cut name has.
+	let renamed = cutToFit(name.replace(FORBIDDEN, "_"), MAX_NAME_BYTES - 1).replace(/[. ]+$/, "");
 	if (renamed === "") renamed = "_";
 	const dot = renamed.indexOf(".");
 	const stem = dot === -1 ? renamed : renamed.slice(0, dot);
 	if (RESERVED_STEM.test(stem)) renamed = `${stem}_${renamed.slice(stem.length)}`;
-	// Cut to fit, then once more without what a cut may leave at the end.
-	const cut = withSuffix(renamed, "").replace(/[. ]+$/, "");
-	return cut === "" ? "_" : cut;
+	return renamed;
+}
+
+/** `name` cut to `bytes` UTF-8 bytes, its extension kept when it fits. */
+function cutToFit(name: string, bytes: number): string {
+	if (encoder.encode(name).length <= bytes) return name;
+	const dot = name.lastIndexOf(".");
+	const extension = dot > 0 ? name.slice(dot) : "";
+	const room = bytes - encoder.encode(extension).length;
+	if (room <= 0) return cutToBytes(name, bytes);
+	return `${cutToBytes(name.slice(0, dot > 0 ? dot : name.length), room)}${extension}`;
 }
 
 /**

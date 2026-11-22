@@ -232,9 +232,16 @@ describe("POST /api/hosts/:id/connect|reconnect|disconnect (#648)", () => {
 			downloads: 2,
 		});
 		const both = await post("disconnect", sshHostId);
-		expect(both.json().error.message).toBe(
-			"1 terminal on this host would end, and 1 upload and 2 downloads on it would stop. Send force: true to go on.",
-		);
+		expect(both.json()).toEqual({
+			error: {
+				code: "TERMINALS_WOULD_END",
+				message:
+					"1 terminal on this host would end, and 1 upload and 2 downloads on it would stop. Send force: true to go on.",
+				terminals: 1,
+				transfers: 3,
+				downloads: 2,
+			},
+		});
 	});
 
 	it("answers 400 for the local host, which has no connection to act on", async () => {

@@ -1666,6 +1666,36 @@ describe("POST stop-keeping", () => {
 		expect(f.ctx.sessions.has(hostId)).toBe(false);
 	});
 
+	it("names an open download apart from uploads in Stop and Replace refusals (#840)", async () => {
+		const f = fixture();
+		sm.setTransfers({ activeOn: () => 0, interruptOn: () => {} });
+		const release = sm.downloadOpened(hostId);
+		try {
+			const refusal = await stop({ end_terminals: true, force: true });
+			expect(refusal.statusCode).toBe(409);
+			expect(refusal.json().error).toMatchObject({
+				code: "TRANSFERS_WOULD_STOP",
+				transfers: 1,
+				downloads: 1,
+			});
+			unchanged(f);
+			const replace = await server.inject({
+				method: "POST",
+				url: `/api/hosts/${hostId}/agent/replace`,
+				payload: { force: true },
+			});
+			expect(replace.statusCode).toBe(409);
+			expect(replace.json().error).toMatchObject({
+				code: "TRANSFERS_WOULD_STOP",
+				transfers: 1,
+				downloads: 1,
+			});
+			unchanged(f);
+		} finally {
+			release();
+		}
+	});
+
 	it("requires consent for the uploads to the host, apart from force, and interrupts them once given (#833)", async () => {
 		const f = fixture();
 		const interrupted: string[] = [];

@@ -1,5 +1,4 @@
-import { type Readable, Transform, type TransformCallback } from "node:stream";
-import { pipeline } from "node:stream/promises";
+import { PassThrough, type Readable, Transform, type TransformCallback } from "node:stream";
 import { ErrorCode, isValidUlid } from "@lasterm/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { DownloadTickets } from "../files/download-tickets.js";
@@ -173,6 +172,39 @@ class HoldBack extends Transform {
 	}
 }
 
+/**
+ * The first chunk of `source`, which then stays paused for its pipe; null when
+ * it ends at once. Rejects with the source's error.
+ */
+function firstChunk(source: Readable): Promise<Buffer | null> {
+	return new Promise((resolve, reject) => {
+		const onData = (chunk: Buffer): void => {
+			done();
+			source.pause();
+			resolve(chunk);
+		};
+		const onEnd = (): void => {
+			done();
+			resolve(null);
+		};
+		const onError = (error: Error): void => {
+			done();
+			reject(error);
+		};
+		const done = (): void => {
+			source.off("data", onData);
+			source.off("end", onEnd);
+			source.off("error", onError);
+			// Until the caller listens: an error meanwhile leaves the source
+			// destroyed, which the caller looks at, never an uncaught error.
+			source.on("error", () => {});
+		};
+		source.on("data", onData);
+		source.once("end", onEnd);
+		source.once("error", onError);
+	});
+}
+
 /** Read a whole small body into memory. */
 async function readAll(stream: Readable, limit: number): Promise<Buffer> {
 	const chunks: Buffer[] = [];
@@ -307,14 +339,28 @@ export function registerFileContentRoutes(server: FastifyInstance, deps: FileCon
 				return reply.header("Content-Length", length).send(body);
 			}
 			const source = await file.read(start, length);
+			// The first bytes before any header: a read that fails at once is
+			// still answered with its code, as JSON.
+			const first = await firstChunk(source);
 			const hold = new HoldBack(length, unchanged);
-			reply.header("Content-Length", length);
-			// The response is the held-back stream; a failure on either side
-			// destroys the socket, so the client sees fewer bytes than promised.
-			pipeline(source, hold).catch(() => {
+			const out = new PassThrough();
+			// A failure after the headers ends the socket, so the client sees fewer
+			// bytes than promised. No error object reaches Fastify: its message may
+			// name the path, which no log may hold.
+			const fail = (): void => {
 				reply.raw.destroy();
-			});
-			return reply.send(hold);
+				out.destroy();
+				source.destroy();
+				hold.destroy();
+			};
+			source.on("error", fail);
+			hold.on("error", fail);
+			// A source that failed between its first chunk and these listeners.
+			if (source.destroyed) fail();
+			if (first !== null) hold.write(first);
+			source.pipe(hold).pipe(out);
+			reply.header("Content-Length", length);
+			return reply.send(out);
 		} catch (error) {
 			finish();
 			if (reply.sent) {

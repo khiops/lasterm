@@ -47,6 +47,7 @@ import {
 	describeRemoteDaemonPlacement,
 	openRelay,
 	RelayFailed,
+	RemoteDaemonUnavailable,
 	relayCommand,
 	SOCKET_FORWARDING_REFUSED_MESSAGE,
 } from "./remote-daemon.js";
@@ -430,6 +431,20 @@ export class SshAgent extends AgentConnection {
 	reachedThrough: "streamlocal" | "relay" | "stdio" | null = null;
 
 	/**
+	 * Why this connection runs its agent on stdio although the host keeps a
+	 * daemon: the Windows host's SSH session does not let a process outlive it,
+	 * in the agent's own words (#755). Null otherwise.
+	 */
+	remoteDaemonUnavailable: string | null = null;
+
+	/**
+	 * The system of the host this connection runs its agent on: what the
+	 * deploy detected, else the host's stored one. Null until the agent runs,
+	 * and where neither says (#755).
+	 */
+	remoteOs: HostOs | null = null;
+
+	/**
 	 * Where the agent this connection reached lives on the remote, once the
 	 * deploy has resolved it. Null when it was never resolved — an agent found
 	 * on PATH, or a connection that failed before the deploy.
@@ -478,8 +493,8 @@ export class SshAgent extends AgentConnection {
 		private readonly loggingConfig: AgentLoggingConfig = DEFAULT_AGENT_CONFIG,
 		/**
 		 * Whether to leave the remote agent running as a daemon and reach it
-		 * through its socket, so its terminals outlive this connection (#79).
-		 * Windows remotes ignore it: no SSH channel carries a named pipe.
+		 * through its socket or pipe, so its terminals outlive this connection
+		 * (#79; a Windows host through the relay, #755).
 		 */
 		private readonly remoteDaemon: boolean = false,
 		/**
@@ -500,9 +515,9 @@ export class SshAgent extends AgentConnection {
 	 */
 	private daemonOnlyRelay(
 		hostname: string,
-	): (client: Client, socketPath: string, waitMs: number) => Promise<Duplex> {
+	): (client: Client, endpoint: string | null, waitMs: number) => Promise<Duplex> {
 		let checked: Promise<RelayAgent> | null = null;
-		return async (client, socketPath, waitMs) => {
+		return async (client, endpoint, waitMs) => {
 			const options = this.deployOptions;
 			if (options === undefined)
 				throw new RelayFailed("this hub cannot check the agent on this host");
@@ -522,7 +537,10 @@ export class SshAgent extends AgentConnection {
 			}
 			if (agent.kind === "refused") throw new RelayFailed(agent.reason);
 			try {
-				return await openRelay(client, relayCommand(agent.path, socketPath, waitMs));
+				return await openRelay(
+					client,
+					relayCommand(agent.path, endpoint, this.host.os ?? null, waitMs),
+				);
 			} catch (err) {
 				if (err instanceof RelayFailed && err.predates) {
 					throw new RelayFailed(
@@ -538,17 +556,10 @@ export class SshAgent extends AgentConnection {
 		};
 	}
 
-	/**
-	 * The binary to run as a daemon, or undefined to keep it on stdio.
-	 *
-	 * A daemon is only worth reaching where a socket can be reached: Windows
-	 * remotes listen on a named pipe, and no SSH channel carries one, so they
-	 * stay as they were — their terminals end with the connection.
-	 */
-	private daemonBinary(remotePath: string, os: HostOs | null): string | undefined {
+	/** The binary to run as a daemon, or undefined to keep it on stdio. */
+	private daemonBinary(remotePath: string): string | undefined {
 		if (this.daemonOnly) return remotePath;
 		if (!this.remoteDaemon) return undefined;
-		if ((os ?? this.host.os) === "windows") return undefined;
 		return remotePath;
 	}
 
@@ -580,6 +591,8 @@ export class SshAgent extends AgentConnection {
 		this.sftpSupport = null;
 		this.socketForwardingRefused = false;
 		this.reachedThrough = null;
+		this.remoteDaemonUnavailable = null;
+		this.remoteOs = null;
 		this.keySigner = null;
 		if (!this.host.sshHost) {
 			throw new Error("Host has no sshHost configured");
@@ -905,6 +918,7 @@ export class SshAgent extends AgentConnection {
 					// Attach stream handler — called after deploy (or immediately if no deploy needed).
 					const runAgent = (agentPath: string, os: HostOs | null, daemonPath?: string): void => {
 						const hostOs = os ?? this.host.os;
+						this.remoteOs = hostOs;
 						const helloTimeoutMs =
 							(connectTimeoutMs ??
 								(hostOs === "windows" ? WINDOWS_HELLO_TIMEOUT_MS : HELLO_TIMEOUT_MS)) +
@@ -977,6 +991,7 @@ export class SshAgent extends AgentConnection {
 									route: "relay" as const,
 								}),
 								...(this.daemonOnly && { relay: this.daemonOnlyRelay(hostname) }),
+								os: hostOs,
 							})
 								.then((attachment) => {
 									this.usedRemoteDaemon = true;
@@ -999,6 +1014,22 @@ export class SshAgent extends AgentConnection {
 									onStream(attachment.stream as unknown as ClientChannel);
 								})
 								.catch((err: unknown) => {
+									// The Windows host forbids what would keep a daemon: the
+									// agent runs on stdio, and the host says why (#755).
+									// Nothing listened before the launch, so no daemon there
+									// holds anything a stdio agent would start over.
+									if (err instanceof RemoteDaemonUnavailable) {
+										this.remoteDaemonUnavailable = err.reason;
+										this.reachedThrough = "stdio";
+										// A stdio agent is the shell's command, which
+										// may print first (#749): seek its HELLO.
+										seeker = new HelloSeeker();
+										console.error(
+											`[lasterm-ssh] ${err.message} The agent runs on stdio on this connection, and its terminals end with it.`,
+										);
+										execStdio();
+										return;
+									}
 									onError(err instanceof Error ? err : new Error(String(err)));
 								});
 						};
@@ -1124,7 +1155,7 @@ export class SshAgent extends AgentConnection {
 								runAgent(
 									buildAgentCommandForDeployResult(result, this.loggingConfig),
 									result.os,
-									this.daemonBinary(result.remotePath, result.os),
+									this.daemonBinary(result.remotePath),
 								);
 							})
 							.catch((deployErr: unknown) => {
@@ -1173,7 +1204,7 @@ export class SshAgent extends AgentConnection {
 								runAgent(
 									buildAgentCommand("lasterm-agent", this.host.os, this.loggingConfig, false),
 									this.host.os,
-									this.daemonBinary("lasterm-agent", this.host.os),
+									this.daemonBinary("lasterm-agent"),
 								);
 							} catch (err) {
 								this.cleanup();

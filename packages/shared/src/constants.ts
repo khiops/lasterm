@@ -91,8 +91,8 @@ export const ErrorCode = {
 	/** REST stop-keeping: the connected agent did not reach a remote daemon. */
 	NO_DAEMON_CONNECTION: "NO_DAEMON_CONNECTION",
 	/**
-	 * REST connect with `daemon_only` (#701): the host's stored OS is not one
-	 * whose daemon a socket reaches (linux or darwin), unknown included.
+	 * REST connect with `daemon_only` (#701): the host's stored OS is not
+	 * known yet, and which way a daemon is reached depends on it (#755).
 	 */
 	DAEMON_NOT_POSSIBLE: "DAEMON_NOT_POSSIBLE",
 	/** Connect with `daemon_only` (#701): nothing listens on the daemon's socket. */

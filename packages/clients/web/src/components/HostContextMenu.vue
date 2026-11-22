@@ -147,14 +147,16 @@ const canReconnect = computed(
 const canStopAgent = computed(() => host.value?.type === "ssh" && status.value === "live" && hostsStore.isConnectedThroughRemoteDaemon(props.hostId));
 
 /**
- * A host not set to keep an agent, whose system's agent a socket reaches,
- * with no agent connected (never, disconnected, lost or being reached): a
- * daemon a hub left there may still run (#701).
+ * A host not set to keep an agent, whose system is known (a Windows one is
+ * reached through the relay, #755), with no agent connected (never,
+ * disconnected, lost or being reached): a daemon a hub left there may still
+ * run (#701).
  */
 const canKeepAgent = computed(
 	() =>
 		host.value?.type === "ssh" &&
-		(host.value.os === "linux" || host.value.os === "darwin") &&
+		host.value.os !== null &&
+		host.value.os !== undefined &&
 		host.value.sshRemoteDaemon !== true &&
 		!hostsStore.isHostConnected(props.hostId),
 );

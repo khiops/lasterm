@@ -15,7 +15,7 @@ and so do remote ones on hosts that keep an agent running.
 ## Features
 
 - **Session persistence** — terminals outlive client/UI disconnects; reattach and the hub restores the screen from its snapshot and spool. Local terminals also survive hub restarts: they run in a detached agent daemon the hub reconnects to.
-- **Remote terminals that outlive the connection** — the Add Host dialog preselects keeping an agent running there (No and "Follow the global setting" are the other choices), the batch import from `~/.ssh/config` applies one Yes/No checkbox, ticked by default, to every imported host, and Duplicate copies the source host's choice. A host that keeps an agent has terminals that survive a dropped SSH connection and a hub restart. Older hosts and API-created hosts without that field follow `[ssh] remote_daemon` (off by default); Windows remotes always end their shells with the connection.
+- **Remote terminals that outlive the connection** — the Add Host dialog preselects keeping an agent running there (No and "Follow the global setting" are the other choices), the batch import from `~/.ssh/config` applies one Yes/No checkbox, ticked by default, to every imported host, and Duplicate copies the source host's choice. A host that keeps an agent has terminals that survive a dropped SSH connection and a hub restart. Older hosts and API-created hosts without that field follow `[ssh] remote_daemon` (off by default). Windows remotes keep an agent too, where their SSH server lets a process outlive the session.
 - **SSH transport** — agents are reached over SSH, on stdio or through a daemon's Unix socket; no port is opened on remote machines. A host can be reached through a jump host (ProxyJump), reconnects included, and one that stops answering is noticed within a minute.
 - **Local-first** — the hub daemon owns all state; the UI is a thin client that can come and go
 - **Multi-client** — the desktop app and browsers on the same machine attach to the same terminal; a write lock keeps one writer at a time. Pairing another device is not delivered yet (#193)
@@ -124,9 +124,8 @@ over SFTP, so the remote host never needs outbound internet. Pre-populate with `
 By default a remote agent runs on SSH stdio: it ends with the connection, and its
 terminals' shells with it; when the hub reconnects, it starts a new shell in each. A host
 added through the Add Host dialog keeps an agent running unless its creator picks No or
-"Follow the global setting" (a host the dialog knows to be Windows stores no answer); the
-batch import stores its one Yes/No checkbox for every imported host, Windows ones included,
-where the value is ignored; Duplicate copies the source host's answer; older
+"Follow the global setting"; the batch import stores its one Yes/No checkbox for every
+imported host; Duplicate copies the source host's answer; older
 hosts and API-created hosts without the field follow `[ssh] remote_daemon`, which is off
 by default. A host that keeps an agent running starts it detached instead, on a Unix
 socket in its state directory, and the hub reaches that socket through the SSH connection
@@ -137,7 +136,9 @@ The daemon exits by itself after 30 minutes with no terminal and no hub connecte
 On a Linux host with systemd and lingering on (`loginctl enable-linger <user>`), the daemon
 runs in a systemd scope of its own, outside the login sessions. Without lingering it stays in
 the SSH session that started it, which a host with `KillUserProcesses=yes` ends at logout.
-Windows remotes always stay on stdio: no SSH channel carries a named pipe. See
+A Windows remote's agent listens on a named pipe, which no SSH channel carries: the hub always
+reaches it through the relay, and starts it with `--daemon --detach`, which leaves the SSH
+session's job. Where that job forbids it, the host runs its agent on stdio and says why. See
 [`docs/SPEC.md` §3.2](docs/SPEC.md).
 
 The hub sends an SSH keepalive every 15 s, so a host that goes silent without closing the

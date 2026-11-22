@@ -74,8 +74,7 @@
 							Lasterm keeps a small agent running on each host, so its terminals survive
 							a dropped connection. It stops by itself after 30 minutes with no terminal
 							and no hub connected. On a systemd host without lingering, logging out may
-							end it. Not available on Windows hosts. Untick this to end the shells with
-							the connection.
+							end it. Untick this to end the shells with the connection.
 						</p>
 
 						<!-- Host entries -->

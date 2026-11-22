@@ -109,6 +109,13 @@ interface MockHost {
 	relays: number;
 	/** The hash `sha256sum` reports for an agent `which` finds on PATH, or none. */
 	installedAgentSha: string | null;
+	/**
+	 * What a Windows host's `--daemon --detach` says (#755): started, or its
+	 * SSH session's job forbids breaking away.
+	 */
+	detach: "started" | "breakaway-refused";
+	/** The arguments of every Windows launch the hub ran there, decoded (#755). */
+	windowsArgs: string[];
 	/** The installed agent predates `--attach`: clap's usage error, no marker. */
 	relayPredates: boolean;
 	/** Where that agent is: on PATH at /usr/local/bin, or off PATH under ~/.local/bin. */
@@ -149,6 +156,25 @@ interface MockHost {
 	/** End every SSH connection it holds, leaving it listening. */
 	dropLinks: () => void;
 	close: () => Promise<void>;
+}
+
+/** What a Windows agent says when its SSH session's job forbids breaking away. */
+const BREAKAWAY_REFUSED =
+	"this SSH session's job does not allow a process to break away; the daemon would end with the connection";
+
+const ENCODED_POWERSHELL = "powershell -NoProfile -NonInteractive -EncodedCommand ";
+
+/** The arguments a Windows launch of the agent passes, decoded; null for any other command. */
+function windowsLaunchArgs(command: string): string | null {
+	if (!command.startsWith(ENCODED_POWERSHELL)) return null;
+	const script = Buffer.from(command.slice(ENCODED_POWERSHELL.length), "base64").toString(
+		"utf16le",
+	);
+	const encoded =
+		/\$a=\[Text\.Encoding\]::UTF8\.GetString\(\[Convert\]::FromBase64String\('([^']*)'\)\)/.exec(
+			script,
+		)?.[1];
+	return encoded === undefined ? null : Buffer.from(encoded, "base64").toString("utf8");
 }
 
 function hello(daemon = false, acknowledgesStop = false, agentVersion = HUB_VERSION): Buffer {
@@ -271,6 +297,8 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 		daemonLaunches: 0,
 		daemonStops: 0,
 		relays: 0,
+		detach: "started",
+		windowsArgs: [],
 		installedAgentSha: null,
 		relayPredates: false,
 		installedOffPath: false,
@@ -318,6 +346,44 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 		stream.exit?.(1);
 		stream.end();
 	};
+	/**
+	 * What a Windows host answers (#755): each command a PowerShell launch of
+	 * the agent, with exit status 1 for every failure, as PowerShell leaves it.
+	 */
+	const answerWindows = (stream: Stream, args: string): void => {
+		const relay = stream as Stream & { stderr: NodeJS.WritableStream };
+		if (args === "--stdio") {
+			serveAgent(stream);
+			return;
+		}
+		if (args.startsWith("--attach")) {
+			answerRelay(stream, result.daemonSocket === "running");
+			return;
+		}
+		if (args.startsWith("--daemon --detach")) {
+			result.daemonLaunches++;
+			if (result.detach === "started") {
+				result.daemonSocket = "running";
+				relay.stderr.write("lasterm-detach: started\n");
+				stream.exit?.(0);
+			} else {
+				relay.stderr.write(`lasterm-detach: breakaway-refused\n${BREAKAWAY_REFUSED}\n`);
+				stream.exit?.(1);
+			}
+			stream.end();
+			return;
+		}
+		if (args === "--stop") {
+			result.daemonStops++;
+			result.daemonSocket = "silent";
+			stream.write("stopped\n");
+			stream.exit?.(0);
+			stream.end();
+			return;
+		}
+		stream.exit?.(1);
+		stream.end();
+	};
 	/** What a host that refuses the forwarding answers. */
 	const answerRefusing = (stream: Stream, command: string): void => {
 		if (command.includes("--stdio")) {
@@ -356,6 +422,12 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 				session.on("exec", (acceptExec, _reject, info) => {
 					const stream = acceptExec() as Stream;
 					result.execs.push(info.command);
+					const windows = windowsLaunchArgs(info.command);
+					if (windows !== null) {
+						result.windowsArgs.push(windows);
+						answerWindows(stream, windows);
+						return;
+					}
 					if (refusesForwarding) {
 						answerRefusing(stream, info.command);
 						return;
@@ -611,15 +683,17 @@ function terminalsOn(h: Harness, count: number): string[] {
 	return ids;
 }
 
-function sessionStates(
-	h: Harness,
-): Array<{ status: string; disconnectedByUser?: boolean; socketForwardingRefused?: boolean }> {
+type HeardSessionState = {
+	status: string;
+	disconnectedByUser?: boolean;
+	socketForwardingRefused?: boolean;
+	remoteDaemonUnavailable?: string;
+};
+
+function sessionStates(h: Harness): HeardSessionState[] {
 	return h.heard
 		.filter((m) => m.type === "SESSION_STATE" && m.hostId === h.host.id)
-		.map(
-			(m) =>
-				m as { status: string; disconnectedByUser?: boolean; socketForwardingRefused?: boolean },
-		);
+		.map((m) => m as HeardSessionState);
 }
 
 function endsOf(h: Harness, channelId: string): ProtocolMessage[] {
@@ -854,6 +928,135 @@ describe("Reconnect (#648)", { timeout: 20_000 }, () => {
 			expect(endsOf(h, id)).toEqual([expect.objectContaining({ endReason: "stopped" })]);
 		}
 		expect(sessionOf(h)?.status).toBe("active");
+	});
+});
+
+// ─── A Windows host that keeps its daemon (#755) ────────────────────────────
+
+describe("a Windows host that keeps its daemon (#755)", { timeout: 30_000 }, () => {
+	/** The deploy says what a real one detects there: Windows. */
+	function deployFindsWindows(): void {
+		const deploy = vi.mocked(deployAgentIfNeeded);
+		const remotePath = "C:UserspiAppDataLocallastermlasterm-agent.exe";
+		deploy.mockResolvedValue({
+			deployed: false,
+			remoteMatchesHubVersionCache: false,
+			remotePath,
+			os: "windows",
+			arch: "x64",
+		});
+		cleanups.push(() => {
+			deploy.mockResolvedValue({
+				deployed: false,
+				remoteMatchesHubVersionCache: false,
+				remotePath: "lasterm-agent",
+				os: null,
+				arch: null,
+			});
+		});
+	}
+
+	it("reaches it through the relay, started with --detach", async () => {
+		deployFindsWindows();
+		const h = await hubWith({ daemon: true, os: "windows" });
+		h.remote.daemonSocket = "silent";
+
+		const agent = await connected(h);
+
+		expect(agent.usedRemoteDaemon).toBe(true);
+		expect(agent.reachedThrough).toBe("relay");
+		expect(h.remote.windowsArgs).toEqual([
+			"--attach --wait 0",
+			expect.stringMatching(/^--daemon --detach .* --idle-timeout 1800 /),
+			expect.stringMatching(/^--attach --wait [1-9]\d*$/),
+		]);
+		expect(h.remote.execs.filter((c) => !c.startsWith(ENCODED_POWERSHELL))).toEqual([]);
+		expect(sessionStates(h).at(-1)?.remoteDaemonUnavailable).toBeUndefined();
+	});
+
+	// AC-W2. Mutation: a field left out of the announcement condition, or a
+	// field that outlives the connection that set it.
+	it("runs on stdio where breakaway is refused, says why while that connection lasts, and forgets it", async () => {
+		deployFindsWindows();
+		const h = await hubWith({ daemon: true, os: "windows" });
+		h.remote.daemonSocket = "silent";
+		h.remote.detach = "breakaway-refused";
+
+		const agent = await connected(h);
+
+		expect(agent.reachedThrough).toBe("stdio");
+		expect(h.remote.windowsArgs.at(-1)).toBe("--stdio");
+		await until(
+			"the host says why it keeps no daemon",
+			() => sessionStates(h).at(-1)?.remoteDaemonUnavailable === BREAKAWAY_REFUSED,
+		);
+		expect(sessionStates(h).at(-1)).toMatchObject({ status: "active" });
+		expect(h.sm.getStateSnapshot().sessions).toEqual([
+			expect.objectContaining({ hostId: h.host.id, remoteDaemonUnavailable: BREAKAWAY_REFUSED }),
+		]);
+
+		// Disconnected: the field goes.
+		expect(h.sm.disconnectHost(h.host.id)).toMatchObject({ kind: "disconnected" });
+		expect(sessionStates(h).at(-1)?.remoteDaemonUnavailable).toBeUndefined();
+		expect(
+			h.sm.getStateSnapshot().sessions.filter((s) => s.remoteDaemonUnavailable !== undefined),
+		).toEqual([]);
+
+		// A later connection that reaches a daemon says nothing of it either.
+		h.remote.detach = "started";
+		const again = await connected(h);
+		expect(again.reachedThrough).toBe("relay");
+		expect(sessionStates(h).at(-1)).toMatchObject({ status: "active" });
+		expect(sessionStates(h).at(-1)?.remoteDaemonUnavailable).toBeUndefined();
+		expect(h.sm.getStateSnapshot().sessions).toEqual([
+			expect.not.objectContaining({ remoteDaemonUnavailable: expect.anything() }),
+		]);
+	});
+	// The system the deploy detects picks the route, not the host as this
+	// connection read it before (#755: `remoteOs` is the deploy's `os`, else
+	// the host's). Mutation: the stored, still unknown, system used instead.
+	it("takes the relay on a host whose system only the deploy detected", async () => {
+		deployFindsWindows();
+		const h = await hubWith({ daemon: true, os: null });
+		h.remote.daemonSocket = "silent";
+
+		const agent = await connected(h);
+
+		expect(agent.reachedThrough).toBe("relay");
+		expect(agent.remoteOs).toBe("windows");
+		expect(h.remote.windowsArgs[0]).toBe("--attach --wait 0");
+		expect(h.remote.execs.filter((c) => !c.startsWith(ENCODED_POWERSHELL))).toEqual([]);
+	});
+
+	// AC-W2 / cleared-by-daemon: the field goes with the daemon reach itself,
+	// on the reconnect after a lost link, with no Disconnect in between.
+	// Mutation: the reason kept per host and cleared only by a Disconnect.
+	it("forgets why once the reconnect after a lost link reaches a daemon", async () => {
+		deployFindsWindows();
+		const h = await hubWith({ daemon: true, os: "windows" });
+		h.remote.daemonSocket = "silent";
+		h.remote.detach = "breakaway-refused";
+		await connected(h);
+		await until(
+			"the host says why it keeps no daemon",
+			() => sessionStates(h).at(-1)?.remoteDaemonUnavailable === BREAKAWAY_REFUSED,
+		);
+
+		h.remote.detach = "started";
+		const launchesBefore = h.remote.daemonLaunches;
+		h.remote.dropLinks();
+		await until(
+			"the reconnect reaches a daemon",
+			() => agentOf(h)?.reachedThrough === "relay",
+			15_000,
+		);
+
+		expect(h.remote.daemonLaunches).toBe(launchesBefore + 1);
+		await until("the host says active again", () => sessionStates(h).at(-1)?.status === "active");
+		expect(sessionStates(h).at(-1)?.remoteDaemonUnavailable).toBeUndefined();
+		expect(
+			h.sm.getStateSnapshot().sessions.filter((s) => s.remoteDaemonUnavailable !== undefined),
+		).toEqual([]);
 	});
 });
 
@@ -1775,14 +1978,21 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		expect(await outcome.done).toBe(true);
 	});
 
-	it.each(["windows", null] as const)(
-		"refuses an OS a daemon is not reached on (%s)",
-		async (os) => {
-			const h = await leftOn({ os });
-			expect(keepAndConnect(h).kind).toBe("daemon-not-possible");
-			expect(h.remote.connections).toBe(0);
-		},
-	);
+	// #755 AC-W4: a Windows host is reached through the relay; only a system
+	// nobody detected yet is refused. Mutation: today's Linux-or-macOS guard.
+	it("refuses a host whose system is not known yet", async () => {
+		const h = await leftOn({ os: null });
+		expect(keepAndConnect(h).kind).toBe("daemon-not-possible");
+		expect(h.remote.connections).toBe(0);
+	});
+
+	it("accepts a Windows host whose system is known", async () => {
+		const h = await leftOn({ os: "windows" });
+		const outcome = keepAndConnect(h);
+		expect(outcome.kind).toBe("connecting");
+		if (outcome.kind === "connecting") await outcome.done;
+		expect(h.remote.connections).toBe(1);
+	});
 
 	it("has no binary path for --stop: a forced stop it cannot send is not confirmed", async () => {
 		const h = await leftOn();

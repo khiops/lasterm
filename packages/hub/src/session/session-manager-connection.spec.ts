@@ -31,6 +31,7 @@ import { transfersText } from "../api/host-connection.js";
 import { HUB_VERSION } from "../build-version.js";
 import { openTestDatabases } from "../storage/db.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
+import { AgentRefusedHub } from "./agent-connection.js";
 import { deployAgentIfNeeded, getBinaryCacheDir } from "./agent-deployer.js";
 import { socketForwardingRefusedOn } from "./remote-daemon.js";
 import type { SessionState, SharedSessionContext } from "./session-context.js";
@@ -1591,6 +1592,75 @@ describe("A remote daemon that refuses AUTH (#1135)", { timeout: 20_000 }, () =>
 		expect(h.remote.connections).toBe(2);
 		expect(h.ctx.userDisconnectedHosts.has(h.host.id)).toBe(false);
 	});
+
+	it("answers the spawn that reached a refusing daemon", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		const [ended, survivor] = terminalsOn(h, 2);
+		if (ended === undefined || survivor === undefined) throw new Error("not enough terminals");
+		await h.sm.destroyChannel(ended);
+		h.sm.disconnectHost(h.host.id, { force: true });
+		h.remote.refusesAuth = true;
+
+		await expect(
+			h.sm.handleSpawn(h.window.id, {
+				type: "SPAWN",
+				hostId: h.host.id,
+				reuseChannelId: ended,
+				requestId: "spawn-auth-refusal",
+			}),
+		).resolves.toBeNull();
+
+		expect(h.ctx.agents.has(h.host.id)).toBe(false);
+		expect(h.ctx.sessions.get(h.host.id)?.status).toBe("disconnected");
+		expect(h.ctx.channels.get(survivor)?.status).toBe("live");
+		expect([...SshAgentsSeen].at(-1)?.closedByHub).toBe(true);
+
+		const answered = errorsHeard(h).filter(
+			(error) => error.code === "AGENT_REFUSED_HUB" && error.requestId === "spawn-auth-refusal",
+		);
+		expect(answered).toEqual([
+			expect.objectContaining({
+				hostId: h.host.id,
+				channelId: ended,
+				message: expect.stringMatching(/^The agent on this host refused this hub\./),
+			}),
+		]);
+	});
+
+	it("closes a freshly created session when adoption refuses it", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		h.remote.refusesAuth = true;
+
+		await expect(
+			h.sm.handleSpawn(h.window.id, {
+				type: "SPAWN",
+				hostId: h.host.id,
+				requestId: "spawn-fresh-auth-refusal",
+			}),
+		).resolves.toBeNull();
+
+		expect(h.ctx.agents.has(h.host.id)).toBe(false);
+		expect(h.ctx.sessions.has(h.host.id)).toBe(false);
+		expect([...SshAgentsSeen].at(-1)?.closedByHub).toBe(true);
+	});
+
+	it("keeps a restart during a refusing adoption on the normal failure path", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		const [id] = terminalsOn(h, 1);
+		if (id === undefined) throw new Error("no terminal");
+		const lifecycle = (
+			h.sm as unknown as {
+				lifecycle: { adoptionSettled(hostId: string): Promise<void> | undefined };
+			}
+		).lifecycle;
+		vi.spyOn(lifecycle, "adoptionSettled").mockReturnValue(
+			Promise.reject(new AgentRefusedHub("not this hub")),
+		);
+
+		await expect(h.sm.restartChannel(id, h.window.id)).resolves.toBe(false);
+	});
 });
 
 // ─── Keep the agent left here and connect (#701) ────────────────────────────
@@ -1621,10 +1691,25 @@ async function keptAndConnected(h: Harness): Promise<boolean> {
 	return outcome.done;
 }
 
-function errorsHeard(h: Harness): Array<{ code?: string; message?: string; hostId?: string }> {
+function errorsHeard(h: Harness): Array<{
+	code?: string;
+	message?: string;
+	hostId?: string;
+	channelId?: string;
+	requestId?: string;
+}> {
 	return h.heard
 		.filter((m) => m.type === "ERROR")
-		.map((m) => m as { code?: string; message?: string; hostId?: string });
+		.map(
+			(m) =>
+				m as {
+					code?: string;
+					message?: string;
+					hostId?: string;
+					channelId?: string;
+					requestId?: string;
+				},
+		);
 }
 
 /** Commands that would deploy, launch a daemon or run the agent on stdio. */

@@ -835,7 +835,14 @@ export class SessionManager {
 		// that no exit of the run its DESTROY ends reaches that adoption, which
 		// takes exits up outside the restart's hold.
 		const adoption = hostId === undefined ? undefined : this.lifecycle.adoptionSettled(hostId);
-		if (adoption !== undefined) await adoption;
+		if (adoption !== undefined) {
+			try {
+				await adoption;
+			} catch (err) {
+				if (err instanceof AgentRefusedHub) return false;
+				throw err;
+			}
+		}
 		if (hostId !== undefined && this.hostIsBeingStopped(hostId)) return "busy";
 		if (this.isQuitting()) return false;
 		// Its host is away: the reconnect has the next attempt, and a restart
@@ -1308,6 +1315,7 @@ export class SessionManager {
 					try {
 						// getOrCreateSession is async; the session object is created here.
 						const sessionState = await this.agentMgr.getOrCreateSession(hostId, true, spawnFence);
+						const neverConnected = sessionState.status === "starting";
 						// The pane stops its own clock until the hub answers: each wait of
 						// the connection below has its own bound, and the host's may be
 						// longer than the pane's 15 s (#1034). Every way out of the
@@ -1373,7 +1381,16 @@ export class SessionManager {
 							// P2: set agent + commit atomically — agent becomes visible only when
 							// the acq is simultaneously deleted (no dual-authority window).
 							this.ctx.commits.adoptAgent(spawnFence, hostId, connectedAgent);
-							await this.lifecycle.adoptWhatTheDaemonHolds(hostId, connectedAgent);
+							try {
+								await this.lifecycle.adoptWhatTheDaemonHolds(hostId, connectedAgent);
+							} catch (err) {
+								if (err instanceof AgentRefusedHub) {
+									this.releaseAgent(hostId, connectedAgent);
+									void connectedAgent.close();
+									this.settleFailedConnect(hostId, sessionState, neverConnected);
+								}
+								throw err;
+							}
 							Acq.commit(this.ctx, connectingAcq, sessionState);
 							clearContext(this.ctx, connectingAcq.id);
 							agent = connectedAgent;
@@ -1401,6 +1418,15 @@ export class SessionManager {
 						}
 					} catch (err) {
 						this.failConnectingAcq(connectingAcq, err, lease, releaseConnectingLease);
+						if (err instanceof AgentRefusedHub) {
+							client.send({
+								type: "ERROR",
+								code: ErrorCode.AGENT_REFUSED_HUB,
+								message: err.message,
+								hostId,
+								...(reuseChannelId !== undefined && { channelId: reuseChannelId }),
+							} satisfies ErrorMessage);
+						}
 						return null;
 					}
 

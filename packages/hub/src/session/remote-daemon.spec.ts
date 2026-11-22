@@ -1553,7 +1553,7 @@ describe("a Windows host keeps its daemon through the relay (#755)", () => {
 	 * listens, `"hello"` relays the daemon's HELLO. Every outcome closes with
 	 * exit status 1, as a PowerShell `DefaultShell` hands it on.
 	 */
-	function windowsConn(answers: ("nothing" | "hello")[]) {
+	function windowsConn(answers: ("nothing" | "hello" | "denied")[]) {
 		const relays: string[] = [];
 		const client = {
 			exec(command: string, cb: (err: Error | undefined, ch?: unknown) => void) {
@@ -1572,7 +1572,11 @@ describe("a Windows host keeps its daemon through the relay (#755)", () => {
 						channel.write(HELLO);
 						return;
 					}
-					channel.stderr.write("lasterm-attach: nothing-listens\nnothing listens there\n");
+					channel.stderr.write(
+						answer === "denied"
+							? "lasterm-attach: denied\nthe pipe refused this account\n"
+							: "lasterm-attach: nothing-listens\nnothing listens there\n",
+					);
 					channel.emit("exit", 1);
 					channel.emit("close");
 				});
@@ -1695,6 +1699,55 @@ describe("a Windows host keeps its daemon through the relay (#755)", () => {
 		expect(commands).toHaveLength(1);
 	});
 
+	// The hub's logging settings reach a Windows daemon as a POSIX one's.
+	// Mutation: the launch built from the agent path alone (defaults).
+	it("passes the configured log level, format and files kept to the Windows launch", async () => {
+		const { client } = windowsConn(["nothing", "hello"]);
+		const { exec, commands } = launchExec("lasterm-detach: started\n", 0);
+		await attachRemoteDaemon({
+			conn: client,
+			agentPath: AGENT,
+			exec,
+			os: "windows",
+			logLevel: "debug",
+			logFormat: "text",
+			logFilesKept: 12,
+		});
+		expect(argsOf(commands[0] ?? "")).toBe(
+			"--daemon --detach --log-level debug --format text --idle-timeout 1800 --log-files-kept 12",
+		);
+	});
+
+	// A launch exec that never returns fails the connection; it is neither a
+	// start nor a refused breakaway. Mutation: its rejection taken as either.
+	it("fails with the launch exec's own error, with no second relay", async () => {
+		const { client, relays } = windowsConn(["nothing"]);
+		const exec = async (): Promise<never> => {
+			throw new Error("SSH exec timed out after 10426ms");
+		};
+		const err = await attachRemoteDaemon({
+			conn: client,
+			agentPath: AGENT,
+			exec,
+			os: "windows",
+		}).catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(Error);
+		expect(err).not.toBeInstanceOf(RemoteDaemonUnavailable);
+		expect((err as Error).message).toBe("SSH exec timed out after 10426ms");
+		expect(relays).toHaveLength(1);
+	});
+
+	// AC-H4 on Windows: a relay that fails is unreachable, not "nothing runs".
+	// Mutation: any Windows relay failure turned into NoRunningDaemon.
+	it("a daemon-only reach whose relay is denied is unreachable, and launches nothing", async () => {
+		const { client } = windowsConn(["denied"]);
+		const { exec, commands } = launchExec("", 0);
+		await expect(
+			attachRemoteDaemon({ conn: client, agentPath: AGENT, exec, os: "windows", launch: false }),
+		).rejects.toBeInstanceOf(DaemonUnreachable);
+		expect(commands).toEqual([]);
+	});
+
 	it("a daemon-only reach finds nothing running, and launches nothing", async () => {
 		const { client, relays } = windowsConn(["nothing"]);
 		const { exec, commands } = launchExec("", 0);
@@ -1711,6 +1764,36 @@ describe("a Windows host keeps its daemon through the relay (#755)", () => {
 });
 
 describe("detachOutcome (#755)", () => {
+	// Read as the relay is, by its last marker, past what the shell wrote on
+	// stderr before it. Mutation: the first marker, or the first line.
+	it("reads the last marker, past what the shell printed before it", () => {
+		expect(detachOutcome("AutoRun: welcome\r\nlasterm-detach: started\r\n", 0)).toBe("started");
+		expect(detachOutcome("lasterm-detach: failed first\nlasterm-detach: started\n", 0)).toBe(
+			"started",
+		);
+		expect(
+			detachOutcome("lasterm-detach: started\nlasterm-detach: failed later\n", 1),
+		).toBeInstanceOf(Error);
+	});
+
+	// A marker it does not know is no start, whatever the exit status.
+	// Mutation: any marker with exit 0 taken as started.
+	it("fails on an outcome it does not know, even with exit 0", () => {
+		const outcome = detachOutcome("lasterm-detach: begun\n", 0);
+		expect(outcome).toBeInstanceOf(Error);
+		expect(outcome).not.toBeInstanceOf(RemoteDaemonUnavailable);
+	});
+
+	// A refused breakaway with no line after it still says why.
+	// Mutation: an empty reason, which the dialog would not show.
+	it("gives a refused breakaway with no line after it the job's reason", () => {
+		const outcome = detachOutcome("lasterm-detach: breakaway-refused\n", 1);
+		expect(outcome).toBeInstanceOf(RemoteDaemonUnavailable);
+		expect((outcome as RemoteDaemonUnavailable).reason).toBe(
+			"its SSH session's job does not allow a process to break away",
+		);
+	});
+
 	it("cuts a stderr past 64 KiB and reads it as saying nothing", () => {
 		const long = `${"x".repeat(64 * 1024)}\nlasterm-detach: started\n`;
 		expect(detachOutcome(long, 0)).toBeInstanceOf(Error);

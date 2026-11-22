@@ -863,6 +863,7 @@ describe("SshAgent", () => {
 			running?: boolean;
 			prelude?: string;
 			sha?: string;
+			relayDenied?: boolean;
 		}) {
 			const args: string[] = [];
 			const programs: string[] = [];
@@ -891,6 +892,12 @@ describe("SshAgent", () => {
 					programs.push(launchVariable(command, "p") ?? "");
 					if (said.startsWith("--attach")) {
 						stream.stderr.write("lasterm-attach: start\n");
+						if (options.relayDenied === true) {
+							stream.stderr.write("lasterm-attach: denied\n");
+							stream.exit(1);
+							stream.end();
+							return;
+						}
 						if (running) {
 							stream.write(makeHelloFrame());
 							return;
@@ -974,6 +981,16 @@ describe("SshAgent", () => {
 			expect(agent.reachedThrough).toBe("stdio");
 			expect(agent.remoteDaemonUnavailable).toBe(LINE);
 			expect(args.at(-1)).toBe("--stdio");
+		}, 15_000);
+
+		// A relay that fails is no reason to keep no daemon: the connection
+		// fails (decision table). Mutation: a Windows relay failure sent to stdio.
+		it("fails when its relay is denied, with no launch and no stdio", async () => {
+			const { agent, start: started, args } = await start({ relayDenied: true });
+
+			await expect(started).rejects.toThrow(/refused this account/);
+			expect(args).toEqual(["--attach --wait 0"]);
+			expect(agent.remoteDaemonUnavailable).toBeNull();
 		}, 15_000);
 
 		it.each([

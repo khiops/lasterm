@@ -2796,13 +2796,16 @@ describe("POST stop-keeping", () => {
 	// known. Mutation: today's `startsWith("/")` refusal on Windows.
 	it.each([
 		["windows", (path: string) => [[windowsDaemonStopCommand(path)]]],
-		[
-			null,
-			(path: string) => [
-				[REMOTE_STATE_DIR_COMMAND],
-				[remoteDaemonStopCommand(path, remoteDaemonPaths("/home/pi/.local/state/lasterm"))],
-			],
-		],
+		...(["linux", "darwin", null] as const).map(
+			(posix) =>
+				[
+					posix,
+					(path: string) => [
+						[REMOTE_STATE_DIR_COMMAND],
+						[remoteDaemonStopCommand(path, remoteDaemonPaths("/home/pi/.local/state/lasterm"))],
+					],
+				] as const,
+		),
 	] as const)("a forced unsent STOP on a %s host runs that system's --stop", async (os, calls) => {
 		const f = fixture();
 		f.agent.remoteOs = os;

@@ -2665,7 +2665,7 @@ export class SessionManager {
 				agent.remoteAgentPath !== null &&
 				!this.isQuitting()
 			) {
-				stopped = await this.stopKeepingWithStopCommand(hostId, agent);
+				stopped = (await this.runDaemonStopCommand(hostId, agent)).kind === "stopped";
 			}
 			if (this.isQuitting()) return error(409, "HUB_QUITTING", "The hub is quitting.");
 			let updated: Host | undefined;
@@ -2803,43 +2803,68 @@ export class SessionManager {
 	}
 
 	/**
-	 * Stop-keeping's way to stop a daemon its STOP could not reach: the agent's
-	 * own `--stop`, run over the SSH connection. True once the daemon is
-	 * confirmed gone.
+	 * The agent's own `--stop`, run over the SSH connection, for a daemon its
+	 * STOP could not reach. The daemon stopping closes its channel, which ends
+	 * the SSH client the `--stop` runs on, so the exec may report a failure or
+	 * reject after the daemon is gone: the connection closing during the run
+	 * counts as the stop, and is the only thing that does besides a zero exit.
+	 *
+	 * `not_run`: the stop command could not be built (the host could not say where its agent's socket is), nothing was run.
+	 * `failed`: the command ended without the daemon being confirmed gone, with
+	 * its exit code, or null when it did not report one.
 	 */
-	private async stopKeepingWithStopCommand(hostId: string, agent: SshAgent): Promise<boolean> {
+	private async runDaemonStopCommand(
+		hostId: string,
+		agent: SshAgent,
+	): Promise<
+		| { readonly kind: "stopped" }
+		| { readonly kind: "not_run" }
+		| { readonly kind: "failed"; readonly exitCode: number | null }
+	> {
 		let onClose: () => void = () => {};
 		let displaced = false;
 		const onMessage = (msg: ProtocolMessage): void => {
 			if (msg.type === "ERROR" && msg.code === ErrorCode.DISPLACED) displaced = true;
 		};
 		const remotePath = agent.remoteAgentPath;
-		if (remotePath === null) return false;
+		if (remotePath === null) return { kind: "not_run" };
 		let stopCommand: string | null;
 		try {
 			stopCommand = await this.daemonStopCommand(agent, remotePath);
 		} catch {
-			return false;
+			return { kind: "not_run" };
 		}
-		if (stopCommand === null || this.isQuitting() || !agent.connected) return false;
-		const closed = new Promise<boolean>((resolve) => {
-			onClose = () => {
-				const stopped = !agent.closedByHub && !displaced && !this.isQuitting();
-				if (stopped) {
-					agent.closedByHub = true;
-					this.releaseAgent(hostId, agent);
-				}
-				resolve(stopped);
-			};
-		});
+		if (stopCommand === null || this.isQuitting()) return { kind: "not_run" };
+		const closed = new Promise<{ readonly kind: "stopped" } | { readonly kind: "failed" }>(
+			(resolve) => {
+				onClose = () => {
+					const stopped = !agent.closedByHub && !displaced && !this.isQuitting();
+					if (stopped) {
+						agent.closedByHub = true;
+						this.releaseAgent(hostId, agent);
+					}
+					resolve(stopped ? { kind: "stopped" } : { kind: "failed" });
+				};
+			},
+		);
 		agent.prependListener("message", onMessage);
 		agent.prependListener("close", onClose);
 		try {
-			const exec = async (): Promise<boolean> => {
+			const exec = async () => {
 				const result = await agent.execOnHost(stopCommand);
-				return result.exitCode === 0 && !displaced && !agent.closedByHub && !this.isQuitting();
+				const stopped =
+					result.exitCode === 0 && !displaced && !agent.closedByHub && !this.isQuitting();
+				return stopped
+					? ({ kind: "stopped" } as const)
+					: ({ kind: "failed", exitCode: result.exitCode } as const);
 			};
-			return await Promise.race([closed, exec().catch(() => false)]);
+			const outcome = await Promise.race([
+				closed,
+				exec().catch(() => ({ kind: "failed", exitCode: null }) as const),
+			]);
+			return outcome.kind === "failed"
+				? { kind: "failed", exitCode: "exitCode" in outcome ? outcome.exitCode : null }
+				: outcome;
 		} finally {
 			agent.off("message", onMessage);
 			agent.off("close", onClose);
@@ -3012,16 +3037,21 @@ export class SessionManager {
 			return { replaced: false, message: "This hub does not know where that agent is installed." };
 		}
 
-		const command = await this.daemonStopCommand(agent, remotePath);
-		if (command === null) {
+		const run = await this.runDaemonStopCommand(hostId, agent);
+		if (run.kind === "not_run") {
 			return { replaced: false, message: "The host could not say where its agent's socket is." };
 		}
-
-		const stopCommand = await agent.execOnHost(command);
-		if (stopCommand.exitCode !== 0) {
+		if (run.kind === "failed") {
+			// Not "nothing was changed": a connection that closed under the
+			// command did not confirm the stop either way (#1111).
 			return {
 				replaced: false,
-				message: `The agent would not stop (exit ${stopCommand.exitCode}).`,
+				message:
+					agent.closedByHub || !agent.connected
+						? "The connection ended without confirming the agent stopped."
+						: run.exitCode === null
+							? "The stop command failed without confirming the agent stopped."
+							: `The agent would not stop (exit ${run.exitCode}).`,
 			};
 		}
 

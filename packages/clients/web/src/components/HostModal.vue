@@ -331,9 +331,9 @@
 								<p v-if="socketForwardingRefused" class="field-hint auth-note">
 									This host's SSH server refuses socket forwarding
 									(<code>AllowStreamLocalForwarding</code> or <code>DisableForwarding</code>
-									in its <code>sshd_config</code>), which keeping an agent running needs. Its
-									terminals run over the connection and end with it. Once it is allowed, use
-									Connect or Reconnect in the host's menu. See
+									in its <code>sshd_config</code>). Lasterm reaches the agent through a relay
+									over the SSH command channel instead: one more process on the host while
+									connected. Its terminals still outlive the connection. See
 									<a
 										:href="EXTERNAL_LINKS.keepingTheAgentRunning"
 										target="_blank"
@@ -706,7 +706,8 @@ const sftpUnavailable = computed(
 
 /**
  * Whether this host's SSH server refused the socket forwarding its agent
- * would be reached through (#765): its terminals end with the connection.
+ * would be reached through (#765): the hub reaches it through a relay
+ * instead, and its terminals still outlive the connection (#755).
  */
 const socketForwardingRefused = computed(
 	() => props.editHost !== null && hostsStore.isSocketForwardingRefused(props.editHost.id),

@@ -130,7 +130,8 @@ where the value is ignored; Duplicate copies the source host's answer; older
 hosts and API-created hosts without the field follow `[ssh] remote_daemon`, which is off
 by default. A host that keeps an agent running starts it detached instead, on a Unix
 socket in its state directory, and the hub reaches that socket through the SSH connection
-(`direct-streamlocal`). Its terminals then survive a dropped connection and a hub restart.
+(`direct-streamlocal`), or through a relay the agent runs over an exec channel where the SSH
+server refuses that (#755). Its terminals then survive a dropped connection and a hub restart.
 The daemon exits by itself after 30 minutes with no terminal and no hub connected.
 
 On a Linux host with systemd and lingering on (`loginctl enable-linger <user>`), the daemon

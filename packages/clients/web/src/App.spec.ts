@@ -2565,3 +2565,118 @@ describe("a paste waiting on its card keeps the pane's keyboard (#1015)", () => 
 		expect(document.activeElement).toBe(pane("P1")?.querySelector(".paste-confirm"));
 	});
 });
+
+// "Delete all dead channels" closes a tab once the hub has deleted every terminal it shows: the
+// ids its answer names, not the ones the window saw ended before asking (#1117).
+describe("deleting every ended terminal from the sidebar", () => {
+	it("closes the tabs whose terminals the hub deleted, and keeps a tab with a live one", async () => {
+		await mountWindow({
+			channels: [ended("T1"), ended("T2"), live("T3"), live("T4")],
+			layout: {
+				tabs: [
+					{ id: "TAB1", root: term("T1", "P1") },
+					{ id: "TAB2", root: term("T3", "P3") },
+					{ id: "TAB3", root: split("vertical", term("T2", "P2"), term("T4", "P4")) },
+				],
+			},
+		});
+
+		await click("Delete all dead channels");
+
+		await vi.waitFor(() => expect(tabs()).toHaveLength(2));
+		expect(tabs().map((tab) => tab.label)).not.toContain("T1");
+		expect(listed("T1")).toBe(false);
+		expect(listed("T2")).toBe(false);
+	});
+
+	// Wrong implementation: close the tabs over the terminals seen ended before the DELETE.
+	it("keeps every tab when the hub refuses the purge", async () => {
+		const { hub } = await mountWindow({
+			channels: [ended("T1"), live("T3")],
+			layout: {
+				tabs: [
+					{ id: "TAB1", root: term("T1", "P1") },
+					{ id: "TAB2", root: term("T3", "P3") },
+				],
+			},
+		});
+		hub.answers.set("DELETE /api/channels/dead", () =>
+			json({ error: { code: "INTERNAL", message: "no" } }, 500),
+		);
+
+		await click("Delete all dead channels");
+		await settle();
+
+		expect(tabs().map((tab) => tab.label)).toEqual(["T1", "T3"]);
+		expect(listed("T1")).toBe(true);
+	});
+
+	// Wrong implementation: the same, for a terminal brought back before the hub chose what to delete.
+	it("keeps the tab of a terminal the hub did not delete", async () => {
+		const { hub } = await mountWindow({
+			channels: [ended("T1"), ended("T2"), live("T3")],
+			layout: {
+				tabs: [
+					{ id: "TAB1", root: term("T1", "P1") },
+					{ id: "TAB2", root: term("T2", "P2") },
+					{ id: "TAB3", root: term("T3", "P3") },
+				],
+			},
+		});
+		hub.answers.set("DELETE /api/channels/dead", () =>
+			json({ ok: true, purged: 1, purged_ids: ["T1"] }),
+		);
+
+		await click("Delete all dead channels");
+
+		await vi.waitFor(() => expect(tabs().map((tab) => tab.label)).toEqual(["T2", "T3"]));
+		expect(listed("T2")).toBe(true);
+	});
+
+	// The sidebar's Delete on one ended terminal waits for the hub the same way. Wrong
+	// implementation: close its tab before the DELETE is answered.
+	it("keeps the tab of an ended terminal whose Delete the hub refuses", async () => {
+		const { hub } = await mountWindow({
+			channels: [ended("T1"), live("T3")],
+			layout: {
+				tabs: [
+					{ id: "TAB1", root: term("T1", "P1") },
+					{ id: "TAB2", root: term("T3", "P3") },
+				],
+			},
+		});
+		hub.answers.set("DELETE /api/channels/T1", () =>
+			json(
+				{ error: { code: "CHANNEL_STARTING", message: "That terminal is being started again." } },
+				409,
+			),
+		);
+
+		await rightClick(document.querySelector('.channel-sidebar [data-channel-id="T1"]'));
+		await click("Delete");
+		await settle();
+
+		expect(deleted(hub)).toEqual(["T1"]);
+		expect(tabs().map((tab) => tab.label)).toEqual(["T1", "T3"]);
+		expect(listed("T1")).toBe(true);
+	});
+
+	it("closes the tab of an ended terminal once the hub deleted it", async () => {
+		const { hub } = await mountWindow({
+			channels: [ended("T1"), live("T3")],
+			layout: {
+				tabs: [
+					{ id: "TAB1", root: term("T1", "P1") },
+					{ id: "TAB2", root: term("T3", "P3") },
+				],
+			},
+		});
+
+		await rightClick(document.querySelector('.channel-sidebar [data-channel-id="T1"]'));
+		await click("Delete");
+
+		await vi.waitFor(() => expect(tabs().map((tab) => tab.label)).toEqual(["T3"]));
+		expect(deleted(hub)).toEqual(["T1"]);
+		expect(listed("T1")).toBe(false);
+	});
+});

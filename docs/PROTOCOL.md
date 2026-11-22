@@ -1139,6 +1139,11 @@ as the SPAWN is accepted, with no await between the check and the claim, and rel
 hub has the agent's answer, by which time the terminal is live or did not start. Two windows
 following "When a terminal ends" over the same terminal therefore start it once (#592).
 
+While claimed, its row stays: neither `DELETE /api/channels/:id` nor `DELETE /api/channels/dead`
+deletes it (§ 6, #1118). Should the row be gone all the same when the agent answers `SPAWN_OK`,
+the hub sends the agent `DESTROY` for it and the window `ERROR { code: "CHANNEL_NOT_REUSABLE",
+channel_id }`, and announces nothing: a terminal with no row is one no window can list.
+
 A SPAWN, new or with `reuse_channel_id`, whose host is away is refused with
 `ERROR { code: "HOST_UNREACHABLE", host_id, host_status, channel_id? }` (#605). `channel_id`
 names the terminal being brought back, and is absent for a new one. It says nothing about the
@@ -2494,8 +2499,8 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 | GET | `/api/channels/:id` | ● | `Channel`, with `display_title`, and `end_reason` as in the list |
 | PATCH | `/api/channels/:id` | ● | At least one of `{ title?, group_id?, icon?, shell?, args?, cwd?, direct_process? }`, and no other key → `Channel`. A `null` clears `title`, `group_id`, `icon`, `shell` or `cwd` |
 | POST | `/api/channels/:id/restart` | ● | Restart dead channel → `{ channel_id }`; 503 while a SPAWN or another restart is already starting it (§ 4.4); 503 `{ error: { code: "HOST_UNREACHABLE", message, host_id, host_status } }` while the hub is reconnecting its host, refused at once, or when the host dropped while it started (§ 4.4, #605); 503 `RESTART_FAILED` otherwise; 500 `RESTART_ERROR` when the restart threw |
-| DELETE | `/api/channels/:id` | ● | `{ ok: true }`. A live channel is ended, and stored `dead` with `end_reason: "killed"`. A dead one is removed with its output: `{ ok: true, purged: true }`, answered once its row is gone; the output follows in the spool GC's bounded batches (STORAGE.md § 7.2) |
-| DELETE | `/api/channels/dead` | ● | Remove all dead channels, or a host's with `{ host_id }` → `{ ok: true, purged, purged_ids }`: the count and the ids of the channels the hub deleted, chosen when it handled the request; a client removes exactly those. Their output as above |
+| DELETE | `/api/channels/:id` | ● | `{ ok: true }`. A live channel is ended, and stored `dead` with `end_reason: "killed"`. A dead one is removed with its output: `{ ok: true, purged: true }`, answered once its row is gone; the output follows in the spool GC's bounded batches (STORAGE.md § 7.2). 409 `{ error: { code: "CHANNEL_STARTING", message } }` while a SPAWN or a restart is starting it again (§ 4.4) |
+| DELETE | `/api/channels/dead` | ● | Remove all dead channels, or a host's with `{ host_id }` → `{ ok: true, purged, purged_ids }`: the count and the ids of the channels the hub deleted, chosen when it handled the request; a client removes exactly those. A dead channel a SPAWN or a restart is starting again is left out (§ 4.4). Their output as above |
 
 #### Host Files
 

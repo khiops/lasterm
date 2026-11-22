@@ -431,6 +431,169 @@ describe("useChannelsStore — fetchChannelIndex", () => {
 
 		expect(store.channelIndex.get("ch-4")?.displayTitle).toBe("kept");
 	});
+
+	describe("a title set while the fetch is in flight (#1128)", () => {
+		/** An index fetch whose (older) response waits for `release`. */
+		function fetchingIndex(store: ReturnType<typeof useChannelsStore>, rows: unknown[]) {
+			let release!: () => void;
+			const held = new Promise<void>((r) => {
+				release = r;
+			});
+			mockFetch.mockImplementation(() =>
+				held.then(() => ({ ok: true, json: () => Promise.resolve(rows) })),
+			);
+			return { fetching: store.fetchChannelIndex(), release };
+		}
+
+		it("keeps the title set for a channel the index already held", async () => {
+			mockFetch.mockImplementation(() =>
+				Promise.resolve({ ok: true, json: () => Promise.resolve([row("ch-1", "host-2", "old")]) }),
+			);
+			const store = useChannelsStore();
+			await store.fetchChannelIndex();
+
+			const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-2", "old")]);
+			store.setDisplayTitle("ch-1", "new");
+			release();
+			await fetching;
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("new");
+		});
+
+		it("keeps the title set for a channel the index did not hold yet", async () => {
+			const store = useChannelsStore();
+			const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-2", "old")]);
+			store.setDisplayTitle("ch-1", "first");
+			store.setDisplayTitle("ch-1", "newest");
+			release();
+			await fetching;
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("newest");
+		});
+
+		it("leaves a title set for a channel the response does not list out of the index", async () => {
+			const store = useChannelsStore();
+			const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-2", "old")]);
+			store.setDisplayTitle("ch-unlisted", "x");
+			release();
+			await fetching;
+
+			expect(store.channelIndex.has("ch-unlisted")).toBe(false);
+		});
+
+		it("does not carry the title into a later fetch, which reads the hub's newer one", async () => {
+			const store = useChannelsStore();
+			const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-2", "old")]);
+			store.setDisplayTitle("ch-1", "heard");
+			release();
+			await fetching;
+
+			mockFetch.mockImplementation(() =>
+				Promise.resolve({
+					ok: true,
+					json: () => Promise.resolve([row("ch-1", "host-2", "hub says")]),
+				}),
+			);
+			await store.fetchChannelIndex();
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("hub says");
+		});
+
+		it("keeps the title when the older of two overlapping fetches resolves last", async () => {
+			const store = useChannelsStore();
+			const releases: Array<() => void> = [];
+			mockFetch.mockImplementation(
+				() =>
+					new Promise((resolve) => {
+						releases.push(() =>
+							resolve({ ok: true, json: () => Promise.resolve([row("ch-1", "host-2", "old")]) }),
+						);
+					}),
+			);
+			const older = store.fetchChannelIndex();
+			const newer = store.fetchChannelIndex();
+			store.setDisplayTitle("ch-1", "new");
+			releases[1]?.();
+			await newer;
+			releases[0]?.();
+			await older;
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("new");
+		});
+
+		describe("a creation heard during the fetch", () => {
+			function created(extra: Record<string, unknown>) {
+				return {
+					type: "CHANNEL_CREATED",
+					channelId: "ch-1",
+					sessionId: "sess-new",
+					hostId: "host-9",
+					cols: 80,
+					rows: 24,
+					status: "live",
+					createdAt: "2026-11-21T00:01:00Z",
+					updatedAt: "2026-11-21T00:02:00Z",
+					...extra,
+				} as unknown as Parameters<ReturnType<typeof useChannelsStore>["handleChannelCreated"]>[0];
+			}
+
+			it("replaces a title heard before it with the title it tells", async () => {
+				const store = useChannelsStore();
+				const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-9", "created")]);
+				store.setDisplayTitle("ch-1", "before the creation");
+				store.handleChannelCreated(created({ displayTitle: "created" }));
+				release();
+				await fetching;
+
+				expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("created");
+			});
+
+			it("drops a title heard before it when it tells none", async () => {
+				const store = useChannelsStore();
+				const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-9", "hub says")]);
+				store.setDisplayTitle("ch-1", "before the creation");
+				store.handleChannelCreated(created({}));
+				release();
+				await fetching;
+
+				expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("hub says");
+			});
+
+			it("keeps a title heard after it", async () => {
+				const store = useChannelsStore();
+				const { fetching, release } = fetchingIndex(store, [row("ch-1", "host-9", "created")]);
+				store.handleChannelCreated(created({ displayTitle: "created" }));
+				store.setDisplayTitle("ch-1", "after the creation");
+				release();
+				await fetching;
+
+				expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("after the creation");
+			});
+		});
+
+		it("does not carry the title out of a fetch the hub refused", async () => {
+			const store = useChannelsStore();
+			let release!: () => void;
+			const held = new Promise<void>((r) => {
+				release = r;
+			});
+			mockFetch.mockImplementation(() => held.then(() => ({ ok: false, status: 503 })));
+			const refused = store.fetchChannelIndex();
+			store.setDisplayTitle("ch-1", "heard");
+			release();
+			await refused;
+
+			mockFetch.mockImplementation(() =>
+				Promise.resolve({
+					ok: true,
+					json: () => Promise.resolve([row("ch-1", "host-2", "hub says")]),
+				}),
+			);
+			await store.fetchChannelIndex();
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("hub says");
+		});
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -3017,7 +3180,7 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 			row("ch-b", "live"),
 		]);
 
-		expect(await store.purgeDeadChannels()).toBe(1);
+		expect(await store.purgeDeadChannels()).toEqual(["ch-a"]);
 		release();
 		await fetching;
 
@@ -3048,7 +3211,7 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		const purging = store.purgeDeadChannels();
 		store.updateChannelStatus("ch-a", "live");
 		answer();
-		expect(await purging).toBe(0);
+		expect(await purging).toEqual([]);
 		release();
 		await fetching;
 
@@ -3082,7 +3245,7 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		const purging = store.purgeDeadChannels();
 		store.updateChannelStatus("ch-b", "dead", 0);
 		answer();
-		expect(await purging).toBe(2);
+		expect(await purging).toEqual(["ch-a", "ch-b"]);
 		release();
 		await fetching;
 
@@ -3095,7 +3258,7 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 	it.each([
 		["an unreadable answer", () => Promise.reject(new Error("bad body"))],
 		["an answer without ids", () => Promise.resolve({ ok: true, purged: 1 })],
-	])("%s removes nothing and counts nothing", async (_name, body) => {
+	])("%s removes nothing and names nothing", async (_name, body) => {
 		const { store, fetching, release } = await listedThenFetching([row("ch-a", "dead")]);
 		const held = mockFetch.getMockImplementation() as (
 			u: string,
@@ -3105,7 +3268,7 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 			init?.method === "DELETE" ? Promise.resolve({ ok: true, json: body }) : held(url, init),
 		);
 
-		expect(await store.purgeDeadChannels()).toBe(0);
+		expect(await store.purgeDeadChannels()).toEqual([]);
 		release();
 		await fetching;
 

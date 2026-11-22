@@ -296,26 +296,22 @@
 
 							<div class="field">
 								<label class="field-label">Keep an agent running there</label>
-								<p v-if="sshRemoteDaemonUnavailable" class="field-hint auth-note">
-									Not available on Windows hosts.
+								<select v-model="form.sshRemoteDaemon" class="field-select" :disabled="connectedThroughRemoteDaemon">
+									<option value="">Follow the global setting</option>
+									<option value="yes">Yes — terminals survive the connection</option>
+									<option value="no">No — leave nothing behind</option>
+								</select>
+								<p class="field-hint auth-note">
+									Lasterm keeps a small agent running on this host, so its terminals
+									survive a dropped connection. It stops by itself after 30 minutes with
+									no terminal and no hub connected.<template v-if="form.os !== 'windows'">
+										On a systemd host without lingering, logging out may end it.</template>
+									Choose No to end the shells with the connection.
 								</p>
-								<template v-else>
-									<select v-model="form.sshRemoteDaemon" class="field-select" :disabled="connectedThroughRemoteDaemon">
-										<option value="">Follow the global setting</option>
-										<option value="yes">Yes — terminals survive the connection</option>
-										<option value="no">No — leave nothing behind</option>
-									</select>
-									<p class="field-hint auth-note">
-										Lasterm keeps a small agent running on this host, so its terminals
-										survive a dropped connection. It stops by itself after 30 minutes with
-										no terminal and no hub connected. On a systemd host without lingering,
-										logging out may end it. Choose No to end the shells with the connection.
-									</p>
-									<p class="field-hint auth-note">
-										If logging out of that machine ends your processes, run
-										<code>loginctl enable-linger</code> there so the agent survives logout.
-									</p>
-								</template>
+								<p v-if="form.os !== 'windows'" class="field-hint auth-note">
+									If logging out of that machine ends your processes, run
+									<code>loginctl enable-linger</code> there so the agent survives logout.
+								</p>
 								<p v-if="connectedThroughRemoteDaemon" class="field-hint auth-note">
 									To stop it, use Stop keeping an agent here in the host menu.
 								</p>
@@ -331,14 +327,19 @@
 								<p v-if="socketForwardingRefused" class="field-hint auth-note">
 									This host's SSH server refuses socket forwarding
 									(<code>AllowStreamLocalForwarding</code> or <code>DisableForwarding</code>
-									in its <code>sshd_config</code>), which keeping an agent running needs. Its
-									terminals run over the connection and end with it. Once it is allowed, use
-									Connect or Reconnect in the host's menu. See
+									in its <code>sshd_config</code>). Lasterm reaches the agent through a relay
+									over the SSH command channel instead: one more process on the host while
+									connected. Its terminals still outlive the connection. See
 									<a
 										:href="EXTERNAL_LINKS.keepingTheAgentRunning"
 										target="_blank"
 										rel="noopener noreferrer"
 									>Configuring an SSH server for Lasterm</a>.
+								</p>
+								<p v-if="remoteDaemonUnavailable" class="field-hint auth-note">
+									This host does not let Lasterm keep its agent running
+									({{ remoteDaemonUnavailable }}); its terminals run over the connection
+									and end with it.
 								</p>
 								<div v-if="outdatedAgent" class="outdated-agent">
 									<p class="outdated-agent__text">
@@ -706,10 +707,19 @@ const sftpUnavailable = computed(
 
 /**
  * Whether this host's SSH server refused the socket forwarding its agent
- * would be reached through (#765): its terminals end with the connection.
+ * would be reached through (#765): the hub reaches it through a relay
+ * instead, and its terminals still outlive the connection (#755).
  */
 const socketForwardingRefused = computed(
 	() => props.editHost !== null && hostsStore.isSocketForwardingRefused(props.editHost.id),
+);
+
+/**
+ * Why this Windows host keeps no daemon although it is meant to, while the
+ * connection that found it lasts (#755): its SSH session's job forbids it.
+ */
+const remoteDaemonUnavailable = computed(() =>
+	props.editHost === null ? null : hostsStore.remoteDaemonUnavailable(props.editHost.id),
 );
 
 /**
@@ -801,7 +811,6 @@ const {
 	testing,
 	saving,
 	saveError,
-	sshRemoteDaemonUnavailable,
 	connectedThroughRemoteDaemon,
 	labelError,
 	portText,

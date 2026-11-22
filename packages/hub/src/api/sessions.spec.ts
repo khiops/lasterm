@@ -10,6 +10,7 @@ import {
 	REMOTE_STATE_DIR_COMMAND,
 	remoteDaemonPaths,
 	remoteDaemonStopCommand,
+	windowsDaemonStopCommand,
 } from "../session/remote-daemon.js";
 import type { SessionState, SharedSessionContext } from "../session/session-context.js";
 import { SessionManager } from "../session/session-manager.js";
@@ -61,6 +62,9 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 		connected = true;
 		usedRemoteDaemon = true;
 		remoteAgentPath = "/home/pi/.local/bin/lasterm-agent";
+		/** The host's system, as the connection ran its agent there (#755). */
+		remoteOs: string | null = null;
+		remoteDaemonUnavailable: string | null = null;
 		helloMessage: HelloMessage | undefined;
 		otherOwnerChannels: number | undefined;
 		/** How many terminals other hubs hold on this daemon. */
@@ -125,6 +129,18 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 	}
 	return { ...actual, SshAgent: FakeSshAgent };
 });
+
+/** The arguments an encoded Windows launch passes, decoded, written out to compare (#755). */
+function windowsArgsOf(command: string): string | null {
+	const prefix = "powershell -NoProfile -NonInteractive -EncodedCommand ";
+	if (!command.startsWith(prefix)) return null;
+	const script = Buffer.from(command.slice(prefix.length), "base64").toString("utf16le");
+	const found =
+		/\$a=\[Text\.Encoding\]::UTF8\.GetString\(\[Convert\]::FromBase64String\('([^']*)'\)\)/.exec(
+			script,
+		)?.[1];
+	return found === undefined ? null : Buffer.from(found, "base64").toString("utf8");
+}
 
 type FakeSshAgent = SshAgent & {
 	connected: boolean;
@@ -1740,6 +1756,25 @@ describe("POST /api/hosts/:id/agent/replace, on an agent other hubs use (#127)",
 		expect(sm.agents.has(hostId)).toBe(false);
 	});
 
+	// #755 AC-W3. Mutation: today's state-directory resolution, which a Windows
+	// host answers with no absolute path, and the stop refused.
+	it("on a Windows host, falls back to the agent's own --stop, with no state directory", async () => {
+		const agent = connectedAgent(2);
+		agent.remoteOs = "windows";
+		agent.send.mockImplementation(() => {
+			throw new Error("SSH agent not connected");
+		});
+
+		const res = await replace();
+
+		expect(res.statusCode).toBe(200);
+		expect(agent.execOnHost.mock.calls).toEqual([
+			[windowsDaemonStopCommand("/home/pi/.local/bin/lasterm-agent")],
+		]);
+		expect(windowsArgsOf(agent.execOnHost.mock.calls[0]?.[0] as string)).toBe("--stop");
+		expect(sm.agents.has(hostId)).toBe(false);
+	});
+
 	it("refuses a force that is not a boolean, and asks the agent nothing", async () => {
 		const agent = connectedAgent(2);
 
@@ -2421,6 +2456,33 @@ describe("POST stop-keeping", () => {
 		expect(f.agent.sent).toContainEqual({ type: "STOP", force: true });
 	});
 
+	it("leaves the uploads running when the daemon refuses a stop consented for them, and interrupts them once it stops (#1102)", async () => {
+		const f = fixture();
+		f.agent.othersHold = 3;
+		const uploads = recordUploads(f);
+		const declined = await stop({ end_terminals: true, stop_transfers: true });
+		expect(declined.statusCode).toBe(409);
+		expect(declined.json()).toMatchObject({
+			error: { code: "OTHER_HUBS_HOLD_CHANNELS", other_owner_channels: 3 },
+		});
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(409);
+		expect(replace.json()).toMatchObject({
+			error: { code: "OTHER_HUBS_HOLD_CHANNELS", other_owner_channels: 3 },
+		});
+		expect(uploads.interrupted).toEqual([]);
+		unchanged(f);
+
+		const forced = await stop({ end_terminals: true, stop_transfers: true, force: true });
+		expect(forced.json()).toMatchObject({ outcome: "stopped", ended: 2 });
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
 	// A STOP with no connection to say it on: only a forced request goes on to
 	// the agent's own --stop, over SSH.
 	function stopCannotBeSent(f: ReturnType<typeof fixture>): void {
@@ -2429,8 +2491,178 @@ describe("POST stop-keeping", () => {
 		});
 	}
 
+	// What the uploads saw: interrupted for which host, and whether the hub
+	// still held the connection they run over when they were. `counted` uploads
+	// run to the host until they are interrupted.
+	function recordUploads(f: ReturnType<typeof fixture>, counted = 1) {
+		const seen = { interrupted: [] as string[], held: [] as boolean[] };
+		sm.setTransfers({
+			activeOn: (id) => (id === hostId && seen.interrupted.length === 0 ? counted : 0),
+			interruptOn: (id) => {
+				seen.held.push(sm.agents.get(hostId) === f.agent);
+				seen.interrupted.push(id);
+			},
+		});
+		return seen;
+	}
+
+	it("Replace interrupts the uploads it was told about once the daemon stops, before letting go of the connection (#1102)", async () => {
+		const f = fixture();
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(200);
+		expect(replace.json()).toMatchObject({ replaced: true });
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
+	it("Stop keeping with no upload counted interrupts none once the daemon stops (#1102)", async () => {
+		const f = fixture();
+		const uploads = recordUploads(f, 0);
+		const response = await stop({ end_terminals: true });
+		expect(response.json()).toMatchObject({ outcome: "stopped", ended: 2 });
+		expect(uploads.interrupted).toEqual([]);
+	});
+
+	it("Replace with no upload counted interrupts none once the daemon stops (#1102)", async () => {
+		const f = fixture();
+		const uploads = recordUploads(f, 0);
+		const response = await replace({});
+		expect(response.statusCode).toBe(200);
+		expect(response.json()).toMatchObject({ replaced: true });
+		expect(uploads.interrupted).toEqual([]);
+	});
+
+	it("Stop keeping whose STOP cannot be sent still interrupts the uploads before the connection is let go (#1102)", async () => {
+		const f = fixture();
+		stopCannotBeSent(f);
+		const uploads = recordUploads(f);
+		const response = await stop({ end_terminals: true, stop_transfers: true });
+		expect(response.json()).toMatchObject({ outcome: "disabled_not_stopped" });
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
+	it("Replace whose STOP is answered with an error leaves the uploads running (#1102)", async () => {
+		const f = fixture();
+		f.agent.send.mockImplementation((msg: ProtocolMessage) => {
+			if (msg.type !== "STOP") return;
+			setImmediate(() =>
+				f.agent.emit("message", { type: "ERROR", code: "INTERNAL_ERROR", message: "no" }),
+			);
+		});
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.statusCode).toBe(409);
+		expect(replace.json()).toMatchObject({
+			error: { message: expect.stringContaining("Nothing was changed") },
+		});
+		expect(uploads.interrupted).toEqual([]);
+	});
+
+	it.each([
+		[
+			"timeout",
+			"The agent did not say it had stopped. Its terminals may be ending; look again before asking twice.",
+		],
+		["unconfirmed", "The connection ended without confirming the agent stopped."],
+		["closed_by_hub", "The connection ended without confirming the agent stopped."],
+		["displaced", "The connection ended without confirming the agent stopped."],
+	] as const)(
+		"Replace whose STOP ends %s: the uploads are interrupted, the agent may be ending or its connection ended (#1102)",
+		async (mode, message) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const f = fixture();
+				if (mode === "unconfirmed") {
+					f.agent.helloMessage = {
+						...DAEMON_HELLO,
+						capabilities: [...(DAEMON_HELLO.capabilities ?? []), "stop-accepted"],
+					};
+				}
+				f.agent.send.mockImplementation((msg: ProtocolMessage) => {
+					if (msg.type !== "STOP" || mode === "timeout") return;
+					queueMicrotask(() => {
+						if (mode === "closed_by_hub") void f.agent.close();
+						else if (mode === "unconfirmed") {
+							f.agent.connected = false;
+							f.agent.emit("close");
+						} else {
+							f.agent.emit("message", {
+								type: "ERROR",
+								code: "DISPLACED",
+								message: "displaced",
+							});
+						}
+					});
+				});
+				const uploads = recordUploads(f);
+				const replace = server.inject({
+					method: "POST",
+					url: `/api/hosts/${hostId}/agent/replace`,
+					payload: { stop_transfers: true },
+				});
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				await vi.advanceTimersByTimeAsync(15_001);
+				const response = await replace;
+				expect(response.statusCode).toBe(409);
+				expect(response.json()).toEqual({ error: { code: "AGENT_NOT_REPLACED", message } });
+				expect(uploads.interrupted).toEqual([hostId]);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+
+	it("Replace whose STOP cannot be sent interrupts the uploads before its own --stop lets go (#1102)", async () => {
+		const f = fixture();
+		stopCannotBeSent(f);
+		const uploads = recordUploads(f);
+		const replace = await server.inject({
+			method: "POST",
+			url: `/api/hosts/${hostId}/agent/replace`,
+			payload: { stop_transfers: true },
+		});
+		expect(replace.json()).toMatchObject({ replaced: true });
+		expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
+		expect(uploads.interrupted).toEqual([hostId]);
+		expect(uploads.held).toEqual([true]);
+	});
+
+	it.each([
+		["missing-path", "This hub does not know where that agent is installed."],
+		["state-exit", "The host could not say where its agent's socket is."],
+		["nonzero", "The agent would not stop (exit 1)."],
+	] as const)(
+		"Replace whose STOP cannot be sent and whose --stop fails on %s still interrupts the uploads, their link being gone (#1102)",
+		async (mode, message) => {
+			const f = fixture();
+			stopCannotBeSent(f);
+			if (mode === "missing-path") f.agent.remoteAgentPath = null;
+			f.agent.execOnHost.mockImplementation(async (command: string) =>
+				command === REMOTE_STATE_DIR_COMMAND
+					? { stdout: "/state", exitCode: mode === "state-exit" ? 1 : 0 }
+					: { stdout: "", exitCode: 1 },
+			);
+			const uploads = recordUploads(f);
+			const response = await replace({ stop_transfers: true });
+			expect(response.statusCode).toBe(409);
+			expect(response.json()).toEqual({ error: { code: "AGENT_NOT_REPLACED", message } });
+			expect(uploads.interrupted).toEqual([hostId]);
+		},
+	);
+
 	it.each(["exit-zero", "daemon-close"])(
-		"--stop after an unsent STOP confirms on %s",
+		"--stop after an unsent STOP confirms on %s, the uploads interrupted before it runs (#1102)",
 		async (mode) => {
 			const f = fixture();
 			stopCannotBeSent(f);
@@ -2442,45 +2674,67 @@ describe("POST stop-keeping", () => {
 					return { stdout: "", exitCode: 1 };
 				});
 			}
-			const response = await stop({ end_terminals: true, force: true });
+			const uploads = recordUploads(f);
+			const response = await stop({ end_terminals: true, force: true, stop_transfers: true });
 			expect(response.statusCode).toBe(200);
 			expect(response.json()).toMatchObject({ outcome: "stopped", ended: 2 });
 			expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
 			expect(f.agent.sent).toEqual([]);
 			for (const id of f.channelIds) expect(f.dal.getChannel(id)?.endReason).toBe("stopped");
+			expect(uploads.interrupted).toEqual([hostId]);
+			expect(uploads.held).toEqual([true]);
 		},
 	);
 
-	it.each(["timeout", "error", "displaced", "closed_by_hub", "unsent"])(
-		"unconfirmed STOP %s disables and disconnects",
-		async (mode) => {
-			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-			try {
-				const f = fixture();
-				f.agent.send.mockImplementation(() => {
-					if (mode === "unsent") throw new Error("transport unavailable");
-					if (mode === "timeout") return;
-					queueMicrotask(() => {
-						if (mode === "closed_by_hub") void f.agent.close();
-						else
-							f.agent.emit("message", {
-								type: "ERROR",
-								code: mode === "displaced" ? "DISPLACED" : "STOP_FAILED",
-								message: "unconfirmed",
-							});
-					});
-				});
-				const result = disabled(f, { end_terminals: true });
-				await new Promise<void>((resolve) => setImmediate(resolve));
-				await new Promise<void>((resolve) => setImmediate(resolve));
-				await vi.advanceTimersByTimeAsync(15_001);
-				await result;
-				expect(f.agent.execOnHost).not.toHaveBeenCalled();
-			} finally {
-				vi.useRealTimers();
+	// `held`: the uploads are interrupted before the hub lets go of a
+	// connection still up at the answer; null where it had already ended.
+	it.each([
+		["timeout", [true]],
+		["error", [true]],
+		["displaced", null],
+		["closed_by_hub", null],
+		["unconfirmed", null],
+		["unsent", [true]],
+	] as const)("unconfirmed STOP %s disables and disconnects", async (mode, held) => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const f = fixture();
+			if (mode === "unconfirmed") {
+				f.agent.helloMessage = {
+					...DAEMON_HELLO,
+					capabilities: [...(DAEMON_HELLO.capabilities ?? []), "stop-accepted"],
+				};
 			}
-		},
-	);
+			f.agent.send.mockImplementation(() => {
+				if (mode === "unsent") throw new Error("transport unavailable");
+				if (mode === "timeout") return;
+				queueMicrotask(() => {
+					if (mode === "closed_by_hub") void f.agent.close();
+					else if (mode === "unconfirmed") {
+						f.agent.connected = false;
+						f.agent.emit("close");
+					} else
+						f.agent.emit("message", {
+							type: "ERROR",
+							code: mode === "displaced" ? "DISPLACED" : "STOP_FAILED",
+							message: "unconfirmed",
+						});
+				});
+			});
+			const uploads = recordUploads(f);
+			const result = disabled(f, { end_terminals: true, stop_transfers: true });
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			await vi.advanceTimersByTimeAsync(15_001);
+			await result;
+			expect(f.agent.execOnHost).not.toHaveBeenCalled();
+			// The connection is dropped whatever the answer: the uploads stop (#1102).
+			expect(uploads.interrupted).toEqual([hostId]);
+			if (held !== null) expect(uploads.held).toEqual(held);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 
 	it.each([
 		"missing-path",
@@ -2492,35 +2746,41 @@ describe("POST stop-keeping", () => {
 		"exec-timeout",
 		"nonzero",
 		"hub-close",
-	])("--stop after an unsent STOP: %s is unconfirmed", async (mode) => {
-		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-		try {
-			const f = fixture();
-			stopCannotBeSent(f);
-			if (mode === "missing-path") f.agent.remoteAgentPath = null;
-			f.agent.execOnHost.mockImplementation(async (command: string) => {
-				if (command === REMOTE_STATE_DIR_COMMAND) {
-					if (mode === "state-reject") throw new Error("state command failed");
-					if (mode === "state-close") {
-						f.agent.connected = false;
-						f.agent.emit("close");
-						return { stdout: "", exitCode: 1 };
+	])(
+		"--stop after an unsent STOP: %s is unconfirmed, the uploads interrupted before it runs (#1102)",
+		async (mode) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			try {
+				const f = fixture();
+				stopCannotBeSent(f);
+				if (mode === "missing-path") f.agent.remoteAgentPath = null;
+				f.agent.execOnHost.mockImplementation(async (command: string) => {
+					if (command === REMOTE_STATE_DIR_COMMAND) {
+						if (mode === "state-reject") throw new Error("state command failed");
+						if (mode === "state-close") {
+							f.agent.connected = false;
+							f.agent.emit("close");
+							return { stdout: "", exitCode: 1 };
+						}
+						return {
+							stdout: mode === "state-relative" ? "relative" : "/state",
+							exitCode: mode === "state-exit" ? 1 : 0,
+						};
 					}
-					return {
-						stdout: mode === "state-relative" ? "relative" : "/state",
-						exitCode: mode === "state-exit" ? 1 : 0,
-					};
-				}
-				if (mode === "exec-reject" || mode === "exec-timeout") throw new Error(mode);
-				if (mode === "hub-close") await f.agent.close();
-				return { stdout: "", exitCode: mode.startsWith("state-") ? 0 : 1 };
-			});
-			await disabled(f, { end_terminals: true, force: true });
-			if (mode === "missing-path") expect(f.agent.execOnHost).not.toHaveBeenCalled();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
+					if (mode === "exec-reject" || mode === "exec-timeout") throw new Error(mode);
+					if (mode === "hub-close") await f.agent.close();
+					return { stdout: "", exitCode: mode.startsWith("state-") ? 0 : 1 };
+				});
+				const uploads = recordUploads(f);
+				await disabled(f, { end_terminals: true, force: true, stop_transfers: true });
+				if (mode === "missing-path") expect(f.agent.execOnHost).not.toHaveBeenCalled();
+				expect(uploads.interrupted).toEqual([hostId]);
+				expect(uploads.held).toEqual([true]);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
 
 	it("allows only a forced unsent STOP to fall back to --stop", async () => {
 		const f = fixture();
@@ -2530,6 +2790,34 @@ describe("POST stop-keeping", () => {
 		const response = await stop({ end_terminals: true, force: true });
 		expect(response.json()).toMatchObject({ outcome: "stopped" });
 		expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
+	});
+
+	// #755 AC-W3: the Windows --stop, and the POSIX one where the system is not
+	// known. Mutation: today's `startsWith("/")` refusal on Windows.
+	it.each([
+		["windows", (path: string) => [[windowsDaemonStopCommand(path)]]],
+		...(["linux", "darwin", null] as const).map(
+			(posix) =>
+				[
+					posix,
+					(path: string) => [
+						[REMOTE_STATE_DIR_COMMAND],
+						[remoteDaemonStopCommand(path, remoteDaemonPaths("/home/pi/.local/state/lasterm"))],
+					],
+				] as const,
+		),
+	] as const)("a forced unsent STOP on a %s host runs that system's --stop", async (os, calls) => {
+		const f = fixture();
+		f.agent.remoteOs = os;
+		f.agent.send.mockImplementation(() => {
+			throw new Error("unsent");
+		});
+		const response = await stop({ end_terminals: true, force: true });
+		expect(response.json()).toMatchObject({ outcome: "stopped" });
+		expect(f.agent.execOnHost.mock.calls).toEqual(calls("/home/pi/.local/bin/lasterm-agent"));
+		if (os === "windows") {
+			expect(windowsArgsOf(f.agent.execOnHost.mock.calls[0]?.[0] as string)).toBe("--stop");
+		}
 	});
 
 	it.each([
@@ -2762,17 +3050,16 @@ describe("POST stop-keeping", () => {
 		},
 	);
 
-	it("PUT refuses OS policy revocation but allows unrelated edits and unchanged policy", async () => {
-		const f = fixture();
-		const os = await server.inject({
-			method: "PUT",
-			url: `/api/hosts/${hostId}`,
-			payload: { os: "windows" },
-		});
-		expect(os.statusCode).toBe(409);
-		expect(os.json().error.code).toBe("DAEMON_CONNECTED");
-		unchanged(f);
-		for (const payload of [{ label: "renamed" }, { ssh_remote_daemon: true }, { os: "linux" }]) {
+	// #755: a Windows host keeps its daemon, so no system revokes one.
+	// Mutation: the old exclusion, which answered DAEMON_CONNECTED for Windows.
+	it("PUT lets the system change, Windows included, and unrelated edits", async () => {
+		fixture();
+		for (const payload of [
+			{ os: "windows" },
+			{ label: "renamed" },
+			{ ssh_remote_daemon: true },
+			{ os: "linux" },
+		]) {
 			const response = await server.inject({ method: "PUT", url: `/api/hosts/${hostId}`, payload });
 			expect(response.statusCode).toBe(200);
 		}
@@ -3099,5 +3386,93 @@ describe("GET /api/sessions/:id (#932)", () => {
 		expect(body.channels).toHaveLength(1);
 		expect(body.channels[0]).toMatchObject({ id: channelId, status: "dead", exit_code: 2 });
 		expect(body.channels[0]).not.toHaveProperty("end_id");
+	});
+});
+
+// ─── A purge leaves a terminal being brought back alone (#1118) ─────────────
+//
+// A SPAWN bringing a dead terminal back claims its id until the agent
+// answers. Either purge used to delete the still-dead row meanwhile, and the
+// SPAWN_OK then announced a live terminal the hub had no row for.
+
+describe("a purge while a dead terminal is being brought back (#1118)", () => {
+	/** A dead terminal of the Pi, a SPAWN bringing it back sent and unanswered. */
+	async function respawnSent() {
+		const agent = connectedAgent();
+		const { channelId, heard } = liveTerminalOn(agent);
+		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
+		const dal = new MetaDAL(dbs.meta);
+		expect(dal.getChannel(channelId)?.status).toBe("dead");
+		const spawning = sm.handleSpawn("c-window", {
+			type: "SPAWN",
+			hostId,
+			reuseChannelId: channelId,
+		});
+		await vi.waitFor(() => expect(agent.sent.some((m) => m.type === "SPAWN")).toBe(true));
+		const spawn = agent.sent.find((m) => m.type === "SPAWN") as { requestId: string };
+		const answer = async () => {
+			agent.emit("message", { type: "SPAWN_OK", requestId: spawn.requestId, channelId });
+			return spawning;
+		};
+		return { channelId, dal, heard, answer };
+	}
+
+	// Wrong implementation: the bulk purge selects every dead row, the
+	// reserved one included, on either branch (row gone, purged_ids [channelId]).
+	it.each([
+		["a host's", true],
+		["every host's", false],
+	])(
+		"the bulk purge of %s dead terminals leaves it out, and it comes back with its row",
+		async (_, scoped) => {
+			const { channelId, dal, answer } = await respawnSent();
+
+			const res = await server.inject({
+				method: "DELETE",
+				url: "/api/channels/dead",
+				...(scoped && { payload: { host_id: hostId } }),
+			});
+
+			expect(res.json()).toEqual({ ok: true, purged: 0, purged_ids: [] });
+			expect(await answer()).toBe(channelId);
+			expect(dal.getChannel(channelId)?.status).toBe("live");
+		},
+	);
+
+	// Wrong implementation: the single delete purges a dead row whatever
+	// starts it (200, row gone).
+	it("the single delete refuses it, and it comes back with its row", async () => {
+		const { channelId, dal, answer } = await respawnSent();
+
+		const res = await server.inject({ method: "DELETE", url: `/api/channels/${channelId}` });
+
+		expect(res.statusCode).toBe(409);
+		expect(res.json()).toEqual({
+			error: { code: "CHANNEL_STARTING", message: "That terminal is being started again." },
+		});
+		expect(await answer()).toBe(channelId);
+		expect(dal.getChannel(channelId)?.status).toBe("live");
+	});
+
+	// Wrong implementation: reviveChannel()'s false result ignored, as before
+	// (SPAWN_OK and CHANNEL_CREATED announced, no DESTROY, no row).
+	it("a row gone by another path ends the started terminal instead of announcing it", async () => {
+		const { channelId, dal, heard, answer } = await respawnSent();
+		const agent = (sm.agents as unknown as Map<string, FakeSshAgent>).get(hostId)!;
+		dal.deleteChannel(channelId);
+		heard.length = 0;
+
+		expect(await answer()).toBeNull();
+
+		expect(agent.sent.at(-1)).toEqual({ type: "DESTROY", channelId });
+		expect(heard).toEqual([
+			{
+				type: "ERROR",
+				code: "CHANNEL_NOT_REUSABLE",
+				message: "Cannot bring that terminal back: it is not a terminal this hub knows.",
+				channelId,
+			},
+		]);
+		expect(dal.getChannel(channelId)).toBeUndefined();
 	});
 });

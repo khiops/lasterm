@@ -433,8 +433,9 @@ export const useHostsStore = defineStore("hosts", () => {
 
 	/**
 	 * Hosts meant to keep an agent running whose SSH server refused the socket
-	 * forwarding that reaches it, as the hub reports it (#765). The hub runs
-	 * their agent over the connection instead, so their terminals end with it.
+	 * forwarding that reaches it, as the hub reports it (#765). The hub reaches
+	 * their agent through a relay instead, and their terminals still outlive
+	 * the connection (#755).
 	 */
 	const _socketForwardingRefused = ref<Map<string, true>>(new Map());
 
@@ -452,6 +453,29 @@ export const useHostsStore = defineStore("hosts", () => {
 
 	function setSocketForwardingRefused(hostIds: readonly string[]): void {
 		_socketForwardingRefused.value = new Map(hostIds.map((id) => [id, true]));
+	}
+
+	/**
+	 * Hosts meant to keep an agent running whose connection runs it on stdio,
+	 * since their Windows SSH session does not let a process outlive it, with
+	 * the agent's words for why, as the hub reports it (#755).
+	 */
+	const _remoteDaemonUnavailable = ref<Map<string, string>>(new Map());
+
+	function remoteDaemonUnavailable(hostId: string): string | null {
+		return _remoteDaemonUnavailable.value.get(hostId) ?? null;
+	}
+
+	function rememberRemoteDaemonUnavailable(hostId: string, reason: string | undefined): void {
+		if (reason === _remoteDaemonUnavailable.value.get(hostId)) return;
+		const next = new Map(_remoteDaemonUnavailable.value);
+		if (reason === undefined) next.delete(hostId);
+		else next.set(hostId, reason);
+		_remoteDaemonUnavailable.value = next;
+	}
+
+	function setRemoteDaemonUnavailable(entries: ReadonlyArray<readonly [string, string]>): void {
+		_remoteDaemonUnavailable.value = new Map(entries);
 	}
 
 	function stopKeepingAgent(
@@ -880,6 +904,9 @@ export const useHostsStore = defineStore("hosts", () => {
 		isSocketForwardingRefused,
 		rememberSocketForwardingRefused,
 		setSocketForwardingRefused,
+		remoteDaemonUnavailable,
+		rememberRemoteDaemonUnavailable,
+		setRemoteDaemonUnavailable,
 		getOutdatedAgent,
 		rememberOutdatedAgent,
 		getOtherOwnerChannels,

@@ -387,6 +387,19 @@ describe("HostModal for an SSH host", () => {
 });
 
 describe("HostModal on a host whose SSH server refuses socket forwarding (#765)", () => {
+	it("says the agent is reached through a relay and its terminals outlive the connection (#755)", async () => {
+		mountModal(SSH);
+		useHostsStore().rememberSocketForwardingRefused(SSH.id, true);
+		await nextTick();
+
+		const note = [...document.body.querySelectorAll(".auth-note")]
+			.map((p) => p.textContent?.replace(/\s+/g, " ").trim() ?? "")
+			.find((text) => text.includes("refuses socket forwarding"));
+		expect(note).toBe(
+			"This host's SSH server refuses socket forwarding (AllowStreamLocalForwarding or DisableForwarding in its sshd_config). Lasterm reaches the agent through a relay over the SSH command channel instead: one more process on the host while connected. Its terminals still outlive the connection. See Configuring an SSH server for Lasterm.",
+		);
+	});
+
 	it("links to the guide to configuring an SSH server for Lasterm", async () => {
 		mountModal(SSH);
 		useHostsStore().rememberSocketForwardingRefused(SSH.id, true);
@@ -401,6 +414,33 @@ describe("HostModal on a host whose SSH server refuses socket forwarding (#765)"
 				"https://github.com/khiops/lasterm/blob/main/docs/SSH_SERVER.md#keeping-the-agent-running-79",
 			],
 		]);
+	});
+});
+
+describe("HostModal on a Windows host that keeps no daemon (#755)", () => {
+	/** The host dialog's note on it, whitespace folded, or undefined. */
+	function note(): string | undefined {
+		return [...document.body.querySelectorAll(".auth-note")]
+			.map((p) => p.textContent?.replace(/\s+/g, " ").trim() ?? "")
+			.find((text) => text.includes("keep its agent running"));
+	}
+
+	// AC-W2. Mutation: a note that does not follow the store.
+	it("says why while the hub says so, and not after", async () => {
+		mountModal({ ...SSH, os: "windows", sshRemoteDaemon: true });
+		const store = useHostsStore();
+		store.rememberRemoteDaemonUnavailable(
+			SSH.id,
+			"this SSH session's job does not allow a process to break away; the daemon would end with the connection",
+		);
+		await nextTick();
+		expect(note()).toBe(
+			"This host does not let Lasterm keep its agent running (this SSH session's job does not allow a process to break away; the daemon would end with the connection); its terminals run over the connection and end with it.",
+		);
+
+		store.rememberRemoteDaemonUnavailable(SSH.id, undefined);
+		await nextTick();
+		expect(note()).toBeUndefined();
 	});
 });
 
@@ -492,19 +532,22 @@ describe("HostModal remote daemon choice", () => {
 		expect(await save()).toHaveProperty("ssh_remote_daemon", null);
 	});
 
-	it("hides the choice and saves null when Windows is selected", async () => {
+	// #755 AC-W4. Mutation: the M3 exclusion, which hid the choice for Windows.
+	it("offers the choice for Windows and saves the answer", async () => {
 		const save = await prepareNewHost();
 		choose(selectWithOption("Windows"), "windows");
 		await nextTick();
-		expect(el("#panel-connection")?.textContent).toContain("Not available on Windows hosts");
-		expect(document.body.querySelector("select option[value='yes']")).toBeNull();
-		expect(await save()).toHaveProperty("ssh_remote_daemon", null);
+		choose(selectWithOption("Yes — terminals survive the connection"), "yes");
+		expect(el("#panel-connection")?.textContent).not.toContain("Not available on Windows hosts");
+		// No systemd advice for a Windows host.
+		expect(el("#panel-connection")?.textContent).not.toContain("loginctl");
+		expect(el("#panel-connection")?.textContent).not.toContain("systemd");
+		expect(await save()).toHaveProperty("ssh_remote_daemon", true);
 	});
 
-	it("shows the setting as unavailable when editing a Windows host", () => {
+	it("offers the choice when editing a Windows host", () => {
 		mountModal({ ...SSH, os: "windows", sshRemoteDaemon: true });
-		expect(el("#panel-connection")?.textContent).toContain("Not available on Windows hosts");
-		expect(document.body.querySelector("select option[value='yes']")).toBeNull();
+		expect(document.body.querySelector("select option[value='yes']")).not.toBeNull();
 	});
 });
 

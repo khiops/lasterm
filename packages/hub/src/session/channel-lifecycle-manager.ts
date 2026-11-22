@@ -311,7 +311,20 @@ export class ChannelLifecycleManager {
 					// is the session it now belongs to, which is a new one whenever
 					// the hub has been restarted since it died.
 					if (reuseChannelId !== undefined && reuseChannelId === channelId) {
-						this.ctx.metaDal.reviveChannel(channelId, session.id, cols, rows);
+						if (!this.ctx.metaDal.reviveChannel(channelId, session.id, cols, rows)) {
+							// Its row went while the agent started it: a terminal with no
+							// row is one no window can list or reach. It is ended there
+							// rather than announced (#1118).
+							agent.send({ type: "DESTROY", channelId } satisfies DestroyMessage);
+							client.send({
+								type: "ERROR",
+								code: "CHANNEL_NOT_REUSABLE",
+								message: "Cannot bring that terminal back: it is not a terminal this hub knows.",
+								channelId,
+							} satisfies ErrorMessage);
+							resolve({ channelId: null, errCode: "CHANNEL_NOT_REUSABLE" });
+							return;
+						}
 						// The row records this start, as a new terminal's does: what the
 						// next restart reads, from a window or the hub, starts it the same
 						// (#858).
@@ -399,7 +412,7 @@ export class ChannelLifecycleManager {
 						status: "live",
 						displayTitle: resolvedDisplayTitle,
 						createdAt: now,
-						updatedAt: now,
+						updatedAt: dbChannel?.updatedAt ?? now,
 					};
 					this.broadcaster.broadcastChannelCreated(channelCreatedMsg);
 

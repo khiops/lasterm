@@ -1672,3 +1672,1019 @@ async fn the_channel_flag_picks_the_daemons_directories() {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+// ---------------------------------------------------------------------------
+// `--attach`: the relay a hub runs over an exec channel (#755)
+// ---------------------------------------------------------------------------
+
+/// Run `--attach` against `fixture`'s endpoint with `extra` arguments, every
+/// stream piped.
+fn spawn_relay(fixture: &StopFixture, extra: &[&str]) -> Child {
+    fixture
+        .agent("--attach")
+        .args(extra)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn relay")
+}
+
+/// The relay's exit status, stderr lines and stdout, once it has exited.
+async fn relay_end(relay: Child, within: Duration) -> (i32, Vec<String>, Vec<u8>) {
+    let output = tokio::time::timeout(within, relay.wait_with_output())
+        .await
+        .expect("relay did not exit in time")
+        .expect("relay output");
+    let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8");
+    (
+        output.status.code().expect("relay exit status"),
+        stderr.lines().map(str::to_owned).collect(),
+        output.stdout,
+    )
+}
+
+/// AC-R1, AC-R9: what a hub writes reaches the daemon, and what the daemon
+/// says comes back, through the relay alone; its stderr carries `start` and
+/// nothing once connected. Mutations: a relay that drops stdin (no
+/// CHANNEL_STATE_END), one that copies one way only (no HELLO), one that logs
+/// once connected.
+#[tokio::test]
+async fn relay_carries_hello_and_auth_both_ways() {
+    let fixture = StopFixture::new("relay-both");
+    let _daemon = fixture.spawn_daemon();
+    let mut relay = spawn_relay(&fixture, &["--wait", "5000"]);
+    let mut stdin = relay.stdin.take().expect("relay stdin");
+    let mut stdout = relay.stdout.take().expect("relay stdout");
+
+    let hello = read_frame_timeout(&mut stdout, 10).await;
+    assert_eq!(hello["type"].as_str(), Some("HELLO"), "{hello:?}");
+    write_frame(
+        &mut stdin,
+        &msgmap(vec![
+            ("type", sv("AUTH")),
+            ("token", sv("")),
+            ("hub_key", sv("relay-test-hub-key")),
+        ]),
+    )
+    .await;
+    let answer = read_frame_timeout(&mut stdout, 10).await;
+    assert_eq!(
+        answer["type"].as_str(),
+        Some("CHANNEL_STATE_END"),
+        "{answer:?}"
+    );
+
+    drop(stdin);
+    drop(stdout);
+    let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 0);
+    assert_eq!(stderr, vec!["lasterm-attach: start".to_owned()]);
+}
+
+/// AC-R2, AC-R9. Mutation: every failure exiting 1, or no outcome marker.
+#[tokio::test]
+async fn relay_exits_3_when_nothing_listens() {
+    let fixture = StopFixture::new("relay-none");
+    let relay = spawn_relay(&fixture, &[]);
+    let (status, stderr, stdout) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 3, "{stderr:?}");
+    assert_eq!(
+        stderr.len(),
+        3,
+        "start, the marker, the human line: {stderr:?}"
+    );
+    assert_eq!(stderr[0], "lasterm-attach: start");
+    assert_eq!(stderr[1], "lasterm-attach: nothing-listens");
+    assert!(stdout.is_empty());
+}
+
+/// AC-R2 on a socket file a dead daemon left: ECONNREFUSED is nothing
+/// listening too, so the hub may start one. Mutation: ECONNREFUSED as failed.
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_exits_3_on_a_socket_nobody_listens_on() {
+    let fixture = StopFixture::new("relay-stale");
+    drop(std::os::unix::net::UnixListener::bind(&fixture.socket).expect("bind"));
+    assert!(std::path::Path::new(&fixture.socket).exists());
+    let relay = spawn_relay(&fixture, &[]);
+    let (status, stderr, stdout) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 3, "{stderr:?}");
+    assert_eq!(
+        stderr.len(),
+        3,
+        "start, the marker, the human line: {stderr:?}"
+    );
+    assert_eq!(stderr[0], "lasterm-attach: start");
+    assert_eq!(stderr[1], "lasterm-attach: nothing-listens");
+    assert!(stdout.is_empty());
+}
+
+/// AC-R3. Mutation: `--wait` ignored.
+#[tokio::test]
+async fn relay_waits_for_a_late_listener() {
+    let fixture = StopFixture::new("relay-late");
+    let mut relay = spawn_relay(&fixture, &["--wait", "5000"]);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _daemon = fixture.spawn_daemon();
+    let mut stdout = relay.stdout.take().expect("relay stdout");
+    let hello = read_frame_timeout(&mut stdout, 10).await;
+    assert_eq!(hello["type"].as_str(), Some("HELLO"), "{hello:?}");
+}
+
+/// AC-R3 / expires. Mutation: retrying for ever.
+#[tokio::test]
+async fn relay_wait_gives_up() {
+    let fixture = StopFixture::new("relay-gives-up");
+    let started = std::time::Instant::now();
+    let relay = spawn_relay(&fixture, &["--wait", "500"]);
+    let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 3, "{stderr:?}");
+    // 0.56 s alone; 2.07 s once beside the whole suite's processes on Windows.
+    // The bound is for a relay that never gives up, not for its start-up.
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// A listener of the test's own on `fixture`'s endpoint, for one client.
+#[cfg(unix)]
+fn accept_one(
+    fixture: &StopFixture,
+) -> (
+    tokio::sync::oneshot::Receiver<tokio::net::UnixStream>,
+    AbortOnDrop,
+) {
+    let listener = tokio::net::UnixListener::bind(&fixture.socket).expect("bind test listener");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let _ = tx.send(stream);
+    });
+    (rx, AbortOnDrop(task))
+}
+
+#[cfg(windows)]
+fn accept_one(
+    fixture: &StopFixture,
+) -> (
+    tokio::sync::oneshot::Receiver<tokio::net::windows::named_pipe::NamedPipeServer>,
+    AbortOnDrop,
+) {
+    let server = tokio::net::windows::named_pipe::ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&fixture.socket)
+        .expect("create test pipe");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        server.connect().await.expect("accept");
+        let _ = tx.send(server);
+    });
+    (rx, AbortOnDrop(task))
+}
+
+/// AC-R4 / stdin-eof: every byte written before stdin ends reaches the
+/// endpoint, then the endpoint ends. Mutations: a half-close only (a Windows
+/// pipe never sees it), a relay waiting for the endpoint, one dropping its
+/// last buffer.
+#[tokio::test]
+async fn relay_ends_when_the_hub_side_closes() {
+    let fixture = StopFixture::new("relay-eof");
+    let (accepted, _guard) = accept_one(&fixture);
+    let mut relay = spawn_relay(&fixture, &["--wait", "5000"]);
+    let mut endpoint = tokio::time::timeout(Duration::from_secs(10), accepted)
+        .await
+        .expect("relay connected in time")
+        .expect("accepted");
+    let pattern: Vec<u8> = (0..65_536u32).map(|i| (i % 251) as u8).collect();
+    let mut stdin = relay.stdin.take().expect("relay stdin");
+    let writer = tokio::spawn(async move {
+        stdin.write_all(&pattern).await.expect("write pattern");
+        drop(stdin);
+        pattern
+    });
+    let mut received = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), endpoint.read_to_end(&mut received))
+        .await
+        .expect("end-of-stream within the bound");
+    let pattern = writer.await.expect("writer");
+    assert_eq!(received.len(), 65_536);
+    assert!(received == pattern, "the bytes changed on the way");
+    let (status, _, _) = relay_end(relay, Duration::from_secs(5)).await;
+    assert_eq!(status, 0);
+}
+
+/// AC-R4 / endpoint-ends. Mutation: a relay that waits for stdin.
+#[tokio::test]
+async fn relay_ends_when_the_daemon_side_closes() {
+    let fixture = StopFixture::new("relay-gone");
+    let (accepted, _guard) = accept_one(&fixture);
+    let mut relay = spawn_relay(&fixture, &["--wait", "5000"]);
+    let mut endpoint = tokio::time::timeout(Duration::from_secs(10), accepted)
+        .await
+        .expect("relay connected in time")
+        .expect("accepted");
+    endpoint.write_all(b"last words").await.expect("write");
+    endpoint.flush().await.expect("flush");
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        let raw = endpoint.as_raw_handle() as usize;
+        tokio::task::spawn_blocking(move || unsafe {
+            windows_sys::Win32::Storage::FileSystem::FlushFileBuffers(raw as _)
+        })
+        .await
+        .expect("flush pipe");
+    }
+    drop(endpoint);
+    // stdin stays open: held here until the relay has exited.
+    let stdin = relay.stdin.take();
+    let (status, _, stdout) = relay_end(relay, Duration::from_secs(5)).await;
+    drop(stdin);
+    assert_eq!(status, 0);
+    assert_eq!(stdout, b"last words");
+}
+
+/// AC-R5. Mutation: denied folded into 1.
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_exits_4_on_denied_endpoint() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root searches any directory");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = StopFixture::new("relay-denied");
+    let _listener = std::os::unix::net::UnixListener::bind(&fixture.socket).expect("bind");
+    /// Gives the directory its mode back whatever fails, so it can be removed.
+    struct Searchable<'a>(&'a std::path::Path);
+    impl Drop for Searchable<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    std::fs::set_permissions(&fixture.dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let _searchable = Searchable(&fixture.dir);
+    let relay = spawn_relay(&fixture, &[]);
+    let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 4, "{stderr:?}");
+    assert_eq!(
+        stderr.len(),
+        3,
+        "start, the marker, the human line: {stderr:?}"
+    );
+    assert_eq!(stderr[0], "lasterm-attach: start");
+    assert_eq!(stderr[1], "lasterm-attach: denied");
+}
+
+/// AC-R6: without `--socket`, the relay goes where `--daemon` listens for the
+/// same channel. Every variable a default endpoint is made of points at the
+/// fixture, so nothing of the developer's is reached. Mutation: an attach that
+/// always resolves the release channel.
+#[tokio::test]
+async fn attach_default_endpoint_follows_the_channel() {
+    let fixture = StopFixture::new("relay-default");
+    let user = format!("lasterm-test-{}", ulid::Ulid::generate());
+    let output = Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
+        .args(["--attach", "--channel", "dev"])
+        .env("XDG_STATE_HOME", &fixture.dir)
+        .env("XDG_CONFIG_HOME", &fixture.dir)
+        .env("LOCALAPPDATA", &fixture.dir)
+        .env("APPDATA", &fixture.dir)
+        .env("USERNAME", &user)
+        .output()
+        .await
+        .expect("run relay");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8");
+    let expected = if cfg!(windows) {
+        format!(r"\\.\pipe\lasterm-dev-agent-{user}")
+    } else {
+        fixture
+            .dir
+            .join("lasterm-dev")
+            .join("agent.socket")
+            .to_string_lossy()
+            .into_owned()
+    };
+    assert!(
+        stderr.contains(&format!("nothing listens on {expected}")),
+        "{stderr}"
+    );
+}
+
+/// AC-R7: a pipe that exists with no free instance is not "nothing listens",
+/// which would have the hub start a second daemon. Mutation: busy as 3.
+#[cfg(windows)]
+#[tokio::test]
+async fn relay_busy_pipe_is_not_nothing_listens() {
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+    let fixture = StopFixture::new("relay-busy");
+    let server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&fixture.socket)
+        .expect("create test pipe");
+    // Its only instance, taken.
+    let _holder = ClientOptions::new()
+        .open(&fixture.socket)
+        .expect("occupy the pipe");
+    let started = std::time::Instant::now();
+    let relay = spawn_relay(&fixture, &["--wait", "0"]);
+    let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
+    drop(server);
+    assert_eq!(status, 6, "{stderr:?}");
+    assert_eq!(
+        stderr.len(),
+        3,
+        "start, the marker, the human line: {stderr:?}"
+    );
+    assert_eq!(stderr[0], "lasterm-attach: start");
+    assert_eq!(stderr[1], "lasterm-attach: busy");
+    assert!(
+        started.elapsed() >= Duration::from_millis(1_800),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// AC-R7 / freed: a busy pipe is tried again for as long as `--wait` says.
+/// Mutations: a relay that sleeps then gives up, or caps the wait at 2 s.
+#[cfg(windows)]
+#[tokio::test]
+async fn relay_retries_a_busy_pipe() {
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+    let fixture = StopFixture::new("relay-freed");
+    let first = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&fixture.socket)
+        .expect("create test pipe");
+    let _holder = ClientOptions::new()
+        .open(&fixture.socket)
+        .expect("occupy the pipe");
+    let mut relay = spawn_relay(&fixture, &["--wait", "6000"]);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let mut second = ServerOptions::new()
+        .create(&fixture.socket)
+        .expect("second instance");
+    tokio::time::timeout(Duration::from_secs(5), second.connect())
+        .await
+        .expect("relay connected in time")
+        .expect("connect");
+    second.write_all(b"freed").await.expect("write");
+    let mut stdout = relay.stdout.take().expect("relay stdout");
+    let mut got = [0u8; 5];
+    tokio::time::timeout(Duration::from_secs(5), stdout.read_exact(&mut got))
+        .await
+        .expect("bytes in time")
+        .expect("read");
+    assert_eq!(&got, b"freed");
+    drop(first);
+}
+
+/// A default endpoint that cannot be resolved is an outcome the relay says,
+/// after `start`, not silence a hub would read as an agent without
+/// `--attach`. Mutation: resolving before `start`.
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_says_why_it_has_no_endpoint() {
+    let output = Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
+        .arg("--attach")
+        .env_remove("HOME")
+        .env_remove("XDG_STATE_HOME")
+        .output()
+        .await
+        .expect("run relay");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(lines.first(), Some(&"lasterm-attach: start"), "{stderr}");
+    assert!(
+        lines
+            .get(1)
+            .is_some_and(|line| line.starts_with("lasterm-attach: failed ")),
+        "{stderr}"
+    );
+}
+
+/// What the daemon sends that cannot reach stdout makes the relay exit 1, not
+/// 0. Mutation: every end reported as 0.
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_fails_when_it_cannot_deliver_the_daemons_bytes() {
+    let fixture = StopFixture::new("relay-full");
+    let _daemon = fixture.spawn_daemon();
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full");
+    let mut relay = fixture
+        .agent("--attach")
+        .args(["--wait", "5000"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(full)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn relay");
+    let _stdin = relay.stdin.take();
+    let status = tokio::time::timeout(Duration::from_secs(10), relay.wait())
+        .await
+        .expect("relay exited in time")
+        .expect("relay status");
+    assert_eq!(status.code(), Some(1));
+}
+
+// ---------------------------------------------------------------------------
+// `--daemon --detach` and the Windows idle timeout (#755)
+// ---------------------------------------------------------------------------
+
+/// Whether the detach tests run here. They start daemons outside every job,
+/// so they run only with `LASTERM_TEST_DETACH=1`: CI's Windows agent tests
+/// and a windows-sandbox run, never a developer's session. Under CI without
+/// it they fail, so that a green CI run means they ran.
+#[cfg(windows)]
+fn detach_tests_run(test: &str) -> bool {
+    if std::env::var("LASTERM_TEST_DETACH").is_ok_and(|value| value == "1") {
+        return true;
+    }
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "detach tests must run in CI: {test} needs LASTERM_TEST_DETACH=1"
+    );
+    eprintln!(
+        "skipping {test}: the detach tests run only with LASTERM_TEST_DETACH=1 (CI, windows-sandbox)"
+    );
+    false
+}
+
+#[cfg(windows)]
+mod detach {
+    use super::*;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_FILE_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+    use windows_sys::Win32::System::Threading::{
+        OpenThread, ResumeThread, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
+    };
+
+    /// A job like a Win32-OpenSSH session's: its last handle closing kills
+    /// what runs in it, and breaking away is allowed or not.
+    pub(super) struct Job(HANDLE);
+
+    // The handle is used from the blocking task that runs the launcher.
+    unsafe impl Send for Job {}
+
+    impl Job {
+        pub(super) fn new(breakaway_ok: bool) -> Self {
+            // SAFETY: a new anonymous job, and limits this function owns.
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                assert!(!job.is_null(), "CreateJobObjectW failed");
+                let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                    | if breakaway_ok {
+                        JOB_OBJECT_LIMIT_BREAKAWAY_OK
+                    } else {
+                        0
+                    };
+                let set = SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    (&raw const limits).cast(),
+                    std::mem::size_of_val(&limits) as u32,
+                );
+                assert!(set != 0, "SetInformationJobObject failed");
+                Self(job)
+            }
+        }
+
+        /// Run `command` in this job from its first instruction, to its end.
+        pub(super) fn run(&self, mut command: std::process::Command) -> std::process::Output {
+            use std::os::windows::process::CommandExt;
+            let child = command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .creation_flags(CREATE_SUSPENDED)
+                .spawn()
+                .expect("spawn the agent suspended");
+            // SAFETY: the child's process handle, valid while `child` lives.
+            let assigned =
+                unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) };
+            assert!(assigned != 0, "AssignProcessToJobObject failed");
+            resume_threads(child.id());
+            child.wait_with_output().expect("the agent's output")
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: the job handle this value owns; closing the last one
+            // kills what is still in the job.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    fn resume_threads(pid: u32) {
+        // SAFETY: a thread snapshot walked with an entry this function owns,
+        // and thread handles closed after use.
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            assert!(snapshot != INVALID_HANDLE_VALUE, "thread snapshot failed");
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut resumed = 0;
+            let mut more = Thread32First(snapshot, &mut entry) != 0;
+            while more {
+                if entry.th32OwnerProcessID == pid {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !thread.is_null() {
+                        ResumeThread(thread);
+                        CloseHandle(thread);
+                        resumed += 1;
+                    }
+                }
+                more = Thread32Next(snapshot, &mut entry) != 0;
+            }
+            CloseHandle(snapshot);
+            assert!(resumed > 0, "no thread of process {pid} resumed");
+        }
+    }
+
+    /// Whether a pipe of that name exists, without connecting to it: a
+    /// connection would count as a hub and keep an idle daemon up.
+    pub(super) fn pipe_exists(name: &str) -> bool {
+        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        // SAFETY: a NUL-terminated name this function owns.
+        unsafe { WaitNamedPipeW(wide.as_ptr(), 1) != 0 || GetLastError() != ERROR_FILE_NOT_FOUND }
+    }
+
+    /// `--daemon --detach` on `fixture`'s pipe, with `idle_timeout` seconds.
+    pub(super) fn detach_command(
+        fixture: &StopFixture,
+        idle_timeout: &str,
+    ) -> std::process::Command {
+        detach_command_with(fixture, idle_timeout, &[])
+    }
+
+    /// The same, with `extra` arguments after the others.
+    pub(super) fn detach_command_with(
+        fixture: &StopFixture,
+        idle_timeout: &str,
+        extra: &[&str],
+    ) -> std::process::Command {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_lasterm-agent"));
+        command
+            .args(["--daemon", "--detach", "--socket", &fixture.socket])
+            .args(["--idle-timeout", idle_timeout])
+            .args(extra)
+            .env("XDG_STATE_HOME", &fixture.dir)
+            .env("XDG_CONFIG_HOME", &fixture.dir)
+            .env("LOCALAPPDATA", &fixture.dir)
+            .env("APPDATA", &fixture.dir);
+        command
+    }
+
+    /// Stops the fixture's daemon, if one runs, through `--stop` and the
+    /// fixture's own profile.
+    pub(super) struct StopOnDrop<'a>(pub(super) &'a StopFixture);
+
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
+                .args(["--stop", "--socket", &self.0.socket])
+                .env("XDG_STATE_HOME", &self.0.dir)
+                .env("XDG_CONFIG_HOME", &self.0.dir)
+                .env("LOCALAPPDATA", &self.0.dir)
+                .env("APPDATA", &self.0.dir)
+                .output();
+        }
+    }
+
+    /// The lines of a launcher's stderr.
+    pub(super) fn stderr_lines(output: &std::process::Output) -> Vec<String> {
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A relay that sent AUTH and read the channel state: the live relay, its
+    /// two pipes, and the frames before CHANNEL_STATE_END.
+    pub(super) async fn authenticated_relay(
+        fixture: &StopFixture,
+    ) -> (Child, ChildStdin, ChildStdout, Vec<rmpv::Value>) {
+        let mut relay = spawn_relay(fixture, &["--wait", "10000"]);
+        let mut stdin = relay.stdin.take().expect("relay stdin");
+        let mut stdout = relay.stdout.take().expect("relay stdout");
+        let hello = read_frame_timeout(&mut stdout, 15).await;
+        assert_eq!(hello["type"].as_str(), Some("HELLO"), "{hello:?}");
+        write_frame(
+            &mut stdin,
+            &msgmap(vec![
+                ("type", sv("AUTH")),
+                ("token", sv("")),
+                ("hub_key", sv("detach-test-hub-key")),
+            ]),
+        )
+        .await;
+        let mut state = Vec::new();
+        loop {
+            let frame = read_frame_timeout(&mut stdout, 10).await;
+            if frame["type"].as_str() == Some("CHANNEL_STATE_END") {
+                break;
+            }
+            state.push(frame);
+        }
+        (relay, stdin, stdout, state)
+    }
+}
+
+/// AC-D1: a daemon started with `--detach` inside a job that allows breaking
+/// away outlives the job. Mutation: no breakaway flag (the daemon dies with
+/// the job), or a daemon inheriting the launcher's stdio (the launcher's
+/// output never ends).
+#[cfg(windows)]
+#[tokio::test]
+async fn detach_survives_the_job() {
+    if !detach_tests_run("detach_survives_the_job") {
+        return;
+    }
+    let fixture = StopFixture::new("detach-survives");
+    let _stop = detach::StopOnDrop(&fixture);
+    let job = detach::Job::new(true);
+    let launch = detach::detach_command(&fixture, "60");
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        tokio::task::spawn_blocking(move || {
+            let output = job.run(launch);
+            drop(job);
+            output
+        }),
+    )
+    .await
+    .expect("the launcher's output ended")
+    .expect("launcher task");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        detach::stderr_lines(&output),
+        vec!["lasterm-detach: started"]
+    );
+
+    let mut relay = spawn_relay(&fixture, &["--wait", "10000"]);
+    let mut stdout = relay.stdout.take().expect("relay stdout");
+    let hello = read_frame_timeout(&mut stdout, 15).await;
+    assert_eq!(hello["type"].as_str(), Some("HELLO"), "{hello:?}");
+}
+
+/// AC-D1, launched as a hub launches it on a Windows host: by PowerShell's
+/// `Process.Start`, with nothing redirected, under a parent whose output is a
+/// pipe, as an SSH exec channel is. The launcher's output must end once it has
+/// said `started`, while the daemon runs on. Mutation: a daemon that inherits
+/// the launcher's handles holds the pipe open (seen on Win32-OpenSSH, V2).
+#[cfg(windows)]
+#[tokio::test]
+async fn detach_lets_a_powershell_launch_end() {
+    if !detach_tests_run("detach_lets_a_powershell_launch_end") {
+        return;
+    }
+    let fixture = StopFixture::new("detach-powershell");
+    let _stop = detach::StopOnDrop(&fixture);
+    let script = format!(
+        "$c=[Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]@{{FileName='{}';\
+         Arguments='--daemon --detach --socket {} --idle-timeout 60';UseShellExecute=$false}});\
+         $c.WaitForExit();exit $c.ExitCode",
+        env!("CARGO_BIN_EXE_lasterm-agent"),
+        fixture.socket
+    );
+    let mut launch = std::process::Command::new("powershell.exe");
+    launch
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .env("XDG_STATE_HOME", &fixture.dir)
+        .env("XDG_CONFIG_HOME", &fixture.dir)
+        .env("LOCALAPPDATA", &fixture.dir)
+        .env("APPDATA", &fixture.dir);
+    // Inside a job that allows breaking away, as a Win32-OpenSSH session's.
+    let job = detach::Job::new(true);
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || job.run(launch)),
+    )
+    .await
+    .expect("the launch's output ended while its daemon runs")
+    .expect("launch task");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        detach::stderr_lines(&output).contains(&"lasterm-detach: started".to_owned()),
+        "{output:?}"
+    );
+    pipe_appears(&fixture).await;
+}
+
+/// AC-D3, through the binary: on POSIX `--daemon --detach` is a usage error
+/// with its line, and starts nothing. Mutation: a POSIX agent that accepts
+/// the flag and runs a daemon in the foreground (the bounded wait fails).
+#[cfg(unix)]
+#[tokio::test]
+async fn detach_is_refused_on_posix() {
+    let fixture = StopFixture::new("detach-posix");
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        fixture
+            .agent("--daemon")
+            .arg("--detach")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("--detach exits at once on POSIX")
+    .expect("run the agent");
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--detach is for Windows; a POSIX launch detaches through the shell"),
+        "{stderr}"
+    );
+    assert!(!std::path::Path::new(&fixture.socket).exists());
+}
+
+/// AC-D2: a job that forbids breaking away gives exit 5 and its line, and no
+/// daemon, looked for while the job still lives (its close would kill one
+/// started inside it). Mutation: that refusal classified as 1.
+#[cfg(windows)]
+#[tokio::test]
+async fn detach_refused_without_breakaway() {
+    if !detach_tests_run("detach_refused_without_breakaway") {
+        return;
+    }
+    let fixture = StopFixture::new("detach-refused");
+    let _stop = detach::StopOnDrop(&fixture);
+    let job = detach::Job::new(false);
+    let launch = detach::detach_command(&fixture, "60");
+    let (output, job) = tokio::task::spawn_blocking(move || (job.run(launch), job))
+        .await
+        .expect("launcher task");
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    assert_eq!(
+        detach::stderr_lines(&output),
+        vec![
+            "lasterm-detach: breakaway-refused",
+            "this SSH session's job does not allow a process to break away; the daemon would end with the connection",
+        ]
+    );
+    // A second for a daemon that would still be binding.
+    let relay = spawn_relay(&fixture, &["--wait", "1000"]);
+    let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 3, "{stderr:?}");
+    drop(job);
+}
+
+/// Start a detached daemon with `idle_timeout`, launched inside a job that
+/// allows breaking away, as a Win32-OpenSSH session's does. The job the test
+/// itself may run in need not allow it (a CI runner's does not).
+#[cfg(windows)]
+fn start_detached(fixture: &StopFixture, idle_timeout: &str) {
+    let job = detach::Job::new(true);
+    let output = job.run(detach::detach_command(fixture, idle_timeout));
+    drop(job);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+/// Wait until the fixture's pipe exists, as the daemon binds it.
+#[cfg(windows)]
+async fn pipe_appears(fixture: &StopFixture) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !detach::pipe_exists(&fixture.socket) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the daemon never listened"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// AC-D4 / expires: a detached daemon holding nothing, with no hub, exits
+/// after its idle timeout. Mutation: today's warning-and-ignore, or a
+/// launcher that drops `--idle-timeout`.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_idle_daemon_exits() {
+    if !detach_tests_run("windows_idle_daemon_exits") {
+        return;
+    }
+    let fixture = StopFixture::new("idle-exits");
+    let _stop = detach::StopOnDrop(&fixture);
+    start_detached(&fixture, "2");
+    pipe_appears(&fixture).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while detach::pipe_exists(&fixture.socket) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the idle daemon still listens after 15 s"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// `--detach` passes all its other arguments on to the daemon: here the log
+/// format, which the daemon's log then shows. Mutation: a launcher that
+/// passes on only the socket and the timeout (the log stays JSON lines).
+#[cfg(windows)]
+#[tokio::test]
+async fn detach_passes_its_arguments_on() {
+    if !detach_tests_run("detach_passes_its_arguments_on") {
+        return;
+    }
+    let fixture = StopFixture::new("detach-arguments");
+    let _stop = detach::StopOnDrop(&fixture);
+    let job = detach::Job::new(true);
+    let output = job.run(detach::detach_command_with(
+        &fixture,
+        "60",
+        &["--log-level", "info", "--format", "text"],
+    ));
+    drop(job);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    pipe_appears(&fixture).await;
+
+    let logs = fixture.dir.join("lasterm").join("logs");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let first_line = loop {
+        let line = std::fs::read_dir(&logs).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("agent-daemon")
+                })
+                .find_map(|entry| {
+                    std::fs::read_to_string(entry.path())
+                        .ok()
+                        .and_then(|text| text.lines().next().map(str::to_owned))
+                })
+        });
+        if let Some(line) = line {
+            break line;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no daemon log line in {}",
+            logs.display()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(
+        !first_line.trim_start().starts_with('{'),
+        "the daemon logged JSON lines, not text: {first_line}"
+    );
+}
+
+/// AC-D4 / connected-hub-keeps: a hub connected keeps an idle daemon up.
+/// Mutation: an expiry that ignores connections.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_idle_daemon_kept_by_a_connection() {
+    if !detach_tests_run("windows_idle_daemon_kept_by_a_connection") {
+        return;
+    }
+    let fixture = StopFixture::new("idle-connection");
+    let _stop = detach::StopOnDrop(&fixture);
+    start_detached(&fixture, "2");
+    let (_relay, _stdin, _stdout, _) = detach::authenticated_relay(&fixture).await;
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert!(
+        detach::pipe_exists(&fixture.socket),
+        "the daemon left a connected hub"
+    );
+}
+
+/// AC-D4, the same condition as POSIX: once its last hub has gone, a daemon
+/// that was in use waits a whole timeout again before it exits. Mutation: an
+/// idle clock that use never resets (the daemon exits at the first check
+/// after its hub leaves).
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_idle_daemon_waits_a_whole_timeout_after_use() {
+    if !detach_tests_run("windows_idle_daemon_waits_a_whole_timeout_after_use") {
+        return;
+    }
+    let fixture = StopFixture::new("idle-after-use");
+    let _stop = detach::StopOnDrop(&fixture);
+    start_detached(&fixture, "4");
+    let (relay, stdin, stdout, _) = detach::authenticated_relay(&fixture).await;
+    // Past the timeout while in use, so a clock that use does not reset
+    // has already run out.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    drop(stdin);
+    drop(stdout);
+    drop(relay);
+    let released = tokio::time::Instant::now();
+
+    // Its next check starts the clock, and the one a timeout later ends it:
+    // never sooner than 4 s after the release.
+    while released.elapsed() < Duration::from_millis(3_600) {
+        assert!(
+            detach::pipe_exists(&fixture.socket),
+            "the daemon exited {} ms after its hub left",
+            released.elapsed().as_millis()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let deadline = released + Duration::from_secs(15);
+    while detach::pipe_exists(&fixture.socket) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the idle daemon still listens 15 s after its hub left"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// AC-D4 / zero-never: `--idle-timeout 0` never exits on idleness.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_idle_zero_never_exits() {
+    if !detach_tests_run("windows_idle_zero_never_exits") {
+        return;
+    }
+    let fixture = StopFixture::new("idle-zero");
+    let _stop = detach::StopOnDrop(&fixture);
+    start_detached(&fixture, "0");
+    pipe_appears(&fixture).await;
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert!(
+        detach::pipe_exists(&fixture.socket),
+        "a daemon with no timeout exited"
+    );
+}
+
+/// AC-D4 / terminal-keeps: a terminal held keeps an idle daemon up once its
+/// hub has gone. Mutation: a Windows condition that looks at connections only.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_idle_daemon_kept_by_a_terminal() {
+    if !detach_tests_run("windows_idle_daemon_kept_by_a_terminal") {
+        return;
+    }
+    let fixture = StopFixture::new("idle-terminal");
+    let _stop = detach::StopOnDrop(&fixture);
+    start_detached(&fixture, "2");
+    let (relay, mut stdin, mut stdout, _) = detach::authenticated_relay(&fixture).await;
+    write_frame(
+        &mut stdin,
+        &msgmap(vec![
+            ("type", sv("SPAWN")),
+            ("request_id", sv("idle-terminal")),
+            ("shell", sv("cmd.exe")),
+            ("cols", iv(80)),
+            ("rows", iv(24)),
+            ("env_mode", sv("inherit")),
+        ]),
+    )
+    .await;
+    let channel_id = loop {
+        let frame = read_frame_timeout(&mut stdout, 10).await;
+        if frame["type"].as_str() == Some("SPAWN_OK") {
+            break frame["channel_id"].as_str().expect("channel_id").to_owned();
+        }
+    };
+    drop(stdin);
+    drop(stdout);
+    drop(relay);
+
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert!(
+        detach::pipe_exists(&fixture.socket),
+        "the daemon left its terminal"
+    );
+    let (_relay, _stdin, _stdout, state) = detach::authenticated_relay(&fixture).await;
+    assert!(
+        state.iter().any(
+            |frame| frame["type"].as_str() == Some("AGENT_CHANNEL_STATE")
+                && frame["channel_id"].as_str() == Some(channel_id.as_str())
+        ),
+        "the terminal is not in the channel state: {state:?}"
+    );
+}

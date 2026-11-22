@@ -254,7 +254,6 @@ impl DaemonShared {
     }
 
     /// Whether nobody uses this daemon: no hub connected, no terminal held.
-    #[cfg(unix)]
     async fn unused(&self) -> bool {
         self.routes.lock().await.connections.is_empty()
             && self.pty_manager.lock().await.channel_ids().is_empty()
@@ -369,8 +368,36 @@ async fn run_daemon_impl(
 /// Internal test seam for exercising daemon teardown with a short confirmation
 /// bound, without changing the production shutdown deadline.
 /// How often an idle daemon asks itself whether it is still needed.
-#[cfg(unix)]
 const IDLE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How often the idle check runs for `idle_timeout`: every `IDLE_CHECK_EVERY`,
+/// or sooner for a shorter timeout, so a caller asking for a second does not
+/// wait ten. A connection that begins and ends between two checks is not
+/// seen.
+fn idle_check_period(idle_timeout: Option<std::time::Duration>) -> std::time::Duration {
+    idle_timeout.map_or(IDLE_CHECK_EVERY, |limit| limit.min(IDLE_CHECK_EVERY))
+}
+
+#[cfg(test)]
+mod idle_check_period_tests {
+    use super::idle_check_period;
+    use std::time::Duration;
+
+    // A long timeout is still checked every ten seconds, on both platforms
+    // (#755). Mutation: a period equal to the timeout.
+    #[test]
+    fn checks_a_long_timeout_every_ten_seconds_and_a_short_one_at_its_pace() {
+        assert_eq!(
+            idle_check_period(Some(Duration::from_secs(1800))),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            idle_check_period(Some(Duration::from_secs(2))),
+            Duration::from_secs(2)
+        );
+        assert_eq!(idle_check_period(None), Duration::from_secs(10));
+    }
+}
 
 #[cfg(unix)]
 async fn run_daemon_impl_with_manager(
@@ -458,9 +485,7 @@ async fn run_daemon_impl_with_manager(
     let mut idle_since: Option<std::time::Instant> = None;
     // A short timeout is checked at its own pace, so a caller asking for a
     // second does not wait ten.
-    let mut idle_check = tokio::time::interval(
-        idle_timeout.map_or(IDLE_CHECK_EVERY, |limit| limit.min(IDLE_CHECK_EVERY)),
-    );
+    let mut idle_check = tokio::time::interval(idle_check_period(idle_timeout));
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     // Accept loop — spawn each connection handler so we can accept the next immediately.
@@ -566,15 +591,16 @@ pub(crate) async fn run_daemon(
     bound: Option<oneshot::Sender<()>>,
     idle_timeout: Option<std::time::Duration>,
 ) -> std::io::Result<DestroyAllSummary> {
-    // A Windows daemon is only ever started beside its own hub: no SSH channel
-    // carries a named pipe, so nothing reaches one from another machine and
-    // none is ever left behind. Saying so beats honouring a timeout here that
-    // nothing would ever exercise.
-    if idle_timeout.is_some() {
-        tracing::warn!("--idle-timeout is ignored on Windows: a daemon here is never a remote one");
-    }
     // auth.json lives in the hub's configuration directory, %APPDATA%\lasterm.
-    run_daemon_impl(socket_path, config_dir()?, state_dir()?, shutdown, bound).await
+    run_daemon_impl(
+        socket_path,
+        config_dir()?,
+        state_dir()?,
+        shutdown,
+        bound,
+        idle_timeout,
+    )
+    .await
 }
 
 /// Internal implementation — takes explicit directories, as on Unix, so tests
@@ -586,6 +612,9 @@ async fn run_daemon_impl(
     state_dir: std::path::PathBuf,
     mut shutdown: ShutdownReceiver,
     bound: Option<oneshot::Sender<()>>,
+    // How long to stay up holding nothing, for nobody, as on Unix: a remote
+    // daemon reached through `--attach` (#755). `None` never exits.
+    idle_timeout: Option<std::time::Duration>,
 ) -> std::io::Result<DestroyAllSummary> {
     // Never another pipe than the one asked for: a hub that looks at the path it
     // was given would otherwise reach nothing (#733).
@@ -615,6 +644,11 @@ async fn run_daemon_impl(
         let _ = bound.send(());
     }
 
+    // The same idle rule as on Unix: nobody connected and nothing held.
+    let mut idle_since: Option<std::time::Instant> = None;
+    let mut idle_check = tokio::time::interval(idle_check_period(idle_timeout));
+    idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     let result = loop {
         // Block until a client connects to this pipe instance
         // Use match instead of ? to avoid crashing the daemon on transient OS errors
@@ -624,6 +658,23 @@ async fn run_daemon_impl(
                 tracing::info!("daemon shutdown requested");
                 drop(server.take());
                 break Ok(());
+            }
+            _ = idle_check.tick(), if idle_timeout.is_some() => {
+                if !daemon.unused().await {
+                    idle_since = None;
+                    continue;
+                }
+                let since = *idle_since.get_or_insert_with(std::time::Instant::now);
+                let waited = since.elapsed();
+                if idle_timeout.is_some_and(|limit| waited >= limit) {
+                    tracing::info!(
+                        waited_secs = waited.as_secs(),
+                        "daemon idle with no terminals and no hub; exiting"
+                    );
+                    drop(server.take());
+                    break Ok(());
+                }
+                continue;
             }
             result = server.as_mut().expect("pipe server remains live until shutdown").connect() => result,
         };
@@ -1616,6 +1667,7 @@ mod tests {
                 dir.to_string_lossy().into_owned(),
                 dir.clone(),
                 no_shutdown_request(),
+                None,
                 None,
             ),
         )
@@ -3674,6 +3726,7 @@ mod tests {
             state_dir.clone(),
             no_shutdown_request(),
             Some(bound_tx),
+            None,
         ));
 
         // Wait for daemon to create the pipe
@@ -3769,6 +3822,7 @@ mod tests {
                         state_dir.clone(),
                         shutdown_rx,
                         Some(bound_tx),
+                        None,
                     );
                     (endpoint, daemon)
                 };

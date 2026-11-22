@@ -794,10 +794,19 @@ export interface SessionStateMessage {
 	/**
 	 * Set only when the host keeps a daemon (#79) and this hub saw its SSH
 	 * server refuse the socket forwarding a daemon is reached through (#765).
-	 * The hub runs the agent on stdio there, so the host's terminals end with
-	 * its connection, and a client says so as a note on the host.
+	 * The hub reaches the daemon through a relay there, and the host's
+	 * terminals still outlive its connection (#755); a client says so as a
+	 * note on the host.
 	 */
 	socketForwardingRefused?: boolean;
+	/**
+	 * Set only while the host's connection runs its agent on stdio although
+	 * the host keeps a daemon, because the Windows host's SSH session does not
+	 * let a process outlive it: the agent's own words for why (#755). Absent
+	 * once a later connection reaches a daemon, or the host is disconnected.
+	 * A client says so as a note on the host.
+	 */
+	remoteDaemonUnavailable?: string;
 	/**
 	 * Set only while the host's user has disconnected it (#648): the hub does
 	 * not reach for it again until someone acts on it. Absent from every
@@ -890,6 +899,8 @@ export interface StateSyncMessage {
 		sftpUnavailable?: boolean;
 		/** Set only when the server refused socket forwarding. See SessionStateMessage. */
 		socketForwardingRefused?: boolean;
+		/** Set only while no daemon can be kept there. See SessionStateMessage. */
+		remoteDaemonUnavailable?: string;
 	}>;
 	/**
 	 * The hosts their user disconnected, sessions or not: a host whose

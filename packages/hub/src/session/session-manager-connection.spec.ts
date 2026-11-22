@@ -10,7 +10,7 @@ import { sshAddress, targetRoute } from "../ssh-route.js";
 
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type net from "node:net";
 import { join } from "node:path";
 import {
@@ -30,7 +30,8 @@ import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
 import { openTestDatabases } from "../storage/db.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
-import { deployAgentIfNeeded } from "./agent-deployer.js";
+import { deployAgentIfNeeded, getBinaryCacheDir } from "./agent-deployer.js";
+import { socketForwardingRefusedOn } from "./remote-daemon.js";
 import type { SessionState, SharedSessionContext } from "./session-context.js";
 import { SessionManager, type WsClient } from "./session-manager.js";
 import { SshAgent } from "./ssh-agent.js";
@@ -104,6 +105,23 @@ interface MockHost {
 	/** Daemons launched, and stopped through `--stop`, where it refuses socket forwarding. */
 	daemonLaunches: number;
 	daemonStops: number;
+	/** Relays the hub ran that reached the daemon (#755). */
+	relays: number;
+	/** The hash `sha256sum` reports for an agent `which` finds on PATH, or none. */
+	installedAgentSha: string | null;
+	/**
+	 * What a Windows host's `--daemon --detach` says (#755): started, or its
+	 * SSH session's job forbids breaking away.
+	 */
+	detach: "started" | "breakaway-refused";
+	/** The arguments of every Windows launch the hub ran there, decoded (#755). */
+	windowsArgs: string[];
+	/** The installed agent predates `--attach`: clap's usage error, no marker. */
+	relayPredates: boolean;
+	/** Where that agent is: on PATH at /usr/local/bin, or off PATH under ~/.local/bin. */
+	installedOffPath: boolean;
+	/** `sha256sum` fails on the installed agent. */
+	installedHashUnreadable: boolean;
 	/** Every command run over SSH, in order, before anything answers it (#701). */
 	execs: string[];
 	/**
@@ -138,6 +156,25 @@ interface MockHost {
 	/** End every SSH connection it holds, leaving it listening. */
 	dropLinks: () => void;
 	close: () => Promise<void>;
+}
+
+/** What a Windows agent says when its SSH session's job forbids breaking away. */
+const BREAKAWAY_REFUSED =
+	"this SSH session's job does not allow a process to break away; the daemon would end with the connection";
+
+const ENCODED_POWERSHELL = "powershell -NoProfile -NonInteractive -EncodedCommand ";
+
+/** The arguments a Windows launch of the agent passes, decoded; null for any other command. */
+function windowsLaunchArgs(command: string): string | null {
+	if (!command.startsWith(ENCODED_POWERSHELL)) return null;
+	const script = Buffer.from(command.slice(ENCODED_POWERSHELL.length), "base64").toString(
+		"utf16le",
+	);
+	const encoded =
+		/\$a=\[Text\.Encoding\]::UTF8\.GetString\(\[Convert\]::FromBase64String\('([^']*)'\)\)/.exec(
+			script,
+		)?.[1];
+	return encoded === undefined ? null : Buffer.from(encoded, "base64").toString("utf8");
 }
 
 function hello(daemon = false, acknowledgesStop = false, agentVersion = HUB_VERSION): Buffer {
@@ -259,6 +296,13 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 		stops: [],
 		daemonLaunches: 0,
 		daemonStops: 0,
+		relays: 0,
+		detach: "started",
+		windowsArgs: [],
+		installedAgentSha: null,
+		relayPredates: false,
+		installedOffPath: false,
+		installedHashUnreadable: false,
 		execs: [],
 		daemonSocket: "running",
 		acknowledgesStop: false,
@@ -280,10 +324,74 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 		close: async () => {},
 	};
 	let listening = false;
+	/**
+	 * The relay (#755): the daemon itself once it listens, else what the relay
+	 * says on stderr, with the 1 a PowerShell shell would leave.
+	 */
+	const answerRelay = (stream: Stream, listens: boolean): void => {
+		const relay = stream as Stream & { stderr: NodeJS.WritableStream };
+		if (result.relayPredates) {
+			relay.stderr.write("error: unexpected argument '--attach' found\n");
+			stream.exit?.(2);
+			stream.end();
+			return;
+		}
+		relay.stderr.write("lasterm-attach: start\n");
+		if (listens) {
+			result.relays++;
+			serveAgent(stream, result);
+			return;
+		}
+		relay.stderr.write("lasterm-attach: nothing-listens\n");
+		stream.exit?.(1);
+		stream.end();
+	};
+	/**
+	 * What a Windows host answers (#755): each command a PowerShell launch of
+	 * the agent, with exit status 1 for every failure, as PowerShell leaves it.
+	 */
+	const answerWindows = (stream: Stream, args: string): void => {
+		const relay = stream as Stream & { stderr: NodeJS.WritableStream };
+		if (args === "--stdio") {
+			serveAgent(stream);
+			return;
+		}
+		if (args.startsWith("--attach")) {
+			answerRelay(stream, result.daemonSocket === "running");
+			return;
+		}
+		if (args.startsWith("--daemon --detach")) {
+			result.daemonLaunches++;
+			if (result.detach === "started") {
+				result.daemonSocket = "running";
+				relay.stderr.write("lasterm-detach: started\n");
+				stream.exit?.(0);
+			} else {
+				relay.stderr.write(`lasterm-detach: breakaway-refused\n${BREAKAWAY_REFUSED}\n`);
+				stream.exit?.(1);
+			}
+			stream.end();
+			return;
+		}
+		if (args === "--stop") {
+			result.daemonStops++;
+			result.daemonSocket = "silent";
+			stream.write("stopped\n");
+			stream.exit?.(0);
+			stream.end();
+			return;
+		}
+		stream.exit?.(1);
+		stream.end();
+	};
 	/** What a host that refuses the forwarding answers. */
 	const answerRefusing = (stream: Stream, command: string): void => {
 		if (command.includes("--stdio")) {
 			serveAgent(stream);
+			return;
+		}
+		if (command.includes("--attach")) {
+			answerRelay(stream, listening);
 			return;
 		}
 		if (command.includes("XDG_STATE_HOME")) {
@@ -314,12 +422,51 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 				session.on("exec", (acceptExec, _reject, info) => {
 					const stream = acceptExec() as Stream;
 					result.execs.push(info.command);
+					const windows = windowsLaunchArgs(info.command);
+					if (windows !== null) {
+						result.windowsArgs.push(windows);
+						answerWindows(stream, windows);
+						return;
+					}
 					if (refusesForwarding) {
 						answerRefusing(stream, info.command);
 						return;
 					}
 					if (!daemon || info.command.includes("--stdio")) {
 						serveAgent(stream);
+						return;
+					}
+					const installed = result.installedOffPath
+						? "/home/pi/.local/bin/lasterm-agent"
+						: "/usr/local/bin/lasterm-agent";
+					if (
+						result.installedAgentSha &&
+						!result.installedOffPath &&
+						info.command.startsWith("which lasterm-agent")
+					) {
+						stream.write(`${installed}\n`);
+					} else if (
+						result.installedAgentSha &&
+						result.installedOffPath &&
+						info.command.startsWith('test -x "$HOME/.local/bin/lasterm-agent"')
+					) {
+						stream.write(`${installed}\n`);
+					} else if (
+						result.installedAgentSha &&
+						info.command.startsWith(`sha256sum '${installed}'`)
+					) {
+						if (result.installedHashUnreadable) {
+							stream.exit?.(1);
+							stream.end();
+							return;
+						}
+						stream.write(`${result.installedAgentSha}  ${installed}\n`);
+					}
+					if (info.command.includes("--attach")) {
+						answerRelay(
+							stream,
+							result.daemonSocket === "running" || result.daemonSocket === "refusing",
+						);
 						return;
 					}
 					if (info.command.includes("XDG_STATE_HOME")) {
@@ -536,15 +683,17 @@ function terminalsOn(h: Harness, count: number): string[] {
 	return ids;
 }
 
-function sessionStates(
-	h: Harness,
-): Array<{ status: string; disconnectedByUser?: boolean; socketForwardingRefused?: boolean }> {
+type HeardSessionState = {
+	status: string;
+	disconnectedByUser?: boolean;
+	socketForwardingRefused?: boolean;
+	remoteDaemonUnavailable?: string;
+};
+
+function sessionStates(h: Harness): HeardSessionState[] {
 	return h.heard
 		.filter((m) => m.type === "SESSION_STATE" && m.hostId === h.host.id)
-		.map(
-			(m) =>
-				m as { status: string; disconnectedByUser?: boolean; socketForwardingRefused?: boolean },
-		);
+		.map((m) => m as HeardSessionState);
 }
 
 function endsOf(h: Harness, channelId: string): ProtocolMessage[] {
@@ -782,19 +931,151 @@ describe("Reconnect (#648)", { timeout: 20_000 }, () => {
 	});
 });
 
+// ─── A Windows host that keeps its daemon (#755) ────────────────────────────
+
+describe("a Windows host that keeps its daemon (#755)", { timeout: 30_000 }, () => {
+	/** The deploy says what a real one detects there: Windows. */
+	function deployFindsWindows(): void {
+		const deploy = vi.mocked(deployAgentIfNeeded);
+		const remotePath = "C:UserspiAppDataLocallastermlasterm-agent.exe";
+		deploy.mockResolvedValue({
+			deployed: false,
+			remoteMatchesHubVersionCache: false,
+			remotePath,
+			os: "windows",
+			arch: "x64",
+		});
+		cleanups.push(() => {
+			deploy.mockResolvedValue({
+				deployed: false,
+				remoteMatchesHubVersionCache: false,
+				remotePath: "lasterm-agent",
+				os: null,
+				arch: null,
+			});
+		});
+	}
+
+	it("reaches it through the relay, started with --detach", async () => {
+		deployFindsWindows();
+		const h = await hubWith({ daemon: true, os: "windows" });
+		h.remote.daemonSocket = "silent";
+
+		const agent = await connected(h);
+
+		expect(agent.usedRemoteDaemon).toBe(true);
+		expect(agent.reachedThrough).toBe("relay");
+		expect(h.remote.windowsArgs).toEqual([
+			"--attach --wait 0",
+			expect.stringMatching(/^--daemon --detach .* --idle-timeout 1800 /),
+			expect.stringMatching(/^--attach --wait [1-9]\d*$/),
+		]);
+		expect(h.remote.execs.filter((c) => !c.startsWith(ENCODED_POWERSHELL))).toEqual([]);
+		expect(sessionStates(h).at(-1)?.remoteDaemonUnavailable).toBeUndefined();
+	});
+
+	// AC-W2. Mutation: a field left out of the announcement condition, or a
+	// field that outlives the connection that set it.
+	it("runs on stdio where breakaway is refused, says why while that connection lasts, and forgets it", async () => {
+		deployFindsWindows();
+		const h = await hubWith({ daemon: true, os: "windows" });
+		h.remote.daemonSocket = "silent";
+		h.remote.detach = "breakaway-refused";
+
+		const agent = await connected(h);
+
+		expect(agent.reachedThrough).toBe("stdio");
+		expect(h.remote.windowsArgs.at(-1)).toBe("--stdio");
+		await until(
+			"the host says why it keeps no daemon",
+			() => sessionStates(h).at(-1)?.remoteDaemonUnavailable === BREAKAWAY_REFUSED,
+		);
+		expect(sessionStates(h).at(-1)).toMatchObject({ status: "active" });
+		expect(h.sm.getStateSnapshot().sessions).toEqual([
+			expect.objectContaining({ hostId: h.host.id, remoteDaemonUnavailable: BREAKAWAY_REFUSED }),
+		]);
+
+		// Disconnected: the field goes.
+		expect(h.sm.disconnectHost(h.host.id)).toMatchObject({ kind: "disconnected" });
+		expect(sessionStates(h).at(-1)?.remoteDaemonUnavailable).toBeUndefined();
+		expect(
+			h.sm.getStateSnapshot().sessions.filter((s) => s.remoteDaemonUnavailable !== undefined),
+		).toEqual([]);
+
+		// A later connection that reaches a daemon says nothing of it either.
+		h.remote.detach = "started";
+		const again = await connected(h);
+		expect(again.reachedThrough).toBe("relay");
+		expect(sessionStates(h).at(-1)).toMatchObject({ status: "active" });
+		expect(sessionStates(h).at(-1)?.remoteDaemonUnavailable).toBeUndefined();
+		expect(h.sm.getStateSnapshot().sessions).toEqual([
+			expect.not.objectContaining({ remoteDaemonUnavailable: expect.anything() }),
+		]);
+	});
+	// The system the deploy detects picks the route, not the host as this
+	// connection read it before (#755: `remoteOs` is the deploy's `os`, else
+	// the host's). Mutation: the stored, still unknown, system used instead.
+	it("takes the relay on a host whose system only the deploy detected", async () => {
+		deployFindsWindows();
+		const h = await hubWith({ daemon: true, os: null });
+		h.remote.daemonSocket = "silent";
+
+		const agent = await connected(h);
+
+		expect(agent.reachedThrough).toBe("relay");
+		expect(agent.remoteOs).toBe("windows");
+		expect(h.remote.windowsArgs[0]).toBe("--attach --wait 0");
+		expect(h.remote.execs.filter((c) => !c.startsWith(ENCODED_POWERSHELL))).toEqual([]);
+	});
+
+	// AC-W2 / cleared-by-daemon: the field goes with the daemon reach itself,
+	// on the reconnect after a lost link, with no Disconnect in between.
+	// Mutation: the reason kept per host and cleared only by a Disconnect.
+	it("forgets why once the reconnect after a lost link reaches a daemon", async () => {
+		deployFindsWindows();
+		const h = await hubWith({ daemon: true, os: "windows" });
+		h.remote.daemonSocket = "silent";
+		h.remote.detach = "breakaway-refused";
+		await connected(h);
+		await until(
+			"the host says why it keeps no daemon",
+			() => sessionStates(h).at(-1)?.remoteDaemonUnavailable === BREAKAWAY_REFUSED,
+		);
+
+		h.remote.detach = "started";
+		const launchesBefore = h.remote.daemonLaunches;
+		h.remote.dropLinks();
+		await until(
+			"the reconnect reaches a daemon",
+			() => agentOf(h)?.reachedThrough === "relay",
+			15_000,
+		);
+
+		expect(h.remote.daemonLaunches).toBe(launchesBefore + 1);
+		await until("the host says active again", () => sessionStates(h).at(-1)?.status === "active");
+		expect(sessionStates(h).at(-1)?.remoteDaemonUnavailable).toBeUndefined();
+		expect(
+			h.sm.getStateSnapshot().sessions.filter((s) => s.remoteDaemonUnavailable !== undefined),
+		).toEqual([]);
+	});
+});
+
 // ─── A server that refuses socket forwarding ─────────────────────────────────
 
 describe("a host whose SSH server refuses socket forwarding (#765)", { timeout: 30_000 }, () => {
-	it("runs on stdio and says so, and tries no daemon again until a person asks", async () => {
+	it("reaches the daemon through the relay, keeps it, and relays first until a person asks (#755)", async () => {
 		const h = await hubWith({ daemon: true, refusesForwarding: true });
 
 		const first = await connected(h);
 
-		expect(first.usedRemoteDaemon).toBe(false);
+		expect(first.usedRemoteDaemon).toBe(true);
+		expect(first.reachedThrough).toBe("relay");
 		expect(first.socketForwardingRefused).toBe(true);
-		// The daemon it started to find that out is stopped.
+		// The daemon it started is kept, and reached through the relay.
 		expect(h.remote.daemonLaunches).toBe(1);
-		expect(h.remote.daemonStops).toBe(1);
+		expect(h.remote.daemonStops).toBe(0);
+		expect(h.remote.relays).toBe(1);
+		expect(h.remote.execs.filter((c) => c.includes("--stdio"))).toEqual([]);
 		expect(sessionStates(h).at(-1)).toMatchObject({
 			status: "active",
 			socketForwardingRefused: true,
@@ -802,35 +1083,51 @@ describe("a host whose SSH server refuses socket forwarding (#765)", { timeout: 
 		expect(h.sm.getStateSnapshot().sessions).toEqual([
 			expect.objectContaining({ hostId: h.host.id, socketForwardingRefused: true }),
 		]);
-		// Its terminals end with the connection: a Disconnect says how many.
+		// Its terminals outlive the connection: a Disconnect ends none.
 		terminalsOn(h, 2);
-		expect(h.sm.disconnectHost(h.host.id)).toEqual({ kind: "terminals-would-end", terminals: 2 });
-		h.sm.disconnectHost(h.host.id, { force: true });
+		expect(h.sm.disconnectHost(h.host.id)).toMatchObject({ kind: "disconnected", ended: 0 });
 
-		// A terminal opened there connects straight to stdio: no daemon started
-		// only to be stopped, and the host still says why.
+		// A terminal opened there connects through the relay at once.
+		const probesBefore = h.remote.execs.filter((c) => c.includes("/proc/net/unix")).length;
 		await expect(
 			h.sm.handleSpawn(h.window.id, { type: "SPAWN", hostId: h.host.id }),
 		).resolves.not.toBeNull();
 		expect(h.remote.connections).toBe(2);
-		expect(agentOf(h)?.usedRemoteDaemon).toBe(false);
+		expect(agentOf(h)?.reachedThrough).toBe("relay");
+		expect(h.remote.execs.filter((c) => c.includes("/proc/net/unix")).length).toBe(probesBefore);
 		expect(h.remote.daemonLaunches).toBe(1);
-		expect(sessionStates(h).at(-1)).toMatchObject({
-			status: "active",
-			socketForwardingRefused: true,
-		});
+		expect(h.remote.relays).toBe(2);
 
-		// A person's Reconnect asks the server again, and so does a Connect.
+		// A dropped link's automatic reconnect relays first too.
+		const relaysBefore = h.remote.relays;
+		const probesBeforeDrop = h.remote.execs.filter((c) => c.includes("/proc/net/unix")).length;
+		h.remote.dropLinks();
+		await until(
+			"the reconnect reaches the daemon again",
+			() => h.remote.relays > relaysBefore,
+			15_000,
+		);
+		await until(
+			"the reconnected agent is the host's",
+			() => agentOf(h)?.connected === true,
+			15_000,
+		);
+		expect(agentOf(h)?.reachedThrough).toBe("relay");
+		expect(h.remote.execs.filter((c) => c.includes("/proc/net/unix")).length).toBe(
+			probesBeforeDrop,
+		);
+
+		// A person's Reconnect asks the server again: the channel first, then
+		// the relay to the same daemon.
 		const outcome = h.sm.reconnectHost(h.host.id, { clientId: h.window.id, force: true });
 		if (outcome.kind !== "connecting") throw new Error(outcome.kind);
 		await expect(outcome.done).resolves.toBe(true);
-		expect(h.remote.daemonLaunches).toBe(2);
-		expect(h.remote.daemonStops).toBe(2);
+		expect(h.remote.execs.filter((c) => c.includes("/proc/net/unix")).length).toBeGreaterThan(
+			probesBefore,
+		);
 		expect(agentOf(h)?.socketForwardingRefused).toBe(true);
-		h.sm.disconnectHost(h.host.id, { force: true });
-		await connected(h);
-		expect(h.remote.daemonLaunches).toBe(3);
-		expect(h.remote.daemonStops).toBe(3);
+		expect(h.remote.daemonLaunches).toBe(1);
+		expect(h.remote.daemonStops).toBe(0);
 	});
 });
 
@@ -1306,8 +1603,9 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
 	});
 
-	it("says it cannot tell when the socket listens but cannot be reached, and runs nothing", async () => {
+	it("relays only through an agent it can verify, and runs nothing it cannot (#755)", async () => {
 		const h = await leftOn();
+		h.ctx.metaDal.updateHostOsArch(h.host.id, "linux", "x64");
 		h.remote.daemonSocket = "refusing";
 		const before = deployMock.mock.calls.length;
 		expect(await keptAndConnected(h)).toBe(false);
@@ -1315,10 +1613,12 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 			expect.objectContaining({
 				code: "DAEMON_UNREACHABLE",
 				message:
-					"Lasterm could not reach an agent on this host, and cannot tell whether one is running.",
+					"Lasterm could not reach an agent on this host: its relay failed: no Lasterm agent was found on this host.",
 			}),
 		);
 		expect(startingCommands(h)).toEqual([]);
+		// Never the bare `lasterm-agent` of PATH (#43).
+		expect(h.remote.execs.filter((c) => c.includes("--attach"))).toEqual([]);
 		expect(deployMock.mock.calls.length).toBe(before);
 		expect(h.ctx.metaDal.getHost(h.host.id)?.sshRemoteDaemon).toBe(false);
 	});
@@ -1376,6 +1676,141 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		expect(h.ctx.channels.get(recorded)?.status).not.toBe("dead");
 		await until("the unknown terminal is destroyed", () => h.remote.destroys.includes(unknown));
 		expect(h.remote.destroys).not.toContain(recorded);
+	});
+
+	it.each([
+		["No", false],
+		["no answer", null],
+	] as const)(
+		"keeps a refusal its relay proved once Yes is stored, from %s (#755)",
+		async (_what, stored) => {
+			const h = await leftOn({ stored });
+			h.ctx.metaDal.updateHostOsArch(h.host.id, "linux", "x64");
+			h.remote.daemonSocket = "refusing";
+			h.remote.installedAgentSha = "c".repeat(64);
+			h.ctx.metaDal.updateHostAgentSha256(h.host.id, "c".repeat(64));
+
+			expect(await keptAndConnected(h)).toBe(true);
+
+			expect(agentOf(h)?.reachedThrough).toBe("relay");
+			expect(h.remote.execs.filter((c) => c.includes("--attach"))).toEqual([
+				expect.stringMatching(/^\/usr\/local\/bin\/lasterm-agent --attach /),
+			]);
+			const now = h.ctx.metaDal.getHost(h.host.id);
+			expect(now?.sshRemoteDaemon).toBe(true);
+			expect(socketForwardingRefusedOn(now, false, h.ctx.socketForwardingRefusals)).toBe(true);
+			await until("the refusal is announced", () =>
+				sessionStates(h).some(
+					(s) => (s as { socketForwardingRefused?: boolean }).socketForwardingRefused === true,
+				),
+			);
+		},
+	);
+
+	describe("an agent the relay cannot run (#755)", () => {
+		const pinned = "c".repeat(64);
+
+		async function refusedWith(
+			setup: (h: Harness) => void,
+		): Promise<{ h: Harness; message: string }> {
+			const h = await leftOn();
+			h.ctx.metaDal.updateHostOsArch(h.host.id, "linux", "x64");
+			h.remote.daemonSocket = "refusing";
+			setup(h);
+			expect(await keptAndConnected(h)).toBe(false);
+			const error = errorsHeard(h).find((e) => e.code === "DAEMON_UNREACHABLE");
+			expect(startingCommands(h)).toEqual([]);
+			return { h, message: error?.message ?? "" };
+		}
+
+		it("says an agent older than the relay cannot be fixed by Connect when this hub has no copy", async () => {
+			const { message } = await refusedWith((h) => {
+				h.remote.installedAgentSha = pinned;
+				h.remote.relayPredates = true;
+				h.ctx.metaDal.updateHostAgentSha256(h.host.id, pinned);
+			});
+			expect(message).toBe(
+				"Lasterm could not reach an agent on this host: its relay failed: the agent on this host predates the relay; this hub has no copy of its own agent to install.",
+			);
+		});
+
+		it("says Connect installs this hub's agent when it has a copy of its own", async () => {
+			const cached = join(getBinaryCacheDir(), `lasterm-agent-linux-x64-${HUB_VERSION}`);
+			mkdirSync(getBinaryCacheDir(), { recursive: true });
+			writeFileSync(cached, "this hub's own agent");
+			try {
+				const sha = createHash("sha256").update("this hub's own agent").digest("hex");
+				const { message } = await refusedWith((h) => {
+					h.remote.installedAgentSha = sha;
+					h.remote.relayPredates = true;
+				});
+				expect(message).toBe(
+					"Lasterm could not reach an agent on this host: its relay failed: the agent on this host predates the relay; Connect installs this hub's.",
+				);
+			} finally {
+				rmSync(cached, { force: true });
+			}
+		});
+
+		it("relays through an agent trusted this session, with no pin and no copy of its own", async () => {
+			const h = await leftOn();
+			h.ctx.metaDal.updateHostOsArch(h.host.id, "linux", "x64");
+			h.remote.daemonSocket = "refusing";
+			h.remote.installedAgentSha = pinned;
+			h.ctx.trustedAgentSha256.set(h.host.id, pinned);
+			expect(await keptAndConnected(h)).toBe(true);
+			expect(h.remote.execs.filter((c) => c.includes("--attach"))).toEqual([
+				expect.stringMatching(/^\/usr\/local\/bin\/lasterm-agent --attach /),
+			]);
+		});
+
+		it("finds the agent off PATH where the deploy installs it", async () => {
+			const h = await leftOn();
+			h.ctx.metaDal.updateHostOsArch(h.host.id, "linux", "x64");
+			h.remote.daemonSocket = "refusing";
+			h.remote.installedAgentSha = pinned;
+			h.remote.installedOffPath = true;
+			h.ctx.metaDal.updateHostAgentSha256(h.host.id, pinned);
+			expect(await keptAndConnected(h)).toBe(true);
+			expect(h.remote.execs.filter((c) => c.includes("--attach"))).toEqual([
+				expect.stringMatching(/^\/home\/pi\/\.local\/bin\/lasterm-agent --attach /),
+			]);
+		});
+
+		it("with a copy of its own, refuses a file that matches only the pin", async () => {
+			const cached = join(getBinaryCacheDir(), `lasterm-agent-linux-x64-${HUB_VERSION}`);
+			mkdirSync(getBinaryCacheDir(), { recursive: true });
+			writeFileSync(cached, "this hub's own agent");
+			try {
+				const { h, message } = await refusedWith((h) => {
+					h.remote.installedAgentSha = pinned;
+					h.ctx.metaDal.updateHostAgentSha256(h.host.id, pinned);
+				});
+				expect(message).toMatch(/not one this hub can vouch for .*Connect installs this hub's/);
+				expect(h.remote.execs.filter((c) => c.includes("--attach"))).toEqual([]);
+			} finally {
+				rmSync(cached, { force: true });
+			}
+		});
+
+		it("says the hash could not be read for an agent it found", async () => {
+			const { h, message } = await refusedWith((h) => {
+				h.remote.installedAgentSha = pinned;
+				h.remote.installedHashUnreadable = true;
+				h.ctx.metaDal.updateHostAgentSha256(h.host.id, pinned);
+			});
+			expect(message).toMatch(/could not be checked: its hash could not be read/);
+			expect(h.remote.execs.filter((c) => c.includes("--attach"))).toEqual([]);
+		});
+
+		it("runs nothing whose hash matches neither this hub's agent nor the pin", async () => {
+			const { h, message } = await refusedWith((h) => {
+				h.remote.installedAgentSha = "d".repeat(64);
+				h.ctx.metaDal.updateHostAgentSha256(h.host.id, pinned);
+			});
+			expect(message).toMatch(/could not be checked: this hub has no copy of its own agent/);
+			expect(h.remote.execs.filter((c) => c.includes("--attach"))).toEqual([]);
+		});
 	});
 
 	it("forgets an earlier forwarding refusal once the socket answered", async () => {
@@ -1543,14 +1978,21 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		expect(await outcome.done).toBe(true);
 	});
 
-	it.each(["windows", null] as const)(
-		"refuses an OS a daemon is not reached on (%s)",
-		async (os) => {
-			const h = await leftOn({ os });
-			expect(keepAndConnect(h).kind).toBe("daemon-not-possible");
-			expect(h.remote.connections).toBe(0);
-		},
-	);
+	// #755 AC-W4: a Windows host is reached through the relay; only a system
+	// nobody detected yet is refused. Mutation: today's Linux-or-macOS guard.
+	it("refuses a host whose system is not known yet", async () => {
+		const h = await leftOn({ os: null });
+		expect(keepAndConnect(h).kind).toBe("daemon-not-possible");
+		expect(h.remote.connections).toBe(0);
+	});
+
+	it("accepts a Windows host whose system is known", async () => {
+		const h = await leftOn({ os: "windows" });
+		const outcome = keepAndConnect(h);
+		expect(outcome.kind).toBe("connecting");
+		if (outcome.kind === "connecting") await outcome.done;
+		expect(h.remote.connections).toBe(1);
+	});
 
 	it("has no binary path for --stop: a forced stop it cannot send is not confirmed", async () => {
 		const h = await leftOn();

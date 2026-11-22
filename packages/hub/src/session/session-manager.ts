@@ -111,11 +111,12 @@ import {
 } from "./quit-fence.js";
 import {
 	hostKeepsDaemon,
-	hostTriesDaemon,
 	REMOTE_STATE_DIR_COMMAND,
 	rememberSocketForwardingRefused,
 	remoteDaemonPaths,
 	remoteDaemonStopCommand,
+	socketForwardingRefusedOn,
+	windowsDaemonStopCommand,
 } from "./remote-daemon.js";
 import * as Acq from "./session-acquisition.js";
 import {
@@ -392,13 +393,14 @@ export class SessionManager {
 						setImmediate(() => transfers.hostConnected?.(hostId));
 					}
 					// The session went active before this agent was the host's: what
-					// only it knows is said again now (#79, #722, #765).
+					// only it knows is said again now (#79, #722, #765, #755).
 					if (
 						agent instanceof SshAgent &&
 						agent.connected &&
 						(agent.usedRemoteDaemon ||
 							agent.sftpSupport?.offered === false ||
-							agent.socketForwardingRefused) &&
+							agent.socketForwardingRefused ||
+							agent.remoteDaemonUnavailable !== null) &&
 						sessions.get(hostId)?.status === "active"
 					) {
 						this.broadcaster.announceSessionState(hostId);
@@ -553,11 +555,7 @@ export class SessionManager {
 					promptAuth,
 					deployOpts,
 					agentLaunchConfig(ctx),
-					hostTriesDaemon(
-						host,
-						ctx.configResolver?.sshConfig?.remoteDaemon === true,
-						ctx.socketForwardingRefusals,
-					),
+					hostKeepsDaemon(host, ctx.configResolver?.sshConfig?.remoteDaemon === true),
 				);
 
 				const hostKey = targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id)));
@@ -708,6 +706,15 @@ export class SessionManager {
 
 	getMetaDal(): SessionMetaDAL {
 		return this.metaDal;
+	}
+
+	/**
+	 * Whether a SPAWN or a restart is starting this terminal again: claimed
+	 * before its SPAWN goes and until the agent answers (#592). Its row stays
+	 * dead meanwhile, and no purge may delete it (#1118).
+	 */
+	isChannelStarting(channelId: string): boolean {
+		return this.ctx.startingChannels.has(channelId);
 	}
 
 	/**
@@ -946,6 +953,12 @@ export class SessionManager {
 			onSocketForwardingRefused: (reached) => {
 				rememberSocketForwardingRefused(this.ctx.socketForwardingRefusals, reached);
 			},
+			relayFirst: (reached) =>
+				socketForwardingRefusedOn(
+					reached,
+					this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+					this.ctx.socketForwardingRefusals,
+				),
 			onAgentUpdated: (hid, { besideRunningDaemon }) => {
 				this.ctx.hubLogger?.log(
 					"info",
@@ -2598,11 +2611,12 @@ export class SessionManager {
 					transfers,
 				};
 			}
-			if (transfers > 0) this.transfers?.interruptOn(hostId);
+			const interruptUploads = this.uploadsInterrupter(hostId, transfers);
 			const stop = await requestDaemonStop(agent, {
 				force: options.force,
 				isHubQuitting: () => this.isQuitting(),
 				onStopped: () => {
+					interruptUploads();
 					agent.closedByHub = true;
 					this.releaseAgent(hostId, agent);
 				},
@@ -2618,6 +2632,7 @@ export class SessionManager {
 					}),
 				};
 			}
+			interruptUploads();
 			let stopped = stop.kind === "stopped";
 			// A STOP with no connection to say it on cannot be refused, so it
 			// cannot say whether other hubs hold terminals there: only a forced
@@ -2753,6 +2768,19 @@ export class SessionManager {
 	}
 
 	/**
+	 * The agent's own `--stop` for the daemon `agent` reached, at `remotePath`:
+	 * on a Windows host as is (#755), elsewhere with the socket of the state
+	 * directory the host resolves. Null when the host cannot say where that is.
+	 */
+	private async daemonStopCommand(agent: SshAgent, remotePath: string): Promise<string | null> {
+		if (agent.remoteOs === "windows") return windowsDaemonStopCommand(remotePath);
+		const resolved = await agent.execOnHost(REMOTE_STATE_DIR_COMMAND);
+		const stateDir = resolved.stdout.trim();
+		if (resolved.exitCode !== 0 || !stateDir.startsWith("/")) return null;
+		return remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir));
+	}
+
+	/**
 	 * Stop-keeping's way to stop a daemon its STOP could not reach: the agent's
 	 * own `--stop`, run over the SSH connection. True once the daemon is
 	 * confirmed gone.
@@ -2763,16 +2791,15 @@ export class SessionManager {
 		const onMessage = (msg: ProtocolMessage): void => {
 			if (msg.type === "ERROR" && msg.code === ErrorCode.DISPLACED) displaced = true;
 		};
-		let stateDir: string;
+		const remotePath = agent.remoteAgentPath;
+		if (remotePath === null) return false;
+		let stopCommand: string | null;
 		try {
-			const resolved = await agent.execOnHost(REMOTE_STATE_DIR_COMMAND);
-			stateDir = resolved.stdout.trim();
-			if (resolved.exitCode !== 0 || !stateDir.startsWith("/") || this.isQuitting()) return false;
+			stopCommand = await this.daemonStopCommand(agent, remotePath);
 		} catch {
 			return false;
 		}
-		const remotePath = agent.remoteAgentPath;
-		if (remotePath === null || !agent.connected) return false;
+		if (stopCommand === null || this.isQuitting() || !agent.connected) return false;
 		const closed = new Promise<boolean>((resolve) => {
 			onClose = () => {
 				const stopped = !agent.closedByHub && !displaced && !this.isQuitting();
@@ -2787,9 +2814,7 @@ export class SessionManager {
 		agent.prependListener("close", onClose);
 		try {
 			const exec = async (): Promise<boolean> => {
-				const result = await agent.execOnHost(
-					remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir)),
-				);
+				const result = await agent.execOnHost(stopCommand);
 				return result.exitCode === 0 && !displaced && !agent.closedByHub && !this.isQuitting();
 			};
 			return await Promise.race([closed, exec().catch(() => false)]);
@@ -2865,8 +2890,12 @@ export class SessionManager {
 					transfers,
 				};
 			}
-			if (transfers > 0) this.transfers?.interruptOn(hostId);
-			const outcome = await this.stopAgentToReplace(hostId, agent, options);
+			const outcome = await this.stopAgentToReplace(
+				hostId,
+				agent,
+				options,
+				this.uploadsInterrupter(hostId, transfers),
+			);
 			if (outcome.replaced) this.lifecycle.endChannelsOfStoppedAgent(hostId);
 			return outcome;
 		} finally {
@@ -2886,11 +2915,19 @@ export class SessionManager {
 		}
 	}
 
-	/** Stop the daemon `agent` reaches, and let go of the connection once it has. */
+	/**
+	 * Stop the daemon `agent` reaches, and let go of the connection once it has.
+	 * `interruptUploads` runs on every answer but a refusal or an error, which
+	 * stop nothing and keep the connection: the agent stopped, its connection
+	 * ended (a displaced one included, which this hub closes), the wait ended
+	 * with no answer while it may be ending, or the STOP could not be sent,
+	 * the link being gone already (#1102).
+	 */
 	private async stopAgentToReplace(
 		hostId: string,
 		agent: SshAgent,
 		options: { readonly force?: boolean },
+		interruptUploads: () => void,
 	): Promise<ReplaceAgentOutcome> {
 		const stop = await requestDaemonStop(agent, {
 			force: options.force === true,
@@ -2899,10 +2936,12 @@ export class SessionManager {
 			// dial again, which is what the close handling would otherwise read,
 			// and the security log records the disconnect as this hub's doing.
 			onStopped: () => {
+				interruptUploads();
 				agent.closedByHub = true;
 				this.releaseAgent(hostId, agent);
 			},
 		});
+		if (stop.kind !== "refused" && stop.kind !== "error") interruptUploads();
 		switch (stop.kind) {
 			case "displaced":
 			case "closed_by_hub":
@@ -2937,8 +2976,8 @@ export class SessionManager {
 						"The agent did not say it had stopped. Its terminals may be ending; look again before asking twice.",
 				};
 			case "unsent":
-				// No connection to say it on: the out-of-band stop below still
-				// has the SSH connection, which is what it runs over.
+				// No connection to say it on, so the link the uploads used is
+				// gone: the out-of-band stop below runs over SSH.
 				break;
 		}
 
@@ -2947,19 +2986,16 @@ export class SessionManager {
 			return { replaced: false, message: "This hub does not know where that agent is installed." };
 		}
 
-		const resolved = await agent.execOnHost(REMOTE_STATE_DIR_COMMAND);
-		const stateDir = resolved.stdout.trim();
-		if (resolved.exitCode !== 0 || !stateDir.startsWith("/")) {
+		const command = await this.daemonStopCommand(agent, remotePath);
+		if (command === null) {
 			return { replaced: false, message: "The host could not say where its agent's socket is." };
 		}
 
-		const stopCommand = await agent.execOnHost(
-			remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir)),
-		);
+		const stopCommand = await agent.execOnHost(command);
 		if (stopCommand.exitCode !== 0) {
 			return {
 				replaced: false,
-				message: `The agent would not stop (exit ${stopCommand.exitCode}). Nothing was changed.`,
+				message: `The agent would not stop (exit ${stopCommand.exitCode}).`,
 			};
 		}
 
@@ -2970,6 +3006,23 @@ export class SessionManager {
 		return {
 			replaced: true,
 			message: "The agent was stopped. The next terminal on this host starts the current one.",
+		};
+	}
+
+	/**
+	 * Interrupt the uploads to `hostId`, once, when the stop they were
+	 * consented for goes ahead (#833): never before the STOP is answered,
+	 * unanswered in time, or could not be sent, so that a refusal, which stops
+	 * nothing, leaves them running (#1102). Each caller says which outcomes
+	 * interrupt them; `onStopped` calls it before the hub lets go of the
+	 * connection they use.
+	 */
+	private uploadsInterrupter(hostId: string, transfers: number): () => void {
+		let done = transfers === 0;
+		return () => {
+			if (done) return;
+			done = true;
+			this.transfers?.interruptOn(hostId);
 		};
 	}
 
@@ -3141,8 +3194,9 @@ export class SessionManager {
 		if (this.isQuitting()) return { kind: "quitting" };
 		if (this.daemonOnlyReaches.has(hostId)) return { kind: "connecting-already" };
 		if (options.daemonOnly === true) {
-			// A socket a daemon listens on is reached only on these (#701).
-			if (host.os !== "linux" && host.os !== "darwin") return { kind: "daemon-not-possible" };
+			// Deploying nothing, this connection detects nothing, and which way
+			// a daemon is reached depends on the system (#701, #755).
+			if (host.os === null || host.os === undefined) return { kind: "daemon-not-possible" };
 			const agent = this.ctx.agents.get(hostId);
 			if (agent?.connected === true) {
 				if (!(agent instanceof SshAgent) || !agent.usedRemoteDaemon) {
@@ -3387,12 +3441,11 @@ export class SessionManager {
 							connected: agent.connected,
 							usedRemoteDaemon: agent instanceof SshAgent && agent.usedRemoteDaemon,
 						},
-			// A host whose server refused the forwarding runs its agent on stdio
-			// (#765): its terminals end with the connection, daemon or not.
-			hostKeepsDaemon: hostTriesDaemon(
+			// A host whose server refuses the forwarding still keeps its daemon,
+			// reached through the relay (#755).
+			hostKeepsDaemon: hostKeepsDaemon(
 				host,
 				this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
-				this.ctx.socketForwardingRefusals,
 			),
 			liveTerminals,
 		};
@@ -3410,9 +3463,9 @@ export class SessionManager {
 
 	/**
 	 * A person's Connect or Reconnect: the connection it opens tries the
-	 * host's daemon again, since the server may allow socket forwarding now
+	 * socket's channel again, since the server may allow socket forwarding now
 	 * (#765). Nothing else forgets a refusal, short of a change to the route it
-	 * was seen on: a terminal opened there goes straight to stdio.
+	 * was seen on: a terminal opened there goes straight to the relay (#755).
 	 */
 	private askServerAgain(hostId: string): void {
 		this.ctx.socketForwardingRefusals.delete(hostId);
@@ -3718,8 +3771,17 @@ export class SessionManager {
 		if (stored === undefined) {
 			return fail("INTERNAL_ERROR", "The agent was reached, but the setting could not be saved.");
 		}
-		// A socket that answered proves the server forwards it now.
-		this.askServerAgain(hostId);
+		// A socket that answered through its own channel proves the server
+		// forwards it now. One reached through the relay proves nothing of the
+		// sort (#755): a refusal this reach proved is kept, under the host as it
+		// is now stored, since the Yes just written is part of its route.
+		if (agent instanceof SshAgent && agent.reachedThrough === "relay") {
+			if (agent.socketForwardingRefused) {
+				rememberSocketForwardingRefused(this.ctx.socketForwardingRefusals, stored);
+			}
+		} else {
+			this.askServerAgain(hostId);
+		}
 		return listed;
 	}
 
@@ -3751,12 +3813,9 @@ export class SessionManager {
 		// Only where something may still be holding the terminal. On stdio the
 		// agent died with its connection, so dialling out would reach a machine
 		// nobody asked for — and ask for a password — to find nothing.
-		// Nor where the server refused the forwarding a daemon is reached
-		// through (#765): its agent ran on stdio too.
-		const keepsDaemon = hostTriesDaemon(
+		const keepsDaemon = hostKeepsDaemon(
 			this.ctx.metaDal.getHost(hostId),
 			this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
-			this.ctx.socketForwardingRefusals,
 		);
 		if (!keepsDaemon) return false;
 
@@ -3866,11 +3925,7 @@ export class SessionManager {
 			promptAuth,
 			deployOpts,
 			agentLaunchConfig(this.ctx),
-			hostTriesDaemon(
-				host,
-				this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
-				this.ctx.socketForwardingRefusals,
-			),
+			hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
 			daemonOnly,
 		);
 
@@ -4056,11 +4111,7 @@ export class SessionManager {
 					promptAuth,
 					deployOpts,
 					agentLaunchConfig(this.ctx),
-					hostTriesDaemon(
-						host,
-						this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
-						this.ctx.socketForwardingRefusals,
-					),
+					hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
 					daemonOnly,
 				);
 				console.error(`[lasterm-ssh] creating SshAgent for host ${host.id} (retry)`);

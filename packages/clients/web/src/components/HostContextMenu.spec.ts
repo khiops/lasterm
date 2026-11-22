@@ -297,6 +297,8 @@ describe("Keep the agent left here and connect (#701)", () => {
 		{ os: "linux", sshRemoteDaemon: false },
 		{ os: "darwin", sshRemoteDaemon: null },
 		{ os: "linux" },
+		// #755 AC-W4: reached through the relay.
+		{ os: "windows", sshRemoteDaemon: false },
 	] as const)(
 		"offers it to an unconnected $os host not set to keep one ($sshRemoteDaemon)",
 		async (patch) => {
@@ -313,7 +315,6 @@ describe("Keep the agent left here and connect (#701)", () => {
 
 	it.each([
 		["an unknown system", { os: null, sshRemoteDaemon: false }],
-		["Windows", { os: "windows", sshRemoteDaemon: false }],
 		["a host set to keep one", { os: "linux", sshRemoteDaemon: true }],
 	] as const)("does not offer it to %s", async (_, patch) => {
 		hostIs(patch);

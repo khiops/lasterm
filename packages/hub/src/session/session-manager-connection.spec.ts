@@ -111,6 +111,10 @@ interface MockHost {
 	installedAgentSha: string | null;
 	/** The installed agent predates `--attach`: clap's usage error, no marker. */
 	relayPredates: boolean;
+	/** Where that agent is: on PATH at /usr/local/bin, or off PATH under ~/.local/bin. */
+	installedOffPath: boolean;
+	/** `sha256sum` fails on the installed agent. */
+	installedHashUnreadable: boolean;
 	/** Every command run over SSH, in order, before anything answers it (#701). */
 	execs: string[];
 	/**
@@ -269,6 +273,8 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 		relays: 0,
 		installedAgentSha: null,
 		relayPredates: false,
+		installedOffPath: false,
+		installedHashUnreadable: false,
 		execs: [],
 		daemonSocket: "running",
 		acknowledgesStop: false,
@@ -358,13 +364,31 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 						serveAgent(stream);
 						return;
 					}
-					if (info.command.startsWith("which lasterm-agent") && result.installedAgentSha) {
-						stream.write("/usr/local/bin/lasterm-agent\n");
-					} else if (
-						info.command.startsWith("sha256sum '/usr/local/bin/lasterm-agent'") &&
-						result.installedAgentSha
+					const installed = result.installedOffPath
+						? "/home/pi/.local/bin/lasterm-agent"
+						: "/usr/local/bin/lasterm-agent";
+					if (
+						result.installedAgentSha &&
+						!result.installedOffPath &&
+						info.command.startsWith("which lasterm-agent")
 					) {
-						stream.write(`${result.installedAgentSha}  /usr/local/bin/lasterm-agent\n`);
+						stream.write(`${installed}\n`);
+					} else if (
+						result.installedAgentSha &&
+						result.installedOffPath &&
+						info.command.startsWith('test -x "$HOME/.local/bin/lasterm-agent"')
+					) {
+						stream.write(`${installed}\n`);
+					} else if (
+						result.installedAgentSha &&
+						info.command.startsWith(`sha256sum '${installed}'`)
+					) {
+						if (result.installedHashUnreadable) {
+							stream.exit?.(1);
+							stream.end();
+							return;
+						}
+						stream.write(`${result.installedAgentSha}  ${installed}\n`);
 					}
 					if (info.command.includes("--attach")) {
 						answerRelay(
@@ -870,6 +894,25 @@ describe("a host whose SSH server refuses socket forwarding (#765)", { timeout: 
 		expect(h.remote.execs.filter((c) => c.includes("/proc/net/unix")).length).toBe(probesBefore);
 		expect(h.remote.daemonLaunches).toBe(1);
 		expect(h.remote.relays).toBe(2);
+
+		// A dropped link's automatic reconnect relays first too.
+		const relaysBefore = h.remote.relays;
+		const probesBeforeDrop = h.remote.execs.filter((c) => c.includes("/proc/net/unix")).length;
+		h.remote.dropLinks();
+		await until(
+			"the reconnect reaches the daemon again",
+			() => h.remote.relays > relaysBefore,
+			15_000,
+		);
+		await until(
+			"the reconnected agent is the host's",
+			() => agentOf(h)?.connected === true,
+			15_000,
+		);
+		expect(agentOf(h)?.reachedThrough).toBe("relay");
+		expect(h.remote.execs.filter((c) => c.includes("/proc/net/unix")).length).toBe(
+			probesBeforeDrop,
+		);
 
 		// A person's Reconnect asks the server again: the channel first, then
 		// the relay to the same daemon.
@@ -1504,6 +1547,57 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 			} finally {
 				rmSync(cached, { force: true });
 			}
+		});
+
+		it("relays through an agent trusted this session, with no pin and no copy of its own", async () => {
+			const h = await leftOn();
+			h.ctx.metaDal.updateHostOsArch(h.host.id, "linux", "x64");
+			h.remote.daemonSocket = "refusing";
+			h.remote.installedAgentSha = pinned;
+			h.ctx.trustedAgentSha256.set(h.host.id, pinned);
+			expect(await keptAndConnected(h)).toBe(true);
+			expect(h.remote.execs.filter((c) => c.includes("--attach"))).toEqual([
+				expect.stringMatching(/^\/usr\/local\/bin\/lasterm-agent --attach /),
+			]);
+		});
+
+		it("finds the agent off PATH where the deploy installs it", async () => {
+			const h = await leftOn();
+			h.ctx.metaDal.updateHostOsArch(h.host.id, "linux", "x64");
+			h.remote.daemonSocket = "refusing";
+			h.remote.installedAgentSha = pinned;
+			h.remote.installedOffPath = true;
+			h.ctx.metaDal.updateHostAgentSha256(h.host.id, pinned);
+			expect(await keptAndConnected(h)).toBe(true);
+			expect(h.remote.execs.filter((c) => c.includes("--attach"))).toEqual([
+				expect.stringMatching(/^\/home\/pi\/\.local\/bin\/lasterm-agent --attach /),
+			]);
+		});
+
+		it("with a copy of its own, refuses a file that matches only the pin", async () => {
+			const cached = join(getBinaryCacheDir(), `lasterm-agent-linux-x64-${HUB_VERSION}`);
+			mkdirSync(getBinaryCacheDir(), { recursive: true });
+			writeFileSync(cached, "this hub's own agent");
+			try {
+				const { h, message } = await refusedWith((h) => {
+					h.remote.installedAgentSha = pinned;
+					h.ctx.metaDal.updateHostAgentSha256(h.host.id, pinned);
+				});
+				expect(message).toMatch(/not one this hub can vouch for .*Connect installs this hub's/);
+				expect(h.remote.execs.filter((c) => c.includes("--attach"))).toEqual([]);
+			} finally {
+				rmSync(cached, { force: true });
+			}
+		});
+
+		it("says the hash could not be read for an agent it found", async () => {
+			const { h, message } = await refusedWith((h) => {
+				h.remote.installedAgentSha = pinned;
+				h.remote.installedHashUnreadable = true;
+				h.ctx.metaDal.updateHostAgentSha256(h.host.id, pinned);
+			});
+			expect(message).toMatch(/could not be checked: its hash could not be read/);
+			expect(h.remote.execs.filter((c) => c.includes("--attach"))).toEqual([]);
 		});
 
 		it("runs nothing whose hash matches neither this hub's agent nor the pin", async () => {

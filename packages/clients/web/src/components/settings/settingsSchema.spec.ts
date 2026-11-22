@@ -271,12 +271,61 @@ describe("settingsSchema", () => {
 	});
 });
 
-// ─── Every setting offered is read by something ──────────────────────────────
-//
-// Three settings were offered, stored and read by nothing: Max Panes, Default
-// Split Direction and Auto-open Welcome Tab. Changing them changed nothing, and
-// nobody could tell from the panel. A setting's key must appear in code other
-// than the panel, the validators, the config parser and the tests.
+// Where each setting is stored, written out: the key the readers read it under (#937). Renaming a
+// setting in the schema without its readers makes the panel write a key nothing reads; the reader
+// specs inject these same keys directly, so this table is what ties the panel to them.
+const STORED_AT: Record<string, string> = {
+	"terminal.fontFamily": "terminal:fontFamily",
+	"terminal.fontSize": "terminal:fontSize",
+	"terminal.cursorStyle": "terminal:cursorStyle",
+	"terminal.scrollback": "terminal:scrollback",
+	"terminal.bellSound": "terminal:bellSound",
+	"terminal.bellCustomFile": "terminal:bellCustomFile",
+	"terminal.bellBadge": "terminal:bellBadge",
+	"terminal.pasteWarning": "terminal:pasteWarning",
+	"terminal.whenEnded": "terminal:whenEnded",
+	"panes.keepEnded": "ui:panes.keepEnded",
+	"title.source": "ui:title.source",
+	"title.staticTitle": "ui:title.staticTitle",
+	"title.maxLength": "ui:title.maxLength",
+	"title.windowTitle": "ui:title.windowTitle",
+	"tabs.closeButton": "ui:tabs.closeButton",
+	"tabs.newTabPosition": "ui:tabs.newTabPosition",
+	"tabs.scope": "ui:tabs.scope",
+	"tabs.hostMarker": "ui:tabs.hostMarker",
+	"tabs.confirmCloseAll": "ui:tabs.confirmCloseAll",
+	"tabs.confirmCloseOthers": "ui:tabs.confirmCloseOthers",
+	"panes.maxPanes": "ui:panes.maxPanes",
+	"search.position": "ui:search.position",
+	"search.highlightOnClose": "ui:search.highlightOnClose",
+	"terminal.scrollbarMarkers": "terminal:scrollbarMarkers",
+	"search.historySize": "ui:search.historySize",
+	"channels.defaultGroupName": "ui:channels.defaultGroupName",
+	"channels.autoGroup": "ui:channels.autoGroup",
+	"startup.autoOpenWelcome": "ui:startup.autoOpenWelcome",
+	"terminal.transferDrop": "terminal:transferDrop",
+	"terminal.transferConfirmDrop": "terminal:transferConfirmDrop",
+	"terminal.transferOnConflict": "terminal:transferOnConflict",
+	"terminal.transferFollowCwd": "terminal:transferFollowCwd",
+	"terminal.transferFallbackDir": "terminal:transferFallbackDir",
+	"terminal.transferVerify": "terminal:transferVerify",
+	"transfer.panelSide": "ui:transfer.panelSide",
+	"transfer.openOnDrag": "ui:transfer.openOnDrag",
+	"transfer.maxConcurrent": "ui:transfer.maxConcurrent",
+	"transfer.showHidden": "ui:transfer.showHidden",
+};
+
+describe("settingsSchema — where each setting is stored (#937)", () => {
+	it("stores every setting under the key its readers read, and offers no other", () => {
+		const offered = Object.fromEntries(
+			settingsSchema.map((d) => {
+				const { storeSection, storeKey } = toStoreParams(d);
+				return [`${d.section}.${d.key}`, `${storeSection}:${storeKey}`];
+			}),
+		);
+		expect(offered).toEqual(STORED_AT);
+	});
+});
 
 describe("settingsSchema — a paste of several lines (#1015)", () => {
 	it("offers pasteWarning in Terminal, its three values, at every scope", () => {
@@ -290,46 +339,4 @@ describe("settingsSchema — a paste of several lines (#1015)", () => {
 			).toBe(true);
 		}
 	});
-});
-
-describe("settingsSchema — nothing offered in vain", () => {
-	// Every source that could act on a setting, as text. The web client, the
-	// hub, the shared package, and the desktop shell.
-	const sources = import.meta.glob(
-		[
-			"../../**/*.{ts,vue}",
-			"../../../../../hub/src/**/*.ts",
-			"../../../../../shared/src/**/*.ts",
-			"../../../../desktop/src-tauri/src/**/*.rs",
-			"!**/*.spec.ts",
-		],
-		{ query: "?raw", import: "default", eager: true },
-	) as Record<string, string>;
-
-	// Where a key is declared, validated, parsed or tested — not where it acts.
-	const notAReader =
-		/(settingsSchema\.ts|\/settings\/categories\/.*|hub\/src\/api\/config\.ts|hub\/src\/config\.ts|shared\/src\/config\.ts|shared\/src\/appearance\.ts|shared\/src\/file-transfer\.ts)$/;
-
-	// A setting offered before anything reads it, kept here until something
-	// does. None now: upload (#837) reads the last of the File transfer
-	// settings, `transfer_drop` and `max_concurrent`.
-	const notReadYet = new Set<string>();
-	const code = Object.entries(sources)
-		.filter(([path]) => !notAReader.test(path))
-		.map(([, text]) => text)
-		.join("\n");
-
-	it("reads the sources it searches", () => {
-		expect(Object.keys(sources).length).toBeGreaterThan(100);
-	});
-
-	for (const setting of settingsSchema) {
-		const leaf = setting.key.split(".").at(-1) ?? setting.key;
-		it.skipIf(notReadYet.has(setting.key))(`${setting.key} is read somewhere`, () => {
-			// A whole word, without escapes a formatter may rewrite: `source`
-			// must not be found inside `sources`.
-			const word = new RegExp(`(^|[^A-Za-z0-9_])${leaf}([^A-Za-z0-9_]|$)`);
-			expect(word.test(code)).toBe(true);
-		});
-	}
 });

@@ -363,6 +363,45 @@ describe("uploads over the hub's WebSocket and REST routes (#833)", () => {
 		]);
 	});
 
+	it("sends as many files at once as Settings › max concurrent says (#937)", async () => {
+		const h = await startHub(true);
+		const writer = await window(h);
+		// Set the way Settings sets it: a PUT of the UI section. The default is 2.
+		const set = await h.server.inject({
+			method: "PUT",
+			url: "/api/config/ui",
+			headers: bearer,
+			payload: { transfer: { maxConcurrent: 1 } },
+		});
+		expect(set.statusCode).toBe(200);
+		send(writer.socket, {
+			type: "TRANSFER_START",
+			requestId: "r-limit",
+			channelId: CHANNEL,
+			dir: h.dest,
+			items: ["a", "b", "c"].map((name) => ({
+				relPath: `${name}.bin`,
+				kind: "file",
+				size: 10,
+				mtime: 1_700_000_000_000,
+			})),
+			onConflict: "ask",
+		});
+		const accepted = await heard(writer.seen, (m) => m.type === "TRANSFER_ACCEPTED");
+		const states = async (): Promise<string[]> => {
+			const described = await h.server.inject({
+				method: "GET",
+				url: `/api/transfers/${accepted.transferId as string}`,
+				headers: bearer,
+			});
+			return (described.json().items as { state: string }[]).map((item) => item.state).sort();
+		};
+		await vi.waitFor(async () => expect(await states()).toContain("sending"), { timeout: 10_000 });
+		// Time for a second item to start if the limit let it (the default is 2).
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect(await states()).toEqual(["queued", "queued", "sending"]);
+	});
+
 	it("refuse a start from a window that does not hold the write lock", async () => {
 		const h = await startHub(true);
 		const writer = await window(h);

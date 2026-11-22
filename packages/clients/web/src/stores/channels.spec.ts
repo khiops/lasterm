@@ -855,7 +855,90 @@ describe("useChannelsStore — fetchChannelIndex", () => {
 			await store.fetchChannelIndex();
 
 			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("hub says");
+		});
+
+		it("does not keep a channel only the earlier host list published once a later fetch omits it", async () => {
+			const store = useChannelsStore();
+			const release = holdingIndex(
+				[row("ch-new", "host-1", "created")],
+				[row("ch-1", "host-1", "old")],
+			);
+			const fetching = store.fetchChannelIndex();
+			await store.fetchChannels("host-1");
+			release();
+			await fetching;
+
+			mockFetch.mockImplementation(() =>
+				Promise.resolve({ ok: true, json: () => Promise.resolve([row("ch-1", "host-1", "old")]) }),
+			);
+			await store.fetchChannelIndex();
+
 			expect(store.channelIndex.has("ch-new")).toBe(false);
+		});
+
+		describe("with two index fetches in flight", () => {
+			/** Two index requests that wait, each answered by its own call; the host list answers at once. */
+			function twoIndexRequests(hostRows: unknown[]) {
+				const answers: Array<(rows: unknown[]) => void> = [];
+				mockFetch.mockImplementation((url: string) => {
+					if (url.includes("/api/groups")) {
+						return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+					}
+					if (url.includes("host_id=")) {
+						return Promise.resolve({ ok: true, json: () => Promise.resolve(hostRows) });
+					}
+					return new Promise((resolve) => {
+						answers.push((rows) => resolve({ ok: true, json: () => Promise.resolve(rows) }));
+					});
+				});
+				return answers;
+			}
+
+			it("keeps the listed channel when the older response is taken first", async () => {
+				const store = useChannelsStore();
+				const answers = twoIndexRequests([row("ch-new", "host-1", "created")]);
+				const older = store.fetchChannelIndex();
+				const newer = store.fetchChannelIndex();
+				await store.fetchChannels("host-1");
+				answers[0]?.([row("ch-1", "host-1", "old")]);
+				await older;
+
+				expect(store.channelIndex.get("ch-new")).toEqual({
+					hostId: "host-1",
+					displayTitle: "created",
+				});
+
+				answers[1]?.([row("ch-1", "host-1", "old")]);
+				await newer;
+
+				expect(store.channelIndex.get("ch-new")).toEqual({
+					hostId: "host-1",
+					displayTitle: "created",
+				});
+			});
+
+			it("keeps the listed channel when the newer response is taken first", async () => {
+				const store = useChannelsStore();
+				const answers = twoIndexRequests([row("ch-new", "host-1", "created")]);
+				const older = store.fetchChannelIndex();
+				const newer = store.fetchChannelIndex();
+				await store.fetchChannels("host-1");
+				answers[1]?.([row("ch-1", "host-1", "old")]);
+				await newer;
+
+				expect(store.channelIndex.get("ch-new")).toEqual({
+					hostId: "host-1",
+					displayTitle: "created",
+				});
+
+				answers[0]?.([row("ch-1", "host-1", "old")]);
+				await older;
+
+				expect(store.channelIndex.get("ch-new")).toEqual({
+					hostId: "host-1",
+					displayTitle: "created",
+				});
+			});
 		});
 	});
 });

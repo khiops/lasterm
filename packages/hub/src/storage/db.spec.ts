@@ -68,12 +68,33 @@ describe("openTestDatabases", () => {
 		expect(row.v).toBe(30);
 	});
 
-	it("spool.db: schema_version is 1 after migration", () => {
+	it("spool.db: schema_version is 2 after migration", () => {
 		dbs = openTestDatabases();
 		const row = dbs.spool.prepare("SELECT MAX(version) as v FROM schema_version").get() as {
 			v: number;
 		};
-		expect(row.v).toBe(1);
+		expect(row.v).toBe(2);
+	});
+
+	// AC-MIG (#80): a spool at version 1 opens at version 2 with the recordings
+	// tables and their constraints. Mutation caught: the migration file absent.
+	it("spool.db: version 2 adds the recordings tables and their constraints", () => {
+		dbs = openTestDatabases();
+		const spool = dbs.spool;
+		const tables = spool
+			.prepare(
+				"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'recording%' ORDER BY name",
+			)
+			.all() as Array<{ name: string }>;
+		expect(tables.map((t) => t.name)).toEqual(["recording_blocks", "recordings"]);
+		const insert = (id: string, channel: string, extra = "") =>
+			spool.exec(
+				`INSERT INTO recordings (id, channel_id, host_label, title, started_at, cols, rows${extra ? ", end_reason" : ""}) VALUES ('${id}', '${channel}', 'h', 't', 'now', 80, 24${extra})`,
+			);
+		insert("r1", "c1");
+		expect(() => insert("r2", "c1")).toThrow(); // one open recording per terminal
+		expect(() => insert("r3", "c2", ", 'bogus'")).toThrow(); // end_reason CHECK
+		expect(() => spool.exec("UPDATE recordings SET deleting = 2 WHERE id = 'r1'")).toThrow();
 	});
 
 	it("meta.db: all required tables exist", () => {

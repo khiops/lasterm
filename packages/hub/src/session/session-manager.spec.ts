@@ -49,6 +49,11 @@ let nextLocalAttachNotFoundChannelId: string | null = null;
  * CHANNEL_EXIT, with this code, comes in the same read as the SPAWN_OK.
  */
 let nextLocalSpawnEndsWith: number | null = null;
+/** Set before a test to have the next local SPAWN_OK followed, in the same read, by this OUTPUT. */
+let nextLocalSpawnOutput: string | null = null;
+/** While set, local ATTACHes go unanswered; the request ids are kept here (#80). */
+let holdLocalAttach = false;
+const heldLocalAttaches: Array<{ channelId: string; requestId: string }> = [];
 /** Set before a test to have the next elevated local SPAWN start without a secret. */
 let nextLocalElevationPasswordless = false;
 let localChannelStateWaitCount = 0;
@@ -138,12 +143,21 @@ vi.mock("./agent-launcher.js", async () => {
 				}
 				const endsWith = nextLocalSpawnEndsWith;
 				nextLocalSpawnEndsWith = null;
+				const firstOutput = nextLocalSpawnOutput;
+				nextLocalSpawnOutput = null;
 				setImmediate(() => {
 					this.emit("message", {
 						type: "SPAWN_OK",
 						requestId: spawnMsg.requestId,
 						channelId,
 					});
+					if (firstOutput !== null) {
+						this.emit("message", {
+							type: "OUTPUT",
+							channelId,
+							data: new TextEncoder().encode(firstOutput),
+						});
+					}
 					// One read, as AgentConnection emits its frames: synchronously.
 					if (endsWith !== null) {
 						this.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: endsWith });
@@ -151,6 +165,10 @@ vi.mock("./agent-launcher.js", async () => {
 				});
 			} else if (msg.type === "ATTACH") {
 				const attachMsg = msg as unknown as { channelId: string; requestId: string };
+				if (holdLocalAttach) {
+					heldLocalAttaches.push(attachMsg);
+					return;
+				}
 				if (nextLocalAttachNotFoundChannelId === attachMsg.channelId) {
 					nextLocalAttachNotFoundChannelId = null;
 					setImmediate(() => {
@@ -202,6 +220,9 @@ vi.mock("./agent-launcher.js", async () => {
 });
 
 afterEach(() => {
+	nextLocalSpawnOutput = null;
+	holdLocalAttach = false;
+	heldLocalAttaches.length = 0;
 	nextLocalSpawnChannelIdOverride = null;
 	nextLocalSpawnError = null;
 	nextLocalSpawnEndsWith = null;
@@ -11265,5 +11286,357 @@ describe("SessionManager — a start on a host the hub is reconnecting (#605)", 
 
 		expect(await sm.handleSpawn("c-window", { type: "SPAWN", hostId: host.id })).not.toBeNull();
 		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(1);
+	});
+});
+
+// ─── Recordings (#80) ─────────────────────────────────────────────────────────
+//
+// The hub's wiring of the recorder: where it hears output, sizes, ends and a
+// lost connection, where a terminal's profile starts one, and where the screen
+// of a manual start comes from. The recorder's own decisions are in
+// recorder.spec.ts.
+
+describe("SessionManager recordings (#80)", () => {
+	let sm: SessionManager;
+	let dbManager: ReturnType<typeof openTestDatabases>;
+	let configDir: string | null = null;
+	let dal: MetaDAL;
+
+	function exportOf(manager: SessionManager, id: string): string[] {
+		let part = manager.recorder.exportPart(id);
+		let out = part?.body ?? "";
+		while (part?.nextSeq !== undefined) {
+			part = manager.recorder.exportPart(id, {
+				fromSeq: part.nextSeq,
+				lastSeq: part.lastSeq,
+				lost: part.lost,
+			});
+			out += part?.body ?? "";
+		}
+		return out.split("\n").filter(Boolean);
+	}
+
+	function emitLocal(msg: Record<string, unknown>): void {
+		(mockLocalAgents[0] as unknown as { emit: (event: string, m: unknown) => void }).emit(
+			"message",
+			msg,
+		);
+	}
+
+	async function hubWithToml(toml: string): Promise<void> {
+		const { ConfigResolver } = await import("../config.js");
+		configDir = makeTempDir("lasterm-rec-");
+		writeFileSync(join(configDir, "config.toml"), toml);
+		const resolver = new ConfigResolver(dal);
+		resolver.loadFromFile(configDir);
+		await sm.shutdown();
+		sm = new SessionManager(dbManager, undefined, undefined, resolver);
+	}
+
+	async function spawnLocal(): Promise<string> {
+		sm.addClient(makeClient("c1", []));
+		const channelId = await sm.handleSpawn("c1", { type: "SPAWN", hostId: "local" });
+		if (channelId === null) throw new Error("spawn failed");
+		return channelId;
+	}
+
+	beforeEach(() => {
+		localSpawnCount = 0;
+		nextLocalAgentCapabilities = [];
+		mockLocalAgents.length = 0;
+		dbManager = openTestDatabases();
+		dal = new MetaDAL(dbManager.meta);
+		sm = new SessionManager(dbManager);
+	});
+
+	afterEach(async () => {
+		await sm.shutdown();
+		dbManager.close();
+		if (configDir !== null) await removeTempDir(configDir);
+		configDir = null;
+	});
+
+	// AC-REC-START-MANUAL / AC-START-NO-SPOOL through the hub.
+	it("starts a manual recording from the agent's screen, reading no spool", async () => {
+		const channelId = await spawnLocal();
+		const reads = [
+			vi.spyOn(SpoolDAL.prototype, "getChunksByChannel"),
+			vi.spyOn(SpoolDAL.prototype, "readOutput"),
+			vi.spyOn(SpoolDAL.prototype, "getLatestSnapshot"),
+			vi.spyOn(SpoolDAL.prototype, "getNewestSnapshotRef"),
+		];
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+		for (const read of reads) expect(read).not.toHaveBeenCalled();
+		expect(exportOf(sm, started.id)[1]).toBe('[0.000, "o", "<mock-snapshot>"]');
+		for (const read of reads) read.mockRestore();
+	});
+
+	// AC-START-CORRELATED. Mutation caught: the first snapshot for the channel taken.
+	it("takes only the ATTACH_OK answering its own request", async () => {
+		const channelId = await spawnLocal();
+		holdLocalAttach = true;
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		const mine = heldLocalAttaches.at(-1);
+		emitLocal({
+			type: "SNAPSHOT_RES",
+			channelId,
+			snapshot: { serialized: "SCHEDULER", cols: 80, rows: 24, cursorX: 0, cursorY: 0 },
+			lastSeq: 0,
+		});
+		emitLocal({
+			type: "ATTACH_OK",
+			channelId,
+			requestId: "01OTHERREQUEST",
+			snapshot: { serialized: "OTHER", cols: 80, rows: 24, cursorX: 0, cursorY: 0 },
+			lastSeq: 0,
+		});
+		emitLocal({
+			type: "ATTACH_OK",
+			channelId,
+			requestId: mine?.requestId,
+			snapshot: { serialized: "MINE", cols: 80, rows: 24, cursorX: 0, cursorY: 0 },
+			lastSeq: 0,
+		});
+		expect(exportOf(sm, started.id)[1]).toBe('[0.000, "o", "MINE"]');
+	});
+
+	// Wiring of OUTPUT, resize and CHANNEL_EXIT; AC-NO-FINAL-REDRAW.
+	it("records the agent's output, the hub's size changes and the exit, not the final-screen redraw", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+		emitLocal({ type: "OUTPUT", channelId, data: new TextEncoder().encode("hello") });
+		sm.handleResize("c1", channelId, 120, 40);
+		emitLocal({
+			type: "CHANNEL_EXIT",
+			channelId,
+			exitCode: 7,
+			screen: { serialized: "FINAL-SCREEN", cols: 120, rows: 40, cursorX: 0, cursorY: 0 },
+		});
+		const lines = exportOf(sm, started.id)
+			.slice(1)
+			.map((l) => JSON.parse(l) as [number, string, string]);
+		expect(lines.map(([, code, data]) => [code, data])).toEqual([
+			["o", "<mock-snapshot>"],
+			["o", "hello"],
+			["r", "120x40"],
+			["x", "7"],
+		]);
+		expect(sm.recorder.listed(started.id)?.end_reason).toBe("exited");
+	});
+
+	// AC-REC-AUTO variants. Mutations caught: profile ignored, default on, layers ORed.
+	describe("by the terminal's profile", () => {
+		it("records nothing by default", async () => {
+			await spawnLocal();
+			expect(sm.recorder.list().recordings).toEqual([]);
+		});
+
+		it("records every terminal when set globally", async () => {
+			await hubWithToml("[terminal]\nrecord_terminals = true\n");
+			const channelId = await spawnLocal();
+			expect(sm.recordingIdOf(channelId)).not.toBeNull();
+		});
+
+		it("records a host's terminals when set on the host", async () => {
+			const localId = await sm.ensureLocalHost();
+			dal.updateHostProfile(localId, JSON.stringify({ recordTerminals: true }));
+			await hubWithToml("");
+			const channelId = await spawnLocal();
+			expect(sm.recordingIdOf(channelId)).not.toBeNull();
+		});
+
+		it("records nothing when the host turns off what is set globally", async () => {
+			const localId = await sm.ensureLocalHost();
+			dal.updateHostProfile(localId, JSON.stringify({ recordTerminals: false }));
+			await hubWithToml("[terminal]\nrecord_terminals = true\n");
+			const channelId = await spawnLocal();
+			expect(sm.recordingIdOf(channelId)).toBeNull();
+		});
+
+		it("follows the terminal's own setting over its host's, at a restart", async () => {
+			const localId = await sm.ensureLocalHost();
+			dal.updateHostProfile(localId, JSON.stringify({ recordTerminals: true }));
+			await hubWithToml("");
+			const on = await spawnLocal();
+			dal.updateChannelProfile(on, JSON.stringify({ recordTerminals: false }));
+			expect(await sm.restartChannel(on)).toBe(true);
+			expect(sm.recordingIdOf(on)).toBeNull();
+
+			dal.updateHostProfile(localId, JSON.stringify({ recordTerminals: false }));
+			dal.updateChannelProfile(on, JSON.stringify({ recordTerminals: true }));
+			expect(await sm.restartChannel(on)).toBe(true);
+			expect(sm.recordingIdOf(on)).not.toBeNull();
+		});
+
+		// AC-AUTO-FIRST-OUTPUT. Mutation caught: the automatic start after an await.
+		it("records the output read with the SPAWN_OK, at a spawn and at a restart", async () => {
+			await hubWithToml("[terminal]\nrecord_terminals = true\n");
+			nextLocalSpawnOutput = "first";
+			const channelId = await spawnLocal();
+			const first = sm.recordingIdOf(channelId) ?? "";
+			expect(exportOf(sm, first)[1]).toBe('[0.000, "o", "first"]');
+
+			nextLocalSpawnOutput = "again";
+			expect(await sm.restartChannel(channelId)).toBe(true);
+			const second = sm.recordingIdOf(channelId) ?? "";
+			expect(second).not.toBe(first);
+			// AC-REC-AUTO-RESTART: the previous run's recording ended `restarted`.
+			expect(sm.recorder.listed(first)?.end_reason).toBe("restarted");
+			expect(JSON.parse(exportOf(sm, second)[1] ?? "[]")[2]).toBe("again");
+		});
+	});
+
+	// AC-REC-AUTO-RESTART / respawn and respawn-fails.
+	it("ends a recording when a reconnection spawns its terminal again, whatever the answer", async () => {
+		await hubWithToml("[terminal]\nrecord_terminals = true\n");
+		const channelId = await spawnLocal();
+		const first = sm.recordingIdOf(channelId) ?? "";
+		const lifecycle = (
+			sm as unknown as {
+				lifecycle: { reAttachChannels: (h: string, s: string, a: unknown) => void };
+			}
+		).lifecycle;
+		const sessionId = dal.listSessions()[0]?.id ?? "";
+		nextLocalSpawnError = { code: "SPAWN_FAILED", message: "no" };
+		lifecycle.reAttachChannels(await sm.ensureLocalHost(), sessionId, mockLocalAgents[0]);
+		expect(sm.recorder.listed(first)?.end_reason).toBe("restarted");
+		await flushImmediate();
+		expect(sm.recordingIdOf(channelId)).toBeNull();
+		expect(exportOf(sm, first).length).toBeGreaterThan(0);
+	});
+
+	// AC-NO-AUTO-ADOPT. Mutation caught: automatic start on every trackChannel.
+	it("starts no recording when a reconciliation keeps a terminal alive", async () => {
+		await hubWithToml("[terminal]\nrecord_terminals = true\n");
+		const channelId = await spawnLocal();
+		const first = sm.recordingIdOf(channelId) ?? "";
+		sm.recorder.stop(first);
+		const lifecycle = (
+			sm as unknown as {
+				lifecycle: { reconcileChannelState: (h: string, s: unknown[], a: unknown) => void };
+			}
+		).lifecycle;
+		lifecycle.reconcileChannelState(
+			await sm.ensureLocalHost(),
+			[{ type: "AGENT_CHANNEL_STATE", channelId, title: "", pid: 1, alive: true }],
+			mockLocalAgents[0],
+		);
+		expect(sm.recordingIdOf(channelId)).toBeNull();
+	});
+
+	// AC-LOST-CONNECTION-MARKER. Mutations caught: no marker, a held byte joined across the loss, a marker on a stale close.
+	it("marks a lost agent connection once, after writing a held byte", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+		emitLocal({ type: "OUTPUT", channelId, data: new Uint8Array([0xc3]) });
+		const agent = mockLocalAgents[0] as unknown as {
+			simulateDisconnect: () => void;
+			emit: (e: string) => void;
+		};
+		agent.simulateDisconnect();
+		agent.emit("close"); // a stale close: this connection is no longer the host's
+		emitLocal({ type: "OUTPUT", channelId, data: new Uint8Array([0xa9]) });
+		const lines = exportOf(sm, started.id)
+			.slice(1)
+			.map((l) => JSON.parse(l) as [number, string, string]);
+		expect(lines.map(([, c, d]) => [c, d])).toEqual([
+			["o", "<mock-snapshot>"],
+			["o", "�"],
+			[
+				"m",
+				"lasterm: connection to the agent lost; output until it returns may be missing or late",
+			],
+			["o", "�"],
+		]);
+	});
+
+	// AC-END-REASONS. Mutation caught: an end hooked only at CHANNEL_EXIT.
+	describe("ends a recording with its terminal", () => {
+		it("killed by destroyChannel", async () => {
+			const channelId = await spawnLocal();
+			const started = sm.startRecording(channelId);
+			if (!started.ok) throw new Error(started.code);
+			sm.destroyChannel(channelId);
+			expect(sm.recorder.listed(started.id)?.end_reason).toBe("killed");
+			expect(sm.recordingIdOf(channelId)).toBeNull();
+		});
+
+		it("gone when its host's stopped agent takes it", async () => {
+			const channelId = await spawnLocal();
+			const started = sm.startRecording(channelId);
+			if (!started.ok) throw new Error(started.code);
+			(
+				sm as unknown as { lifecycle: { endChannelsOfStoppedAgent: (h: string) => void } }
+			).lifecycle.endChannelsOfStoppedAgent(await sm.ensureLocalHost());
+			expect(sm.recorder.listed(started.id)?.end_reason).toBe("gone");
+		});
+
+		it("gone when the agent no longer holds it", async () => {
+			const channelId = await spawnLocal();
+			const started = sm.startRecording(channelId);
+			if (!started.ok) throw new Error(started.code);
+			(
+				sm as unknown as {
+					lifecycle: { reconcileChannelState: (h: string, s: unknown[], a: unknown) => void };
+				}
+			).lifecycle.reconcileChannelState(await sm.ensureLocalHost(), [], mockLocalAgents[0]);
+			expect(sm.recorder.listed(started.id)?.end_reason).toBe("gone");
+		});
+
+		it("killed when its host is deleted by force", async () => {
+			const host = dal.createHost({
+				type: "ssh",
+				label: "pi",
+				sshHost: "pi@localhost",
+				sshAuth: "key",
+				sshKeyPath: "/nonexistent/key",
+			});
+			sm.addClient(makeClient("c1", []));
+			const channelId = await sm.handleSpawn("c1", { type: "SPAWN", hostId: host.id });
+			if (channelId === null) throw new Error("spawn failed");
+			sm.recorder.startAutomatic({
+				channelId,
+				hostId: host.id,
+				hostLabel: "pi",
+				cols: 80,
+				rows: 24,
+			});
+			const id = sm.recordingIdOf(channelId) ?? "";
+			expect(sm.deleteHost(host.id, { force: true }).kind).toBe("deleted");
+			expect(sm.recorder.listed(id)?.end_reason).toBe("killed");
+		});
+	});
+
+	// AC-PURGE-KEEPS. Mutation caught: recordings deleted with their channel or by the GC.
+	it("keeps a recording when its terminal is purged and the GC runs", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		emitLocal({ type: "OUTPUT", channelId, data: new TextEncoder().encode("kept") });
+		sm.destroyChannel(channelId);
+		dal.deleteChannel(channelId);
+		await sm.purgeChannelOutput([channelId]);
+		expect(sm.recorder.listed(started.id)).toBeDefined();
+		expect(exportOf(sm, started.id).join("\n")).toContain("kept");
+	});
+
+	// AC-INTERRUPTED at a real hub start (a SessionManager over the same databases).
+	it("ends at the next hub start a recording a crashed hub left open", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		const next = new SessionManager(dbManager);
+		try {
+			expect(next.recorder.listed(started.id)?.end_reason).toBe("crashed");
+		} finally {
+			await next.shutdown();
+		}
 	});
 });

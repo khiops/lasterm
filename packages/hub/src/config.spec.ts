@@ -525,6 +525,37 @@ describe("loadGcConfig", () => {
 		expect(config.deadRetentionHours).toBe(DEFAULT_GC_CONFIG.deadRetentionHours);
 	});
 
+	// AC-CONFIG (#80). Mutation caught: Math.max(0, …), which accepts 0.
+	it.each([
+		["", 1024, false],
+		["max_total_mb = 5", 5, false],
+		["max_total_mb = 0", 1024, true],
+		["max_total_mb = -3", 1024, true],
+		["max_total_mb = 1.5", 1024, true],
+		['max_total_mb = "10"', 1024, true],
+	])("reads [recording] %j as %i", (line, expected, warns) => {
+		const dir = join(tmpdir(), `lasterm-rec-test-${Date.now()}-${Math.random()}`);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "config.toml"),
+			`[recording]
+${line}
+`,
+		);
+		const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		try {
+			expect(loadGcConfig(dir).recordingMaxTotalMb).toBe(expected);
+			const warned = stderr.mock.calls.some((c) =>
+				String(c[0]).includes(
+					"[lasterm-config] [recording] max_total_mb must be an integer of at least 1; using 1024",
+				),
+			);
+			expect(warned).toBe(warns);
+		} finally {
+			stderr.mockRestore();
+		}
+	});
+
 	it("parses both gc keys together", () => {
 		const dir = join(tmpdir(), `lasterm-gc-test-${Date.now()}`);
 		mkdirSync(dir, { recursive: true });

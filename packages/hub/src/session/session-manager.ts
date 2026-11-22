@@ -1241,7 +1241,9 @@ export class SessionManager {
 		// Invariant 3: release checks leases.size===0 && no channels → reap if needed.
 		try {
 			// B1: outer try wraps all paths that hold a lease (B1 fix — every early return hits this finally)
-			if (!agent?.connected && host.type === "ssh") {
+			// A connected agent whose acquisition is still open has its daemon list being
+			// taken up (#1165): it is not the host's yet, so this SPAWN joins the acquisition.
+			if ((!agent?.connected || this.ctx.acquisitions.has(hostId)) && host.type === "ssh") {
 				// ── SSH: no live agent — use acquisition state machine ────────────────
 				const existing = this.ctx.acquisitions.get(hostId);
 
@@ -1322,8 +1324,9 @@ export class SessionManager {
 						// connection below answers it.
 						client.send({ type: "HOST_CONNECTING", hostId } satisfies HostConnectingMessage);
 						// B4 fix: _connectSshAgent returns the wired agent WITHOUT setting
-						// ctx.agents — we set it here, atomically with commit(), so no
-						// concurrent SPAWN can observe "agent live + acq live" simultaneously.
+						// ctx.agents — we set it here, inside the commit guard. The agent is
+						// live while the acq stays open through the adoption; a SPAWN seeing
+						// both joins the acq (#1165).
 						let connectedAgent: import("./agent-connection.js").AgentConnection;
 						try {
 							connectedAgent = await this._connectSshAgent(
@@ -1370,16 +1373,17 @@ export class SessionManager {
 
 						// Connect succeeded — commit: P1 synchronous guarded step (invariant 7).
 						// Guard: map identity + state + signal + session currency.
-						// B4 fix: ctx.agents.set is done HERE, inside the guard, atomically with
-						// commit() — no microtask gap between "agent visible" and "acq deleted".
+						// B4 fix: ctx.agents.set is done HERE, inside the guard; the acq is
+						// deleted by commit() after the daemon's list is taken up (#1165).
 						if (
 							this.ctx.acquisitions.get(hostId) === connectingAcq &&
 							connectingAcq.state === "CONNECTING" &&
 							!connectingAcq.controller.signal.aborted &&
 							this.ctx.sessions.get(hostId)?.id === sessionState.id
 						) {
-							// P2: set agent + commit atomically — agent becomes visible only when
-							// the acq is simultaneously deleted (no dual-authority window).
+							// P2: the agent is visible (connected) while the adoption below runs and
+							// the acq stays open until it is over: a SPAWN meeting both joins the
+							// acq instead of taking the fast path (#1165).
 							this.ctx.commits.adoptAgent(spawnFence, hostId, connectedAgent);
 							try {
 								await this.lifecycle.adoptWhatTheDaemonHolds(hostId, connectedAgent);
@@ -3284,6 +3288,9 @@ export class SessionManager {
 			// Deploying nothing, this connection detects nothing, and which way
 			// a daemon is reached depends on the system (#701, #755).
 			if (host.os === null || host.os === undefined) return { kind: "daemon-not-possible" };
+			// An agent published while its acquisition is open is still being taken up
+			// (#1165): another connection is under way, whatever the agent says.
+			if (this.ctx.acquisitions.has(hostId)) return { kind: "connecting-already" };
 			const agent = this.ctx.agents.get(hostId);
 			if (agent?.connected === true) {
 				if (!(agent instanceof SshAgent) || !agent.usedRemoteDaemon) {
@@ -4297,7 +4304,7 @@ export class SessionManager {
 				}
 				if (!daemonOnly) this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 				this.agentMgr.wireAgentEvents(hostId, sessionId, retryAgent);
-				// B4: do NOT set ctx.agents here — caller sets it atomically with commit().
+				// B4: do NOT set ctx.agents here — caller sets it, inside its commit guard.
 				return retryAgent;
 			}
 			// A prompt cancelled is no failure: it is said as what it is, and a
@@ -4325,7 +4332,7 @@ export class SessionManager {
 		// First connection succeeded without TOFU/mismatch prompt
 		if (!daemonOnly) this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 		this.agentMgr.wireAgentEvents(hostId, sessionId, sshAgent);
-		// B4: do NOT set ctx.agents here — caller sets it atomically with commit().
+		// B4: do NOT set ctx.agents here — caller sets it, inside its commit guard.
 		return sshAgent;
 	}
 

@@ -2466,4 +2466,19 @@ describe("a SPAWN while the connecting one takes up the daemon's list (#1165)", 
 		expect(h.ctx.acquisitions.has(h.host.id)).toBe(false);
 		expect(h.remote.connections).toBe(1);
 	});
+
+	it("answers a daemon-only Connect busy, not connected, while that adoption runs", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		h.remote.holdsList = true;
+		h.remote.held = [generateId()];
+
+		const leader = h.sm.handleSpawn(h.window.id, { type: "SPAWN", hostId: h.host.id });
+		await until("the daemon is asked for its list", () => h.remote.listStream !== null);
+
+		expect(keepAndConnect(h).kind).toBe("connecting-already");
+
+		h.remote.releaseList();
+		expect(await leader).not.toBeNull();
+		expect(keepAndConnect(h).kind).toBe("connected");
+	});
 });

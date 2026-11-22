@@ -917,8 +917,18 @@ describe("SshAgent", () => {
 
 		it("relays to a daemon that was already listening, and leaves it alone", async () => {
 			const remote = createForwardingRefusingServer({ alreadyListening: true, relayPrelude: 40 });
+			const logged = vi.spyOn(console, "error");
 			const { agent, start } = await reach(remote.server);
-			await start;
+			try {
+				await start;
+				expect(logged.mock.calls.map((call) => String(call[0]))).toContainEqual(
+					expect.stringMatching(
+						/skipped 40 bytes the remote shell printed before the relay's HELLO/,
+					),
+				);
+			} finally {
+				logged.mockRestore();
+			}
 
 			expect(agent.reachedThrough).toBe("relay");
 			expect(agent.reachedRunningDaemon).toBe(true);

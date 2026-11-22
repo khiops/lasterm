@@ -511,7 +511,15 @@ export class SshAgent extends AgentConnection {
 				this.host,
 				toDeployOptions(options, this.host, hostname),
 			);
-			const agent = await checked;
+			let agent: RelayAgent;
+			try {
+				agent = await checked;
+			} catch (err) {
+				// Every failure to check is a relay that cannot run (#755).
+				throw new RelayFailed(
+					`the agent on this host could not be checked: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
 			if (agent.kind === "refused") throw new RelayFailed(agent.reason);
 			try {
 				return await openRelay(client, relayCommand(agent.path, socketPath, waitMs));

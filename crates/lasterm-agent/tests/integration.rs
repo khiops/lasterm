@@ -1906,13 +1906,24 @@ async fn relay_exits_4_on_denied_endpoint() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = StopFixture::new("relay-denied");
     let _listener = std::os::unix::net::UnixListener::bind(&fixture.socket).expect("bind");
+    /// Gives the directory its mode back whatever fails, so it can be removed.
+    struct Searchable<'a>(&'a std::path::Path);
+    impl Drop for Searchable<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
     std::fs::set_permissions(&fixture.dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let _searchable = Searchable(&fixture.dir);
     let relay = spawn_relay(&fixture, &[]);
-    let result = relay_end(relay, Duration::from_secs(10)).await;
-    std::fs::set_permissions(&fixture.dir, std::fs::Permissions::from_mode(0o700))
-        .expect("chmod back");
-    let (status, stderr, _) = result;
+    let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
     assert_eq!(status, 4, "{stderr:?}");
+    assert_eq!(
+        stderr.len(),
+        3,
+        "start, the marker, the human line: {stderr:?}"
+    );
+    assert_eq!(stderr[0], "lasterm-attach: start");
     assert_eq!(stderr[1], "lasterm-attach: denied");
 }
 
@@ -1971,6 +1982,12 @@ async fn relay_busy_pipe_is_not_nothing_listens() {
     let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
     drop(server);
     assert_eq!(status, 6, "{stderr:?}");
+    assert_eq!(
+        stderr.len(),
+        3,
+        "start, the marker, the human line: {stderr:?}"
+    );
+    assert_eq!(stderr[0], "lasterm-attach: start");
     assert_eq!(stderr[1], "lasterm-attach: busy");
     assert!(
         started.elapsed() >= Duration::from_millis(1_800),
@@ -2011,4 +2028,56 @@ async fn relay_retries_a_busy_pipe() {
         .expect("read");
     assert_eq!(&got, b"freed");
     drop(first);
+}
+
+/// A default endpoint that cannot be resolved is an outcome the relay says,
+/// after `start`, not silence a hub would read as an agent without
+/// `--attach`. Mutation: resolving before `start`.
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_says_why_it_has_no_endpoint() {
+    let output = Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
+        .arg("--attach")
+        .env_remove("HOME")
+        .env_remove("XDG_STATE_HOME")
+        .output()
+        .await
+        .expect("run relay");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(lines.first(), Some(&"lasterm-attach: start"), "{stderr}");
+    assert!(
+        lines
+            .get(1)
+            .is_some_and(|line| line.starts_with("lasterm-attach: failed ")),
+        "{stderr}"
+    );
+}
+
+/// What the daemon sends that cannot reach stdout makes the relay exit 1, not
+/// 0. Mutation: every end reported as 0.
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_fails_when_it_cannot_deliver_the_daemons_bytes() {
+    let fixture = StopFixture::new("relay-full");
+    let _daemon = fixture.spawn_daemon();
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full");
+    let mut relay = fixture
+        .agent("--attach")
+        .args(["--wait", "5000"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(full)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn relay");
+    let _stdin = relay.stdin.take();
+    let status = tokio::time::timeout(Duration::from_secs(10), relay.wait())
+        .await
+        .expect("relay exited in time")
+        .expect("relay status");
+    assert_eq!(status.code(), Some(1));
 }

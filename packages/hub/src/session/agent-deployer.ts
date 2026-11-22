@@ -1023,18 +1023,8 @@ export async function verifiedRelayAgent(
 	const selection = await selectRemoteAgentPath(client, os);
 	const path = selection.existing ?? (await selection.installTarget());
 	const remoteSha = await getRemoteSha256(client, path, os);
-	let localBinary: string | null = null;
-	try {
-		localBinary = await resolveLocalAgentBinary(
-			os,
-			arch,
-			options,
-			options.hubVersion ?? HUB_VERSION,
-		);
-	} catch {
-		localBinary = null;
-	}
-	const localSha = localBinary === null ? null : getLocalSha256(localBinary);
+	// Before any local reference is resolved: a packaged hub may download one,
+	// for nothing to compare it with.
 	if (remoteSha === null) {
 		return {
 			kind: "refused",
@@ -1044,6 +1034,27 @@ export async function verifiedRelayAgent(
 					: "the agent on this host could not be checked: its hash could not be read",
 		};
 	}
+	// A reference that exists but cannot be had (a failed download, a cached
+	// file that cannot be read) is not the absence of one: the pin does not
+	// stand in for it.
+	const unavailable: RelayAgent = {
+		kind: "refused",
+		reason:
+			"the agent on this host could not be checked: this hub could not read its own agent for that system",
+	};
+	let localBinary: string | null;
+	try {
+		localBinary = await resolveLocalAgentBinary(
+			os,
+			arch,
+			options,
+			options.hubVersion ?? HUB_VERSION,
+		);
+	} catch {
+		return unavailable;
+	}
+	const localSha = localBinary === null ? null : getLocalSha256(localBinary);
+	if (localBinary !== null && localSha === null) return unavailable;
 	if (localSha !== null) {
 		return remoteSha === localSha
 			? { kind: "verified", path, localCopy: true }

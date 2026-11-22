@@ -60,7 +60,8 @@ struct Cli {
     /// named pipe on Windows, and nothing else: how a hub reaches a remote
     /// daemon where its SSH server carries no channel to that endpoint (#755).
     /// Connects to `--socket`, else the channel's default endpoint. stderr
-    /// carries `lasterm-attach:` lines only; the exit status is 0 once a
+    /// carries `lasterm-attach:` lines, and a plain line saying why after a
+    /// failure; the exit status is 0 once a
     /// connection ended, 3 when nothing listens, 4 when the endpoint refused
     /// this account, 6 when a pipe stayed busy, 1 otherwise.
     #[arg(long, conflicts_with_all = ["daemon", "stdio", "stop"])]
@@ -246,11 +247,15 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
     // The relay logs nothing: its stderr carries the outcome lines a hub reads,
     // and nothing else may land between them (#755).
     if cli.attach {
-        let socket = match cli.socket {
-            Some(socket) => socket,
-            None => default_socket_path()?,
-        };
-        let status = relay::run(socket, std::time::Duration::from_millis(cli.wait)).await;
+        let socket = cli.socket;
+        let status = relay::run(
+            move || match socket {
+                Some(socket) => Ok(socket),
+                None => default_socket_path(),
+            },
+            std::time::Duration::from_millis(cli.wait),
+        )
+        .await;
         std::process::exit(status);
     }
 

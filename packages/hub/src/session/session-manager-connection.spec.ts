@@ -10,7 +10,7 @@ import { sshAddress, targetRoute } from "../ssh-route.js";
 
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type net from "node:net";
 import { join } from "node:path";
 import {
@@ -30,7 +30,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { HUB_VERSION } from "../build-version.js";
 import { openTestDatabases } from "../storage/db.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
-import { deployAgentIfNeeded } from "./agent-deployer.js";
+import { deployAgentIfNeeded, getBinaryCacheDir } from "./agent-deployer.js";
 import { socketForwardingRefusedOn } from "./remote-daemon.js";
 import type { SessionState, SharedSessionContext } from "./session-context.js";
 import { SessionManager, type WsClient } from "./session-manager.js";
@@ -109,6 +109,8 @@ interface MockHost {
 	relays: number;
 	/** The hash `sha256sum` reports for an agent `which` finds on PATH, or none. */
 	installedAgentSha: string | null;
+	/** The installed agent predates `--attach`: clap's usage error, no marker. */
+	relayPredates: boolean;
 	/** Every command run over SSH, in order, before anything answers it (#701). */
 	execs: string[];
 	/**
@@ -266,6 +268,7 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 		daemonStops: 0,
 		relays: 0,
 		installedAgentSha: null,
+		relayPredates: false,
 		execs: [],
 		daemonSocket: "running",
 		acknowledgesStop: false,
@@ -293,6 +296,12 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 	 */
 	const answerRelay = (stream: Stream, listens: boolean): void => {
 		const relay = stream as Stream & { stderr: NodeJS.WritableStream };
+		if (result.relayPredates) {
+			relay.stderr.write("error: unexpected argument '--attach' found\n");
+			stream.exit?.(2);
+			stream.end();
+			return;
+		}
 		relay.stderr.write("lasterm-attach: start\n");
 		if (listens) {
 			result.relays++;
@@ -1358,7 +1367,7 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 			expect.objectContaining({
 				code: "DAEMON_UNREACHABLE",
 				message:
-					"Lasterm could not reach an agent on this host, and cannot tell whether one is running. Lasterm could not reach the agent through its relay: no Lasterm agent was found on this host.",
+					"Lasterm could not reach an agent on this host: its relay failed: no Lasterm agent was found on this host.",
 			}),
 		);
 		expect(startingCommands(h)).toEqual([]);
@@ -1451,6 +1460,61 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 			);
 		},
 	);
+
+	describe("an agent the relay cannot run (#755)", () => {
+		const pinned = "c".repeat(64);
+
+		async function refusedWith(
+			setup: (h: Harness) => void,
+		): Promise<{ h: Harness; message: string }> {
+			const h = await leftOn();
+			h.ctx.metaDal.updateHostOsArch(h.host.id, "linux", "x64");
+			h.remote.daemonSocket = "refusing";
+			setup(h);
+			expect(await keptAndConnected(h)).toBe(false);
+			const error = errorsHeard(h).find((e) => e.code === "DAEMON_UNREACHABLE");
+			expect(startingCommands(h)).toEqual([]);
+			return { h, message: error?.message ?? "" };
+		}
+
+		it("says an agent older than the relay cannot be fixed by Connect when this hub has no copy", async () => {
+			const { message } = await refusedWith((h) => {
+				h.remote.installedAgentSha = pinned;
+				h.remote.relayPredates = true;
+				h.ctx.metaDal.updateHostAgentSha256(h.host.id, pinned);
+			});
+			expect(message).toBe(
+				"Lasterm could not reach an agent on this host: its relay failed: the agent on this host predates the relay; this hub has no copy of its own agent to install.",
+			);
+		});
+
+		it("says Connect installs this hub's agent when it has a copy of its own", async () => {
+			const cached = join(getBinaryCacheDir(), `lasterm-agent-linux-x64-${HUB_VERSION}`);
+			mkdirSync(getBinaryCacheDir(), { recursive: true });
+			writeFileSync(cached, "this hub's own agent");
+			try {
+				const sha = createHash("sha256").update("this hub's own agent").digest("hex");
+				const { message } = await refusedWith((h) => {
+					h.remote.installedAgentSha = sha;
+					h.remote.relayPredates = true;
+				});
+				expect(message).toBe(
+					"Lasterm could not reach an agent on this host: its relay failed: the agent on this host predates the relay; Connect installs this hub's.",
+				);
+			} finally {
+				rmSync(cached, { force: true });
+			}
+		});
+
+		it("runs nothing whose hash matches neither this hub's agent nor the pin", async () => {
+			const { h, message } = await refusedWith((h) => {
+				h.remote.installedAgentSha = "d".repeat(64);
+				h.ctx.metaDal.updateHostAgentSha256(h.host.id, pinned);
+			});
+			expect(message).toMatch(/could not be checked: this hub has no copy of its own agent/);
+			expect(h.remote.execs.filter((c) => c.includes("--attach"))).toEqual([]);
+		});
+	});
 
 	it("forgets an earlier forwarding refusal once the socket answered", async () => {
 		const h = await leftOn();

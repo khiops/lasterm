@@ -3812,6 +3812,26 @@ describe("verifiedRelayAgent: the agent a daemon-only connection may relay throu
 		});
 	});
 
+	it("refuses, rather than trusting the pin, when this hub's own agent cannot be had", async () => {
+		const result = await verifiedRelayAgent(
+			remoteWith(onPath, REMOTE_SHA_DIFFERENT, true),
+			{ os: "linux", arch: "x64" },
+			makeOptions({
+				pinnedSha256: REMOTE_SHA_DIFFERENT,
+				detectSea: () => true,
+				hubVersion: TEST_HUB_VERSION,
+				fetchAgentBinary: async () => {
+					throw new FetchError("NOT_FOUND", "offline");
+				},
+			}),
+		);
+		expect(result).toEqual({
+			kind: "refused",
+			reason:
+				"the agent on this host could not be checked: this hub could not read its own agent for that system",
+		});
+	});
+
 	it("says no agent was found when there is none", async () => {
 		expect(
 			await verifiedRelayAgent(

@@ -63,9 +63,18 @@ fn say(line: &str) {
     eprintln!("{MARKER} {line}");
 }
 
-/// Run the relay and return the process exit status.
-pub(crate) async fn run(endpoint: String, wait: Duration) -> i32 {
+/// Run the relay and return the process exit status. `endpoint` resolves
+/// the endpoint after `start` is said, so that a failure to resolve one is an
+/// outcome like any other, not silence.
+pub(crate) async fn run(endpoint: impl FnOnce() -> std::io::Result<String>, wait: Duration) -> i32 {
     say("start");
+    let endpoint = match endpoint() {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            say(&format!("failed {}", one_line(&error.to_string())));
+            return exit::FAILED;
+        }
+    };
     match connect(&endpoint, wait).await {
         Ok(stream) => relay(stream).await,
         Err(ConnectError::NothingListens) => {
@@ -154,6 +163,11 @@ async fn connect(endpoint: &str, wait: Duration) -> Result<Endpoint, ConnectErro
     }
 }
 
+/// How long the endpoint may take to read what this relay wrote before it is
+/// closed anyway, and how long what the daemon sent may take to reach stdout
+/// once the hub's side failed.
+const CLOSE_GRACE: Duration = Duration::from_secs(2);
+
 /// Copy both ways until one side ends, then exit.
 ///
 /// When stdin ends, the hub is done with this connection: what was read is
@@ -161,7 +175,8 @@ async fn connect(endpoint: &str, wait: Duration) -> Result<Endpoint, ConnectErro
 /// pipe client cannot half-close (Tokio's shutdown only flushes), and a daemon
 /// waiting for an end that never comes would keep the connection registered.
 /// When the endpoint ends, what it sent goes out on stdout, then the relay
-/// exits; whatever stdin still holds is the hub's to notice.
+/// exits; whatever stdin still holds is the hub's to notice. A failed copy is
+/// exit 1: what it was carrying did not all arrive.
 async fn relay(stream: Endpoint) -> i32 {
     #[cfg(windows)]
     let raw = {
@@ -171,27 +186,39 @@ async fn relay(stream: Endpoint) -> i32 {
     let (mut from_daemon, mut to_daemon) = tokio::io::split(stream);
     let mut downstream = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
-        let result = tokio::io::copy(&mut from_daemon, &mut stdout).await;
-        let _ = stdout.flush().await;
-        result.map(|_| ())
+        tokio::io::copy(&mut from_daemon, &mut stdout).await?;
+        stdout.flush().await
     });
     let upstream = async {
         let mut stdin = tokio::io::stdin();
-        let result = tokio::io::copy(&mut stdin, &mut to_daemon).await;
-        let _ = to_daemon.flush().await;
-        result.map(|_| ())
+        tokio::io::copy(&mut stdin, &mut to_daemon).await?;
+        to_daemon.flush().await
     };
     tokio::select! {
-        _ = &mut downstream => exit::ENDED,
-        _ = upstream => {
+        ended = &mut downstream => match ended {
+            Ok(Ok(())) => exit::ENDED,
+            _ => exit::FAILED,
+        },
+        written = upstream => {
+            if written.is_err() {
+                // The daemon's side went away while the hub was writing: what
+                // it sent before that, a displacement notice say, still goes
+                // out on stdout.
+                let _ = tokio::time::timeout(CLOSE_GRACE, &mut downstream).await;
+                return exit::FAILED;
+            }
             // Closing a pipe client discards what its server has not read
-            // yet; `FlushFileBuffers` returns once it has. The handle stays
-            // valid: the write half still owns it.
+            // yet; `FlushFileBuffers` returns once it has, bounded so that a
+            // daemon that stopped reading does not keep the relay alive. The
+            // handle stays valid: the write half still owns it.
             #[cfg(windows)]
             {
-                let _ = tokio::task::spawn_blocking(move || unsafe {
-                    windows_sys::Win32::Storage::FileSystem::FlushFileBuffers(raw as _)
-                })
+                let _ = tokio::time::timeout(
+                    CLOSE_GRACE,
+                    tokio::task::spawn_blocking(move || unsafe {
+                        windows_sys::Win32::Storage::FileSystem::FlushFileBuffers(raw as _)
+                    }),
+                )
                 .await;
             }
             downstream.abort();

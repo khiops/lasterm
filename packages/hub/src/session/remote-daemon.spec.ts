@@ -1358,6 +1358,28 @@ describe("openRelay (#755)", () => {
 		await expect(opened).rejects.toBeInstanceOf(NothingListens);
 	});
 
+	it("ignores every marker once stderr passed 64 KiB, counted in bytes, however it was cut", async () => {
+		const { client, channel } = fakeConn();
+		const opened = openRelay(client, "x");
+		channel.stderr.write("lasterm-attach: start\nlasterm-attach: nothing-listens\n");
+		// 40 000 two-byte characters: under 64 Ki characters, over 64 KiB.
+		channel.stderr.write("é".repeat(40_000));
+		channel.emit("close");
+		const err = await opened.then(
+			() => null,
+			(e: unknown) => e,
+		);
+		expect(err).toBeInstanceOf(RelayFailed);
+		expect(err).not.toBeInstanceOf(NothingListens);
+	});
+
+	it("fails, rather than throwing, when the channel errs before HELLO", async () => {
+		const { client, channel } = fakeConn();
+		const opened = openRelay(client, "x");
+		channel.emit("error", new Error("boom"));
+		await expect(opened).rejects.toThrow(/relay's channel failed \(boom\)/);
+	});
+
 	it("builds the relay command with the socket and the wait", () => {
 		expect(
 			relayCommand("/home/pi/.local/bin/lasterm-agent", "/home/pi/x y/agent.sock", 5000.7),

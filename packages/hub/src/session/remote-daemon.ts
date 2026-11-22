@@ -542,16 +542,31 @@ export function openRelay(conn: Client, command: string): Promise<Duplex> {
 				reject(new RelayFailed(`the SSH server refused the command (${err.message})`));
 				return;
 			}
-			let stderr = "";
+			const stderr: Buffer[] = [];
+			let stderrBytes = 0;
 			let settled = false;
 			const seeker = new HelloSeeker();
 			const onStderr = (chunk: Buffer): void => {
-				if (stderr.length < RELAY_STDERR_LIMIT) stderr += chunk.toString("utf8");
+				// Counted in bytes, and past the limit for good: what is said
+				// does not depend on how the stream was cut.
+				stderrBytes += chunk.length;
+				if (stderrBytes <= RELAY_STDERR_LIMIT) stderr.push(chunk);
 			};
+			const onError = (cause: Error): void => {
+				if (settled) return;
+				settled = true;
+				finish();
+				reject(new RelayFailed(`the relay's channel failed (${cause.message})`));
+			};
+			// Kept after HELLO too, until the reader attaches its own: an error
+			// event with no listener would take the hub down.
+			const ignoreError = (): void => {};
+			channel.on("error", ignoreError);
 			const finish = (): void => {
 				channel.off("data", onData);
 				channel.stderr.off("data", onStderr);
 				channel.off("close", onClose);
+				channel.off("error", onError);
 			};
 			const onData = (chunk: Buffer): void => {
 				const seek = seeker.push(chunk);
@@ -577,11 +592,16 @@ export function openRelay(conn: Client, command: string): Promise<Duplex> {
 				if (settled) return;
 				settled = true;
 				finish();
-				reject(stderr.length > RELAY_STDERR_LIMIT ? relayEndError("") : relayEndError(stderr));
+				reject(
+					relayEndError(
+						stderrBytes > RELAY_STDERR_LIMIT ? "" : Buffer.concat(stderr).toString("utf8"),
+					),
+				);
 			};
 			channel.on("data", onData);
 			channel.stderr.on("data", onStderr);
 			channel.on("close", onClose);
+			channel.on("error", onError);
 		});
 	});
 }
@@ -656,8 +676,9 @@ export class DaemonUnreachable extends Error {
 		reason?: string,
 	) {
 		super(
-			"Lasterm could not reach an agent on this host, and cannot tell whether one is running." +
-				(reason === undefined ? "" : ` ${reason}`),
+			reason === undefined
+				? "Lasterm could not reach an agent on this host, and cannot tell whether one is running."
+				: `Lasterm could not reach an agent on this host: ${reason}.`,
 		);
 		this.name = "DaemonUnreachable";
 	}
@@ -757,7 +778,7 @@ export async function attachRemoteDaemon(
 			return attachment;
 		} catch (err) {
 			if (err instanceof RelayFailed && daemonOnly) {
-				throw new DaemonUnreachable(paths, err.message);
+				throw new DaemonUnreachable(paths, `its relay failed: ${err.reason}`);
 			}
 			throw err;
 		}

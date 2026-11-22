@@ -370,6 +370,35 @@ async fn run_daemon_impl(
 /// How often an idle daemon asks itself whether it is still needed.
 const IDLE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How often the idle check runs for `idle_timeout`: every `IDLE_CHECK_EVERY`,
+/// or sooner for a shorter timeout, so a caller asking for a second does not
+/// wait ten, and a hub that comes and goes between two checks of a long
+/// timeout is still seen.
+fn idle_check_period(idle_timeout: Option<std::time::Duration>) -> std::time::Duration {
+    idle_timeout.map_or(IDLE_CHECK_EVERY, |limit| limit.min(IDLE_CHECK_EVERY))
+}
+
+#[cfg(test)]
+mod idle_check_period_tests {
+    use super::idle_check_period;
+    use std::time::Duration;
+
+    // A long timeout is still checked every ten seconds, on both platforms
+    // (#755). Mutation: a period equal to the timeout.
+    #[test]
+    fn checks_a_long_timeout_every_ten_seconds_and_a_short_one_at_its_pace() {
+        assert_eq!(
+            idle_check_period(Some(Duration::from_secs(1800))),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            idle_check_period(Some(Duration::from_secs(2))),
+            Duration::from_secs(2)
+        );
+        assert_eq!(idle_check_period(None), Duration::from_secs(10));
+    }
+}
+
 #[cfg(unix)]
 async fn run_daemon_impl_with_manager(
     socket_path: String,
@@ -456,9 +485,7 @@ async fn run_daemon_impl_with_manager(
     let mut idle_since: Option<std::time::Instant> = None;
     // A short timeout is checked at its own pace, so a caller asking for a
     // second does not wait ten.
-    let mut idle_check = tokio::time::interval(
-        idle_timeout.map_or(IDLE_CHECK_EVERY, |limit| limit.min(IDLE_CHECK_EVERY)),
-    );
+    let mut idle_check = tokio::time::interval(idle_check_period(idle_timeout));
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     // Accept loop — spawn each connection handler so we can accept the next immediately.
@@ -619,9 +646,7 @@ async fn run_daemon_impl(
 
     // The same idle rule as on Unix: nobody connected and nothing held.
     let mut idle_since: Option<std::time::Instant> = None;
-    let mut idle_check = tokio::time::interval(
-        idle_timeout.map_or(IDLE_CHECK_EVERY, |limit| limit.min(IDLE_CHECK_EVERY)),
-    );
+    let mut idle_check = tokio::time::interval(idle_check_period(idle_timeout));
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let result = loop {

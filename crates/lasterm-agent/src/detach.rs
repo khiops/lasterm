@@ -21,19 +21,24 @@
 #[cfg(windows)]
 const BREAKAWAY_REFUSED: &str = "this SSH session's job does not allow a process to break away; the daemon would end with the connection";
 
+/// Whether a failed launch is the session's job refusing the breakaway: a job
+/// that does not allow it refuses the flag with access denied. Outside a job,
+/// the same error is some other failure. `in_a_job` is asked only then.
+#[cfg(windows)]
+fn breakaway_refused(error: &std::io::Error, in_a_job: impl FnOnce() -> bool) -> bool {
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) && in_a_job()
+}
+
 /// Start the detached daemon; the process's exit status.
 #[cfg(windows)]
 pub(crate) fn run() -> i32 {
-    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
-
     match spawn_detached() {
         Ok(()) => {
             eprintln!("lasterm-detach: started");
             0
         }
-        // A job that does not allow breakaway refuses the flag with access
-        // denied. Outside a job, the same error is some other failure.
-        Err(error) if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) && in_a_job() => {
+        Err(error) if breakaway_refused(&error, in_a_job) => {
             eprintln!("lasterm-detach: breakaway-refused");
             eprintln!("{BREAKAWAY_REFUSED}");
             5
@@ -230,7 +235,20 @@ pub(crate) const POSIX_REFUSAL: &str =
 
 #[cfg(all(test, windows))]
 mod tests {
-    use super::quote_argument;
+    use super::{breakaway_refused, quote_argument};
+
+    // Exit 5 only for access denied inside a job (spec, `--detach`).
+    // Mutation: the job check dropped, so any access denied sends the hub
+    // to stdio with a false reason.
+    #[test]
+    fn calls_only_access_denied_inside_a_job_a_refused_breakaway() {
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND};
+        let denied = std::io::Error::from_raw_os_error(ERROR_ACCESS_DENIED as i32);
+        let missing = std::io::Error::from_raw_os_error(ERROR_FILE_NOT_FOUND as i32);
+        assert!(breakaway_refused(&denied, || true));
+        assert!(!breakaway_refused(&denied, || false));
+        assert!(!breakaway_refused(&missing, || true));
+    }
 
     fn quoted(argument: &str) -> String {
         String::from_utf16(&quote_argument(std::ffi::OsStr::new(argument))).unwrap()

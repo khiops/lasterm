@@ -2243,10 +2243,20 @@ mod detach {
         fixture: &StopFixture,
         idle_timeout: &str,
     ) -> std::process::Command {
+        detach_command_with(fixture, idle_timeout, &[])
+    }
+
+    /// The same, with `extra` arguments after the others.
+    pub(super) fn detach_command_with(
+        fixture: &StopFixture,
+        idle_timeout: &str,
+        extra: &[&str],
+    ) -> std::process::Command {
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_lasterm-agent"));
         command
             .args(["--daemon", "--detach", "--socket", &fixture.socket])
             .args(["--idle-timeout", idle_timeout])
+            .args(extra)
             .env("XDG_STATE_HOME", &fixture.dir)
             .env("XDG_CONFIG_HOME", &fixture.dir)
             .env("LOCALAPPDATA", &fixture.dir)
@@ -2496,6 +2506,61 @@ async fn windows_idle_daemon_exits() {
     }
 }
 
+/// `--detach` passes all its other arguments on to the daemon: here the log
+/// format, which the daemon's log then shows. Mutation: a launcher that
+/// passes on only the socket and the timeout (the log stays JSON lines).
+#[cfg(windows)]
+#[tokio::test]
+async fn detach_passes_its_arguments_on() {
+    if !detach_tests_run("detach_passes_its_arguments_on") {
+        return;
+    }
+    let fixture = StopFixture::new("detach-arguments");
+    let _stop = detach::StopOnDrop(&fixture);
+    let job = detach::Job::new(true);
+    let output = job.run(detach::detach_command_with(
+        &fixture,
+        "60",
+        &["--log-level", "info", "--format", "text"],
+    ));
+    drop(job);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    pipe_appears(&fixture).await;
+
+    let logs = fixture.dir.join("lasterm").join("logs");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let first_line = loop {
+        let line = std::fs::read_dir(&logs).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("agent-daemon")
+                })
+                .find_map(|entry| {
+                    std::fs::read_to_string(entry.path())
+                        .ok()
+                        .and_then(|text| text.lines().next().map(str::to_owned))
+                })
+        });
+        if let Some(line) = line {
+            break line;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no daemon log line in {}",
+            logs.display()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(
+        !first_line.trim_start().starts_with('{'),
+        "the daemon logged JSON lines, not text: {first_line}"
+    );
+}
+
 /// AC-D4 / connected-hub-keeps: a hub connected keeps an idle daemon up.
 /// Mutation: an expiry that ignores connections.
 #[cfg(windows)]
@@ -2513,6 +2578,48 @@ async fn windows_idle_daemon_kept_by_a_connection() {
         detach::pipe_exists(&fixture.socket),
         "the daemon left a connected hub"
     );
+}
+
+/// AC-D4, the same condition as POSIX: once its last hub has gone, a daemon
+/// that was in use waits a whole timeout again before it exits. Mutation: an
+/// idle clock that use never resets (the daemon exits at the first check
+/// after its hub leaves).
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_idle_daemon_waits_a_whole_timeout_after_use() {
+    if !detach_tests_run("windows_idle_daemon_waits_a_whole_timeout_after_use") {
+        return;
+    }
+    let fixture = StopFixture::new("idle-after-use");
+    let _stop = detach::StopOnDrop(&fixture);
+    start_detached(&fixture, "4");
+    let (relay, stdin, stdout, _) = detach::authenticated_relay(&fixture).await;
+    // Past the timeout while in use, so a clock that use does not reset
+    // has already run out.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    drop(stdin);
+    drop(stdout);
+    drop(relay);
+    let released = tokio::time::Instant::now();
+
+    // Its next check starts the clock, and the one a timeout later ends it:
+    // never sooner than 4 s after the release.
+    while released.elapsed() < Duration::from_millis(3_600) {
+        assert!(
+            detach::pipe_exists(&fixture.socket),
+            "the daemon exited {} ms after its hub left",
+            released.elapsed().as_millis()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let deadline = released + Duration::from_secs(15);
+    while detach::pipe_exists(&fixture.socket) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the idle daemon still listens 15 s after its hub left"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 /// AC-D4 / zero-never: `--idle-timeout 0` never exits on idleness.

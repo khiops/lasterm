@@ -67,6 +67,16 @@ export function transfersText(uploads: number, downloads: number): string {
 	return words.join(" and ");
 }
 
+/**
+ * How to go on when transfers would stop: `force` stops them; a retry resumes
+ * uploads, while a stopped download is started again (#840 records none yet).
+ */
+export function stopAdvice(force: string, uploads: number, downloads: number): string {
+	if (downloads === 0) return `Send ${force} to stop them; a retry resumes them.`;
+	if (uploads === 0) return `Send ${force} to stop them.`;
+	return `Send ${force} to stop them; a retry resumes the uploads.`;
+}
+
 /** Say what came of it, in the shapes PROTOCOL.md § 6 gives. */
 function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyReply {
 	switch (outcome.kind) {
@@ -120,7 +130,7 @@ function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyRep
 			return reply.code(409).send({
 				error: {
 					code: ErrorCode.TRANSFERS_WOULD_STOP,
-					message: `${transfersText(outcome.transfers - (outcome.downloads ?? 0), outcome.downloads ?? 0)} ${outcome.downloads ? "on" : "to"} this host would stop. Send force: true to stop them; a retry resumes them.`,
+					message: `${transfersText(outcome.transfers - (outcome.downloads ?? 0), outcome.downloads ?? 0)} ${outcome.downloads ? "on" : "to"} this host would stop. ${stopAdvice("force: true", outcome.transfers - (outcome.downloads ?? 0), outcome.downloads ?? 0)}`,
 					transfers: outcome.transfers,
 					...(outcome.downloads !== undefined && { downloads: outcome.downloads }),
 				},

@@ -125,8 +125,11 @@ export interface SftpServerOptions {
 	 * Win32-OpenSSH 9.5 both do; some servers replace.
 	 */
 	renameReplaces?: boolean;
-	/** False: FSTAT is answered "unsupported", as a server that left it out would. */
-	fstat?: boolean;
+	/**
+	 * False: FSTAT is answered "unsupported", as a server that left it out would;
+	 * "fails": answered with a failure, as a server that has it but fails this handle.
+	 */
+	fstat?: boolean | "fails";
 	/** Told the bytes each READ answered (#840), for tests that bound what a download reads ahead. */
 	onRead?: (bytes: number) => void;
 	/** Told each time a file handle is closed (#840). */
@@ -503,6 +506,10 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 					sftp.on("FSTAT", (id, handle) => {
 						if (options.fstat === false) {
 							sftp.status(id, codes.OP_UNSUPPORTED, "Operation unsupported");
+							return;
+						}
+						if (options.fstat === "fails") {
+							sftp.status(id, codes.FAILURE, "Failure");
 							return;
 						}
 						void (async () => file(handle).stat())().then(

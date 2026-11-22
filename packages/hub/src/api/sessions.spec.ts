@@ -2428,6 +2428,17 @@ describe("POST stop-keeping", () => {
 				downloads: 1,
 			});
 			unchanged(f);
+			const kill = await server.inject({
+				method: "DELETE",
+				url: `/api/sessions/${f.ctx.sessions.get(hostId)?.id}`,
+			});
+			expect(kill.statusCode).toBe(409);
+			expect(kill.json().error).toEqual({
+				code: "TRANSFERS_WOULD_STOP",
+				message: "1 download on this host would stop. Send force=true to stop them.",
+				transfers: 1,
+				downloads: 1,
+			});
 		} finally {
 			release();
 		}

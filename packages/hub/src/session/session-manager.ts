@@ -265,8 +265,11 @@ export interface HostTransfers {
 export type CloseSessionOutcome =
 	| "closed"
 	| "busy"
-	/** Uploads to the host would stop, and `force` did not say to: nothing was done. */
-	| { readonly transfersWouldStop: number };
+	/**
+	 * Transfers of the host would stop, and `force` did not say to: nothing was
+	 * done. `downloads`: how many of them are downloads (#840), when any.
+	 */
+	| { readonly transfersWouldStop: number; readonly downloads?: number };
 
 /** What came of asking to connect, reconnect or disconnect a host (#648). */
 export type HostConnectionOutcome =
@@ -871,7 +874,10 @@ export class SessionManager {
 		// (#833); the local host's go through the hub's own file system.
 		if (recorded && this.ctx.metaDal.getHost(recorded.hostId)?.type === "ssh") {
 			const transfers = this.transfersOn(recorded.hostId);
-			if (transfers > 0 && options.force !== true) return { transfersWouldStop: transfers };
+			if (transfers > 0 && options.force !== true) {
+				const downloads = this.downloadsOn(recorded.hostId);
+				return { transfersWouldStop: transfers, ...(downloads > 0 ? { downloads } : {}) };
+			}
 			if (transfers > 0) this.transfers?.interruptOn(recorded.hostId);
 		}
 		let hostId: string | undefined;

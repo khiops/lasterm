@@ -25,6 +25,9 @@ import {
 	statusOf,
 } from "./sftp-files.js";
 
+/** SFTP's status for a request the server does not implement. */
+const OP_UNSUPPORTED = 8;
+
 /** How many bytes one SFTP READ asks for. */
 export const SFTP_READ_BYTES = 64 * 1024;
 
@@ -147,7 +150,11 @@ class SftpOpenedFile implements OpenedFile {
 				),
 			);
 		} catch (error) {
-			if (this.session.ended) throw error;
+			// By path only from a server that does not answer FSTAT at all: any
+			// other failure is the handle's, which a look by path would not see.
+			if (this.session.ended || (error as { code?: unknown }).code !== OP_UNSUPPORTED) {
+				throw error;
+			}
 			return lookOf(
 				await this.backend.request<Stats>(this.session, (done) =>
 					this.session.channel.stat(this.wire, done),

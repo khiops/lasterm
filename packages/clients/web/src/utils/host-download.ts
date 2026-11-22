@@ -62,8 +62,15 @@ function sizeText(bytes: number): string {
 	return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-/** What the hub's refusal of a download says to the person. */
-export function refusalText(code: string | null | undefined, name: string): string {
+/**
+ * What the hub's refusal of a download says to the person: a sentence of its
+ * own for the codes a person meets most, otherwise the hub's own words.
+ */
+export function refusalText(
+	code: string | null | undefined,
+	name: string,
+	hubMessage?: string | null,
+): string {
 	switch (code) {
 		case "LINK_NOT_FOLLOWED":
 			return `${name} is a link; links are not followed`;
@@ -76,7 +83,9 @@ export function refusalText(code: string | null | undefined, name: string): stri
 		case "HOST_NOT_CONNECTED":
 			return `${name} cannot be read: the host is not connected`;
 		default:
-			return `${name} could not be downloaded`;
+			return hubMessage
+				? `${name} could not be downloaded: ${hubMessage}`
+				: `${name} could not be downloaded`;
 	}
 }
 
@@ -104,11 +113,12 @@ async function downloadInBrowser(file: DownloadFile): Promise<DownloadStart> {
 		);
 		const body = (await response.json().catch(() => ({}))) as {
 			ticket?: unknown;
-			error?: { code?: unknown };
+			error?: { code?: unknown; message?: unknown };
 		};
 		if (!response.ok || typeof body.ticket !== "string") {
 			const code = typeof body.error?.code === "string" ? body.error.code : null;
-			return { kind: "failed", message: refusalText(code, file.name) };
+			const said = typeof body.error?.message === "string" ? body.error.message : null;
+			return { kind: "failed", message: refusalText(code, file.name, said) };
 		}
 		ticket = body.ticket;
 	} catch (error) {
@@ -160,55 +170,70 @@ async function downloadOnDesktop(
 		run: cancel,
 	});
 	const mine = (payload: unknown): payload is Record<string, unknown> =>
-		(payload as { download_id?: unknown } | null)?.download_id === downloadId;
+		(payload as { download_id?: unknown } | null)?.download_id === downloadId &&
+		(payload as { item_id?: unknown } | null)?.item_id === itemId;
 	const unlisten: Array<() => void> = [];
 	const stop = () => {
 		for (const off of unlisten.splice(0)) off();
 	};
-	unlisten.push(
-		await bridge.listen(PROGRESS_EVENT, (payload) => {
-			if (!mine(payload)) return;
-			const written = Number(payload.written);
-			const total = typeof payload.total === "number" ? payload.total : null;
-			toasts.update(
-				toast,
-				total !== null && total > 0
-					? `Downloading ${target.name} · ${Math.floor((written / total) * 100)} %`
-					: `Downloading ${target.name} · ${sizeText(written)}`,
-			);
-		}),
-	);
-	unlisten.push(
-		await bridge.listen(ENDED_EVENT, (payload) => {
-			if (!mine(payload)) return;
-			stop();
-			toasts.dismiss(toast);
-			if (payload.outcome === "done") {
-				const saved = typeof payload.final_name === "string" ? payload.final_name : target.name;
-				const left =
-					typeof payload.kept_partial === "string"
-						? ` (its partial ${payload.kept_partial} could not be removed)`
-						: "";
-				toasts.show("info", `Saved ${saved}${left}`, 8000, {
-					label: "Show in folder",
-					run: () => {
-						void bridge
-							.invoke(REVEAL_COMMAND, { rootId: target.root_id, relPath: saved })
-							.catch(() => {});
-					},
-				});
-			} else if (payload.outcome === "failed") {
-				const code = typeof payload.code === "string" ? payload.code : null;
-				const message =
-					code !== null
-						? refusalText(code, target.name)
-						: typeof payload.error === "string"
-							? payload.error
-							: refusalText(null, target.name);
-				toasts.show("error", message, 10000);
-			}
-		}),
-	);
+	try {
+		unlisten.push(
+			await bridge.listen(PROGRESS_EVENT, (payload) => {
+				if (!mine(payload)) return;
+				const written = Number(payload.written);
+				const total = typeof payload.total === "number" ? payload.total : null;
+				toasts.update(
+					toast,
+					total !== null && total > 0
+						? `Downloading ${target.name} · ${Math.floor((written / total) * 100)} %`
+						: `Downloading ${target.name} · ${sizeText(written)}`,
+				);
+			}),
+		);
+		unlisten.push(
+			await bridge.listen(ENDED_EVENT, (payload) => {
+				if (!mine(payload)) return;
+				stop();
+				toasts.dismiss(toast);
+				if (payload.outcome === "done") {
+					const saved = typeof payload.final_name === "string" ? payload.final_name : target.name;
+					const left =
+						typeof payload.kept_partial === "string"
+							? ` (its partial ${payload.kept_partial} could not be removed)`
+							: "";
+					toasts.show("info", `Saved ${saved}${left}`, 8000, {
+						label: "Show in folder",
+						run: () => {
+							void bridge
+								.invoke(REVEAL_COMMAND, { rootId: target.root_id, relPath: saved })
+								.catch(() => {});
+						},
+					});
+				} else if (payload.outcome === "failed") {
+					const code = typeof payload.code === "string" ? payload.code : null;
+					const message =
+						code !== null
+							? refusalText(
+									code,
+									target.name,
+									typeof payload.error === "string" ? payload.error : null,
+								)
+							: typeof payload.error === "string"
+								? payload.error
+								: refusalText(null, target.name);
+					toasts.show("error", message, 10000);
+				}
+			}),
+		);
+	} catch (error) {
+		// Without its events the download could not be followed: none is started.
+		stop();
+		toasts.dismiss(toast);
+		return {
+			kind: "failed",
+			message: `The download could not be started: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
 	if (cancelled) {
 		stop();
 		toasts.dismiss(toast);

@@ -18,6 +18,7 @@ import { Readable } from "node:stream";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { etagOf, registerFileContentRoutes } from "../api/file-content.js";
+import { WINDOWS_REPLY_MARKER } from "../session/ssh-file-transport.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { DownloadTickets } from "./download-tickets.js";
 import { FileAccessError } from "./host-files.js";
@@ -63,7 +64,7 @@ interface ReadBackendKind {
 	readonly runs: boolean;
 	readonly transport: "local" | "sftp" | "exec";
 	start(options?: {
-		fstat?: boolean;
+		fstat?: boolean | "fails";
 		prelude?: string;
 		rewriteStdout?: (stdout: Buffer) => Buffer;
 		sftpIdleMs?: number;
@@ -175,7 +176,7 @@ function sftpKind(style: PathStyle): ReadBackendKind {
 				onCloseFile: () => {
 					closes++;
 				},
-				...(options.fstat === false ? { fstat: false } : {}),
+				...(options.fstat !== undefined ? { fstat: options.fstat } : {}),
 			});
 			const files = new HostFilesService({
 				channelHost: () => ({ hostId: "remote", hostType: "ssh" }),
@@ -596,6 +597,8 @@ describe("a download's read side, cases of one backend (#840)", () => {
 
 	it("a read that fails answers its code, and no log names the path", async () => {
 		const SECRET = "/private/secret.txt";
+		const PATH_NAME = "lasterm-spec-read-path-4242";
+		const PATH_ASKED = windowsMachine ? `C:\\${PATH_NAME}\\x.bin` : `/${PATH_NAME}/x.bin`;
 		const logs: string[] = [];
 		/** A file of 200 000 bytes whose read fails, at once or after `after` bytes. */
 		const failing = (after: number): ReadBackend => {
@@ -634,6 +637,8 @@ describe("a download's read side, cases of one backend (#840)", () => {
 			});
 			const server = Fastify({
 				logger: { level: "trace", stream: { write: (line: string) => logs.push(line) } },
+				// The request line's redaction is the hub's, covered by security-events.spec.ts.
+				disableRequestLogging: true,
 				forceCloseConnections: true,
 			});
 			registerFileContentRoutes(server, {
@@ -648,7 +653,7 @@ describe("a download's read side, cases of one backend (#840)", () => {
 				const answer = await new Promise<{ status: number; got: number; body: string }>(
 					(resolve) => {
 						const request = get(
-							`http://127.0.0.1:${port}/api/channels/${CHANNEL}/files/content?path=${encodeURIComponent(windowsMachine ? "C:\\x" : "/x")}`,
+							`http://127.0.0.1:${port}/api/channels/${CHANNEL}/files/content?path=${encodeURIComponent(PATH_ASKED)}`,
 							(response) => {
 								let got = 0;
 								let body = "";
@@ -678,7 +683,9 @@ describe("a download's read side, cases of one backend (#840)", () => {
 				await server.close();
 			}
 		}
-		expect(logs.join("\n")).not.toContain(SECRET);
+		const text = logs.join("\n");
+		expect(text).not.toContain(SECRET);
+		expect(text).not.toContain(PATH_NAME);
 	});
 
 	describe.runIf(execKind(machineStyle).runs)("an exec read without its second look", () => {
@@ -708,6 +715,19 @@ describe("a download's read side, cases of one backend (#840)", () => {
 			const response = await content(harness, harness.at("small.bin"));
 			expect(response.statusCode).toBe(409);
 			expect(response.json().error.code).toBe("FILE_CHANGED");
+		});
+
+		it("an exec look answers with its own marker, whatever the host prints after it", async () => {
+			// Output after the look's reply that carries the listing's fixed marker.
+			const trailing = (stdout: Buffer) =>
+				stdout.length < 1000
+					? Buffer.concat([stdout, Buffer.from(`\n${WINDOWS_REPLY_MARKER}\nNOT_FOUND\n`)])
+					: stdout;
+			harness = await execKind(machineStyle).start({ rewriteStdout: trailing });
+			writeFileSync(harness.local("small.bin"), "x".repeat(2000));
+			const response = await content(harness, harness.at("small.bin"));
+			expect(response.statusCode).toBe(200);
+			expect(response.rawPayload.toString()).toBe("x".repeat(2000));
 		});
 
 		for (const [variant, replacement] of [
@@ -742,6 +762,41 @@ describe("a download's read side, cases of one backend (#840)", () => {
 			expect(response.json().error.code).toBe("FILE_ACCESS_FAILED");
 		},
 	);
+
+	it("SFTP downloads left by their client leave no listener behind on the session", async () => {
+		harness = await sftpKind("posix").start();
+		writeFileSync(harness.local("big.bin"), randomBytes(4 * MiB));
+		await harness.server.listen({ port: 0, host: "127.0.0.1" });
+		const port = (harness.server.server.address() as AddressInfo).port;
+		const url = `http://127.0.0.1:${port}/api/channels/${CHANNEL}/files/content?path=${encodeURIComponent(harness.at("big.bin"))}`;
+		const warnings: string[] = [];
+		const onWarning = (warning: Error) => warnings.push(warning.name);
+		process.on("warning", onWarning);
+		try {
+			for (let i = 0; i < 15; i++) {
+				await new Promise<void>((resolve, reject) => {
+					const request = get(url, (response) => {
+						response.once("data", () => {
+							// Paused first, so that no READ is in flight when the client leaves.
+							response.pause();
+							setTimeout(() => {
+								request.destroy();
+								resolve();
+							}, 300);
+						});
+					});
+					request.on("error", () => {});
+					setTimeout(() => reject(new Error("no answer")), 10_000);
+				});
+				// Each left read settles before the next starts.
+				await vi.waitFor(() => expect(harness?.holding()).toBe(0));
+			}
+			await new Promise((resolve) => setImmediate(resolve));
+		} finally {
+			process.off("warning", onWarning);
+		}
+		expect(warnings).not.toContain("MaxListenersExceededWarning");
+	});
 
 	it("many SFTP downloads leave no listener behind on the session", async () => {
 		harness = await sftpKind("posix").start();
@@ -801,6 +856,14 @@ describe("a download's read side, cases of one backend (#840)", () => {
 		});
 		const touched = await content(h, h.at("f.bin"));
 		expect(touched.json().error.code).toBe("FILE_CHANGED");
+	});
+
+	it("sftp whose fstat fails is not looked at by path", async () => {
+		harness = await sftpKind("posix").start({ fstat: "fails" });
+		writeFileSync(harness.local("f.bin"), randomBytes(1000));
+		const response = await content(harness, harness.at("f.bin"));
+		expect(response.statusCode).toBe(502);
+		expect(response.json().error.code).toBe("FILE_ACCESS_FAILED");
 	});
 
 	it("sftp without fstat", async () => {

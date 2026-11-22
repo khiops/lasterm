@@ -8126,8 +8126,18 @@ mod tests {
     fn download_items_are_claimed_once_and_cancelled_alone() {
         let first = ("d840".to_string(), "1".to_string());
         let second = ("d840".to_string(), "2".to_string());
+        struct Release(Vec<(String, String)>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let mut running = running_downloads_map().lock().unwrap();
+                for key in &self.0 {
+                    running.remove(key);
+                }
+            }
+        }
         let one = claim_download(first.clone()).unwrap();
         let two = claim_download(second.clone()).unwrap();
+        let _release = Release(vec![first.clone(), second.clone()]);
         let again = claim_download(first.clone()).unwrap_err();
         assert!(again.starts_with("DOWNLOAD_RUNNING"), "{again}");
         assert_eq!(cancel_running("d840", Some("2")).unwrap(), 1);
@@ -8135,9 +8145,6 @@ mod tests {
         assert!(two.load(Ordering::SeqCst));
         assert_eq!(cancel_running("d840", None).unwrap(), 2);
         assert!(one.load(Ordering::SeqCst));
-        let mut running = running_downloads_map().lock().unwrap();
-        running.remove(&first);
-        running.remove(&second);
     }
 
     #[test]

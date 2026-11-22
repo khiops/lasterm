@@ -9,7 +9,7 @@ import {
 	execWithStdin,
 	powerShellPathVariable,
 	readableStderr,
-	windowsReply,
+	WINDOWS_REPLY_MARKER,
 } from "../session/ssh-file-transport.js";
 import { posixScript, windowsScript } from "./exec-files.js";
 import { FileAccessError, REASONS } from "./host-files.js";
@@ -58,6 +58,17 @@ const EXIT_DENIED = 8;
 
 const LOOK_LINE = /^(\d+) (-?\d+)$/;
 
+/**
+ * What follows the first line `marker` within the first 64 KiB of `stdout`
+ * (a shell's prelude may come before it), or null.
+ */
+function replyAfter(stdout: string, marker: string): string | null {
+	const head = stdout.slice(0, PRELUDE_LIMIT + marker.length + 2);
+	const match = new RegExp(`(?:^|\n)${marker}\r?\n`).exec(head);
+	if (match === null) return null;
+	return stdout.slice(match.index + match[0].length).trim();
+}
+
 // ─── Scripts ──────────────────────────────────────────────────────────────────
 
 const POSIX_LOOK = `l() { stat -L -c '%s %Y' -- "$p" 2>/dev/null || stat -L -f '%z %m' "$p"; }`;
@@ -72,6 +83,7 @@ export function posixLookScript(path: string): string {
 			`[ -e "$p" ] || r NOT_FOUND`,
 			`[ -f "$p" ] || r NOT_A_FILE`,
 			`[ -r "$p" ] || r PERMISSION_DENIED`,
+			`exec 3<"$p" || r PERMISSION_DENIED`,
 			`s=$(l) || r FAILED`,
 			`r "OK
 $s"`,
@@ -79,7 +91,7 @@ $s"`,
 	);
 }
 
-/** The read: the marker, a look on the opened file, `length` bytes from `start`, then a look on stderr. */
+/** The read: the marker, a look on the opened file, `length` bytes from `start`, then a look on stdout. */
 export function posixReadScript(
 	path: string,
 	marker: string,
@@ -165,8 +177,13 @@ export class ExecReadBackend implements ReadBackend {
 		let stdout: string;
 		let stderr: string;
 		let exitCode: number | null;
+		// A marker of this request's own, as the read has (H3): no other output
+		// can pass for the look's answer.
+		const marker = randomBytes(16).toString("hex");
 		try {
-			const script = this.style === "windows" ? windowsLookScript(path) : posixLookScript(path);
+			const script = (this.style === "windows" ? windowsLookScript(path) : posixLookScript(path))
+				.split(WINDOWS_REPLY_MARKER)
+				.join(marker);
 			if (this.style === "windows") {
 				({ stdout, stderr, exitCode } = await sshExec(
 					this.client,
@@ -188,7 +205,7 @@ export class ExecReadBackend implements ReadBackend {
 		} catch (error) {
 			throw this.failure(error);
 		}
-		const reply = windowsReply(stdout);
+		const reply = replyAfter(stdout, marker);
 		const [status = "", line = ""] = reply === null ? [] : reply.split(/\r?\n/);
 		switch (status.trim()) {
 			case "OK": {
@@ -372,7 +389,7 @@ class ExecStream {
 			const wanted = Buffer.from(`${this.marker}\n`);
 			const at = this.head.subarray(0, PRELUDE_LIMIT + wanted.length).indexOf(wanted);
 			if (at === -1) {
-				if (this.head.length > PRELUDE_LIMIT) {
+				if (this.head.length > PRELUDE_LIMIT + wanted.length) {
 					this.settle(
 						new FileAccessError("FILE_ACCESS_FAILED", `${WHAT}: the host gave no answer`),
 					);

@@ -219,8 +219,7 @@ describe("POST /api/hosts/:id/connect|reconnect|disconnect (#648)", () => {
 		expect(alone.json()).toEqual({
 			error: {
 				code: "TRANSFERS_WOULD_STOP",
-				message:
-					"1 download on this host would stop. Send force: true to stop them; a retry resumes them.",
+				message: "1 download on this host would stop. Send force: true to stop them.",
 				transfers: 1,
 				downloads: 1,
 			},

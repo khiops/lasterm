@@ -359,6 +359,11 @@ export function registerFileContentRoutes(server: FastifyInstance, deps: FileCon
 			if (source.destroyed) fail();
 			if (first !== null) hold.write(first);
 			source.pipe(hold).pipe(out);
+			// A client that left: the read goes too, so an SFTP stream lets go of its session.
+			out.on("close", () => {
+				source.destroy();
+				hold.destroy();
+			});
 			reply.header("Content-Length", length);
 			return reply.send(out);
 		} catch (error) {

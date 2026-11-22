@@ -210,17 +210,27 @@ pub(crate) trait Source: Read {
         None
     }
     /// The error code the hub's JSON refusal names, in either of its shapes:
-    /// `{ error: { code } }` from a route, `{ error: "<code>" }` from the auth hook.
-    fn error_code(&mut self) -> Option<String> {
+    /// `{ error: { code, message } }` from a route, `{ error: "<code>" }` from
+    /// the auth hook, with the route's message when it gave one.
+    fn refusal(&mut self) -> (Option<String>, Option<String>) {
         let mut body = Vec::new();
         let _ = self.take(64 * 1024).read_to_end(&mut body);
-        let value: serde_json::Value = serde_json::from_slice(&body).ok()?;
-        let error = value.get("error")?;
-        error
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+            return (None, None);
+        };
+        let Some(error) = value.get("error") else {
+            return (None, None);
+        };
+        let code = error
             .get("code")
             .and_then(|code| code.as_str())
             .or_else(|| error.as_str())
-            .map(str::to_string)
+            .map(str::to_string);
+        let message = error
+            .get("message")
+            .and_then(|message| message.as_str())
+            .map(str::to_string);
+        (code, message)
     }
 }
 
@@ -270,14 +280,15 @@ pub(crate) fn write_file(
     }
     let status = source.status();
     if status != 200 {
-        let code = source.error_code();
-        return Outcome::Failed {
-            error: format!(
+        let (code, message) = source.refusal();
+        // The hub's own words when it gave them (spec W2).
+        let error = message.unwrap_or_else(|| {
+            format!(
                 "The hub refused the download ({})",
                 code.as_deref().unwrap_or("no reason given")
-            ),
-            code,
-        };
+            )
+        });
+        return Outcome::Failed { error, code };
     }
     let Some(total) = source.content_length() else {
         return Outcome::Failed {
@@ -834,7 +845,7 @@ mod tests {
     #[test]
     fn download_refuses_error_status() {
         let dir = temp_dir("refused");
-        let route = br#"{"error":{"code":"NOT_FOUND","message":"x"}}"#;
+        let route = br#"{"error":{"code":"NOT_FOUND","message":"The file is not there"}}"#;
         let source = Bytes {
             status: 404,
             length: Some(route.len() as u64),
@@ -849,7 +860,7 @@ mod tests {
             &RealOps,
         );
         assert!(
-            matches!(&outcome, Outcome::Failed { code: Some(code), .. } if code == "NOT_FOUND"),
+            matches!(&outcome, Outcome::Failed { code: Some(code), error } if code == "NOT_FOUND" && error == "The file is not there"),
             "{outcome:?}"
         );
         let hook = br#"{"error":"UNAUTHORIZED","message":"x"}"#;
@@ -932,6 +943,37 @@ mod tests {
             "{outcome:?}"
         );
         assert_eq!(read(&dir.join("f.txt")), b"changed!");
+
+        // Edited in place at the same size: only its time tells, and it is not the agreed file.
+        let dir = temp_dir("edited");
+        write(&dir.join("f.txt"), b"old");
+        let agreed = job(&dir, "f.txt");
+        write(&dir.join("f.txt"), b"new");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test file in a temporary folder, never a protected file"
+        )]
+        let edited = std::fs::File::options()
+            .write(true)
+            .open(dir.join("f.txt"))
+            .unwrap();
+        edited
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000))
+            .unwrap();
+        drop(edited);
+        let outcome = write_file(
+            &agreed,
+            ok(b"mine"),
+            &AtomicBool::new(false),
+            |_, _| {},
+            |_, _| {},
+            &RealOps,
+        );
+        assert!(
+            matches!(&outcome, Outcome::Failed { error, .. } if error.contains("changed after the save dialog")),
+            "{outcome:?}"
+        );
+        assert_eq!(read(&dir.join("f.txt")), b"new");
     }
 
     #[test]
@@ -994,6 +1036,14 @@ mod tests {
         assert_eq!(*ops.attempts.lock().unwrap(), 3);
         assert_eq!(*ops.pauses.lock().unwrap(), vec![PLACE_RETRY_PAUSE; 2]);
         assert_eq!(read(&dir.join("f.txt")), b"old");
+        // The partial the outcome names is kept, whole.
+        let left = entries(&dir);
+        assert_eq!(left.len(), 2, "{left:?}");
+        let partial = left
+            .iter()
+            .find(|name| name.ends_with(".lasterm-download"))
+            .expect("the partial is kept");
+        assert_eq!(read(&dir.join(partial)), b"new");
     }
 
     /// A one-request HTTP server that sends `total` bytes in `pieces`, `gap` apart.

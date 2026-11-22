@@ -363,6 +363,19 @@ describe("recordings store", () => {
 			expect(requests.filter((r) => r === "GET /api/recordings")).toHaveLength(1);
 		});
 
+		// Each connect registers again on the same client. Mutation caught: a
+		// second handler, which shows every refusal twice.
+		it("handles each state once when its client registers again", () => {
+			const handlers: Array<(msg: { type: string }) => void> = [];
+			const socket = {
+				on: (_type: string, fn: (msg: { type: string }) => void) => handlers.push(fn),
+			};
+			const store = useRecordingsStore();
+			store.registerHandlers(socket as never);
+			store.registerHandlers(socket as never);
+			expect(handlers).toHaveLength(1);
+		});
+
 		it("drops a list answer older than one already applied", async () => {
 			const answers: Array<(r: Response) => void> = [];
 			mocks.hubFetch.mockImplementation(() => new Promise((resolve) => answers.push(resolve)));

@@ -238,7 +238,7 @@ The chords themselves are not configurable yet (#632); Ctrl+/ lists them all.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| max_total_mb | integer ≥ 1 | `1024` | The most all recordings waiting to be saved may hold, in MB of exported `.cast`. Once reached, no recording starts and the open ones end with a marker; nothing is deleted. Read when the hub starts. Any other value gives the default, with a warning (STORAGE.md § 4.3) |
+| max_total_mb | number with an integral value ≥ 1 | `1024` | The most all recordings waiting to be saved may hold, in MB of exported `.cast`. Once reached, no recording starts and the open ones end with a marker; nothing is deleted. Read when the hub starts. Any other value gives the default, with a warning (STORAGE.md § 4.3) |
 
 ---
 

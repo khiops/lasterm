@@ -440,7 +440,11 @@ const PALETTE_TOOLTIP = `Command palette (${shortcutLabel("palette.open")})`;
 const SETTINGS_TOOLTIP = `Settings (${shortcutLabel("settings.open")})`;
 const footerRows = computed(() =>
 	chunkIntoRows(
-		props.recordingCount > 0 ? (["recordings", ...FOOTER_ACTIONS] as const) : FOOTER_ACTIONS,
+		// Shown while one waits, and while the space is full (a discard still
+		// being deleted counts until its deletion ends).
+		props.recordingCount > 0 || props.recordingsFull
+			? (["recordings", ...FOOTER_ACTIONS] as const)
+			: FOOTER_ACTIONS,
 		props.columns,
 	),
 );

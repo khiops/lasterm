@@ -623,6 +623,15 @@ describe("HostRail footer", () => {
 		expect(root.querySelector(".rail-rec-badge")?.textContent?.trim()).toBe("full");
 	});
 
+	// Mutation caught: the button shown only while a row is listed, so a full
+	// space held by a discard still being deleted reads nothing.
+	it("keeps the Recordings button while the space is full, with no row listed", async () => {
+		mountRail({ columns: 1 });
+		recordingsFull.value = true;
+		await nextTick();
+		expect(footerRows()[0]).toEqual(["Recordings, full"]);
+	});
+
 	it("wraps its buttons in the same rows as the badges", async () => {
 		mountRail({ columns: 3 });
 		expect(footerRows()).toEqual([["Open command palette", "Open settings panel", "Add new host"]]);

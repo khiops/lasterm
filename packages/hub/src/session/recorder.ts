@@ -873,6 +873,18 @@ export class SessionRecorder {
 			this.endedInMemory.delete(id);
 	}
 
+	/** An automatic start its caller could not prepare (a failing read): refused, logged, said. */
+	refuseStorage(channelId: string, err: unknown): void {
+		this.logFailure("start", channelId, err);
+		this.deps.broadcast({
+			type: "RECORDING_STATE",
+			channelId,
+			recordingId: null,
+			title: this.titleNow(channelId, ""),
+			refused: "storage",
+		});
+	}
+
 	/** The terminal's title now, or `fallback` when it cannot be read (logged). */
 	private titleNow(channelId: string, fallback: string): string {
 		try {

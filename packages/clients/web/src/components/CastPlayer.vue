@@ -190,6 +190,9 @@ function load(cast: ParsedCast): void {
 		},
 	});
 	playback.value = p;
+	// What the controls already say, chosen while the cast loaded.
+	p.setSpeed(speed.value);
+	p.setSkipIdle(skipIdle.value);
 	total.value = p.totalTime;
 	markers.value = p.markers();
 	p.play();

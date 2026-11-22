@@ -107,7 +107,12 @@ export const useRecordingsStore = defineStore("recordings", () => {
 		refreshSoon();
 	}
 
+	/** The client the handler is on: each connect calls this again with the same one. */
+	let registeredOn: SocketLike | null = null;
+
 	function registerHandlers(socket: SocketLike): void {
+		if (registeredOn === socket) return;
+		registeredOn = socket;
 		socket.on("RECORDING_STATE", (msg) => {
 			if (msg.type === "RECORDING_STATE") onState(msg as RecordingStateMessage);
 		});

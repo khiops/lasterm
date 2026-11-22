@@ -1577,15 +1577,18 @@ export class ChannelLifecycleManager {
 	): void {
 		const recorder = this.ctx.recorder;
 		if (!recorder) return;
-		const profile = this.ctx.configResolver?.resolve(hostId, channelId) ?? null;
-		if (profile?.recordTerminals !== true) return;
-		recorder.startAutomatic({
-			channelId,
-			hostId,
-			hostLabel: this.ctx.metaDal.getHost(hostId)?.label ?? hostId,
-			cols,
-			rows,
-		});
+		// Read in the SPAWN_OK handler: a failing read refuses the recording and
+		// leaves the terminal's own start to finish.
+		let hostLabel: string;
+		try {
+			const profile = this.ctx.configResolver?.resolve(hostId, channelId) ?? null;
+			if (profile?.recordTerminals !== true) return;
+			hostLabel = this.ctx.metaDal.getHost(hostId)?.label ?? hostId;
+		} catch (err) {
+			recorder.refuseStorage(channelId, err);
+			return;
+		}
+		recorder.startAutomatic({ channelId, hostId, hostLabel, cols, rows });
 	}
 
 	// ─── Re-attach channels ───────────────────────────────────────────────────

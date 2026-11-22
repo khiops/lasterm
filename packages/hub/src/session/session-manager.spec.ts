@@ -12415,35 +12415,72 @@ describe("SessionManager recordings (#80)", () => {
 
 	// AC-END-REASONS. Mutation caught: an end hooked only at CHANNEL_EXIT.
 	describe("ends a recording with its terminal", () => {
+		// Every end reaches the windows, its reason with it: a REC mark left on an
+		// ended recording would offer a Stop on nothing. Mutation caught: an end
+		// broadcast only for a Stop.
+		let heard: ProtocolMessage[];
+		function listen(): void {
+			heard = [];
+			sm.addClient(makeClient("c-end", heard));
+		}
+		function heardEnd(channelId: string, endReason: string): void {
+			expect(heard).toContainEqual(
+				expect.objectContaining({
+					type: "RECORDING_STATE",
+					channelId,
+					recordingId: null,
+					endReason,
+				}),
+			);
+		}
+
 		it("killed by destroyChannel", async () => {
 			const channelId = await spawnLocal();
 			const started = sm.startRecording(channelId);
 			if (!started.ok) throw new Error(started.code);
+			listen();
 			sm.destroyChannel(channelId);
 			expect(sm.recorder.listed(started.id)?.end_reason).toBe("killed");
 			expect(sm.recordingIdOf(channelId)).toBeNull();
+			heardEnd(channelId, "killed");
+		});
+
+		it("exited when its program ends", async () => {
+			const channelId = await spawnLocal();
+			const started = sm.startRecording(channelId);
+			if (!started.ok) throw new Error(started.code);
+			listen();
+			emitLocal({ type: "CHANNEL_EXIT", channelId, exitCode: 0 });
+			expect(sm.recorder.listed(started.id)?.end_reason).toBe("exited");
+			heardEnd(channelId, "exited");
 		});
 
 		it("gone when its host's stopped agent takes it", async () => {
 			const channelId = await spawnLocal();
 			const started = sm.startRecording(channelId);
 			if (!started.ok) throw new Error(started.code);
+			const hostId = await sm.ensureLocalHost();
+			listen();
 			(
 				sm as unknown as { lifecycle: { endChannelsOfStoppedAgent: (h: string) => void } }
-			).lifecycle.endChannelsOfStoppedAgent(await sm.ensureLocalHost());
+			).lifecycle.endChannelsOfStoppedAgent(hostId);
 			expect(sm.recorder.listed(started.id)?.end_reason).toBe("gone");
+			heardEnd(channelId, "gone");
 		});
 
 		it("gone when the agent no longer holds it", async () => {
 			const channelId = await spawnLocal();
 			const started = sm.startRecording(channelId);
 			if (!started.ok) throw new Error(started.code);
+			const hostId = await sm.ensureLocalHost();
+			listen();
 			(
 				sm as unknown as {
 					lifecycle: { reconcileChannelState: (h: string, s: unknown[], a: unknown) => void };
 				}
-			).lifecycle.reconcileChannelState(await sm.ensureLocalHost(), [], mockLocalAgents[0]);
+			).lifecycle.reconcileChannelState(hostId, [], mockLocalAgents[0]);
 			expect(sm.recorder.listed(started.id)?.end_reason).toBe("gone");
+			heardEnd(channelId, "gone");
 		});
 
 		it("killed when its host is deleted by force", async () => {
@@ -12465,9 +12502,62 @@ describe("SessionManager recordings (#80)", () => {
 				rows: 24,
 			});
 			const id = sm.recordingIdOf(channelId) ?? "";
+			listen();
 			expect(sm.deleteHost(host.id, { force: true }).kind).toBe("deleted");
 			expect(sm.recorder.listed(id)?.end_reason).toBe("killed");
+			heardEnd(channelId, "killed");
 		});
+	});
+
+	// A failing metadata read around a start refuses the recording, and nothing
+	// else. Mutations caught: the read left to throw out of the SPAWN_OK handler,
+	// and out of the manual start.
+	it("starts the terminal and refuses its recording when its profile cannot be read", async () => {
+		await hubWithToml("[terminal]\nrecord_terminals = true\n");
+		const resolver = (
+			sm as unknown as { ctx: { configResolver: { resolve: (...a: unknown[]) => unknown } } }
+		).ctx.configResolver;
+		const resolve = resolver.resolve.bind(resolver);
+		const spy = vi.spyOn(resolver, "resolve").mockImplementation((...args: unknown[]) => {
+			if (new Error().stack?.includes("startRecordingIfAsked")) {
+				throw Object.assign(new Error("read"), { code: "SQLITE_IOERR" });
+			}
+			return resolve(...args);
+		});
+		try {
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c-read", received));
+			const channelId = await sm.handleSpawn("c-read", { type: "SPAWN", hostId: "local" });
+			expect(channelId).not.toBeNull();
+			expect(received).toContainEqual(expect.objectContaining({ type: "CHANNEL_CREATED" }));
+			expect(received).toContainEqual(
+				expect.objectContaining({
+					type: "RECORDING_STATE",
+					channelId,
+					recordingId: null,
+					refused: "storage",
+				}),
+			);
+			expect(sm.recordingIdOf(channelId ?? "")).toBeNull();
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("answers a storage error to a manual start whose host cannot be read", async () => {
+		const channelId = await spawnLocal();
+		const getHost = vi.spyOn(MetaDAL.prototype, "getHost").mockImplementationOnce(() => {
+			throw Object.assign(new Error("read"), { code: "SQLITE_IOERR" });
+		});
+		try {
+			expect(sm.startRecording(channelId)).toMatchObject({
+				ok: false,
+				status: 500,
+				code: "RECORDING_STORAGE_ERROR",
+			});
+		} finally {
+			getHost.mockRestore();
+		}
 	});
 
 	// AC-PURGE-KEEPS. Mutation caught: recordings deleted with their channel or by the GC.

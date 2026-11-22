@@ -126,6 +126,31 @@ describe("CastPlayer", () => {
 		expect(Number(document.querySelector<HTMLInputElement>(".player__seek")?.value)).toBe(paused);
 	});
 
+	// Mutation caught: the playback started at its defaults, past what the
+	// controls were set to while the cast loaded.
+	it("plays with the speed and Skip idle chosen while the cast loaded", async () => {
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		async function* slow(): AsyncGenerator<string> {
+			yield `${HEADER}\n`;
+			await gate;
+			yield '[0, "o", "A"]\n[10, "o", "B"]\n';
+		}
+		mount(slow);
+		await settle();
+		const skip = document.querySelector<HTMLInputElement>('.player__field input[type="checkbox"]');
+		if (skip) {
+			skip.checked = false;
+			skip.dispatchEvent(new Event("change"));
+		}
+		release();
+		await settle();
+		// Skip idle off: the 10 s pause counts whole.
+		expect(clockText()).toBe("0:00 / 0:10");
+	});
+
 	// Mutation caught: a player closed during its load going on to build and fetch.
 	it("stops reading and builds nothing once closed during its load", async () => {
 		let release: () => void = () => {};

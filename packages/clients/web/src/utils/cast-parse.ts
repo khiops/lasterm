@@ -58,6 +58,11 @@ export class CastParser {
 	private previousTime = 0;
 	private failed = false;
 
+	/** Whether the cast is already unreadable: nothing after can make it readable. */
+	get hasFailed(): boolean {
+		return this.failed;
+	}
+
 	/** Feed the next chunk of text. */
 	push(chunk: string): void {
 		if (this.failed) return;
@@ -192,6 +197,8 @@ export async function parseCastChunks(
 	for await (const chunk of chunks) {
 		if (cancelled()) return null;
 		parser.push(chunk);
+		// Unreadable already: leaving the loop ends the source, nothing more is read.
+		if (parser.hasFailed) break;
 	}
 	return cancelled() ? null : parser.finish();
 }

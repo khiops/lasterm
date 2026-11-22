@@ -88,6 +88,19 @@ describe("parseCast", () => {
 	});
 
 	// The file read in chunks gives the same events, a line split between chunks included.
+	// Mutation caught: the source read to its end after the cast is already unreadable.
+	it("stops reading once the cast is unreadable", async () => {
+		let pulled = 0;
+		async function* chunks(): AsyncGenerator<string> {
+			for (const text of ["not a header\n", '[0, "o", "a"]\n', '[0, "o", "b"]\n']) {
+				pulled++;
+				yield text;
+			}
+		}
+		expect(await parseCastChunks(chunks())).toEqual({ error: "Not an asciicast v2 or v3 file" });
+		expect(pulled).toBe(1);
+	});
+
 	it("reads a cast in chunks cut anywhere", async () => {
 		async function* chunks(): AsyncGenerator<string> {
 			for (let i = 0; i < V3.length; i += 7) yield V3.slice(i, i + 7);

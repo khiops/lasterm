@@ -848,6 +848,16 @@ export class SessionManager {
 		return recorder;
 	}
 
+	/** The answer to a start whose metadata or storage could not be read. */
+	private recordingStorageError(): { ok: false; status: 500; code: string; message: string } {
+		return {
+			ok: false,
+			status: 500,
+			code: "RECORDING_STORAGE_ERROR",
+			message: "The recording could not be stored",
+		};
+	}
+
 	/** The open recording of a terminal, or null. */
 	recordingIdOf(channelId: string): string | null {
 		return this.ctx.recorder?.recordingIdOf(channelId) ?? null;
@@ -862,7 +872,13 @@ export class SessionManager {
 	):
 		| { ok: true; id: string }
 		| { ok: false; status: 404 | 409 | 500; code: string; message: string; openId?: string } {
-		if (!this.ctx.metaDal.getChannel(channelId)) {
+		let known: boolean;
+		try {
+			known = this.ctx.metaDal.getChannel(channelId) !== undefined;
+		} catch {
+			return this.recordingStorageError();
+		}
+		if (!known) {
 			return { ok: false, status: 404, code: "CHANNEL_NOT_FOUND", message: "Channel not found" };
 		}
 		const ch = this.ctx.channels.get(channelId);
@@ -875,10 +891,16 @@ export class SessionManager {
 				message: "Only a running terminal whose host is connected can be recorded",
 			};
 		}
+		let hostLabel: string;
+		try {
+			hostLabel = this.ctx.metaDal.getHost(ch.hostId)?.label ?? ch.hostId;
+		} catch {
+			return this.recordingStorageError();
+		}
 		const result = this.recorder.startManual({
 			channelId,
 			hostId: ch.hostId,
-			hostLabel: this.ctx.metaDal.getHost(ch.hostId)?.label ?? ch.hostId,
+			hostLabel,
 			cols: ch.cols,
 			rows: ch.rows,
 		});

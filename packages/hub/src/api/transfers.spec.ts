@@ -397,6 +397,8 @@ describe("uploads over the hub's WebSocket and REST routes (#833)", () => {
 			return (described.json().items as { state: string }[]).map((item) => item.state).sort();
 		};
 		await vi.waitFor(async () => expect(await states()).toContain("sending"), { timeout: 10_000 });
+		// Time for a second item to start if the limit let it (the default is 2).
+		await new Promise((resolve) => setTimeout(resolve, 500));
 		expect(await states()).toEqual(["queued", "queued", "sending"]);
 	});
 

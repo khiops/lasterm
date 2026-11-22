@@ -2752,6 +2752,24 @@ describe("TerminalPane switched to another terminal (#966)", () => {
 		expect(searchInput()?.value).toBe("");
 	});
 
+	// Wrong implementations: "fade" handled as clear (cleared at once) or as persist (never cleared).
+	it("closes the search at once and clears what it found a moment later when the settings say fade", async () => {
+		await showingT({ setUp: searchSettings({ highlightOnClose: "fade" }) });
+		await openSearch();
+		await typeSearch("needle");
+		const addon = searches().at(-1) as unknown as { clearDecorations: ReturnType<typeof vi.fn> };
+		addon.clearDecorations.mockClear();
+
+		searchInput()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+		await settle();
+
+		expect(searchShown()).toBe(false);
+		expect(addon.clearDecorations).not.toHaveBeenCalled();
+		await vi.waitFor(() => expect(addon.clearDecorations).toHaveBeenCalledTimes(1), {
+			timeout: 2000,
+		});
+	});
+
 	it("remembers as many searches as the settings allow", async () => {
 		localStorage.removeItem("lasterm:search-history");
 		await showingT({ setUp: searchSettings({ historySize: 2 }) });

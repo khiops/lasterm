@@ -341,15 +341,15 @@ describe("every setting Settings offers lands where its readers read it", () => 
 		localStorage.clear();
 	});
 
-	/** A value the setting does not hold by default, of its own type. */
-	function valueFor(def: (typeof settingsSchema)[number]): unknown {
+	/** A value of the setting's own type that differs from `before`, so a write that never lands is seen. */
+	function valueFor(def: (typeof settingsSchema)[number], before: unknown): unknown {
 		switch (def.type) {
 			case "toggle":
-				return true;
+				return before !== true;
 			case "number":
-				return (def.max ?? 100) - 1;
+				return [(def.max ?? 100) - 1, def.min ?? 0].find((n) => n !== before);
 			case "select":
-				return def.options?.at(-1)?.value;
+				return [...(def.options ?? [])].reverse().find((o) => o.value !== before)?.value;
 			default:
 				return "distinct-text";
 		}
@@ -359,30 +359,35 @@ describe("every setting Settings offers lands where its readers read it", () => 
 		for (const scope of def.scopes) {
 			it(`${def.section}.${def.key} set at ${scope} scope`, async () => {
 				const { storeSection, storeKey } = toStoreParams(def);
-				const value = valueFor(def);
 				const settings = useSettingsStore();
 				await settings.loadCascade("host-1", "chan-1");
+
+				// Read as the readers read it: the UI config the client loads, or the
+				// resolved profile of the terminal the setting was set for.
+				const read = async (): Promise<unknown> => {
+					if (storeSection === "ui") {
+						const config = useConfigStore();
+						await config.loadUiConfig();
+						const [uiSection, uiKey] = storeKey.split(".") as [string, string];
+						const sections = config.uiConfig as unknown as Record<string, Record<string, unknown>>;
+						return sections[uiSection]?.[uiKey];
+					}
+					const pane = mountTerminal(pinia, "host-1", "chan-1");
+					mounted.push(pane);
+					await settle();
+					return (pane.profile.value as unknown as Record<string, unknown>)[storeKey];
+				};
+
+				const before = await read();
+				const value = valueFor(def, before);
+				expect(value).not.toEqual(before);
 				vi.useFakeTimers();
 				void settings.updateSetting(scope, storeSection, storeKey, value);
 				await vi.advanceTimersByTimeAsync(600);
 				vi.useRealTimers();
 				await settle();
 
-				if (storeSection === "ui") {
-					// Read as the web client reads it: the UI config it loads.
-					const config = useConfigStore();
-					await config.loadUiConfig();
-					const [uiSection, uiKey] = storeKey.split(".") as [string, string];
-					const sections = config.uiConfig as unknown as Record<string, Record<string, unknown>>;
-					expect(sections[uiSection]?.[uiKey]).toEqual(value);
-					return;
-				}
-				// A terminal profile key: the resolved profile of the terminal it was set for.
-				const pane = mountTerminal(pinia, "host-1", "chan-1");
-				mounted.push(pane);
-				await settle();
-				const resolved = pane.profile.value as unknown as Record<string, unknown>;
-				expect(resolved[storeKey]).toEqual(value);
+				expect(await read()).toEqual(value);
 			});
 		}
 	}

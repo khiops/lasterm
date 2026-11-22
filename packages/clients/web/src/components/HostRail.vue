@@ -1163,8 +1163,8 @@ onMounted(() => {
 	font-weight: 600;
 	line-height: 14px;
 	text-align: center;
-	color: #fff;
-	background: var(--nt-red, #e06c75);
+	color: var(--nt-danger-fg);
+	background: var(--nt-danger);
 	font-variant-numeric: tabular-nums;
 }
 

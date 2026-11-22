@@ -194,17 +194,37 @@ export class CastPlayback {
 		this.busy = true;
 		this.seeking = true;
 		try {
+			// Consecutive outputs go to xterm together, up to a piece: one write
+			// per event waits a task per event, minutes for a large recording.
+			let batch = "";
 			while (this.index < this.cast.events.length) {
 				const event = this.cast.events[this.index] as CastEvent;
 				const at = this.position + this.played(event);
 				// Sums of decimal delays carry float noise (100 × 0.01 s ends at
 				// 1.0000000000000007): an event on the target, within it, belongs.
 				if (at > seconds + BOUNDARY_S) break;
-				await this.apply(event, gen, 0, false);
-				if (gen !== this.generation) return;
+				if (event.c === "o") {
+					if (batch.length > 0 && batch.length + event.t.length > WRITE_PIECE_UNITS) {
+						await this.write(batch, gen);
+						if (gen !== this.generation) return;
+						batch = "";
+					}
+					batch += event.t;
+				} else {
+					// A size change applies once the output before it is parsed.
+					if (event.c === "r" && batch.length > 0) {
+						await this.write(batch, gen);
+						if (gen !== this.generation) return;
+						batch = "";
+					}
+					await this.apply(event, gen, 0, false);
+					if (gen !== this.generation) return;
+				}
 				this.position = at;
 				this.index++;
 			}
+			await this.write(batch, gen);
+			if (gen !== this.generation) return;
 			// The clock starts from the target, whatever time the replay took.
 			this.setClock(Math.min(Math.max(seconds, this.position), this.due()));
 		} finally {
@@ -321,6 +341,23 @@ export class CastPlayback {
 		this.index++;
 		this.options.onTime?.(this.currentTime);
 		this.pump(gen);
+	}
+
+	/**
+	 * Write `text` in pieces, each after the previous one is parsed; stops when
+	 * a seek or a dispose replaced this generation. The caller checks the
+	 * generation again after the await: it may change before it resumes.
+	 */
+	private async write(text: string, gen: number): Promise<void> {
+		let at = 0;
+		while (at < text.length) {
+			if (gen !== this.generation) return;
+			const end = pieceEnd(text, at);
+			const piece = text.slice(at, end);
+			const terminal = this.terminal;
+			await new Promise<void>((resolve) => terminal.write(piece, resolve));
+			at = end;
+		}
 	}
 
 	/**

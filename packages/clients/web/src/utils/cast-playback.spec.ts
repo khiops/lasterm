@@ -157,6 +157,21 @@ describe("CastPlayback", () => {
 		expect(last().text).toBe(big);
 	});
 
+	// V-PERF: a seek over many outputs. Mutation caught: one write (one parse wait) per event.
+	it("writes consecutive outputs together in a seek, in pieces of at most one piece's size", async () => {
+		const line = `${"y".repeat(99)}\n`;
+		const events = Array.from({ length: 5000 }, () => JSON.stringify([0.001, "o", line]));
+		const text = ['{"version":3,"term":{"cols":80,"rows":24}}', ...events].join("\n");
+		const { playback, last } = player(text);
+		await playback.seek(10);
+		// 5000 × 100 units = 500,000: one full piece, then the rest from the next whole event.
+		expect(last().calls.filter((c) => c.startsWith("write"))).toEqual([
+			"write:349500:0",
+			"write:150500:0",
+		]);
+		expect(last().text).toBe(line.repeat(5000));
+	});
+
 	// COR1: time is continuous. Mutation caught: the whole delay waited again after a seek or a pause.
 	it("goes on from a seek between two events with only what remains", async () => {
 		const text = [

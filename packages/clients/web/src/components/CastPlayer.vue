@@ -9,10 +9,10 @@
 				:aria-label="`Replay of ${title}`"
 				@keydown="onKeydown"
 			>
-				<header class="player__head">
+				<div class="player__head">
 					<h3 class="player__title">{{ title }}</h3>
 					<button class="player__close" aria-label="Close the player" @click="emit('close')">×</button>
-				</header>
+				</div>
 
 				<p v-if="error" class="player__error" role="alert">{{ error }}</p>
 				<div v-else ref="stage" class="player__stage">
@@ -34,7 +34,7 @@
 							type="range"
 							min="0"
 							:max="total"
-							step="0.01"
+							step="any"
 							:value="time"
 							aria-label="Position"
 							@input="onSeek"

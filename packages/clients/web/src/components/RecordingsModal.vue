@@ -9,12 +9,12 @@
 				aria-labelledby="rec-title"
 				@keydown="onKeydown"
 			>
-				<header class="rec-head">
+				<div class="rec-head">
 					<h3 id="rec-title" class="rec-title">Recordings</h3>
 					<span class="rec-usage" :class="{ 'rec-usage--full': full }">
 						{{ full ? "Full: " : "" }}{{ size(recordings.usedBytes) }} of {{ size(recordings.capBytes) }}
 					</span>
-				</header>
+				</div>
 				<p class="rec-note">
 					A recording holds everything the terminal printed, secrets included. It stays on this computer.
 				</p>
@@ -331,8 +331,8 @@ async function onFile(event: Event): Promise<void> {
 }
 
 .btn-primary {
-	background: var(--nt-accent, var(--nt-blue, #3b82f6));
-	color: #fff;
+	background: var(--nt-accent);
+	color: var(--nt-accent-fg);
 }
 
 @media (max-width: 520px) {

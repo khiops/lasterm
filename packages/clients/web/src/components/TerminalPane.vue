@@ -2180,14 +2180,16 @@ function onDragEnd(): void {
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
-	padding: 3px 8px;
+	padding: 2px 7px;
 	margin-right: 6px;
 	border-radius: 4px;
 	font-size: 11px;
 	font-weight: 600;
 	letter-spacing: 0.06em;
-	color: var(--nt-red, #e06c75);
-	background: rgba(0, 0, 0, 0.2);
+	/* --nt-status-error is made to read on the theme's background: the mark keeps that ground. */
+	color: var(--nt-status-error);
+	background: var(--nt-bg);
+	border: 1px solid currentColor;
 	user-select: none;
 	flex-shrink: 0;
 }
@@ -2196,7 +2198,7 @@ function onDragEnd(): void {
 	width: 7px;
 	height: 7px;
 	border-radius: 50%;
-	background: var(--nt-red, #e06c75);
+	background: currentColor;
 }
 
 .terminal-container {

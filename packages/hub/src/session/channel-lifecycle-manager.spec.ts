@@ -1,6 +1,7 @@
 import type { AgentSpawnOkMessage, ChannelCreatedMessage, ProtocolMessage } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openTestDatabases } from "../storage/db.js";
+import { MetaDAL } from "../storage/meta.js";
 import { SpoolDAL } from "../storage/spool.js";
 import { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { clearContext, clientDisconnect, respond } from "./prompt-context.js";
@@ -1254,5 +1255,101 @@ describe("#726 storeSnapshot", () => {
 		} finally {
 			dbs.close();
 		}
+	});
+});
+
+describe("#1123 CHANNEL_CREATED announces the row's own times", () => {
+	const OLD = "2020-01-01T00:00:00.000Z";
+
+	/** Spawn through sendSpawnAndWait on a real MetaDAL; return the row and the observer's CHANNEL_CREATED. */
+	async function spawnAndObserve(revive: boolean) {
+		const dbs = openTestDatabases();
+		try {
+			const dal = new MetaDAL(dbs.meta);
+			const host = dal.createHost({ type: "local", label: "here" });
+			dal.createSession({ id: "sess-old", hostId: host.id, status: "active" });
+			dal.createSession({ id: "sess-new", hostId: host.id, status: "active" });
+			if (revive) {
+				dal.createChannel({
+					id: "ch-1",
+					sessionId: "sess-old",
+					status: "dead",
+					cols: 80,
+					rows: 24,
+				});
+				// A terminal created long ago, whose end left updated_at at the same old time.
+				dbs.meta
+					.prepare("UPDATE channels SET created_at = ?, updated_at = ? WHERE id = ?")
+					.run(OLD, OLD, "ch-1");
+			}
+
+			const observerMessages: ProtocolMessage[] = [];
+			const observer = makeWsClient("observer", (m) => observerMessages.push(m as ProtocolMessage));
+			const pendingRequests = new Map<string, (msg: ProtocolMessage) => void>();
+			const ctx = {
+				stoppingAgents: new Set<string>(),
+				clients: new Map([[observer.id, observer]]),
+				channels: new Map(),
+				pendingRequests,
+				metaDal: dal,
+				scheduler: { trackChannel: vi.fn() },
+				chunker: { trackChannel: vi.fn() },
+				sessions: new Map(),
+				agents: new Map(),
+				hubLogger: null,
+				primaryToken: null,
+			} as unknown as SharedSessionContext;
+			const manager = new ChannelLifecycleManager(ctx, new StateBroadcaster(ctx));
+
+			const spawner = makeWsClient("spawner");
+			const spawnPromise = manager.sendSpawnAndWait({
+				agent: { connected: true, send: vi.fn() } as never,
+				spawnMsg: {
+					type: "SPAWN",
+					requestId: "req-1",
+					channelId: "ch-1",
+					cols: 100,
+					rows: 30,
+				} as import("@lasterm/shared").AgentSpawnMessage,
+				clientId: spawner.id,
+				hostId: host.id,
+				session: { id: "sess-new" },
+				client: spawner as never,
+				resolvedShell: "/bin/bash",
+				resolvedArgs: [],
+				resolvedCwd: undefined,
+				resolvedDirectProcess: false,
+				resolvedLaunchProfileId: undefined,
+				cols: 100,
+				rows: 30,
+				...(revive && { reuseChannelId: "ch-1" }),
+			});
+			pendingRequests.get("req-1")?.({
+				type: "SPAWN_OK",
+				requestId: "req-1",
+				channelId: "ch-1",
+			} as AgentSpawnOkMessage);
+			await spawnPromise;
+
+			const created = observerMessages.filter((m) => m.type === "CHANNEL_CREATED");
+			expect(created).toHaveLength(1);
+			return { row: dal.getChannel("ch-1"), msg: created[0] as ChannelCreatedMessage };
+		} finally {
+			dbs.close();
+		}
+	}
+
+	it("a revived channel announces the refreshed updated_at, not its creation time", async () => {
+		const { row, msg } = await spawnAndObserve(true);
+		expect(row?.createdAt).toBe(OLD);
+		expect(row?.updatedAt).not.toBe(OLD);
+		expect(msg.createdAt).toBe(OLD);
+		expect(msg.updatedAt).toBe(row?.updatedAt);
+	});
+
+	it("a new channel announces both times as its row holds them", async () => {
+		const { row, msg } = await spawnAndObserve(false);
+		expect(msg.createdAt).toBe(row?.createdAt);
+		expect(msg.updatedAt).toBe(row?.updatedAt);
 	});
 });

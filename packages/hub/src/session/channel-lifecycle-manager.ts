@@ -275,12 +275,21 @@ export class ChannelLifecycleManager {
 			return;
 		}
 		const current = this.ctx.agents.get(hostId);
-		this.applyChannelExit(
-			hostId,
-			current?.connected === true ? current : undefined,
-			hold.exit.msg,
-			this.restartEndReason(hostId),
-		);
+		try {
+			this.applyChannelExit(
+				hostId,
+				current?.connected === true ? current : undefined,
+				hold.exit.msg,
+				this.restartEndReason(hostId),
+			);
+		} catch (err) {
+			// The restart's own outcome stays its caller's answer; this end's
+			// failure is logged, as a storage error on an exit is (#1113).
+			this.ctx.hubLogger?.log("error", "channel-lifecycle: restart end not recorded", {
+				channelId,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
 	}
 
 	/**
@@ -1110,20 +1119,26 @@ export class ChannelLifecycleManager {
 			}, SPAWN_TIMEOUT_MS);
 
 			this.ctx.pendingRequests.set(spawnMsg.requestId, (incoming: ProtocolMessage) => {
+				clearTimeout(timer);
+				this.ctx.pendingRequests.delete(spawnMsg.requestId);
+				// The boundary of the restart's hold, whatever happens next (#1113):
+				// a SPAWN_OK says a new workload holds the id even when the hub is
+				// quitting, and a throw while recording it is the restart's error,
+				// not a failure to replace the run.
+				if (incoming.type === "SPAWN_OK" && spawnMsg.channelId !== undefined) {
+					try {
+						this.newRunStarted(spawnMsg.channelId);
+					} catch (err) {
+						reject(err);
+						return;
+					}
+				}
 				if (!isQuitFenceCurrent(this.ctx, quitEpoch)) {
-					clearTimeout(timer);
-					this.ctx.pendingRequests.delete(spawnMsg.requestId);
 					resolve({ ok: false, channelId: null, errCode: "HUB_QUITTING" });
 					return;
 				}
-				clearTimeout(timer);
-				this.ctx.pendingRequests.delete(spawnMsg.requestId);
 				if (incoming.type === "SPAWN_OK") {
 					const { channelId } = incoming as AgentSpawnOkMessage;
-					// The boundary of the restart's hold, whatever recording the
-					// new run does next (#1113): a throw there is the restart's
-					// error, not a failure to replace the run.
-					if (spawnMsg.channelId !== undefined) this.newRunStarted(spawnMsg.channelId);
 					try {
 						started(channelId);
 					} catch (err) {
@@ -1631,19 +1646,18 @@ export class ChannelLifecycleManager {
 			}, SPAWN_TIMEOUT_MS);
 
 			this.ctx.pendingRequests.set(requestId, (incoming: ProtocolMessage) => {
+				clearTimeout(timeout);
+				this.ctx.pendingRequests.delete(requestId);
+				// A new shell under the same id, the same entry: an exit of the id
+				// is now its own, whatever a restart under way holds or a failed one
+				// marked (#1113), the hub quitting or not.
+				if (incoming.type === "SPAWN_OK" && stillCurrent()) this.newRunStarted(channelId);
 				if (!isQuitFenceCurrent(this.ctx, quitEpoch) || !stillCurrent()) {
-					clearTimeout(timeout);
-					this.ctx.pendingRequests.delete(requestId);
 					settle();
 					return;
 				}
-				clearTimeout(timeout);
-				this.ctx.pendingRequests.delete(requestId);
 				if (incoming.type === "SPAWN_OK") {
-					// A new shell under the same id, the same entry: no answer asked
-					// before it speaks of it, and an exit of the id is now its own,
-					// whatever a restart under way holds or a failed one marked (#1113).
-					this.newRunStarted(channelId);
+					// No answer asked before it speaks of it.
 					ch.startedAt = this.startedNow();
 					onSpawnOk(channelId, ch);
 				} else {

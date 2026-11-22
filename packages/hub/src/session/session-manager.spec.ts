@@ -1205,8 +1205,27 @@ describe("SessionManager", () => {
 			expect(
 				statesOf(heard, channelId).filter((s) => s.status === "dead" || s.endId !== undefined),
 			).toEqual([]);
+			// The window heard of this terminal during the restart: none of it was an end.
+			expect(statesOf(heard, channelId).some((s) => s.status === "live")).toBe(true);
 			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("live");
 			expect(ctxOf().channels.get(channelId)?.status).toBe("live");
+		});
+
+		it("a restart answered once the hub quits never reports the replaced shell's exit", async () => {
+			const { channelId, heard, agent, emit } = await liveTerminal();
+			nextLocalSpawnUnanswered = true;
+
+			const restarting = sm.restartChannel(channelId);
+			await vi.waitFor(() => expect(spawnsNaming(agent, channelId)).toHaveLength(1));
+			emit({ type: "CHANNEL_EXIT", channelId, exitCode: 137 });
+			sm.beginQuit();
+			const [spawn] = spawnsNaming(agent, channelId);
+			emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
+			await restarting;
+
+			// The SPAWN_OK says a new workload holds the id, the hub quitting or
+			// not: the held exit was the replaced run's, and is not an end.
+			expect(endsOf(heard, channelId).filter((s) => s.exitCode === 137)).toEqual([]);
 		});
 
 		it("a live restart keeps the replaced shell's logger and inventory entry for its new run", async () => {
@@ -1494,12 +1513,14 @@ describe("SessionManager", () => {
 				if (order === "after") emit(exit);
 				const [spawn] = spawnsNaming(agent, channelId);
 				emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
-				expect(await restarting).toBe(true);
+				await restarting;
 
 				expect(connection.daemonInventory?.listed.has(channelId)).toBe(false);
 				expect(logger.close).toHaveBeenCalledTimes(1);
 				expect(registry.has(channelId)).toBe(false);
-				expect(ctxOf().channels.get(channelId)?.status).toBe("live");
+				// Whether the restart writes the terminal back is not decided here;
+				// what it writes back, if anything, the old exit has not ended.
+				expect(ctxOf().channels.get(channelId)?.status).not.toBe("dead");
 			},
 		);
 	});

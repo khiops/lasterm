@@ -5127,10 +5127,15 @@ mod tests {
                     channel_id: "late-reader".to_string(),
                 })
                 .await;
-                // The first reader has seen its PTY close, and waits.
+                // The first reader has seen its PTY close, and waits 3 s from here.
                 a.read_through(|frame| is_about(frame, "LOG", "late-reader"))
                     .await;
+                let first_closed = std::time::Instant::now();
                 spawned(&mut a, interactive("late-reader")).await;
+                // The replacement's reader then wakes 1.5 s or more after the
+                // first: an exit tells by its time which reader sent it, both
+                // runs having ended the same way.
+                tokio::time::sleep(Duration::from_millis(1500)).await;
                 a.send(&HubToAgent::Destroy {
                     channel_id: "late-reader".to_string(),
                 })
@@ -5138,16 +5143,25 @@ mod tests {
                 // The replacement's reader has seen its PTY close too.
                 a.read_through(|frame| is_about(frame, "LOG", "late-reader"))
                     .await;
-                let mut seen = refused(&mut a, "late-reader").await;
-                seen.extend(a.frames_until_quiet(Duration::from_millis(5000)).await);
-                let exits = seen
+                let mut first_window = refused(&mut a, "late-reader").await;
+                let first_woke = first_closed + Duration::from_millis(3750);
+                while let Some(limit) = first_woke.checked_duration_since(std::time::Instant::now())
+                {
+                    match a.frame_within(limit).await {
+                        Some(frame) => first_window.push(frame),
+                        None => break,
+                    }
+                }
+                assert!(
+                    !mentions(&first_window, "late-reader").contains(&"CHANNEL_EXIT".to_string()),
+                    "the late first reader sent an exit"
+                );
+                let later = a.frames_until_quiet(Duration::from_millis(5000)).await;
+                let exits = later
                     .iter()
                     .filter(|frame| is_about(frame, "CHANNEL_EXIT", "late-reader"))
                     .count();
-                assert_eq!(
-                    exits, 1,
-                    "the replacement's exit, and that one only, must come"
-                );
+                assert_eq!(exits, 1, "the replacement's exit must come");
 
                 daemon.stop().await;
             }

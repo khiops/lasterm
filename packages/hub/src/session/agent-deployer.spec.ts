@@ -45,6 +45,7 @@ import {
 	WINDOWS_ARCH_COMMANDS,
 	WINDOWS_REPLY_MARKER,
 	windowsFindAgentScript,
+	windowsHashScript,
 	windowsKnownFolderCommand,
 	windowsLaunchCommand,
 	windowsReplaceScript,
@@ -52,6 +53,7 @@ import {
 } from "./agent-deployer.js";
 import { type FetchAgentBinaryOptions, FetchError } from "./agent-fetch.js";
 import { HelloSeeker } from "./hello-seeker.js";
+import { attachRemoteDaemon, RemoteDaemonUnavailable } from "./remote-daemon.js";
 import { SHELL_START_CEILING_MS, shellStartAllowance, sshExec } from "./ssh-exec.js";
 
 /** What cmd.exe answers, then what asks PowerShell, for a Windows host's architecture (#714). */
@@ -3863,5 +3865,86 @@ describe("verifiedRelayAgent: the agent a daemon-only connection may relay throu
 				makeOptions(),
 			),
 		).toMatchObject({ kind: "refused" });
+	});
+});
+
+// ---------- A Windows host's daemon (#755) -------------------------------------
+
+describe("a Windows host's daemon-only relay and launch (#755)", () => {
+	// AC-W4: the agent the deploy installs at %LOCALAPPDATA%\lasterm, a folder
+	// not on PATH, is the one a daemon-only relay runs. Mutation: the bare
+	// `lasterm-agent` of PATH.
+	it("accepts this hub's agent at %LOCALAPPDATA%\\lasterm, off PATH", async () => {
+		const sha = getLocalSha256(writeCachedAgentBinary("windows", "x64", "this-hubs-windows-agent"));
+		if (sha === null) throw new Error("no local hash");
+		const path = "C:\\Users\\pi\\AppData\\Local\\lasterm\\lasterm-agent.exe";
+		const hash = `${ENCODED_POWERSHELL}${Buffer.from(windowsHashScript(path), "utf16le").toString("base64")}`;
+		const client = makeMockClient({
+			[findAgentCommand()]: folderOutput(),
+			[folderCommand("LocalApplicationData")]: folderOutput("C:\\Users\\pi\\AppData\\Local"),
+			[hash]: { stdout: reply(sha), stderr: "", exitCode: 0 },
+		});
+
+		expect(await verifiedRelayAgent(client, { os: "windows", arch: "x64" }, makeOptions())).toEqual(
+			{ kind: "verified", path, localCopy: true },
+		);
+	});
+
+	describe("read the same under either Windows shell", () => {
+		let dir: string;
+		beforeEach(async () => {
+			dir = await makeTempDir("lasterm-755-shells");
+		});
+		afterEach(async () => {
+			await removeTempDir(dir);
+		});
+
+		/**
+		 * A stand-in for the agent, which touches no pipe: its relay finds
+		 * nothing listening (exit 3) and its launch is refused breakaway (exit
+		 * 5), with the agent's own stderr lines.
+		 */
+		function standIn(): string {
+			const path = join(dir, "stand-in-agent.cmd");
+			writeFileSync(
+				path,
+				[
+					"@echo off",
+					'if "%1"=="--attach" (',
+					"  1>&2 echo lasterm-attach: start",
+					"  1>&2 echo lasterm-attach: nothing-listens",
+					"  1>&2 echo nothing listens on the default pipe",
+					"  exit /b 3",
+					")",
+					'if "%1"=="--daemon" (',
+					"  1>&2 echo lasterm-detach: breakaway-refused",
+					"  1>&2 echo this SSH session's job does not allow a process to break away",
+					"  exit /b 5",
+					")",
+					"exit /b 1",
+					"",
+				].join("\r\n"),
+			);
+			return path;
+		}
+
+		// AC-W5. Mutation: deciding by the exit status, which PowerShell
+		// hands on as 1 for both.
+		it.runIf(process.platform === "win32").each(["cmd.exe", "powershell.exe"] as const)(
+			"a relay that finds nothing, then a refused breakaway, under %s",
+			{ timeout: 60_000 },
+			async (shell) => {
+				const err = await attachRemoteDaemon({
+					conn: localWindowsClient(shell),
+					agentPath: standIn(),
+					os: "windows",
+				}).catch((e: unknown) => e);
+
+				expect(err).toBeInstanceOf(RemoteDaemonUnavailable);
+				expect((err as RemoteDaemonUnavailable).reason).toBe(
+					"this SSH session's job does not allow a process to break away",
+				);
+			},
+		);
 	});
 });

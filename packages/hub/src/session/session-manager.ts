@@ -116,6 +116,7 @@ import {
 	remoteDaemonPaths,
 	remoteDaemonStopCommand,
 	socketForwardingRefusedOn,
+	windowsDaemonStopCommand,
 } from "./remote-daemon.js";
 import * as Acq from "./session-acquisition.js";
 import {
@@ -404,13 +405,14 @@ export class SessionManager {
 						setImmediate(() => transfers.hostConnected?.(hostId));
 					}
 					// The session went active before this agent was the host's: what
-					// only it knows is said again now (#79, #722, #765).
+					// only it knows is said again now (#79, #722, #765, #755).
 					if (
 						agent instanceof SshAgent &&
 						agent.connected &&
 						(agent.usedRemoteDaemon ||
 							agent.sftpSupport?.offered === false ||
-							agent.socketForwardingRefused) &&
+							agent.socketForwardingRefused ||
+							agent.remoteDaemonUnavailable !== null) &&
 						sessions.get(hostId)?.status === "active"
 					) {
 						this.broadcaster.announceSessionState(hostId);
@@ -2782,6 +2784,19 @@ export class SessionManager {
 	}
 
 	/**
+	 * The agent's own `--stop` for the daemon `agent` reached, at `remotePath`:
+	 * on a Windows host as is (#755), elsewhere with the socket of the state
+	 * directory the host resolves. Null when the host cannot say where that is.
+	 */
+	private async daemonStopCommand(agent: SshAgent, remotePath: string): Promise<string | null> {
+		if (agent.remoteOs === "windows") return windowsDaemonStopCommand(remotePath);
+		const resolved = await agent.execOnHost(REMOTE_STATE_DIR_COMMAND);
+		const stateDir = resolved.stdout.trim();
+		if (resolved.exitCode !== 0 || !stateDir.startsWith("/")) return null;
+		return remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir));
+	}
+
+	/**
 	 * Stop-keeping's way to stop a daemon its STOP could not reach: the agent's
 	 * own `--stop`, run over the SSH connection. True once the daemon is
 	 * confirmed gone.
@@ -2792,16 +2807,15 @@ export class SessionManager {
 		const onMessage = (msg: ProtocolMessage): void => {
 			if (msg.type === "ERROR" && msg.code === ErrorCode.DISPLACED) displaced = true;
 		};
-		let stateDir: string;
+		const remotePath = agent.remoteAgentPath;
+		if (remotePath === null) return false;
+		let stopCommand: string | null;
 		try {
-			const resolved = await agent.execOnHost(REMOTE_STATE_DIR_COMMAND);
-			stateDir = resolved.stdout.trim();
-			if (resolved.exitCode !== 0 || !stateDir.startsWith("/") || this.isQuitting()) return false;
+			stopCommand = await this.daemonStopCommand(agent, remotePath);
 		} catch {
 			return false;
 		}
-		const remotePath = agent.remoteAgentPath;
-		if (remotePath === null || !agent.connected) return false;
+		if (stopCommand === null || this.isQuitting() || !agent.connected) return false;
 		const closed = new Promise<boolean>((resolve) => {
 			onClose = () => {
 				const stopped = !agent.closedByHub && !displaced && !this.isQuitting();
@@ -2816,9 +2830,7 @@ export class SessionManager {
 		agent.prependListener("close", onClose);
 		try {
 			const exec = async (): Promise<boolean> => {
-				const result = await agent.execOnHost(
-					remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir)),
-				);
+				const result = await agent.execOnHost(stopCommand);
 				return result.exitCode === 0 && !displaced && !agent.closedByHub && !this.isQuitting();
 			};
 			return await Promise.race([closed, exec().catch(() => false)]);
@@ -2994,15 +3006,12 @@ export class SessionManager {
 			return { replaced: false, message: "This hub does not know where that agent is installed." };
 		}
 
-		const resolved = await agent.execOnHost(REMOTE_STATE_DIR_COMMAND);
-		const stateDir = resolved.stdout.trim();
-		if (resolved.exitCode !== 0 || !stateDir.startsWith("/")) {
+		const command = await this.daemonStopCommand(agent, remotePath);
+		if (command === null) {
 			return { replaced: false, message: "The host could not say where its agent's socket is." };
 		}
 
-		const stopCommand = await agent.execOnHost(
-			remoteDaemonStopCommand(remotePath, remoteDaemonPaths(stateDir)),
-		);
+		const stopCommand = await agent.execOnHost(command);
 		if (stopCommand.exitCode !== 0) {
 			return {
 				replaced: false,
@@ -3205,8 +3214,9 @@ export class SessionManager {
 		if (this.isQuitting()) return { kind: "quitting" };
 		if (this.daemonOnlyReaches.has(hostId)) return { kind: "connecting-already" };
 		if (options.daemonOnly === true) {
-			// A socket a daemon listens on is reached only on these (#701).
-			if (host.os !== "linux" && host.os !== "darwin") return { kind: "daemon-not-possible" };
+			// Deploying nothing, this connection detects nothing, and which way
+			// a daemon is reached depends on the system (#701, #755).
+			if (host.os === null || host.os === undefined) return { kind: "daemon-not-possible" };
 			const agent = this.ctx.agents.get(hostId);
 			if (agent?.connected === true) {
 				if (!(agent instanceof SshAgent) || !agent.usedRemoteDaemon) {

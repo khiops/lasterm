@@ -461,6 +461,29 @@ export const useHostsStore = defineStore("hosts", () => {
 		_socketForwardingRefused.value = new Map(hostIds.map((id) => [id, true]));
 	}
 
+	/**
+	 * Hosts meant to keep an agent running whose connection runs it on stdio,
+	 * since their Windows SSH session does not let a process outlive it, with
+	 * the agent's words for why, as the hub reports it (#755).
+	 */
+	const _remoteDaemonUnavailable = ref<Map<string, string>>(new Map());
+
+	function remoteDaemonUnavailable(hostId: string): string | null {
+		return _remoteDaemonUnavailable.value.get(hostId) ?? null;
+	}
+
+	function rememberRemoteDaemonUnavailable(hostId: string, reason: string | undefined): void {
+		if (reason === _remoteDaemonUnavailable.value.get(hostId)) return;
+		const next = new Map(_remoteDaemonUnavailable.value);
+		if (reason === undefined) next.delete(hostId);
+		else next.set(hostId, reason);
+		_remoteDaemonUnavailable.value = next;
+	}
+
+	function setRemoteDaemonUnavailable(entries: ReadonlyArray<readonly [string, string]>): void {
+		_remoteDaemonUnavailable.value = new Map(entries);
+	}
+
 	function stopKeepingAgent(
 		hostId: string,
 		body: StopKeepingAgentBody,
@@ -887,6 +910,9 @@ export const useHostsStore = defineStore("hosts", () => {
 		isSocketForwardingRefused,
 		rememberSocketForwardingRefused,
 		setSocketForwardingRefused,
+		remoteDaemonUnavailable,
+		rememberRemoteDaemonUnavailable,
+		setRemoteDaemonUnavailable,
 		getOutdatedAgent,
 		rememberOutdatedAgent,
 		getOtherOwnerChannels,

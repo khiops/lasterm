@@ -2680,3 +2680,191 @@ describe("deleting every ended terminal from the sidebar", () => {
 		expect(listed("T1")).toBe(false);
 	});
 });
+
+// What a [ui] setting changes where it acts, in the window mounted with it (#937). Each setting
+// has its opposite beside it, with a value the code would not have by default.
+describe("the settings the window reads", () => {
+	const confirmationAsked = () => document.querySelector(".confirm-dialog") !== null;
+	const toasts = () =>
+		[...document.querySelectorAll(".toast-item .toast-text")].map((el) => el.textContent?.trim());
+	const panel = () => document.getElementById("files-panel");
+	const ON = { experimental: { fileTransfer: true } };
+	const tabsT1T2T3 = (ui?: Record<string, unknown>) =>
+		mountWindow({
+			channels: [live("T1"), live("T2"), live("T3")],
+			...(ui === undefined ? {} : { ui }),
+			layout: {
+				tabs: [
+					{ id: "TAB1", root: term("T1", "P1") },
+					{ id: "TAB2", root: term("T2", "P2") },
+					{ id: "TAB3", root: term("T3", "P3") },
+				],
+			},
+		});
+
+	describe("tabs.confirmCloseAll", () => {
+		it("closes every tab at once, asking nothing, when set to false", async () => {
+			await tabsT1T2T3({ tabs: { confirmCloseAll: false } });
+			await rightClick(document.querySelector('.tab-bar [role="tab"]'));
+
+			await click("Close All");
+
+			expect(confirmationAsked()).toBe(false);
+			expect(tabs()).toEqual([]);
+		});
+
+		it("asks first, and keeps the tabs until confirmed, by default", async () => {
+			await tabsT1T2T3();
+			await rightClick(document.querySelector('.tab-bar [role="tab"]'));
+
+			await click("Close All");
+
+			expect(confirmationAsked()).toBe(true);
+			expect(document.querySelector(".confirm-dialog")?.textContent).toContain(
+				"Close 3 terminals?",
+			);
+			expect(tabs()).toHaveLength(3);
+			await click("Close", document.querySelector(".confirm-dialog") ?? document);
+			expect(tabs()).toEqual([]);
+		});
+	});
+
+	describe("tabs.confirmCloseOthers", () => {
+		it("closes the other tabs at once, asking nothing, when set to false", async () => {
+			await tabsT1T2T3({ tabs: { confirmCloseOthers: false } });
+			await rightClick(document.querySelector('.tab-bar [role="tab"]'));
+
+			await click("Close Others");
+
+			expect(confirmationAsked()).toBe(false);
+			expect(tabs()).toHaveLength(1);
+		});
+
+		it("asks first, and keeps the tabs until confirmed, by default", async () => {
+			await tabsT1T2T3();
+			await rightClick(document.querySelector('.tab-bar [role="tab"]'));
+
+			await click("Close Others");
+
+			expect(confirmationAsked()).toBe(true);
+			expect(document.querySelector(".confirm-dialog")?.textContent).toContain(
+				"Close 2 other terminals?",
+			);
+			expect(tabs()).toHaveLength(3);
+			await click("Close", document.querySelector(".confirm-dialog") ?? document);
+			expect(tabs()).toHaveLength(1);
+		});
+	});
+
+	describe("panes.maxPanes", () => {
+		it("refuses a third pane, and says so, with a limit of 2", async () => {
+			await oneTerminal({ ui: { panes: { maxPanes: 2 } } });
+			await runPaletteRow("Split Right");
+			expect(panesShown()).toHaveLength(2);
+			expect(toasts()).toEqual([]);
+
+			await runPaletteRow("Split Right");
+
+			expect(panesShown()).toHaveLength(2);
+			expect(toasts()).toEqual([
+				"A tab holds at most 2 panes. Close one, or raise Max Panes in Settings › Panes.",
+			]);
+		});
+
+		it("splits a third time with a limit of 3", async () => {
+			await oneTerminal({ ui: { panes: { maxPanes: 3 } } });
+			await runPaletteRow("Split Right");
+			await runPaletteRow("Split Right");
+
+			expect(panesShown()).toHaveLength(3);
+			expect(toasts()).toEqual([]);
+		});
+	});
+
+	describe("startup.autoOpenWelcome", () => {
+		const welcomed = (ui?: Record<string, unknown>) =>
+			mountWindow({
+				channels: [{ ...live("T1"), welcome: true }],
+				...(ui === undefined ? {} : { ui }),
+			});
+
+		it("opens no tab for an alive welcome terminal when set to false", async () => {
+			await welcomed({ startup: { autoOpenWelcome: false } });
+
+			expect(tabs()).toEqual([]);
+		});
+
+		it("opens a tab for an alive welcome terminal by default", async () => {
+			await welcomed();
+
+			expect(tabs().map((t) => t.label)).toEqual(["T1"]);
+		});
+	});
+
+	describe("title.windowTitle", () => {
+		it("leaves the window's title as the app's name when set to false", async () => {
+			await oneTerminal({ ui: { title: { windowTitle: false } } });
+			// The title follows the terminal after a 100 ms debounce: wait it out.
+			await new Promise((resolve) => setTimeout(resolve, 300));
+
+			expect(document.title).toBe("lasterm");
+		});
+
+		it("titles the window after the active terminal by default", async () => {
+			await oneTerminal();
+
+			await vi.waitFor(() => expect(document.title).toBe("lasterm - alpha - T1"));
+		});
+	});
+
+	describe("transfer.openOnDrag", () => {
+		async function dragFilesIn(): Promise<void> {
+			focusPane("P1");
+			const event = new Event("dragenter", { bubbles: true, cancelable: true });
+			Object.defineProperty(event, "dataTransfer", { value: { types: ["Files"] } });
+			window.dispatchEvent(event);
+			await settle();
+		}
+
+		it("keeps the files panel closed when files are dragged in with it set to false", async () => {
+			await oneTerminal({ ui: { ...ON, transfer: { openOnDrag: false } } });
+
+			await dragFilesIn();
+
+			expect(panel()).toBeNull();
+		});
+
+		it("opens the files panel when files are dragged in, by default", async () => {
+			await oneTerminal({ ui: ON });
+
+			await dragFilesIn();
+
+			expect(panel()).not.toBeNull();
+		});
+	});
+
+	describe("transfer.panelSide", () => {
+		const body = () => document.querySelector(".terminal-body");
+		const sideClasses = () =>
+			[...(panel()?.classList ?? [])].filter((name) => name.startsWith("files-panel--"));
+
+		it("docks the panel on the left when set to left", async () => {
+			await oneTerminal({ ui: { ...ON, transfer: { panelSide: "left" } } });
+			focusPane("P1");
+			await press("E", { ctrl: true, shift: true });
+
+			expect(body()?.classList.contains("terminal-body--files-left")).toBe(true);
+			expect(sideClasses()).toContain("files-panel--left");
+		});
+
+		it("docks the panel on the right when set to right", async () => {
+			await oneTerminal({ ui: { ...ON, transfer: { panelSide: "right" } } });
+			focusPane("P1");
+			await press("E", { ctrl: true, shift: true });
+
+			expect(body()?.classList.contains("terminal-body--files-left")).toBe(false);
+			expect(sideClasses()).toContain("files-panel--right");
+			expect(sideClasses()).not.toContain("files-panel--left");
+		});
+	});
+});

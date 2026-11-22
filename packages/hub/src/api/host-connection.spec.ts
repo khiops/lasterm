@@ -304,7 +304,12 @@ describe("connect's daemon_only (#701)", () => {
 		manager.connectHost.mockReturnValue({ kind: "daemon-not-possible" });
 		const notPossible = await post("connect", sshHostId, { daemon_only: true });
 		expect(notPossible.statusCode).toBe(409);
-		expect(notPossible.json()).toMatchObject({ error: { code: "DAEMON_NOT_POSSIBLE" } });
+		expect(notPossible.json()).toEqual({
+			error: {
+				code: "DAEMON_NOT_POSSIBLE",
+				message: "Lasterm does not know this host's system yet; Connect once first",
+			},
+		});
 		manager.connectHost.mockReturnValue({ kind: "no-daemon-connection" });
 		const stdio = await post("connect", sshHostId, { daemon_only: true });
 		expect(stdio.statusCode).toBe(409);

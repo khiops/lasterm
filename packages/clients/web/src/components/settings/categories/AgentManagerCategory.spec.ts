@@ -37,7 +37,7 @@ describe("Settings › Agents › Keep an agent running on remote hosts", () => 
 
 		const note = root.querySelector(".daemon-row .daemon-note")?.textContent?.replace(/\s+/g, " ");
 		expect(note?.trim()).toBe(
-			"Their terminals then survive a dropped connection and a Lasterm restart. It is a process left on the other machine, which ends by itself half an hour after it holds no terminals and no Lasterm is connected to it. After an update, Lasterm replaces it as soon as it runs none of this Lasterm's terminals. Windows hosts are unaffected.",
+			"Their terminals then survive a dropped connection and a Lasterm restart. It is a process left on the other machine, which ends by itself half an hour after it holds no terminals and no Lasterm is connected to it. After an update, Lasterm replaces it as soon as it runs none of this Lasterm's terminals. On Windows hosts too, where the SSH server lets a process outlive the session; where it does not, terminals end with the connection and the host says why.",
 		);
 	});
 });

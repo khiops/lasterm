@@ -347,7 +347,11 @@ lasterm-agent --daemon --socket ~/.local/state/lasterm/agent.sock --idle-timeout
   A remote with an `auth.json` of its own, because a hub runs there, refuses it (§ 3.6). Whoever
   reaches the socket is already that user
 - Exits by itself after 30 minutes holding no terminal with no hub connected
-- Windows remotes never run one: no SSH channel carries a named pipe
+- On a Windows remote it listens on the account's default named pipe, whose DACL admits its owner
+  alone (`D:(A;;GA;;;OW)`; for an elevated administrator's session, Windows makes the
+  Administrators group the owner of what it creates), logs to `%LOCALAPPDATA%\lasterm\logs`, and is started broken away
+  from the SSH session's job (`--detach`). The hub reaches it only through the relay, run as the
+  account (#755)
 
 **Local (daemon mode):**
 ```

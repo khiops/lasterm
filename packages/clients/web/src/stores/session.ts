@@ -459,6 +459,7 @@ export const useSessionStore = defineStore("session", () => {
 				);
 				hostsStore.rememberSftpUnavailable(msg.hostId, msg.sftpUnavailable);
 				hostsStore.rememberSocketForwardingRefused(msg.hostId, msg.socketForwardingRefused);
+				hostsStore.rememberRemoteDaemonUnavailable(msg.hostId, msg.remoteDaemonUnavailable);
 				hostsStore.rememberDisconnectedByUser(msg.hostId, msg.disconnectedByUser === true);
 			}
 		});
@@ -635,6 +636,13 @@ export const useSessionStore = defineStore("session", () => {
 				);
 				hostsStore.setSocketForwardingRefused(
 					msg.sessions.filter((s) => s.socketForwardingRefused === true).map((s) => s.hostId),
+				);
+				hostsStore.setRemoteDaemonUnavailable(
+					msg.sessions.flatMap((s) =>
+						s.remoteDaemonUnavailable === undefined
+							? []
+							: [[s.hostId, s.remoteDaemonUnavailable] as const],
+					),
 				);
 				// Build sessionId → hostId lookup for channel-host mapping
 				const sessionHostMap = new Map<string, string>();

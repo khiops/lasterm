@@ -313,7 +313,7 @@ interface Heard {
  * run (#1091).
  */
 function bufferedStatus(held: Heard | undefined, heard: PendingStatus): PendingStatus {
-	// A creation tells the terminal's titles anew: the ones heard before it go.
+	// A creation tells the display title anew: the titles heard before it go.
 	const { titles: _before, ...buffered } = bufferedEnd(held, heard);
 	// What a creation told of the terminal outlives the statuses heard after it.
 	const row = heard.row ?? held?.row;
@@ -975,11 +975,12 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Silently ignored if the channel is not loaded yet.
 	 */
 	function setDynamicTitle(channelId: string, title: string): void {
+		// Recorded even for a channel no list holds yet: a fetch in flight may list it.
+		titleHeardDuringFetch(channelId, { dynamicTitle: title });
 		const idx = channels.value.findIndex((c) => c.id === channelId);
 		if (idx === -1) return;
 		const existing = channels.value[idx];
 		if (existing === undefined) return;
-		titleHeardDuringFetch(channelId, { dynamicTitle: title });
 		// Avoid unnecessary reactivity triggers if title hasn't changed
 		if (existing.dynamicTitle === title) return;
 		const next = [...channels.value];
@@ -993,6 +994,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Silently ignored if the channel is not loaded yet.
 	 */
 	function setDisplayTitle(channelId: string, displayTitle: string): void {
+		titleHeardDuringFetch(channelId, { displayTitle });
 		// The index keeps up even for a channel this host does not list, so the
 		// tab still carries the last title it was given after a host switch.
 		const indexed = channelIndex.value.get(channelId);
@@ -1007,7 +1009,6 @@ export const useChannelsStore = defineStore("channels", () => {
 		if (idx === -1) return;
 		const existing = channels.value[idx];
 		if (existing === undefined) return;
-		titleHeardDuringFetch(channelId, { displayTitle });
 		if (existing.displayTitle === displayTitle) return;
 		const next = [...channels.value];
 		next[idx] = { ...existing, displayTitle };
@@ -1019,11 +1020,11 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Silently ignored if the channel is not loaded yet.
 	 */
 	function updateProcessTitle(channelId: string, title: string): void {
+		titleHeardDuringFetch(channelId, { processTitle: title });
 		const idx = channels.value.findIndex((c) => c.id === channelId);
 		if (idx === -1) return;
 		const existing = channels.value[idx];
 		if (existing === undefined) return;
-		titleHeardDuringFetch(channelId, { processTitle: title });
 		// Avoid unnecessary reactivity triggers if title hasn't changed
 		if (existing.processTitle === title) return;
 		const next = [...channels.value];

@@ -3359,16 +3359,65 @@ describe("useChannelsStore — a title set while a list fetch is in flight (#112
 		});
 	});
 
-	it("a title set to the value the store already held still outlives the older row", async () => {
-		const { store, fetching, release } = await listedThenFetching((s) =>
-			s.setDisplayTitle("ch-t", "local title"),
-		);
+	it.each([
+		["display", "displayTitle", "setDisplayTitle"],
+		["dynamic", "dynamicTitle", "setDynamicTitle"],
+		["process", "processTitle", "updateProcessTitle"],
+	] as const)(
+		"a %s title set to the value the store already held still outlives the older row",
+		async (_name, field, setter) => {
+			const { store, fetching, release } = await listedThenFetching((s) =>
+				s[setter]("ch-t", "local"),
+			);
 
-		store.setDisplayTitle("ch-t", "local title");
+			store[setter]("ch-t", "local");
+			release();
+			await fetching;
+
+			expect(store.channels.find((c) => c.id === "ch-t")?.[field]).toBe("local");
+		},
+	);
+
+	it.each([
+		["displayTitle", "setDisplayTitle"],
+		["dynamicTitle", "setDynamicTitle"],
+		["processTitle", "updateProcessTitle"],
+	] as const)(
+		"a %s set for a terminal no list holds yet outlives the row the fetch lists",
+		async (field, setter) => {
+			const ok = (body: unknown) =>
+				Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+			let release!: () => void;
+			const held = new Promise<void>((r) => {
+				release = r;
+			});
+			mockFetch.mockImplementation((url: string) =>
+				url.includes("/api/groups")
+					? ok([])
+					: held.then(() => ({ ok: true, json: () => Promise.resolve([row()]) })),
+			);
+			const store = useChannelsStore();
+			const fetching = store.fetchChannels("host-1");
+
+			store[setter]("ch-t", "heard early");
+			release();
+			await fetching;
+
+			expect(store.channels.find((c) => c.id === "ch-t")?.[field]).toBe("heard early");
+		},
+	);
+
+	it("a re-creation that tells no title leaves the listed row's title in place", async () => {
+		const { store, fetching, release } = await listedThenFetching();
+
+		store.handleChannelCreated(created({ displayTitle: undefined }));
 		release();
 		await fetching;
 
-		expect(store.channels.find((c) => c.id === "ch-t")?.displayTitle).toBe("local title");
+		expect(store.channels.find((c) => c.id === "ch-t")).toMatchObject({
+			sessionId: "sess-new",
+			displayTitle: "old display",
+		});
 	});
 
 	it("a title set after a re-creation outlives both the row and the creation's title", async () => {

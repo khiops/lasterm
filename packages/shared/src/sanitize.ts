@@ -12,14 +12,39 @@ const ELLIPSIS = "\u2026";
  * 1. Strip HTML tags (XSS prevention)
  * 2. Strip control characters U+0000–U+001F and U+007F–U+009F (keep printable + Unicode)
  * 3. Trim surrounding whitespace
- * 4. Truncate to maxRawLength
+ * 4. Truncate to maxRawLength UTF-16 units, never splitting a surrogate pair
  */
 export function sanitizeTitle(raw: string, maxRawLength = MAX_RAW_LENGTH): string {
-	return raw
+	const cleaned = raw
 		.replace(/<[^>]*>/g, "")
 		.replace(CONTROL_CHARS_RE, "")
-		.trim()
-		.slice(0, maxRawLength);
+		.trim();
+	return sliceHead(cleaned, maxRawLength);
+}
+
+function isHighSurrogate(code: number): boolean {
+	return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+	return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/** First `count` UTF-16 units of `text`, one fewer when the cut would split a surrogate pair. */
+function sliceHead(text: string, count: number): string {
+	const end =
+		count > 0 && count < text.length && isHighSurrogate(text.charCodeAt(count - 1))
+			? count - 1
+			: count;
+	return text.slice(0, end);
+}
+
+/** Last `count` UTF-16 units of `text`, one fewer when the cut would split a surrogate pair. */
+function sliceTail(text: string, count: number): string {
+	if (count <= 0) return "";
+	let start = text.length - count;
+	if (start > 0 && isLowSurrogate(text.charCodeAt(start))) start += 1;
+	return text.slice(start);
 }
 
 export type TruncationPosition = "end" | "middle" | "start";
@@ -29,7 +54,7 @@ export type TruncationPosition = "end" | "middle" | "start";
  * character (U+2026) at the configured position.
  *
  * @param title     - The title to truncate
- * @param maxLength - Maximum character length of the result
+ * @param maxLength - Maximum length in UTF-16 units; a cut inside a surrogate pair moves inward, so the result may be one unit shorter
  * @param position  - Where to place the ellipsis: 'end', 'middle', or 'start'
  */
 export function truncateTitle(
@@ -43,15 +68,15 @@ export function truncateTitle(
 
 	switch (position) {
 		case "end":
-			return title.slice(0, maxLength - 1) + ELLIPSIS;
+			return sliceHead(title, maxLength - 1) + ELLIPSIS;
 
 		case "start":
-			return ELLIPSIS + title.slice(title.length - (maxLength - 1));
+			return ELLIPSIS + sliceTail(title, maxLength - 1);
 
 		case "middle": {
 			const left = Math.ceil((maxLength - 1) / 2);
 			const right = Math.floor((maxLength - 1) / 2);
-			return title.slice(0, left) + ELLIPSIS + title.slice(title.length - right);
+			return sliceHead(title, left) + ELLIPSIS + sliceTail(title, right);
 		}
 	}
 }

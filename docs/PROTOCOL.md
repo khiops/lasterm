@@ -2591,6 +2591,66 @@ the path; the hub logs neither, at any level.
 A remote host whose OS no connection has recorded is asked once per connection, as the agent
 deployment asks it (`uname -sm`, then the Windows architecture).
 
+#### Downloads
+
+A file of the host a terminal runs on, as a download (#840), for any authenticated client, a reader
+of the terminal included; the write lock plays no part. Every route waits behind
+`[experimental] file_transfer`, and answers 404 `FILE_TRANSFER_DISABLED` while it is off.
+
+| Method | Path | Auth | Body / Notes |
+|--------|------|------|--------------|
+| GET | `/api/channels/:id/files/content` | ● or ticket | `?path=` → the file's bytes. One regular file: a link is refused, not followed |
+| GET | `/api/hosts/:hostId/files/content` | ● or ticket | The same by host, for a download that outlives its terminal |
+| POST | `/api/channels/:id/files/content-ticket` | ● | `{ path }` → `{ ticket, expires_in: 60 }` |
+| POST | `/api/hosts/:hostId/files/content-ticket` | ● | The same by host |
+
+**The answer.** 200, or 206 for a range: `Content-Type: application/octet-stream`, `Content-Length`,
+`Accept-Ranges: bytes`, `ETag: "<size>-<unit><mtime>"` (the unit of the backend's time: `ms` on the
+local host, `s` over SFTP and over SSH commands on a POSIX host, `t` (100 ns ticks) over SSH commands
+on a Windows host), `Last-Modified`, `Content-Disposition: attachment; filename="<fallback>";
+filename*=UTF-8''<name>` (the fallback keeps the bytes 0x20 to 0x7E other than `"`, `\` and `%`, each
+other character one `_`), `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`.
+
+**Ranges** (RFC 9110 § 14): one `bytes=` range. `a-b` and `a-` with `a` inside the file answer 206
+with `Content-Range: bytes a-b/size` (`b` cut to the last byte); `-n` the last `n` bytes. With a
+non-empty file, `a` at or past its end, or `-0`, answer 416 with `Content-Range: bytes */size`.
+Several ranges, `a` above `b`, a header that does not parse, or any range on an empty file, are
+ignored: 200 with the whole file. An `If-Range` that is not the current ETag byte for byte also
+answers 200 with the whole file.
+
+**A file that changes while it is read is never delivered whole.** The hub looks at the file it
+opened before the first byte, and again after the last: a body of at most 64 KiB is read whole
+before any header and answers 409 `FILE_CHANGED` when the looks disagree; a larger one keeps its last
+64 KiB until the second look agrees, and otherwise closes the connection before them, so the client
+holds fewer bytes than `Content-Length` promised.
+
+**Tickets** let a browser's ordinary download, which carries no header, reach the content route. A
+ticket is made through the bearer for one host and one path, is used once, within 60 s, on the
+content routes only and on its own host; a token holds at most 32, the oldest dropped. The route
+then reads the path from the ticket, not from the query. A request with no `Authorization` header and
+an unusable ticket answers 401 `TICKET_INVALID`; a request with a bearer is judged by it and leaves
+the ticket unused. Kept in memory: a restart forgets them. Query values reach no log (`redactUrl`).
+
+**Errors**, before the first byte, answer `{ error: { code, message } }` as the routes above, and also:
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 404 | `HOST_NOT_FOUND` | No host of this hub has that id (the host form) |
+| 409 | `NOT_A_FILE` | A folder, or anything else that is not a regular file |
+| 409 | `LINK_NOT_FOLLOWED` | A link: what the backend can tell as one, a symlink, or over SSH commands on a Windows host a folder that is a reparse point. A Windows file that is a reparse point is read as a file |
+| 409 | `FILE_CHANGED` | The file is not the one the path named a moment before, or changed while a small body was read |
+| 416 | `RANGE_NOT_SATISFIABLE` | Above |
+
+**How each host is read.** The local host: Node's `fs` on an open handle, its `ino`, `dev`, size and
+time compared with the `lstat`. SFTP: OPEN, FSTAT (STAT of the path where the server does not answer
+it), then up to eight 64 KiB READs at once, none asked while the client is not reading; the session
+is held for the whole read. SSH commands: a `sh` script, or an encoded PowerShell calling .NET only,
+prints a marker the hub chose for that read, the opened file's `size mtime`, exactly the bytes asked
+for, then a second `size mtime` line; the hub looks for the marker in the first 64 KiB, past whatever
+the account's shell printed first. A client that leaves stops the read. An open download response
+holds its host's connection as an upload does: a gesture that would close it asks first, naming
+"1 download".
+
 #### Transfers
 
 Uploads (#833, § 4.19): a file's bytes, and what an upload is at. Every route waits behind

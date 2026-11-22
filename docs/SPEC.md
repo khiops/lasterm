@@ -234,6 +234,15 @@ Local daemon, single process, binds to 127.0.0.1.
 - Logs nothing: a path, a name or a variable is the user's, at any level, and a listing is a routine
   request
 
+**Downloads** (`api/file-content.ts`, the backends' reading side in `files/*-read.ts`, #840):
+- Serves one regular file of a terminal's host, by its terminal or by its host, to any
+  authenticated client, a reader included, with one range and an ETag of its size and time; routes
+  in PROTOCOL.md § 6, Downloads. A link is refused, not followed
+- Never delivers whole a file seen to change while it is read: a second look before the last 64 KiB
+- A browser's ordinary download reaches the route through a one-use, 60 s ticket made through the
+  bearer; the desktop writes the bytes itself (Downloads to the desktop, below)
+- An open download response holds its host's connection, as an upload does
+
 **Uploads** (`packages/hub/src/transfers/`, the backends' writing side in `files/*-upload.ts`, #833):
 - Sends files to the host a terminal runs on: started, answered, retried and cancelled over the
   WebSocket (`TRANSFER_*`, PROTOCOL.md § 4.19), the bytes over REST one chunk at a time
@@ -306,6 +315,16 @@ the quit at once; a teardown it cannot confirm is said in a dialog, then the app
 gesture after the hub died leaves without asking it. Once leaving is decided, the process ends
 within 5 s even when the window's main thread, which carries out the exit and shows the dialogs,
 no longer runs: a dialog is shown only after that thread answered.
+
+**Downloads to the desktop (#840).** "Download…" in the files panel calls `pick_download_target`,
+the native save dialog, then `download_hub_file_to`, which streams the hub's bytes over the pinned
+connection (no total time limit, 60 s without a byte ends it) into a hidden partial,
+`.<name>.<16 hex>.lasterm-download`, created exclusively beside the target. Once whole it is placed:
+over the target only when the dialog asked about replacing it and the target is still the file it
+was then, otherwise without replacing (a hard link, or an exclusive copy where hard links are
+unsupported); a name taken meanwhile keeps the partial and says so. The page hears
+`download-progress` and `download-ended`, never the bytes. A browser hands the content route's
+ticketed URL to its own download manager.
 
 **Quitting the desktop while uploads run (#837, decisions.md UPLOADS-DESKTOP).** The page tells the
 shell, on every change, the uploads this window sends: `set_uploads_in_progress({ seq, inProgress,

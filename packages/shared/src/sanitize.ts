@@ -54,7 +54,8 @@ export type TruncationPosition = "end" | "middle" | "start";
  * character (U+2026) at the configured position.
  *
  * @param title     - The title to truncate
- * @param maxLength - Maximum length in UTF-16 units; a cut inside a surrogate pair moves inward, so the result may be one unit shorter
+ * @param maxLength - Maximum length in UTF-16 units; a cut inside a surrogate pair moves inward,
+ *                    so the result may be one unit shorter per adjusted cut (two for "middle")
  * @param position  - Where to place the ellipsis: 'end', 'middle', or 'start'
  */
 export function truncateTitle(

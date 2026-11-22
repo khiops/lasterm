@@ -12587,6 +12587,77 @@ describe("SessionManager recordings (#80)", () => {
 			heardEnd(channelId, "gone");
 		});
 
+		// The end comes before the terminal's status write, which can throw; on a
+		// path over several terminals, every recording ends before the loop's first
+		// write. Mutations caught: the end left after the write (or after the loop's
+		// first write), so a meta.db failure leaves the recording open.
+		describe("even when the terminal's status cannot be written", () => {
+			type Lifecycle = {
+				endChannelsOfStoppedAgent: (h: string) => void;
+				reconcileChannelState: (h: string, s: unknown[], a: unknown) => void;
+				closeSession: (h: string, s: string) => void;
+				retireChannel: (c: string, s: string) => void;
+			};
+			const lifecycle = () => (sm as unknown as { lifecycle: Lifecycle }).lifecycle;
+			const ctx = () =>
+				(sm as unknown as { ctx: import("./session-context.js").SharedSessionContext }).ctx;
+
+			async function twoRecorded(): Promise<{ hostId: string; ids: string[]; channels: string[] }> {
+				const channels = [await spawnLocal(), await spawnLocal()];
+				const ids = channels.map((c) => {
+					const started = sm.startRecording(c);
+					if (!started.ok) throw new Error(started.code);
+					return started.id;
+				});
+				return { hostId: await sm.ensureLocalHost(), ids, channels };
+			}
+
+			function withFailingStatus(run: () => void): void {
+				const write = vi.spyOn(MetaDAL.prototype, "updateChannelStatus").mockImplementation(() => {
+					throw new Error("SQLITE_IOERR");
+				});
+				try {
+					expect(run).toThrow("SQLITE_IOERR");
+				} finally {
+					write.mockRestore();
+				}
+			}
+
+			it.each([
+				["a stopped agent", (h: string) => lifecycle().endChannelsOfStoppedAgent(h)],
+				[
+					"a reconciliation",
+					(h: string) => lifecycle().reconcileChannelState(h, [], mockLocalAgents[0]),
+				],
+				[
+					"a closed session",
+					(h: string) => lifecycle().closeSession(h, ctx().sessions.get(h)?.id ?? ""),
+				],
+			])("ends every recording gone at %s", async (_label, end) => {
+				const { hostId, ids, channels } = await twoRecorded();
+				withFailingStatus(() => end(hostId));
+				expect(ids.map((id) => sm.recorder.listed(id)?.end_reason)).toEqual(["gone", "gone"]);
+				expect(channels.map((c) => sm.recordingIdOf(c))).toEqual([null, null]);
+			});
+
+			it("ends it killed at destroyChannel", async () => {
+				const channelId = await spawnLocal();
+				const started = sm.startRecording(channelId);
+				if (!started.ok) throw new Error(started.code);
+				withFailingStatus(() => sm.destroyChannel(channelId));
+				expect(sm.recorder.listed(started.id)?.end_reason).toBe("killed");
+			});
+
+			it("ends it gone when a terminal is retired", async () => {
+				const channelId = await spawnLocal();
+				const started = sm.startRecording(channelId);
+				if (!started.ok) throw new Error(started.code);
+				const sessionId = ctx().channels.get(channelId)?.sessionId ?? "";
+				withFailingStatus(() => lifecycle().retireChannel(channelId, sessionId));
+				expect(sm.recorder.listed(started.id)?.end_reason).toBe("gone");
+			});
+		});
+
 		it("killed when its host is deleted by force", async () => {
 			const host = dal.createHost({
 				type: "ssh",

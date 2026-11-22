@@ -646,8 +646,9 @@ export class ChannelLifecycleManager {
 			agent.send({ type: "DESTROY", channelId } as DestroyMessage);
 		}
 
-		this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead", undefined, "killed");
+		// The recording ends first: the status write below can throw (#80).
 		this.ctx.recorder?.endChannel(channelId, "killed");
+		this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead", undefined, "killed");
 
 		this.ctx.scheduler.untrackChannel(channelId);
 		this.ctx.chunker.untrackChannel(channelId);
@@ -660,6 +661,7 @@ export class ChannelLifecycleManager {
 	retireChannel(channelId: string, sessionId: string): void {
 		const hostId = this.ctx.channels.get(channelId)?.hostId;
 		this.clearElevationForChannel(channelId);
+		this.ctx.recorder?.endChannel(channelId, "gone");
 		this.broadcaster.updateChannelStatus(channelId, sessionId, "dead");
 		this.forgetChannel(channelId);
 		if (hostId !== undefined) this.agentMayBeIdle(hostId);
@@ -680,6 +682,7 @@ export class ChannelLifecycleManager {
 	 * One whose end did arrive, `stopped` already, is only forgotten.
 	 */
 	endChannelsOfStoppedAgent(hostId: string): void {
+		this.endRecordingsOfHost(hostId);
 		for (const [channelId, ch] of this.ctx.channels.entries()) {
 			if (ch.hostId !== hostId) continue;
 			if (ch.status !== "dead") {
@@ -736,6 +739,16 @@ export class ChannelLifecycleManager {
 	 * still running — its snapshot timer keeps asking an agent that has never
 	 * heard of it, and a SPAWN that names it to bring it back is refused.
 	 */
+	/**
+	 * End the recordings of every terminal of a host about to be forgotten,
+	 * before the status writes that can throw and stop the loop over them (#80).
+	 */
+	private endRecordingsOfHost(hostId: string): void {
+		for (const [channelId, ch] of this.ctx.channels) {
+			if (ch.hostId === hostId) this.ctx.recorder?.endChannel(channelId, "gone");
+		}
+	}
+
 	forgetChannel(channelId: string): void {
 		this.ctx.recorder?.endChannel(channelId, "gone");
 		const ch = this.ctx.channels.get(channelId);
@@ -1309,6 +1322,7 @@ export class ChannelLifecycleManager {
 		// for as long as the hub lives, and a spawn that names it to bring it back
 		// is refused because "it is still running". One already marked dead is the
 		// one most likely to be in both traps, so it is the last thing to skip.
+		this.endRecordingsOfHost(hostId);
 		for (const [channelId, ch] of this.ctx.channels.entries()) {
 			if (ch.hostId !== hostId) continue;
 			if (ch.status !== "dead") {
@@ -1849,6 +1863,16 @@ export class ChannelLifecycleManager {
 	): ReadonlySet<string> {
 		const destroyed = this.destroyOrphans(hostId, states, agent);
 		const reportedIds = new Set(states.filter((s) => s.alive).map((s) => s.channelId));
+
+		// Every terminal judged gone below ends its recording first, before any
+		// status write there can throw and stop the loop (#80).
+		if (this.ctx.sessions.has(hostId)) {
+			for (const [channelId, channelState] of this.ctx.channels) {
+				if (channelState.hostId !== hostId || reportedIds.has(channelId)) continue;
+				if (askedAt !== undefined && !this.answerStillApplies(channelId, askedAt)) continue;
+				this.ctx.recorder?.endChannel(channelId, "gone");
+			}
+		}
 
 		for (const [channelId, channelState] of this.ctx.channels) {
 			if (channelState.hostId !== hostId) continue;

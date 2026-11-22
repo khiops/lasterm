@@ -39,6 +39,10 @@ export interface HostConnectionAnswer {
 			readonly code?: string;
 			readonly message?: string;
 			readonly terminals?: number;
+			/** The uploads and downloads that would stop (#833, #840). */
+			readonly transfers?: number;
+			/** How many of `transfers` are downloads (#840). */
+			readonly downloads?: number;
 		};
 	};
 }
@@ -70,6 +74,8 @@ export interface StopKeepingAgentAnswer {
 			message?: string;
 			terminals?: number;
 			transfers?: number;
+			/** How many of `transfers` are downloads (#840). */
+			downloads?: number;
 			other_owner_channels?: number;
 		};
 	};

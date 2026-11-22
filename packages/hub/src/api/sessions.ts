@@ -2,6 +2,7 @@ import { type AgentEnvironmentResponse, ErrorCode, toSnakeCase } from "@lasterm/
 import type { FastifyInstance } from "fastify";
 import type { SessionManager } from "../session/session-manager.js";
 import type { MetaDAL } from "../storage/meta.js";
+import { stopAdvice, transfersText } from "./host-connection.js";
 import { listedChannel } from "./listed-channel.js";
 
 /**
@@ -132,6 +133,7 @@ export function registerSessionRoutes(
 								other_owner_channels: outcome.otherOwnerChannels,
 							}),
 							...(outcome.transfers !== undefined && { transfers: outcome.transfers }),
+							...(outcome.downloads !== undefined && { downloads: outcome.downloads }),
 						},
 					});
 				}
@@ -197,11 +199,13 @@ export function registerSessionRoutes(
 			}
 			if (outcome !== "closed") {
 				const count = outcome.transfersWouldStop;
+				const downloads = outcome.downloads ?? 0;
 				return reply.code(409).send({
 					error: {
 						code: ErrorCode.TRANSFERS_WOULD_STOP,
-						message: `${count === 1 ? "1 upload" : `${count} uploads`} to this host would stop. Send force=true to stop them; a retry resumes them.`,
+						message: `${transfersText(count - downloads, downloads)} ${downloads > 0 ? "on" : "to"} this host would stop. ${stopAdvice("force=true", count - downloads, downloads)}`,
 						transfers: count,
+						...(downloads > 0 && { downloads }),
 					},
 				});
 			}

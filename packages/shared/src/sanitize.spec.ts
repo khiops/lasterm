@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { sanitizeTitle, truncateTitle } from "./sanitize.js";
 
+/** True when no UTF-16 surrogate is unpaired. */
+const isWellFormed = (text: string): boolean =>
+	!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(text);
+
 describe("sanitizeTitle", () => {
 	it("strips HTML tags but preserves tag content (safe: rendered via .textContent)", () => {
 		// Tag content like "alert(1)" is kept — Vue renders via .textContent so it's
@@ -40,6 +44,18 @@ describe("sanitizeTitle", () => {
 
 	it("handles combined HTML + control chars + whitespace", () => {
 		expect(sanitizeTitle("  <b>title\x00</b>  ")).toBe("title");
+	});
+});
+
+describe("sanitizeTitle surrogate pairs", () => {
+	it("does not keep half a surrogate pair at the raw-length cut", () => {
+		const result = sanitizeTitle("abc\u{1F600}def", 4);
+		expect(result).toBe("abc");
+		expect(isWellFormed(result)).toBe(true);
+	});
+
+	it("keeps a pair that fits the raw length", () => {
+		expect(sanitizeTitle("abc\u{1F600}def", 5)).toBe("abc\u{1F600}");
 	});
 });
 
@@ -101,5 +117,40 @@ describe("truncateTitle", () => {
 		const result = truncateTitle("abcdefghij", 6, "middle");
 		expect(result).toHaveLength(6);
 		expect(result).toBe("abc\u2026ij");
+	});
+	// Surrogate pairs: the bound stays in UTF-16 units, a cut inside a pair moves inward.
+	it("does not keep half a surrogate pair when cutting at 'end'", () => {
+		const result = truncateTitle("abcdefghij\u{1F600}X", 12, "end");
+		expect(result).toBe("abcdefghij…");
+		expect(isWellFormed(result)).toBe(true);
+	});
+
+	it("does not keep half a surrogate pair when cutting at 'start'", () => {
+		const result = truncateTitle("a\u{1F600}abcdefghij", 12, "start");
+		expect(result).toBe("…abcdefghij");
+		expect(isWellFormed(result)).toBe(true);
+	});
+
+	it("does not keep half a surrogate pair when cutting at 'middle'", () => {
+		const result = truncateTitle("abcde\u{1F600}fghijkl", 12, "middle");
+		expect(result).toBe("abcde…hijkl");
+		expect(isWellFormed(result)).toBe(true);
+	});
+
+	it("keeps a whole pair that fits", () => {
+		expect(truncateTitle("abcdefghi\u{1F600}XY", 12, "end")).toBe("abcdefghi\u{1F600}…");
+		expect(truncateTitle("XYabcdefghi\u{1F600}", 12, "start")).toBe("…abcdefghi\u{1F600}");
+		expect(truncateTitle("abcd\u{1F600}efghijkl", 12, "middle")).toBe("abcd\u{1F600}…hijkl");
+	});
+
+	it("never exceeds maxLength nor leaves a lone surrogate, at every length and position", () => {
+		const title = "\u{1F600}a\u{1F600}\u{1F600}bc\u{1F600}d\u{1F600}\u{1F600}\u{1F600}e";
+		for (const position of ["end", "middle", "start"] as const) {
+			for (let max = 2; max < title.length; max++) {
+				const result = truncateTitle(title, max, position);
+				expect(result.length).toBeLessThanOrEqual(max);
+				expect(isWellFormed(result)).toBe(true);
+			}
+		}
 	});
 });

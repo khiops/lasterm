@@ -19,7 +19,8 @@ type FilesIconName =
 	| "chevron-right"
 	| "chevron-down"
 	| "alert"
-	| "upload";
+	| "upload"
+	| "download";
 
 const PATHS: Readonly<Record<FilesIconName, readonly string[]>> = {
 	folder: [
@@ -66,6 +67,7 @@ const PATHS: Readonly<Record<FilesIconName, readonly string[]>> = {
 		"M12 17h.01",
 	],
 	upload: ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "m17 8-5-5-5 5", "M12 3v12"],
+	download: ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "m7 10 5 5 5-5", "M12 15V3"],
 };
 
 defineProps<{ name: FilesIconName }>();

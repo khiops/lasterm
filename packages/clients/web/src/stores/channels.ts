@@ -435,10 +435,22 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Display titles set here DURING each in-flight index fetch, whether or not a
 	 * list holds the channel. The index is rebuilt from the response, which the
 	 * hub may have read before the title: a title heard since goes over its row
-	 * (#1128). Independent of `statusesDuringFetch`: the index fetch has no
-	 * generation and is not tied to a host list.
+	 * (#1128). Independent of `statusesDuringFetch`: the index fetch is not tied to a
+	 * host list or its generations.
 	 */
 	const indexTitlesDuringFetch = new Set<Map<string, string>>();
+
+	/**
+	 * The latest index fetch started, and the latest whose response was taken.
+	 * Fetches are ordered by when they started here: the hub may answer them in
+	 * any order, and an older request's response must not replace a newer one's
+	 * (#1133), or a channel listed by the newer one drops out. An older response
+	 * still applies while no newer one has, so a newer fetch the hub refused does
+	 * not leave the index stale. Separate from `fetchGeneration`, which belongs
+	 * to a host's list.
+	 */
+	let indexGeneration = 0;
+	let indexCommittedGeneration = 0;
 
 	/**
 	 * A run heard for a channel since the last STATE_SYNC says the hub has it:
@@ -615,6 +627,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	async function fetchChannelIndex(): Promise<void> {
 		if (authStore.token === null) return;
+		const myIndexGeneration = ++indexGeneration;
 		const myTitles = new Map<string, string>();
 		indexTitlesDuringFetch.add(myTitles);
 		try {
@@ -624,6 +637,9 @@ export const useChannelsStore = defineStore("channels", () => {
 			if (!res.ok) return;
 			const rows = (await res.json()) as Array<Record<string, unknown>>;
 			if (!Array.isArray(rows)) return;
+			// After the last await: the response of a fetch started later has been
+			// taken, and this older one does not replace it (#1133).
+			if (myIndexGeneration < indexCommittedGeneration) return;
 
 			const nextIndex = new Map<string, ChannelIndexEntry>();
 			const nextHostMap = new Map(channelHostMap.value);
@@ -650,6 +666,7 @@ export const useChannelsStore = defineStore("channels", () => {
 				});
 				nextHostMap.set(id, rowHostId);
 			}
+			indexCommittedGeneration = myIndexGeneration;
 			channelIndex.value = nextIndex;
 			channelHostMap.value = nextHostMap;
 		} catch {

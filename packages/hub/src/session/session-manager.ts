@@ -55,7 +55,7 @@ import {
 	generateId,
 	validateCustomCommand,
 } from "@lasterm/shared";
-import { terminalsText, uploadsText } from "../api/host-connection.js";
+import { terminalsText, transfersText } from "../api/host-connection.js";
 import { HUB_VERSION } from "../build-version.js";
 import type { ConfigResolver, GcConfig } from "../config.js";
 import type { HubLogger } from "../logging/hub-logger.js";
@@ -238,8 +238,10 @@ export type ReplaceAgentOutcome =
 				| typeof ErrorCode.TERMINALS_SHOWN_ENDED;
 			/** How many, when the agent said. */
 			readonly otherOwnerChannels?: number;
-			/** With TRANSFERS_WOULD_STOP: the uploads to the host that would stop (#833). */
+			/** With TRANSFERS_WOULD_STOP: the transfers of the host that would stop (#833). */
 			readonly transfers?: number;
+			/** How many of `transfers` are downloads (#840). */
+			readonly downloads?: number;
 	  };
 
 /** The uploads to each host, as the session manager weighs them (#833). */
@@ -263,8 +265,11 @@ export interface HostTransfers {
 export type CloseSessionOutcome =
 	| "closed"
 	| "busy"
-	/** Uploads to the host would stop, and `force` did not say to: nothing was done. */
-	| { readonly transfersWouldStop: number };
+	/**
+	 * Transfers of the host would stop, and `force` did not say to: nothing was
+	 * done. `downloads`: how many of them are downloads (#840), when any.
+	 */
+	| { readonly transfersWouldStop: number; readonly downloads?: number };
 
 /** What came of asking to connect, reconnect or disconnect a host (#648). */
 export type HostConnectionOutcome =
@@ -286,9 +291,15 @@ export type HostConnectionOutcome =
 			readonly kind: "terminals-would-end";
 			readonly terminals: number;
 			readonly transfers?: number;
+			/** How many of `transfers` are downloads (#840). */
+			readonly downloads?: number;
 	  }
-	/** Closing the connection would stop uploads to the host (#833), and `force` did not say to. */
-	| { readonly kind: "transfers-would-stop"; readonly transfers: number }
+	/** Closing the connection would stop transfers to or from the host (#833, #840), and `force` did not say to. */
+	| {
+			readonly kind: "transfers-would-stop";
+			readonly transfers: number;
+			readonly downloads?: number;
+	  }
 	/** Connected already. */
 	| { readonly kind: "connected" }
 	/**
@@ -318,6 +329,8 @@ export type StopKeepingAgentOutcome =
 			terminals?: number;
 			otherOwnerChannels?: number;
 			transfers?: number;
+			/** How many of `transfers` are downloads (#840). */
+			downloads?: number;
 	  };
 
 export class SessionManager {
@@ -333,6 +346,8 @@ export class SessionManager {
 	private readonly agentMgr: AgentConnectionManager;
 	/** The uploads to each host (#833): they hold its connection as its terminals do. */
 	private transfers: HostTransfers | null = null;
+	/** Download responses being sent, per host (#840). */
+	private readonly downloadsOpen = new Map<string, number>();
 	/** Replaces an agent older than this hub once it holds nothing of it (#805). */
 	private readonly retirement: AgentRetirement;
 	/**
@@ -864,7 +879,10 @@ export class SessionManager {
 		// (#833); the local host's go through the hub's own file system.
 		if (recorded && this.ctx.metaDal.getHost(recorded.hostId)?.type === "ssh") {
 			const transfers = this.transfersOn(recorded.hostId);
-			if (transfers > 0 && options.force !== true) return { transfersWouldStop: transfers };
+			if (transfers > 0 && options.force !== true) {
+				const downloads = this.downloadsOn(recorded.hostId);
+				return { transfersWouldStop: transfers, ...(downloads > 0 ? { downloads } : {}) };
+			}
 			if (transfers > 0) this.transfers?.interruptOn(recorded.hostId);
 		}
 		let hostId: string | undefined;
@@ -2612,8 +2630,12 @@ export class SessionManager {
 					kind: "error",
 					status: 409,
 					code: ErrorCode.TRANSFERS_WOULD_STOP,
-					message: "Send stop_transfers: true to stop the uploads to this host.",
+					message:
+						this.downloadsOn(hostId) > 0
+							? `Send stop_transfers: true to stop the ${this.transfersWords(hostId, transfers)} this host.`
+							: "Send stop_transfers: true to stop the uploads to this host.",
 					transfers,
+					...(this.downloadsOn(hostId) > 0 ? { downloads: this.downloadsOn(hostId) } : {}),
 				};
 			}
 			const interruptUploads = this.uploadsInterrupter(hostId, transfers);
@@ -2648,7 +2670,7 @@ export class SessionManager {
 				agent.remoteAgentPath !== null &&
 				!this.isQuitting()
 			) {
-				stopped = await this.stopKeepingWithStopCommand(hostId, agent);
+				stopped = (await this.runDaemonStopCommand(hostId, agent)).kind === "stopped";
 			}
 			if (this.isQuitting()) return error(409, "HUB_QUITTING", "The hub is quitting.");
 			let updated: Host | undefined;
@@ -2786,43 +2808,68 @@ export class SessionManager {
 	}
 
 	/**
-	 * Stop-keeping's way to stop a daemon its STOP could not reach: the agent's
-	 * own `--stop`, run over the SSH connection. True once the daemon is
-	 * confirmed gone.
+	 * The agent's own `--stop`, run over the SSH connection, for a daemon its
+	 * STOP could not reach. The daemon stopping closes its channel, which ends
+	 * the SSH client the `--stop` runs on, so the exec may report a failure or
+	 * reject after the daemon is gone: the connection closing during the run
+	 * counts as the stop, and is the only thing that does besides a zero exit.
+	 *
+	 * `not_run`: the stop command could not be built (the host could not say where its agent's socket is), nothing was run.
+	 * `failed`: the command ended without the daemon being confirmed gone, with
+	 * its exit code, or null when it did not report one.
 	 */
-	private async stopKeepingWithStopCommand(hostId: string, agent: SshAgent): Promise<boolean> {
+	private async runDaemonStopCommand(
+		hostId: string,
+		agent: SshAgent,
+	): Promise<
+		| { readonly kind: "stopped" }
+		| { readonly kind: "not_run" }
+		| { readonly kind: "failed"; readonly exitCode: number | null }
+	> {
 		let onClose: () => void = () => {};
 		let displaced = false;
 		const onMessage = (msg: ProtocolMessage): void => {
 			if (msg.type === "ERROR" && msg.code === ErrorCode.DISPLACED) displaced = true;
 		};
 		const remotePath = agent.remoteAgentPath;
-		if (remotePath === null) return false;
+		if (remotePath === null) return { kind: "not_run" };
 		let stopCommand: string | null;
 		try {
 			stopCommand = await this.daemonStopCommand(agent, remotePath);
 		} catch {
-			return false;
+			return { kind: "not_run" };
 		}
-		if (stopCommand === null || this.isQuitting() || !agent.connected) return false;
-		const closed = new Promise<boolean>((resolve) => {
-			onClose = () => {
-				const stopped = !agent.closedByHub && !displaced && !this.isQuitting();
-				if (stopped) {
-					agent.closedByHub = true;
-					this.releaseAgent(hostId, agent);
-				}
-				resolve(stopped);
-			};
-		});
+		if (stopCommand === null || this.isQuitting()) return { kind: "not_run" };
+		const closed = new Promise<{ readonly kind: "stopped" } | { readonly kind: "failed" }>(
+			(resolve) => {
+				onClose = () => {
+					const stopped = !agent.closedByHub && !displaced && !this.isQuitting();
+					if (stopped) {
+						agent.closedByHub = true;
+						this.releaseAgent(hostId, agent);
+					}
+					resolve(stopped ? { kind: "stopped" } : { kind: "failed" });
+				};
+			},
+		);
 		agent.prependListener("message", onMessage);
 		agent.prependListener("close", onClose);
 		try {
-			const exec = async (): Promise<boolean> => {
+			const exec = async () => {
 				const result = await agent.execOnHost(stopCommand);
-				return result.exitCode === 0 && !displaced && !agent.closedByHub && !this.isQuitting();
+				const stopped =
+					result.exitCode === 0 && !displaced && !agent.closedByHub && !this.isQuitting();
+				return stopped
+					? ({ kind: "stopped" } as const)
+					: ({ kind: "failed", exitCode: result.exitCode } as const);
 			};
-			return await Promise.race([closed, exec().catch(() => false)]);
+			const outcome = await Promise.race([
+				closed,
+				exec().catch(() => ({ kind: "failed", exitCode: null }) as const),
+			]);
+			return outcome.kind === "failed"
+				? { kind: "failed", exitCode: "exitCode" in outcome ? outcome.exitCode : null }
+				: outcome;
 		} finally {
 			agent.off("message", onMessage);
 			agent.off("close", onClose);
@@ -2891,8 +2938,12 @@ export class SessionManager {
 				return {
 					replaced: false,
 					code: ErrorCode.TRANSFERS_WOULD_STOP,
-					message: "Send stop_transfers: true to stop the uploads to this host.",
+					message:
+						this.downloadsOn(hostId) > 0
+							? `Send stop_transfers: true to stop the ${this.transfersWords(hostId, transfers)} this host.`
+							: "Send stop_transfers: true to stop the uploads to this host.",
 					transfers,
+					...(this.downloadsOn(hostId) > 0 ? { downloads: this.downloadsOn(hostId) } : {}),
 				};
 			}
 			const outcome = await this.stopAgentToReplace(
@@ -2991,16 +3042,21 @@ export class SessionManager {
 			return { replaced: false, message: "This hub does not know where that agent is installed." };
 		}
 
-		const command = await this.daemonStopCommand(agent, remotePath);
-		if (command === null) {
+		const run = await this.runDaemonStopCommand(hostId, agent);
+		if (run.kind === "not_run") {
 			return { replaced: false, message: "The host could not say where its agent's socket is." };
 		}
-
-		const stopCommand = await agent.execOnHost(command);
-		if (stopCommand.exitCode !== 0) {
+		if (run.kind === "failed") {
+			// Not "nothing was changed": a connection that closed under the
+			// command did not confirm the stop either way (#1111).
 			return {
 				replaced: false,
-				message: `The agent would not stop (exit ${stopCommand.exitCode}).`,
+				message:
+					agent.closedByHub || !agent.connected
+						? "The connection ended without confirming the agent stopped."
+						: run.exitCode === null
+							? "The stop command failed without confirming the agent stopped."
+							: `The agent would not stop (exit ${run.exitCode}).`,
 			};
 		}
 
@@ -3255,7 +3311,12 @@ export class SessionManager {
 		const ending = terminalsEndedByReconnect(facts);
 		const transfers =
 			this.ctx.agents.get(hostId)?.connected === true ? this.transfersOn(hostId) : 0;
-		const refused = this.wouldStop(ending, transfers, options.force);
+		const refused = this.wouldStop(
+			ending,
+			transfers,
+			options.force,
+			transfers > 0 ? this.downloadsOn(hostId) : 0,
+		);
 		if (refused !== null) return refused;
 		if (transfers > 0) this.transfers?.interruptOn(hostId);
 		this.userActsOnHost(hostId, false);
@@ -3293,7 +3354,7 @@ export class SessionManager {
 		const facts = this.connectionFacts(hostId, host);
 		const ending = terminalsEndedByDisconnect(facts);
 		const transfers = this.transfersOn(hostId);
-		const refused = this.wouldStop(ending, transfers, options.force);
+		const refused = this.wouldStop(ending, transfers, options.force, this.downloadsOn(hostId));
 		if (refused !== null) return refused;
 		if (transfers > 0) this.transfers?.interruptOn(hostId);
 		const session = this.ctx.sessions.get(hostId);
@@ -3362,7 +3423,7 @@ export class SessionManager {
 				kind: "refused",
 				code: ErrorCode.TRANSFERS_RUNNING,
 				transfers,
-				message: `${uploadsText(transfers)} to this host ${transfers === 1 ? "is" : "are"} running. Wait for them to end or cancel them, then delete the host.`,
+				message: `${this.transfersWords(hostId, transfers)} this host ${transfers === 1 ? "is" : "are"} running. Wait for them to end or cancel them, then delete the host.`,
 			};
 		const terminals = [...this.ctx.channels].filter(
 			([, ch]) => ch.hostId === hostId && ch.status !== "dead",
@@ -3422,12 +3483,20 @@ export class SessionManager {
 		terminals: number,
 		transfers: number,
 		force: boolean | undefined,
+		downloads = 0,
 	): HostConnectionOutcome | null {
 		if (force === true) return null;
 		if (terminals > 0) {
-			return { kind: "terminals-would-end", terminals, ...(transfers > 0 ? { transfers } : {}) };
+			return {
+				kind: "terminals-would-end",
+				terminals,
+				...(transfers > 0 ? { transfers } : {}),
+				...(downloads > 0 ? { downloads } : {}),
+			};
 		}
-		if (transfers > 0) return { kind: "transfers-would-stop", transfers };
+		if (transfers > 0) {
+			return { kind: "transfers-would-stop", transfers, ...(downloads > 0 ? { downloads } : {}) };
+		}
 		return null;
 	}
 
@@ -3545,9 +3614,39 @@ export class SessionManager {
 		return this.hostHasLiveChannels(hostId) || this.transfersOn(hostId) > 0;
 	}
 
-	/** How many uploads to this host are running or queued (#833). */
+	/**
+	 * How many transfers hold this host: uploads running or queued (#833), and
+	 * download responses being sent (#840).
+	 */
 	private transfersOn(hostId: string): number {
-		return this.transfers?.activeOn(hostId) ?? 0;
+		return (this.transfers?.activeOn(hostId) ?? 0) + this.downloadsOn(hostId);
+	}
+
+	/** How many download responses from this host are being sent (#840). */
+	private downloadsOn(hostId: string): number {
+		return this.downloadsOpen.get(hostId) ?? 0;
+	}
+
+	/** Count a download response from a host until the returned function is called (#840). */
+	downloadOpened(hostId: string): () => void {
+		this.downloadsOpen.set(hostId, this.downloadsOn(hostId) + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const left = this.downloadsOn(hostId) - 1;
+			if (left > 0) this.downloadsOpen.set(hostId, left);
+			else {
+				this.downloadsOpen.delete(hostId);
+				if (this.transfersOn(hostId) === 0) this.transfersEnded(hostId);
+			}
+		};
+	}
+
+	/** "1 upload", "2 downloads", "1 upload and 2 downloads": what would stop on this host. */
+	private transfersWords(hostId: string, transfers: number): string {
+		const downloads = Math.min(this.downloadsOn(hostId), transfers);
+		return `${transfersText(transfers - downloads, downloads)} ${downloads > 0 ? "on" : "to"}`;
 	}
 
 	/** Whether this hub holds a terminal on the host that has not ended. */

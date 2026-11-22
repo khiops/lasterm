@@ -109,6 +109,8 @@ export interface SftpServerOptions {
 	shell?: "sh" | "cmd";
 	/** What every exec prints before its command does, as an account's profile may (#749). */
 	prelude?: string;
+	/** What a command's whole stdout becomes before the client gets it, held until the command ends. */
+	rewriteStdout?: (stdout: Buffer) => Buffer;
 	/** The environment exec requests run with under `/bin/sh`, as an account's would; this process's by default. */
 	execEnv?: NodeJS.ProcessEnv;
 	/**
@@ -123,8 +125,15 @@ export interface SftpServerOptions {
 	 * Win32-OpenSSH 9.5 both do; some servers replace.
 	 */
 	renameReplaces?: boolean;
-	/** False: FSTAT is answered "unsupported", as a server that left it out would. */
-	fstat?: boolean;
+	/**
+	 * False: FSTAT is answered "unsupported", as a server that left it out would;
+	 * "fails": answered with a failure, as a server that has it but fails this handle.
+	 */
+	fstat?: boolean | "fails";
+	/** Told the bytes each READ answered (#840), for tests that bound what a download reads ahead. */
+	onRead?: (bytes: number) => void;
+	/** Told each time a file handle is closed (#840). */
+	onCloseFile?: () => void;
 }
 
 /** A path as the client sent it, mapped on to this machine's; null for one the view does not serve. */
@@ -268,9 +277,13 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 					// A channel that closes, with its connection or alone, ends the command's
 					// stdin, as sshd closes its pipes: a command that reads until then ends.
 					stream.once("close", () => child.stdin.end());
-					child.stdout.pipe(stream, { end: false });
+					const rewrite = options.rewriteStdout;
+					const held: Buffer[] = [];
+					if (rewrite) child.stdout.on("data", (chunk: Buffer) => held.push(chunk));
+					else child.stdout.pipe(stream, { end: false });
 					child.stderr.pipe(stream.stderr, { end: false });
 					child.on("close", (code) => {
+						if (rewrite) stream.write(rewrite(Buffer.concat(held)));
 						stream.unpipe(child.stdin);
 						// Killed by a signal, or never started (a negative errno): no status of its own.
 						stream.exit(code === null ? 1 : code < 0 ? 127 : code);
@@ -478,6 +491,7 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 							if (dirs.delete(handle.toString())) return;
 							await file(handle).close();
 							handles.delete(handle.toString());
+							options.onCloseFile?.();
 						}),
 					);
 					sftp.on("SETSTAT", (id, path, attrs) => {
@@ -492,6 +506,10 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 					sftp.on("FSTAT", (id, handle) => {
 						if (options.fstat === false) {
 							sftp.status(id, codes.OP_UNSUPPORTED, "Operation unsupported");
+							return;
+						}
+						if (options.fstat === "fails") {
+							sftp.status(id, codes.FAILURE, "Failure");
 							return;
 						}
 						void (async () => file(handle).stat())().then(
@@ -541,7 +559,26 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 							else await fs.rename(source, target);
 						});
 					});
-					for (const event of ["READ", "RMDIR", "SYMLINK"] as const) {
+					sftp.on("READ", (id, handle, offset, length) => {
+						if (intercept("READ")) return;
+						let opened: ReturnType<typeof file>;
+						try {
+							opened = file(handle);
+						} catch (error) {
+							status(id, error);
+							return;
+						}
+						const buffer = Buffer.alloc(length);
+						void opened.read(buffer, 0, length, offset).then(
+							({ bytesRead }) => {
+								options.onRead?.(bytesRead);
+								if (bytesRead === 0) sftp.status(id, codes.EOF, "End of file");
+								else sftp.data(id, buffer.subarray(0, bytesRead));
+							},
+							(error) => status(id, error),
+						);
+					});
+					for (const event of ["RMDIR", "SYMLINK"] as const) {
 						sftp.on(event, (id: number) =>
 							sftp.status(id, codes.OP_UNSUPPORTED, "Operation unsupported"),
 						);

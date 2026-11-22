@@ -120,6 +120,26 @@ describe("stopAgentWithConsent", () => {
 		expect(confirm.mock.calls[0]?.[0].message).toBe(message);
 	});
 
+	it.each([
+		[{ transfers: 1, downloads: 1 }, "1 download on this host stop."],
+		[{ transfers: 2, downloads: 1 }, "1 upload and 1 download on this host stop."],
+		[{ transfers: 3, downloads: 2 }, "1 upload and 2 downloads on this host stop."],
+		[{ transfers: 2 }, "2 uploads to this host stop."],
+	])("names downloads apart from uploads: %o (#840)", async (counts, message) => {
+		const transfersRefusal: StopKeepingAgentAnswer = {
+			ok: false,
+			status: 409,
+			body: { error: { code: "TRANSFERS_WOULD_STOP", message: "hub reason", ...counts } },
+		};
+		const post = vi.fn().mockResolvedValueOnce(transfersRefusal).mockResolvedValueOnce(done);
+		const confirm = vi.fn().mockResolvedValue(true);
+		expect((await stopAgentWithConsent("pi", { post, confirm })).kind).toBe("done");
+		expect(confirm.mock.calls).toEqual([
+			[{ title: "Stop the agent on pi?", message, confirmLabel: "Stop agent" }],
+		]);
+		expect(post.mock.calls).toEqual([[{}], [{ stop_transfers: true }]]);
+	});
+
 	it("keeps force when the uploads ask after other hubs (#1090)", async () => {
 		const post = vi
 			.fn()

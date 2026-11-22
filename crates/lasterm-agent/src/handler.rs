@@ -680,7 +680,7 @@ pub(crate) async fn handle_message(
                     true => match mgr.start_teardown(&channel_id) {
                         Ok(TeardownStart::Signalled { pid }) => {
                             let process = mgr
-                                .remove(&channel_id)
+                                .remove_torn_down(&channel_id)
                                 .expect("signalled channel must remain registered until removal");
                             let confirmation =
                                 TeardownConfirmation::new(channel_id.clone(), pid, process);
@@ -688,7 +688,7 @@ pub(crate) async fn handle_message(
                             Some(confirmation)
                         }
                         Ok(TeardownStart::AlreadyExited(outcome)) => {
-                            mgr.remove(&channel_id);
+                            mgr.remove_torn_down(&channel_id);
                             log_teardown_outcome(outcome, "DESTROY");
                             None
                         }
@@ -700,11 +700,13 @@ pub(crate) async fn handle_message(
                             None
                         }
                     },
-                    // Its program ended and its exit is not sent yet: the hub
-                    // asked for its end, and a restart's SPAWN follows (#1089).
+                    // Its program ended and its exit is not sent yet: the id is
+                    // free for a restart's SPAWN (#1089), and its exit is owed
+                    // as a torn-down workload's, the end of the terminal if
+                    // that restart fails (#1113).
                     false => {
-                        if mgr.withdraw_ending(&channel_id, owner) {
-                            tracing::debug!(%channel_id, "DESTROY of an ended channel: its exit is withdrawn");
+                        if mgr.tear_down_ending(&channel_id, owner) {
+                            tracing::debug!(%channel_id, "DESTROY of an ended channel: its exit goes as a torn-down one");
                         }
                         None
                     }
@@ -1383,7 +1385,13 @@ fn spawn_reader_task(
                 }
                 status
             }
-            ReaderWorkload::Gone => None,
+            ReaderWorkload::Gone => {
+                #[cfg(test)]
+                if let Some(delay) = crate::pty::torn_down_delay_of(&channel_id) {
+                    tokio::time::sleep(delay).await;
+                }
+                None
+            }
             // The hub asked for this workload to end and already knows it did:
             // an exit reported now would be read against the terminal that took
             // its place.
@@ -1405,29 +1413,44 @@ fn spawn_reader_task(
         let msg = exit_message(
             &channel_id,
             exit_code,
-            signal,
+            signal.clone(),
             (at_pty_end && ended_by_itself).then_some(&mirror),
         );
-        if !ended_by_itself {
-            send_channel_event(&channel_events, &flow, &owner, &channel_id, &msg);
-            return;
-        }
-        // Its id is held from the take above until its exit has been routed
-        // to its hub, so nothing can take that id before the exit is on its
-        // way, nor be answered before it arrives (#1089). Sent under the lock
-        // a DESTROY takes, so that one either withdraws it first or finds it
-        // on its way.
+        // Its id is held until its exit has been routed to its hub, so
+        // nothing can take that id before the exit is on its way, nor be
+        // answered before it arrives (#1089). Sent under the lock a DESTROY
+        // or a SPAWN takes.
         let mut routed = {
             let mut mgr = pty_manager.lock().await;
-            match mgr.send_ending(&channel_id, pty_pid) {
-                EndingSend::Send(routed_tx) => {
-                    let routed = routed_tx.subscribe();
-                    send_ending_exit(&channel_events, &flow, &owner, &channel_id, &msg, routed_tx);
-                    routed
+            let (routed_tx, msg) = if ended_by_itself {
+                // Held from the take above: a DESTROY either makes it a
+                // torn-down workload first or finds its exit on its way.
+                match mgr.send_ending(&channel_id, pty_pid) {
+                    EndingSend::Send(routed_tx) => (routed_tx, msg),
+                    // The hub destroyed it before its exit went: a restart's
+                    // SPAWN may follow, which waits for this exit, and the
+                    // screen goes only with a program that ended by itself
+                    // (#933, #1113).
+                    EndingSend::TornDown(routed_tx) => (
+                        routed_tx,
+                        exit_message(&channel_id, exit_code, signal, None),
+                    ),
+                    // A restart has put another workload under this id since.
+                    EndingSend::Withdrawn => return,
                 }
-                // The hub asked for its end, or the id is another workload's.
-                EndingSend::Withdrawn => return,
-            }
+            } else {
+                // Torn down before this reader took it back. A live restart's
+                // SPAWN may come right after its DESTROY: it waits for this
+                // exit, which reaches the hub before its SPAWN_OK (#1113).
+                match mgr.send_torn_down(&channel_id, pty_pid) {
+                    Some(routed_tx) => (routed_tx, msg),
+                    // A restart has put another workload under this id since.
+                    None => return,
+                }
+            };
+            let routed = routed_tx.subscribe();
+            send_ending_exit(&channel_events, &flow, &owner, &channel_id, &msg, routed_tx);
+            routed
         };
         // Nothing is ever sent on it: it ends once the exit is routed, or
         // dropped with the pipeline.
@@ -2654,6 +2677,19 @@ mod stdio_tests {
         )
         .await
         .expect("DESTROY");
+
+        let exit = exit_of(&mut events).await;
+        assert!(exit.get("screen").is_none(), "{exit}");
+    }
+
+    /// A terminal the agent tears down as it ends still sends its exit, for
+    /// its hub to record, without a screen (#933, #1113).
+    #[tokio::test]
+    async fn a_terminal_torn_down_as_the_agent_ends_sends_its_exit_without_a_screen() {
+        let manager = Arc::new(Mutex::new(PtyManager::new()));
+        let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        let mut events = start_terminal_in("torn-down", None, &manager, &senders).await;
+        manager.lock().await.destroy_all().await;
 
         let exit = exit_of(&mut events).await;
         assert!(exit.get("screen").is_none(), "{exit}");

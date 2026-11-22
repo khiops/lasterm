@@ -6,6 +6,7 @@ export * from "./build-channel.js";
 export * from "./codec.js";
 export * from "./config.js";
 export * from "./constants.js";
+export * from "./download-names.js";
 export * from "./entities.js";
 export * from "./file-transfer.js";
 export * from "./framing.js";

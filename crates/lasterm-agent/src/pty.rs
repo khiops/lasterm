@@ -33,19 +33,30 @@ impl PtyChannelState {
 }
 
 /// A channel whose program has ended, from the moment its reader takes its
-/// workload back until its CHANNEL_EXIT has been routed to its hub (#1089).
+/// workload back until its CHANNEL_EXIT has been routed to its hub (#1089),
+/// or a workload torn down whose exit is on its way (#1113).
 ///
 /// The id stays taken all that time: a SPAWN reusing it is refused, or, once
-/// the exit is on its way, waits for it, and a hub connecting meanwhile may
-/// be told the channel is still there, and gets its exit, before or after
-/// that state. A SPAWN accepted in
-/// between got its SPAWN_OK first, and the hub read the late exit as the end
-/// of the terminal that took its place.
+/// the exit is on its way, waits for it. A SPAWN accepted in between got its
+/// SPAWN_OK first, and the hub read the late exit as the end of the terminal
+/// that took its place.
 pub(crate) struct Ending {
-    owner: OwnerId,
+    kind: EndingKind,
     pid: u32,
     /// Set once its exit is sent: it closes when that exit has been routed.
     routed: Option<watch::Receiver<()>>,
+}
+
+/// What an [`Ending`] is the end of.
+enum EndingKind {
+    /// A program that ended by itself, still its hub's: a hub connecting
+    /// meanwhile may be told the channel is still there, and gets its exit,
+    /// before or after that state, and it counts for the other hubs (#1089).
+    Ended(OwnerId),
+    /// A workload torn down (DESTROY, `destroy_all`): the hub that destroyed
+    /// it no longer holds it, so it is neither listed nor counted. Only a
+    /// SPAWN of its id waits for its exit (#1113).
+    TornDown,
 }
 
 impl Ending {
@@ -55,14 +66,25 @@ impl Ending {
             .as_ref()
             .is_none_or(|routed| routed.has_changed().is_ok())
     }
+
+    /// The hub whose program ended, unless it was torn down.
+    fn ended_for(&self) -> Option<&OwnerId> {
+        match &self.kind {
+            EndingKind::Ended(owner) => Some(owner),
+            EndingKind::TornDown => None,
+        }
+    }
 }
 
 /// What became of an [`Ending`] when its reader came to send its exit.
 pub(crate) enum EndingSend {
     /// Still its own: the exit goes, and the id is held until `routed` closes.
     Send(watch::Sender<()>),
-    /// The hub destroyed it, or another workload took its id: no exit is
-    /// sent (PROTOCOL.md § 3.2).
+    /// The hub DESTROYed it before its exit was sent: the exit goes as a torn
+    /// down workload's, without a screen, and the id is held until `routed`
+    /// closes (#1113).
+    TornDown(watch::Sender<()>),
+    /// Another workload took its id since: no exit is sent (PROTOCOL.md § 3.2).
     Withdrawn,
 }
 
@@ -118,11 +140,72 @@ pub(crate) fn route_delay_of(channel_id: &str) -> Option<Duration> {
         .map(|(_, delay)| *delay)
 }
 
+/// The channels every event of which the output router holds before routing
+/// it, the exit of a workload the hub destroyed included: the window where
+/// that exit, sent before a restart's SPAWN, would reach the hub after its
+/// SPAWN_OK (#1113).
+#[cfg(test)]
+static HELD_ROUTES: std::sync::Mutex<Vec<(String, Duration)>> = std::sync::Mutex::new(Vec::new());
+
+/// Have the router hold every event of `channel_id` for `delay` before routing it.
+#[cfg(test)]
+pub(crate) fn hold_routes_of(channel_id: &str, delay: Duration) {
+    HELD_ROUTES
+        .lock()
+        .expect("held routes")
+        .push((channel_id.to_owned(), delay));
+}
+
+/// How long the router holds every event of `channel_id` before routing it.
+#[cfg(test)]
+pub(crate) fn held_route_of(channel_id: &str) -> Option<Duration> {
+    HELD_ROUTES
+        .lock()
+        .expect("held routes")
+        .iter()
+        .find(|(id, _)| id == channel_id)
+        .map(|(_, delay)| *delay)
+}
+
+/// The channels whose reader, finding its workload torn down, waits before
+/// it sends its exit: the window where a restart's SPAWN reuses the id first
+/// (#1113).
+#[cfg(test)]
+static DELAYED_TORN_DOWN: std::sync::Mutex<Vec<(String, Duration)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Have the reader of `channel_id`, its workload torn down, wait `delay`
+/// before it sends its exit.
+#[cfg(test)]
+pub(crate) fn delay_torn_down_of(channel_id: &str, delay: Duration) {
+    DELAYED_TORN_DOWN
+        .lock()
+        .expect("delayed torn down")
+        .push((channel_id.to_owned(), delay));
+}
+
+/// How long the reader of `channel_id`, its workload torn down, waits.
+#[cfg(test)]
+pub(crate) fn torn_down_delay_of(channel_id: &str) -> Option<Duration> {
+    DELAYED_TORN_DOWN
+        .lock()
+        .expect("delayed torn down")
+        .iter()
+        .find(|(id, _)| id == channel_id)
+        .map(|(_, delay)| *delay)
+}
+
 pub struct PtyManager {
     pub(crate) channels: HashMap<String, PtyChannelState>,
     /// Channels whose program ended and whose exit has not reached its hub's
     /// route yet (#1089).
     ending: HashMap<String, Ending>,
+    /// Workloads torn down (DESTROY, `destroy_all`) before their reader sent
+    /// their exit, the pid of each by its channel id, while no SPAWN has
+    /// started a workload under the id since: each one's reader still owes
+    /// its exit (#1113). At most one per id: one is added only for the
+    /// workload the id holds, and a SPAWN that starts one clears the id's.
+    torn_down: HashMap<String, u32>,
     shutting_down: bool,
     teardown_wait_timeout: Duration,
     /// The most input a channel's queue holds (#740).
@@ -264,6 +347,7 @@ impl PtyManager {
         Self {
             channels: HashMap::new(),
             ending: HashMap::new(),
+            torn_down: HashMap::new(),
             shutting_down: false,
             teardown_wait_timeout: CHANNEL_TEARDOWN_WAIT_TIMEOUT,
             input_bound: INPUT_QUEUE_BYTES,
@@ -387,6 +471,11 @@ impl PtyManager {
         tracing::debug!(channel_id = %id, ?kill_tree_scope, "PTY kill-tree scope");
         let input =
             InputQueue::start_waking(&id, process.writer(), self.input_bound, wake_record());
+        // A workload torn down under this id was replaced: its reader sends
+        // no exit, which the hub would read as this one's end (#1113). Only
+        // now that the PTY exists: a SPAWN that fails to start one leaves that
+        // exit owed, the end of the terminal when its restart fails.
+        self.torn_down.remove(&id);
         self.channels.insert(
             id.clone(),
             PtyChannelState {
@@ -408,7 +497,8 @@ impl PtyManager {
     }
 
     /// How many channels hubs other than `owner` hold, ended ones whose exit
-    /// has not reached its route included.
+    /// has not reached its route included. A torn-down workload's exit on its
+    /// way is not one: its hub let it go (#1113).
     pub(crate) fn held_by_others(&self, owner: &OwnerId) -> u32 {
         let others = self
             .channels
@@ -418,17 +508,20 @@ impl PtyManager {
             + self
                 .ending
                 .values()
-                .filter(|ending| ending.holds() && &ending.owner != owner)
+                .filter(|ending| {
+                    ending.holds() && ending.ended_for().is_some_and(|ended| ended != owner)
+                })
                 .count();
         u32::try_from(others).unwrap_or(u32::MAX)
     }
 
     /// `owner`'s channels whose program ended and whose exit has not reached
     /// its route, with their pids: still there for a hub that connects now.
+    /// Not a workload it destroyed whose exit is on its way (#1113).
     pub(crate) fn ending_of(&self, owner: &OwnerId) -> Vec<(String, u32)> {
         self.ending
             .iter()
-            .filter(|(_, ending)| ending.holds() && &ending.owner == owner)
+            .filter(|(_, ending)| ending.holds() && ending.ended_for() == Some(owner))
             .map(|(id, ending)| (id.clone(), ending.pid))
             .collect()
     }
@@ -456,7 +549,7 @@ impl PtyManager {
         self.ending.insert(
             channel_id.to_owned(),
             Ending {
-                owner: channel.owner,
+                kind: EndingKind::Ended(channel.owner),
                 pid,
                 routed: None,
             },
@@ -464,7 +557,9 @@ impl PtyManager {
         Some(channel.process)
     }
 
-    /// The reader of `pid` is about to send the exit of `channel_id`.
+    /// The reader of `pid` is about to send the exit of `channel_id`, whose
+    /// program ended. A DESTROY that came first made it a torn-down workload
+    /// (`tear_down_ending`): its exit then goes as one's (#1113).
     pub(crate) fn send_ending(&mut self, channel_id: &str, pid: u32) -> EndingSend {
         match self.ending.get_mut(channel_id) {
             Some(ending) if ending.pid == pid && ending.routed.is_none() => {
@@ -472,8 +567,50 @@ impl PtyManager {
                 ending.routed = Some(routed_rx);
                 EndingSend::Send(routed_tx)
             }
-            _ => EndingSend::Withdrawn,
+            _ => match self.send_torn_down(channel_id, pid) {
+                Some(routed_tx) => EndingSend::TornDown(routed_tx),
+                None => EndingSend::Withdrawn,
+            },
         }
+    }
+
+    /// Remove `channel_id` as it is torn down (DESTROY, `destroy_all`), its
+    /// reader still to send its exit (`send_torn_down`).
+    pub(crate) fn remove_torn_down(&mut self, channel_id: &str) -> Option<PtyProcess> {
+        let process = self.remove(channel_id)?;
+        self.torn_down.insert(channel_id.to_owned(), process.pid());
+        Some(process)
+    }
+
+    /// The reader of `pid` is about to send the exit of `channel_id`, a
+    /// workload torn down before its exit was sent. Its exit holds the id
+    /// until routed, as an ended one's does, so a restart's SPAWN reusing it
+    /// waits for it and is answered after it (#1113). None once a SPAWN has
+    /// started a workload under the id: no exit is sent for a workload whose
+    /// id was taken over (PROTOCOL.md § 3.2).
+    ///
+    /// The record is taken only when it is this reader's: a late reader must
+    /// not consume the record of a run destroyed after its own, whose reader
+    /// still owes that run's exit.
+    pub(crate) fn send_torn_down(
+        &mut self,
+        channel_id: &str,
+        pid: u32,
+    ) -> Option<watch::Sender<()>> {
+        if self.torn_down.get(channel_id) != Some(&pid) {
+            return None;
+        }
+        self.torn_down.remove(channel_id);
+        let (routed_tx, routed_rx) = watch::channel(());
+        self.ending.insert(
+            channel_id.to_owned(),
+            Ending {
+                kind: EndingKind::TornDown,
+                pid,
+                routed: Some(routed_rx),
+            },
+        );
+        Some(routed_tx)
     }
 
     /// The exit of `pid` under `channel_id` has been routed: its id is free.
@@ -488,18 +625,25 @@ impl PtyManager {
     }
 
     /// The hub DESTROYs `channel_id`, whose program has ended and whose exit
-    /// is not sent yet: it asked for its end, so none is sent, and the id is
-    /// free for the SPAWN of a restart. Returns whether there was one.
-    /// An exit already on its way is left to arrive first.
-    pub(crate) fn withdraw_ending(&mut self, channel_id: &str, owner: &OwnerId) -> bool {
-        let withdrawn = self
+    /// is not sent yet: the id is free for the SPAWN of a restart (#1089), and
+    /// the workload becomes a torn-down one. Its reader then sends its exit as
+    /// one's: before the answer of a SPAWN of the id that creates a PTY, and
+    /// not at all once such a SPAWN started a workload. When the restart
+    /// fails instead, that exit is the terminal's end, and no other comes
+    /// (#1113). Returns whether there was one. An exit already on its way is
+    /// left to arrive first.
+    pub(crate) fn tear_down_ending(&mut self, channel_id: &str, owner: &OwnerId) -> bool {
+        let unsent = self
             .ending
             .get(channel_id)
-            .is_some_and(|ending| &ending.owner == owner && ending.routed.is_none());
-        if withdrawn {
-            self.ending.remove(channel_id);
+            .is_some_and(|ending| ending.ended_for() == Some(owner) && ending.routed.is_none());
+        if !unsent {
+            return false;
         }
-        withdrawn
+        if let Some(ending) = self.ending.remove(channel_id) {
+            self.torn_down.insert(channel_id.to_owned(), ending.pid);
+        }
+        true
     }
 
     #[allow(dead_code)] // Used in tests
@@ -581,7 +725,7 @@ impl PtyManager {
             match self.start_teardown(&channel_id) {
                 Ok(TeardownStart::Signalled { pid }) => {
                     let process = self
-                        .remove(&channel_id)
+                        .remove_torn_down(&channel_id)
                         .expect("signalled channel must remain registered until removal");
                     let confirmation = TeardownConfirmation {
                         channel_id: channel_id.clone(),
@@ -596,7 +740,7 @@ impl PtyManager {
                     });
                 }
                 Ok(TeardownStart::AlreadyExited(outcome)) => {
-                    self.remove(&channel_id);
+                    self.remove_torn_down(&channel_id);
                     summary.record_outcome(&outcome);
                     log_teardown_outcome(outcome, "shutdown");
                 }

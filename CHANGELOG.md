@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.21.0](https://github.com/khiops/lasterm/compare/v0.20.0...v0.21.0) (2026-11-22)
+
+
+### Features
+
+* **hub,web,desktop:** download a file from a terminal's host ([#840](https://github.com/khiops/lasterm/issues/840), phase A) ([#1138](https://github.com/khiops/lasterm/issues/1138)) ([d0de189](https://github.com/khiops/lasterm/commit/d0de18916014a64c56e19e6134132d1b9c2421e5))
+* **hub:** keep a Windows host's daemon through the relay ([#755](https://github.com/khiops/lasterm/issues/755)) ([#1143](https://github.com/khiops/lasterm/issues/1143)) ([d9f4491](https://github.com/khiops/lasterm/commit/d9f44916d5f084a570c404e86307a82f9356f154))
+* **hub:** reach a remote daemon through an exec-channel relay where socket forwarding is refused ([#755](https://github.com/khiops/lasterm/issues/755)) ([#1134](https://github.com/khiops/lasterm/issues/1134)) ([4cff9af](https://github.com/khiops/lasterm/commit/4cff9afd8cf75f77b2d2a464838fed72ffb0df78))
+
+
+### Bug Fixes
+
+* **agent,hub:** a live restart never shows the replaced shell's exit as the terminal's end ([#1120](https://github.com/khiops/lasterm/issues/1120)) ([e9a6066](https://github.com/khiops/lasterm/commit/e9a6066faad3a4556350e5e685b589830a6fd998))
+* **hub,web:** the dead-channel purge spares a terminal being started and closes only confirmed tabs ([#1130](https://github.com/khiops/lasterm/issues/1130)) ([11cae16](https://github.com/khiops/lasterm/commit/11cae16c20ad78e9d4a751484cb5f3e849449747)), closes [#1117](https://github.com/khiops/lasterm/issues/1117) [#1118](https://github.com/khiops/lasterm/issues/1118) [#1119](https://github.com/khiops/lasterm/issues/1119)
+* **hub:** a download over SSH commands finds its marker after an open prelude line ([#1155](https://github.com/khiops/lasterm/issues/1155)) ([#1156](https://github.com/khiops/lasterm/issues/1156)) ([f639ec7](https://github.com/khiops/lasterm/commit/f639ec71031c4efac7b3d28bf23c682de73407d7))
+* **hub:** announce a revived channel's refreshed updated_at ([#1129](https://github.com/khiops/lasterm/issues/1129)) ([488b247](https://github.com/khiops/lasterm/commit/488b247abcb9f5c8c423e10c0ddbae11f8b9d4b2))
+* **hub:** Replace's --stop fallback counts the connection closing as the stop ([#1127](https://github.com/khiops/lasterm/issues/1127)) ([ce06b01](https://github.com/khiops/lasterm/commit/ce06b013635d90da14bdf9cd956d008ba2431f03))
+* **shared:** truncating a title no longer splits a surrogate pair ([#1149](https://github.com/khiops/lasterm/issues/1149)) ([86c59bc](https://github.com/khiops/lasterm/commit/86c59bca8adf38763334991eba2026aad364fbf5)), closes [#1147](https://github.com/khiops/lasterm/issues/1147)
+* **web:** a channel created again during a list fetch keeps its own session and size ([#1115](https://github.com/khiops/lasterm/issues/1115)) ([4edd39e](https://github.com/khiops/lasterm/commit/4edd39ea5c71981c2640942bd41b73c4509f00fc))
+* **web:** a channel index fetch keeps a display title set while it was in flight ([#1132](https://github.com/khiops/lasterm/issues/1132)) ([0d83b54](https://github.com/khiops/lasterm/commit/0d83b54533cc3a0ed9e1d5dbb2b8cb3527e76355))
+* **web:** a host list's publish into the channel index survives an older index response ([#1152](https://github.com/khiops/lasterm/issues/1152)) ([0cc6bb3](https://github.com/khiops/lasterm/commit/0cc6bb3b2e979c942cfdf13b4e56d3c086d9722a))
+* **web:** a title set during a list fetch outlives the older row it commits ([#1126](https://github.com/khiops/lasterm/issues/1126)) ([3837354](https://github.com/khiops/lasterm/commit/3837354941fe02035c6fb728d8e4682f0bad3bdc))
+* **web:** an older channel index response no longer replaces a newer one ([#1146](https://github.com/khiops/lasterm/issues/1146)) ([11673c1](https://github.com/khiops/lasterm/commit/11673c11f469091e5bb2e51697a5dee975e57b77))
+
+
+### Tests
+
+* **web:** a test per setting that sees its effect, not a scan of the sources ([#937](https://github.com/khiops/lasterm/issues/937)) ([#1142](https://github.com/khiops/lasterm/issues/1142)) ([bcb509a](https://github.com/khiops/lasterm/commit/bcb509ae7b9b2d1a62594b67ebe54f305825f2dd))
+
+
+### Documentation
+
+* **root:** Store news for a live restart staying live ([#1113](https://github.com/khiops/lasterm/issues/1113)) ([#1158](https://github.com/khiops/lasterm/issues/1158)) ([77b51a7](https://github.com/khiops/lasterm/commit/77b51a748b7dbf92bf1dbd6e98d83e9e741f9e7d))
+* **root:** Store news for downloading a file from a terminal's host ([#840](https://github.com/khiops/lasterm/issues/840)) ([#1154](https://github.com/khiops/lasterm/issues/1154)) ([15184ff](https://github.com/khiops/lasterm/commit/15184ff649773ed4c5f5d814c1eb44fa560a5c48))
+* **root:** Store news for the remote daemon relay ([#755](https://github.com/khiops/lasterm/issues/755)) ([#1137](https://github.com/khiops/lasterm/issues/1137)) ([a1a8553](https://github.com/khiops/lasterm/commit/a1a85531b4161a2103e387a25cf39659cf24b938))
+* **root:** Store news for Windows hosts keeping their agent ([#755](https://github.com/khiops/lasterm/issues/755)) ([#1145](https://github.com/khiops/lasterm/issues/1145)) ([38ae9ff](https://github.com/khiops/lasterm/commit/38ae9ff87e2df9a83babb454ffdc4d53d5910641))
+* **root:** the Store listing says Windows hosts can keep their agent ([#755](https://github.com/khiops/lasterm/issues/755)) ([#1159](https://github.com/khiops/lasterm/issues/1159)) ([dec74ae](https://github.com/khiops/lasterm/commit/dec74aee78e9560b321c3cbcd8f01729be187dae))
+
 ## [0.20.0](https://github.com/khiops/lasterm/compare/v0.19.1...v0.20.0) (2026-11-21)
 
 

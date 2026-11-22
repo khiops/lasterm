@@ -1551,10 +1551,11 @@ fn spawn_output_router(mut batched_rx: mpsc::UnboundedReceiver<BatchedEvent>, ro
             match event.into_delivery() {
                 Ok(Delivery::Owner(routed)) => {
                     #[cfg(test)]
-                    if routed.routed.is_some() {
-                        if let Some(delay) = crate::pty::route_delay_of(&routed.channel_id) {
-                            tokio::time::sleep(delay).await;
-                        }
+                    if let Some(delay) = crate::pty::route_delay_of(&routed.channel_id)
+                        .filter(|_| routed.routed.is_some())
+                        .or_else(|| crate::pty::held_route_of(&routed.channel_id))
+                    {
+                        tokio::time::sleep(delay).await;
                     }
                     routes.lock().await.route(
                         &routed.owner,
@@ -4829,9 +4830,9 @@ mod tests {
             }
 
             /// A restart of a terminal whose program has just ended, its exit
-            /// not sent yet, starts: the hub asked for its end, so that exit
+            /// not sent yet, starts: the replacement took its id, so that exit
             /// is never sent, and none arrives after the replacement's
-            /// SPAWN_OK to mark it dead (#1089).
+            /// SPAWN_OK to mark it dead (#1089, #1113).
             #[tokio::test]
             async fn a_restart_while_an_exit_is_held_starts_and_gets_no_late_exit() {
                 crate::pty::delay_exit_of("held-restarted", Duration::from_millis(1500));
@@ -4939,6 +4940,322 @@ mod tests {
                     "the exit must come before the SPAWN_OK; received {:?}",
                     frames.iter().map(frame_type).collect::<Vec<_>>()
                 );
+
+                daemon.stop().await;
+            }
+
+            /// A live terminal restarted: DESTROY, then SPAWN under its id.
+            /// The exit of the shell it destroyed, sent before the SPAWN, comes
+            /// before the SPAWN_OK, never after it, where it would mark the new
+            /// run dead (#1113).
+            #[tokio::test]
+            async fn a_live_restart_gets_the_destroyed_shells_exit_before_its_spawn_ok() {
+                let daemon = TestDaemon::start("live-restart").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("live-restarted")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+                crate::pty::hold_routes_of("live-restarted", Duration::from_millis(1500));
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "live-restarted".to_string(),
+                })
+                .await;
+                // Its shell ends: its reader has seen its PTY close, and sends
+                // its exit, before the SPAWN is sent.
+                a.read_through(|frame| is_about(frame, "LOG", "live-restarted"))
+                    .await;
+                let answered = spawned(&mut a, interactive("live-restarted")).await;
+                assert!(
+                    mentions(&answered, "live-restarted").contains(&"CHANNEL_EXIT".to_string()),
+                    "the destroyed shell's exit must come before the SPAWN_OK; received {:?}",
+                    answered.iter().map(frame_type).collect::<Vec<_>>()
+                );
+                let later = a.frames_until_quiet(Duration::from_millis(4000)).await;
+                assert!(
+                    !mentions(&later, "live-restarted").contains(&"CHANNEL_EXIT".to_string()),
+                    "an exit after the SPAWN_OK marks the restarted terminal dead"
+                );
+
+                daemon.stop().await;
+            }
+
+            /// A live restart whose SPAWN comes before the destroyed shell's
+            /// reader sends its exit: that reader sends none, which would come
+            /// after the SPAWN_OK and mark the new run dead (#1113).
+            #[tokio::test]
+            async fn a_live_restart_answered_first_gets_no_exit_of_the_destroyed_shell() {
+                crate::pty::delay_torn_down_of("restart-first", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("restart-first").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("restart-first")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "restart-first".to_string(),
+                })
+                .await;
+                // Its reader has seen its PTY close, and waits.
+                a.read_through(|frame| is_about(frame, "LOG", "restart-first"))
+                    .await;
+                spawned(&mut a, interactive("restart-first")).await;
+                let later = a.frames_until_quiet(Duration::from_millis(3000)).await;
+                assert!(
+                    !mentions(&later, "restart-first").contains(&"CHANNEL_EXIT".to_string()),
+                    "an exit after the SPAWN_OK marks the restarted terminal dead"
+                );
+
+                daemon.stop().await;
+            }
+
+            /// A live restart whose new run ends at once, before the destroyed
+            /// shell's reader sends its exit: the hub gets the new run's exit,
+            /// and that one only (#1113).
+            #[tokio::test]
+            async fn a_restarted_run_that_ends_at_once_gets_its_own_exit_only() {
+                crate::pty::delay_torn_down_of("restart-ends", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("restart-ends").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("restart-ends")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "restart-ends".to_string(),
+                })
+                .await;
+                a.read_through(|frame| is_about(frame, "LOG", "restart-ends"))
+                    .await;
+                spawned(&mut a, spawn("restart-ends", "exit 5")).await;
+                let later = a.frames_until_quiet(Duration::from_millis(3000)).await;
+                let exits: Vec<Option<i64>> = later
+                    .iter()
+                    .filter(|frame| is_about(frame, "CHANNEL_EXIT", "restart-ends"))
+                    .map(|frame| frame["exit_code"].as_i64())
+                    .collect();
+                assert_eq!(exits, vec![Some(5)]);
+
+                daemon.stop().await;
+            }
+
+            /// A SPAWN under `channel_id` whose shell does not exist: refused
+            /// before any PTY is created, as a restart that fails to start is.
+            fn unstartable(channel_id: &str) -> HubToAgent {
+                let shell = if cfg!(windows) {
+                    r"C:\lasterm-test\no-such-shell.exe"
+                } else {
+                    "/lasterm-test/no-such-shell"
+                };
+                HubToAgent::Spawn {
+                    request_id: format!("refused-{channel_id}"),
+                    channel_id: Some(channel_id.to_string()),
+                    shell: Some(shell.to_string()),
+                    args: None,
+                    cwd: None,
+                    env: None,
+                    cols: 80,
+                    rows: 24,
+                    direct_process: None,
+                    elevated: None,
+                    elevation_secret: None,
+                    elevation_method: None,
+                    custom_command: None,
+                    env_mode: "inherit".to_string(),
+                    env_unset: None,
+                    login_shell: None,
+                    report_directory: None,
+                }
+            }
+
+            /// Send `unstartable(channel_id)`, and read through its SPAWN_ERR.
+            async fn refused(hub: &mut Hub, channel_id: &str) -> Vec<rmpv::Value> {
+                hub.send(&unstartable(channel_id)).await;
+                let request_id = format!("refused-{channel_id}");
+                let frames = hub
+                    .read_through(|frame| frame["request_id"].as_str() == Some(&request_id))
+                    .await;
+                assert_eq!(
+                    frames.last().map(frame_type),
+                    Some("SPAWN_ERR"),
+                    "{:?}",
+                    frames.iter().map(frame_type).collect::<Vec<_>>()
+                );
+                frames
+            }
+
+            /// A live restart whose SPAWN is refused before it creates a PTY:
+            /// the destroyed shell's exit still comes, the end of the terminal
+            /// its hub records when the restart fails (#1113).
+            #[tokio::test]
+            async fn a_restart_that_fails_to_start_still_gets_the_destroyed_shells_exit() {
+                crate::pty::delay_torn_down_of("restart-refused", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("restart-refused").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("restart-refused")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "restart-refused".to_string(),
+                })
+                .await;
+                // Its reader has seen its PTY close, and waits.
+                a.read_through(|frame| is_about(frame, "LOG", "restart-refused"))
+                    .await;
+                let mut seen = refused(&mut a, "restart-refused").await;
+                seen.extend(a.frames_until_quiet(Duration::from_millis(3000)).await);
+                let exits = seen
+                    .iter()
+                    .filter(|frame| is_about(frame, "CHANNEL_EXIT", "restart-refused"))
+                    .count();
+                assert_eq!(exits, 1, "the destroyed shell's exit must still come");
+
+                daemon.stop().await;
+            }
+
+            /// A first restart's SPAWN succeeds while the destroyed shell's
+            /// reader is delayed; that replacement is destroyed in turn, and a
+            /// second SPAWN of the id is refused before it creates a PTY. The
+            /// replacement's exit still comes, the end of the terminal, and
+            /// the late first reader sends none (#1113).
+            #[tokio::test]
+            async fn a_late_reader_does_not_take_the_record_of_the_run_destroyed_after_it() {
+                crate::pty::delay_torn_down_of("late-reader", Duration::from_millis(3000));
+                let daemon = TestDaemon::start("late-reader").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("late-reader")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "late-reader".to_string(),
+                })
+                .await;
+                // The first reader has seen its PTY close, and waits 3 s from here.
+                a.read_through(|frame| is_about(frame, "LOG", "late-reader"))
+                    .await;
+                let first_closed = std::time::Instant::now();
+                spawned(&mut a, interactive("late-reader")).await;
+                // The replacement's reader then wakes 1.5 s or more after the
+                // first: an exit tells by its time which reader sent it, both
+                // runs having ended the same way.
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "late-reader".to_string(),
+                })
+                .await;
+                // The replacement's reader has seen its PTY close too.
+                a.read_through(|frame| is_about(frame, "LOG", "late-reader"))
+                    .await;
+                let mut first_window = refused(&mut a, "late-reader").await;
+                let first_woke = first_closed + Duration::from_millis(3750);
+                while let Some(limit) = first_woke.checked_duration_since(std::time::Instant::now())
+                {
+                    match a.frame_within(limit).await {
+                        Some(frame) => first_window.push(frame),
+                        None => break,
+                    }
+                }
+                assert!(
+                    !mentions(&first_window, "late-reader").contains(&"CHANNEL_EXIT".to_string()),
+                    "the late first reader sent an exit"
+                );
+                let later = a.frames_until_quiet(Duration::from_millis(5000)).await;
+                let exits = later
+                    .iter()
+                    .filter(|frame| is_about(frame, "CHANNEL_EXIT", "late-reader"))
+                    .count();
+                assert_eq!(exits, 1, "the replacement's exit must come");
+
+                daemon.stop().await;
+            }
+
+            /// A terminal whose program ended, its exit not sent yet, is
+            /// restarted, and the restart's SPAWN is refused before it creates
+            /// a PTY: the program's exit still comes, the end of the terminal,
+            /// with its own code and without the screen it drew, as any torn
+            /// down workload's (#933, #1113).
+            #[tokio::test]
+            async fn a_refused_restart_of_an_ended_terminal_still_gets_its_exit() {
+                crate::pty::delay_exit_of("ended-refused", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("ended-refused").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                let command = if cfg!(windows) {
+                    "echo drawn& exit 5"
+                } else {
+                    "echo drawn; exit 5"
+                };
+                spawned(&mut a, spawn("ended-refused", command)).await;
+                // Its PTY closed. Its reader takes its workload back right
+                // after, then holds the exit.
+                a.read_through(|frame| is_about(frame, "LOG", "ended-refused"))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "ended-refused".to_string(),
+                })
+                .await;
+                let mut seen = refused(&mut a, "ended-refused").await;
+                seen.extend(a.frames_until_quiet(Duration::from_millis(3000)).await);
+                let exits: Vec<&rmpv::Value> = seen
+                    .iter()
+                    .filter(|frame| is_about(frame, "CHANNEL_EXIT", "ended-refused"))
+                    .collect();
+                assert_eq!(exits.len(), 1, "the program's exit must still come");
+                assert_eq!(exits[0]["exit_code"].as_i64(), Some(5));
+                assert!(
+                    exits[0]["screen"].is_nil(),
+                    "a destroyed terminal's exit carries no screen: {}",
+                    exits[0]
+                );
+
+                daemon.stop().await;
+            }
+
+            /// A terminal its hub destroyed, its exit on its way: the hub
+            /// connecting again is not told it is still there. It let it go
+            /// (#1113).
+            #[tokio::test]
+            async fn a_destroyed_terminals_exit_on_its_way_is_not_listed() {
+                crate::pty::delay_route_of("torn-listed", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("torn-listed").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("torn-listed")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "torn-listed".to_string(),
+                })
+                .await;
+                // Its reader has seen its PTY close, and sent its exit, which
+                // the router holds.
+                a.read_through(|frame| is_about(frame, "LOG", "torn-listed"))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                let (_a2, listed) = daemon.connect_as(KEY_A).await;
+                assert_eq!(state(&listed), (vec![], 0));
+
+                daemon.stop().await;
+            }
+
+            /// Another hub's terminal destroyed, its exit on its way, counts
+            /// for no other hub: a STOP is not refused for it (#1113).
+            #[tokio::test]
+            async fn a_destroyed_terminals_exit_on_its_way_counts_for_no_other_hub() {
+                crate::pty::delay_route_of("torn-count", Duration::from_millis(1500));
+                let daemon = TestDaemon::start("torn-count").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("torn-count")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "torn-count".to_string(),
+                })
+                .await;
+                a.read_through(|frame| is_about(frame, "LOG", "torn-count"))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                let (_b, frames) = daemon.connect_as(KEY_B).await;
+                assert_eq!(state(&frames).1, 0);
 
                 daemon.stop().await;
             }

@@ -831,6 +831,11 @@ export class SessionManager {
 		if (hostId !== undefined && this.retirement.isUnderWay(hostId)) {
 			await this.retirement.settled(hostId);
 		}
+		// Its host's daemon list being taken up (#1113): the restart waits, so
+		// that no exit of the run its DESTROY ends reaches that adoption, which
+		// takes exits up outside the restart's hold.
+		const adoption = hostId === undefined ? undefined : this.lifecycle.adoptionSettled(hostId);
+		if (adoption !== undefined) await adoption;
 		if (hostId !== undefined && this.hostIsBeingStopped(hostId)) return "busy";
 		if (this.isQuitting()) return false;
 		// Its host is away: the reconnect has the next attempt, and a restart

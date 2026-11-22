@@ -111,6 +111,8 @@ export const useSessionStore = defineStore("session", () => {
 		_unsubs.disconnect = wsClient.onDisconnect(() => {
 			connected.value = false;
 			authenticated.value = false;
+			// The next AUTH_OK reads the recordings again (#80).
+			useRecordingsStore().stopRetrying();
 		});
 
 		// Re-authenticate and refresh state after each WS auto-reconnect.
@@ -704,6 +706,7 @@ export const useSessionStore = defineStore("session", () => {
 	}
 
 	function disconnect(): void {
+		useRecordingsStore().stopRetrying();
 		_unsubs.disconnect?.();
 		_unsubs.disconnect = null;
 		_unsubs.reconnect?.();

@@ -376,6 +376,131 @@ describe("recordings store", () => {
 			expect(handlers).toHaveLength(1);
 		});
 
+		// AC-UI-STATE-ORDER: the list is the one source, so a read that fails is
+		// tried again until one succeeds (agreed with Codex on CTR1).
+		describe("when the list cannot be read", () => {
+			const listed = () =>
+				Response.json({
+					recordings: [row({ id: "01RECNEW", channel_id: "ch-new" })],
+					used_bytes: 0,
+					cap_bytes: 1024,
+				});
+			const stale = {
+				recordingId: "01RECOLD",
+				title: "t",
+				hostLabel: "h",
+				startedAt: "2026-11-22T10:00:00.000Z",
+			};
+			const lists = (requests: string[]) =>
+				requests.filter((r) => r === "GET /api/recordings").length;
+
+			beforeEach(() => {
+				vi.useFakeTimers();
+				vi.spyOn(Math, "random").mockReturnValue(0.5); // no jitter: the delays as written
+			});
+			afterEach(() => {
+				vi.useRealTimers();
+			});
+
+			// Mutation caught: a failed read left as it is until the next event.
+			it("reads it again, restoring a missed start and removing a missed end with no other event", async () => {
+				const answers = [() => new Response("", { status: 503 }), listed];
+				const requests = hub({ list: () => (answers.shift() ?? listed)() });
+				const store = useRecordingsStore();
+				store.open = new Map([["ch-old", stale]]);
+				await store.refresh();
+				expect(store.open.has("ch-old")).toBe(true);
+				await vi.advanceTimersByTimeAsync(999);
+				expect(lists(requests)).toBe(1);
+				await vi.advanceTimersByTimeAsync(1);
+				expect(lists(requests)).toBe(2);
+				expect([...store.open.keys()]).toEqual(["ch-new"]);
+			});
+
+			it("tries again after 1 s, 2 s, 4 s, and never waits more than 30 s", async () => {
+				const requests = hub({ list: () => new Response("", { status: 503 }) });
+				await useRecordingsStore().refresh();
+				for (const [wait, total] of [
+					[1000, 2],
+					[2000, 3],
+					[4000, 4],
+					[8000, 5],
+					[16000, 6],
+					[30000, 7],
+					[30000, 8],
+				] as const) {
+					await vi.advanceTimersByTimeAsync(wait - 1);
+					expect(lists(requests)).toBe(total - 1);
+					await vi.advanceTimersByTimeAsync(1);
+					expect(lists(requests)).toBe(total);
+				}
+			});
+
+			it("tries again when the answer is not a list", async () => {
+				const answers = [() => Response.json({}), listed];
+				const requests = hub({ list: () => (answers.shift() ?? listed)() });
+				const store = useRecordingsStore();
+				await store.refresh();
+				await vi.advanceTimersByTimeAsync(1000);
+				expect(lists(requests)).toBe(2);
+				expect(store.open.has("ch-new")).toBe(true);
+			});
+
+			it("tries again when a read never answers", async () => {
+				let first = true;
+				const requests = hub({
+					list: () => {
+						if (first) {
+							first = false;
+							return new Promise<Response>(() => {}) as never;
+						}
+						return listed();
+					},
+				});
+				const store = useRecordingsStore();
+				void store.refresh();
+				await vi.advanceTimersByTimeAsync(15000); // its deadline
+				await vi.advanceTimersByTimeAsync(1000); // then the first wait
+				expect(lists(requests)).toBe(2);
+				expect(store.open.has("ch-new")).toBe(true);
+			});
+
+			// Mutation caught: a try of an older chain going on beside the new one.
+			it("leaves one chain of tries: a newer read takes over", async () => {
+				const requests = hub({ list: () => new Response("", { status: 503 }) });
+				const store = useRecordingsStore();
+				await store.refresh(); // fails: a try in 1 s
+				await vi.advanceTimersByTimeAsync(500);
+				await store.refresh(); // fails too: its own try in 1 s
+				await vi.advanceTimersByTimeAsync(1000);
+				expect(lists(requests)).toBe(3); // the two reads and one try, not two
+			});
+
+			// Mutation caught: tries going on after the connection is let go.
+			it("stops trying once the connection is let go", async () => {
+				const requests = hub({ list: () => new Response("", { status: 503 }) });
+				const store = useRecordingsStore();
+				await store.refresh();
+				store.stopRetrying();
+				await vi.advanceTimersByTimeAsync(60000);
+				expect(lists(requests)).toBe(1);
+			});
+
+			// Mutation caught: a read answered after the connection was let go applied.
+			it("applies nothing read before the connection was let go", async () => {
+				let answer: (r: Response) => void = () => {};
+				hub({ list: () => new Promise<Response>((resolve) => (answer = resolve)) as never });
+				const store = useRecordingsStore();
+				store.open = new Map([["ch-old", stale]]);
+				const reading = store.refresh();
+				await vi.advanceTimersByTimeAsync(0);
+				store.stopRetrying();
+				answer(listed());
+				await reading;
+				expect([...store.open.keys()]).toEqual(["ch-old"]);
+			});
+		});
+
 		it("drops a list answer older than one already applied", async () => {
 			const answers: Array<(r: Response) => void> = [];
 			mocks.hubFetch.mockImplementation(() => new Promise((resolve) => answers.push(resolve)));

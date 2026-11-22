@@ -55,8 +55,30 @@ function authHeaders(): Record<string, string> {
  * or discarded: this store knows which terminals record (for their REC mark),
  * lists the recordings waiting, starts one, saves one and discards one.
  */
+/** `work`, or a rejection once `LIST_DEADLINE_MS` passes without it settling. */
+function withDeadline<T>(work: Promise<T>): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error("no answer in time")), LIST_DEADLINE_MS);
+		work.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(err: unknown) => {
+				clearTimeout(timer);
+				reject(err);
+			},
+		);
+	});
+}
+
 /** How long states are gathered before the list is read again. */
 const REFRESH_BURST_MS = 100;
+/** A failed list read is tried again after this, doubled each time up to the cap. */
+const RETRY_FIRST_MS = 1000;
+const RETRY_MAX_MS = 30_000;
+/** A list read that has not answered by then counts as failed, so it is tried again. */
+const LIST_DEADLINE_MS = 15_000;
 
 export const useRecordingsStore = defineStore("recordings", () => {
 	/** channelId → its open recording. Keyed by channel, whether or not its row is known yet. */
@@ -70,15 +92,36 @@ export const useRecordingsStore = defineStore("recordings", () => {
 	let fetches = 0;
 	let applied = 0;
 	/** One list fetch for a burst of states (a reconnection ends and starts every recording). */
-	let refreshQueued = false;
+	let refreshQueued: ReturnType<typeof setTimeout> | null = null;
+	/**
+	 * The list is the one source of which terminals record: a read that fails
+	 * is tried again until one succeeds. Each refresh starts a new chain of
+	 * tries (`chain`), and a try of an older chain neither retries nor stops the
+	 * current one. `lifetime` changes when the connection is let go: nothing
+	 * read before then is applied after it.
+	 */
+	let chain = 0;
+	let lifetime = 0;
+	let retryTimer: ReturnType<typeof setTimeout> | null = null;
+	let retryDelay = RETRY_FIRST_MS;
 
 	function refreshSoon(): void {
-		if (refreshQueued) return;
-		refreshQueued = true;
-		setTimeout(() => {
-			refreshQueued = false;
+		if (refreshQueued !== null) return;
+		refreshQueued = setTimeout(() => {
+			refreshQueued = null;
 			void refresh();
 		}, REFRESH_BURST_MS);
+	}
+
+	/** The connection is gone: no try goes on; the next authentication reads the list again. */
+	function stopRetrying(): void {
+		lifetime++;
+		chain++;
+		if (retryTimer !== null) clearTimeout(retryTimer);
+		retryTimer = null;
+		if (refreshQueued !== null) clearTimeout(refreshQueued);
+		refreshQueued = null;
+		retryDelay = RETRY_FIRST_MS;
 	}
 
 	function onState(msg: RecordingStateMessage): void {
@@ -122,23 +165,53 @@ export const useRecordingsStore = defineStore("recordings", () => {
 	 * Read the list again, every host's, and rebuild which terminals record from
 	 * its open rows. A channel heard of since the fetch began keeps what it heard.
 	 */
+	/** Read the list now, and again until a read succeeds (a newer refresh takes over). */
 	async function refresh(): Promise<void> {
-		const before = new Map(heard);
-		const turn = ++fetches;
-		let res: Response;
-		try {
-			res = await hubFetch(`${hubBaseUrl()}/api/recordings`, { headers: authHeaders() });
-		} catch {
+		const mine = ++chain;
+		if (retryTimer !== null) clearTimeout(retryTimer);
+		retryTimer = null;
+		retryDelay = RETRY_FIRST_MS;
+		await tryList(mine);
+	}
+
+	async function tryList(mine: number): Promise<void> {
+		if (await readList()) {
+			if (mine === chain) retryDelay = RETRY_FIRST_MS;
 			return;
 		}
-		if (!res.ok) return;
-		const body = (await res.json().catch(() => null)) as {
-			recordings?: unknown;
-			used_bytes?: unknown;
-			cap_bytes?: unknown;
-		} | null;
-		if (body === null || !Array.isArray(body.recordings)) return;
-		if (turn < applied) return;
+		if (mine !== chain) return;
+		// Jittered, so windows that failed together do not try again together.
+		const delay = retryDelay * (0.8 + Math.random() * 0.4);
+		retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
+		retryTimer = setTimeout(() => {
+			retryTimer = null;
+			if (mine === chain) void tryList(mine);
+		}, delay);
+	}
+
+	/** One read of the list, with a fresh turn; false when it could not be used. */
+	async function readList(): Promise<boolean> {
+		const before = new Map(heard);
+		const turn = ++fetches;
+		const at = lifetime;
+		type ListBody = { recordings?: unknown; used_bytes?: unknown; cap_bytes?: unknown } | null;
+		let body: ListBody;
+		try {
+			body = await withDeadline(
+				(async (): Promise<ListBody> => {
+					const res = await hubFetch(`${hubBaseUrl()}/api/recordings`, {
+						headers: authHeaders(),
+					});
+					if (!res.ok) return null;
+					return (await res.json().catch(() => null)) as ListBody;
+				})(),
+			);
+		} catch {
+			return false;
+		}
+		if (body === null || !Array.isArray(body.recordings)) return false;
+		if (at !== lifetime) return true; // read before the connection was let go
+		if (turn < applied) return true;
 		applied = turn;
 		rows.value = body.recordings as RecordingRow[];
 		usedBytes.value = typeof body.used_bytes === "number" ? body.used_bytes : 0;
@@ -158,6 +231,7 @@ export const useRecordingsStore = defineStore("recordings", () => {
 			});
 		}
 		open.value = next;
+		return true;
 	}
 
 	/** Start recording a terminal now. */
@@ -323,6 +397,7 @@ export const useRecordingsStore = defineStore("recordings", () => {
 		onState,
 		registerHandlers,
 		refresh,
+		stopRetrying,
 		start,
 		stop,
 		discard,

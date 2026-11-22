@@ -1184,6 +1184,18 @@ describe("useSessionStore — recordings", () => {
 	});
 
 	// Mutation caught: no refresh at AUTH_OK (a start or end missed while away stays wrong).
+	// Mutation caught: list reads still tried after the session is let go.
+	it("stops the recordings' list reads when it disconnects", async () => {
+		const stop = vi.spyOn(useRecordingsStore(), "stopRetrying");
+		const sessionStore = useSessionStore();
+		const connected = sessionStore.connect();
+		await vi.advanceTimersByTimeAsync(0);
+		wsHarness.instances[0]?.emit({ type: "AUTH_OK", clientId: "client-1" });
+		await connected;
+		sessionStore.disconnect();
+		expect(stop).toHaveBeenCalled();
+	});
+
 	it("reads the recordings again at each AUTH_OK, and routes RECORDING_STATE", async () => {
 		const recordings = useRecordingsStore();
 		const refresh = vi.spyOn(recordings, "refresh").mockResolvedValue();

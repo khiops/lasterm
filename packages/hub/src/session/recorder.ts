@@ -186,6 +186,8 @@ export class SessionRecorder {
 	private readonly endedInMemory = new Map<string, EndedInMemory>();
 	private readonly maxBytes: number;
 	private capping = false;
+	/** Set by the hub's shutdown: no recording opens after it. */
+	private stopped = false;
 	/** Recordings `finish` is writing out: still allowed their last events. */
 	private readonly finishing = new Set<Active>();
 
@@ -234,6 +236,8 @@ export class SessionRecorder {
 
 	/** A manual start: the screen is asked of the agent. */
 	startManual(input: StartInput): { id: string } | { refused: StartRefusal; openId?: string } {
+		// After the hub's last flush nothing opens: a row would be left open, then read as a crash.
+		if (this.stopped) return { refused: "RECORDING_STORAGE_ERROR" };
 		const existing = this.byChannel.get(input.channelId);
 		if (existing) return { refused: "ALREADY_RECORDING", openId: existing.id };
 		if (this.usedBytes() >= this.deps.capBytes) return { refused: "RECORDING_CAP" };
@@ -264,7 +268,7 @@ export class SessionRecorder {
 	 * with the SPAWN_OK is recorded.
 	 */
 	startAutomatic(input: StartInput): void {
-		if (this.byChannel.has(input.channelId)) return;
+		if (this.stopped || this.byChannel.has(input.channelId)) return;
 		if (this.usedBytes() >= this.deps.capBytes) {
 			this.deps.log(
 				"info",
@@ -450,6 +454,7 @@ export class SessionRecorder {
 
 	/** Hub shutdown: every open recording is written and ended `interrupted`. */
 	shutdown(): void {
+		this.stopped = true;
 		for (const active of [...this.byChannel.values()]) this.finish(active, "interrupted");
 		this.retryPendingEnds();
 	}

@@ -280,7 +280,18 @@ export class SpoolGarbageCollector {
 		if (this.recordings !== null) {
 			const recordings = this.recordings;
 			const marked = await slicer.step(() => recordings.deletingIds());
-			for (const id of marked) await this.collectRecording(slicer, stats, id);
+			for (const id of marked) {
+				// One row that keeps failing holds back only itself: it stays marked
+				// for the next pass, and the others and the vacuum go on.
+				try {
+					await this.collectRecording(slicer, stats, id);
+				} catch (err) {
+					const code = (err as { code?: unknown } | null)?.code;
+					this.logger?.log("warn", "spool GC recording deletion failed", {
+						code: typeof code === "string" ? code : "no code",
+					});
+				}
+			}
 		}
 
 		// 3. Give the freed pages back.

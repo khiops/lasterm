@@ -83,7 +83,8 @@ export const useRecordingsStore = defineStore("recordings", () => {
 
 	function onState(msg: RecordingStateMessage): void {
 		heard.set(msg.channelId, (heard.get(msg.channelId) ?? 0) + 1);
-		const next = new Map(open.value);
+		// Only this terminal's entry changes: no copy of the others.
+		const next = open.value;
 		if (msg.recordingId !== null) {
 			next.set(msg.channelId, {
 				recordingId: msg.recordingId,
@@ -103,7 +104,6 @@ export const useRecordingsStore = defineStore("recordings", () => {
 				);
 			}
 		}
-		open.value = next;
 		refreshSoon();
 	}
 

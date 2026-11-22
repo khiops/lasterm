@@ -574,6 +574,8 @@ export class AgentConnectionManager {
 		);
 		if (this.ctx.agents.get(hostId) === agent) {
 			this.ctx.agents.delete(hostId);
+			// Its close comes after, as a stale one: the recordings learn of the loss here (#80).
+			this.ctx.recorder?.onAgentLost(hostId);
 			if (this.ctx.quitState !== "QUITTING") this.broadcaster.announceSessionState(hostId);
 		}
 		agent.close();
@@ -626,6 +628,7 @@ export class AgentConnectionManager {
 				sessionId,
 			});
 			this.ctx.agents.delete(hostId);
+			this.ctx.recorder?.onAgentLost(hostId);
 			existing.close();
 		}
 

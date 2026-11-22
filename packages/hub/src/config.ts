@@ -139,7 +139,8 @@ function extractGcConfig(parsed: TOML.JsonMap): GcConfig {
 			if (typeof value === "number" && Number.isInteger(value) && value >= 1) {
 				config.recordingMaxTotalMb = value;
 			} else {
-				// A cap of 0 would refuse every recording: the default instead, said once.
+				// A cap of 0 would refuse every recording: the default instead, said each
+				// time config.toml is read.
 				process.stderr.write(
 					"[lasterm-config] [recording] max_total_mb must be an integer of at least 1; using 1024\n",
 				);

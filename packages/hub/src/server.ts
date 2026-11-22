@@ -307,6 +307,13 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			"X-Lasterm-Client",
 			"X-Lasterm-Client-Id",
 		],
+		// A recording's export says where its parts go on in these (#80).
+		exposedHeaders: [
+			"Content-Disposition",
+			"X-Lasterm-Cast-Last-Seq",
+			"X-Lasterm-Cast-Next-Seq",
+			"X-Lasterm-Cast-Lost",
+		],
 		credentials: true,
 	});
 

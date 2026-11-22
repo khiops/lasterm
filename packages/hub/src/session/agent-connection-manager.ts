@@ -501,7 +501,7 @@ export class AgentConnectionManager {
 			if (!session) return;
 
 			if (agent instanceof LastermAgent) {
-				this.broadcaster.updateSessionStatus(hostId, session.id, "disconnected");
+				this.announceDisconnected(hostId, session.id);
 				this.reconnectDaemon(hostId, session.id).catch(() => {
 					this.lifecycle.closeSession(hostId, session.id);
 				});
@@ -510,7 +510,7 @@ export class AgentConnectionManager {
 
 			const host = this.ctx.metaDal.getHost(hostId);
 			if (host?.type === "ssh") {
-				this.broadcaster.updateSessionStatus(hostId, session.id, "disconnected");
+				this.announceDisconnected(hostId, session.id);
 				if (!this.ctx.stoppingAgents.has(hostId)) {
 					this.sshMgr.scheduleReconnect(hostId, session.id, 0, Date.now());
 				}
@@ -520,6 +520,23 @@ export class AgentConnectionManager {
 				});
 			}
 		});
+	}
+
+	/**
+	 * Say a host's session lost its agent. Its status write can throw on
+	 * meta.db, and the reconnect or session close that follows it must still
+	 * run, and end the recordings as it does (#80): the failure is logged by
+	 * its code.
+	 */
+	private announceDisconnected(hostId: string, sessionId: string): void {
+		try {
+			this.broadcaster.updateSessionStatus(hostId, sessionId, "disconnected");
+		} catch (err) {
+			this.ctx.hubLogger?.log("warn", "agent-connection-manager: disconnected status not written", {
+				hostId,
+				code: (err as { code?: unknown } | null)?.code ?? "unknown",
+			});
+		}
 	}
 
 	/**

@@ -27,6 +27,7 @@ import { connectOrLaunch as _connectOrLaunchForMock } from "./agent-launcher.js"
 import { AuthCancelledError } from "./auth-cancelled.js";
 import type { ChannelLifecycleManager } from "./channel-lifecycle-manager.js";
 import { resolveHostOs } from "./host-profile-menu.js";
+import { LastermAgent } from "./lasterm-agent.js";
 import { OutputChunker } from "./output-chunker.js";
 import {
 	clearContext,
@@ -12525,6 +12526,46 @@ describe("SessionManager recordings (#80)", () => {
 				"lasterm: connection to the agent lost; output until it returns may be missing or late",
 			],
 		]);
+	});
+
+	// A quitting hub's local stop closes the daemon connection. The close says the
+	// session is disconnected, a status write that can throw, then reconnects; the
+	// quit refuses the reconnect, and its refusal closes the session, ending the
+	// recording `gone`. The mock local agent is no LastermAgent, so this one is
+	// made to pass for it: the close handler's daemon branch keys on the class.
+	// Mutation caught: the status write left unguarded, so its throw skips the
+	// reconnect and the session's close, and the recording stays open.
+	it("ends a recording gone when a quitting hub's daemon connection closes and its status cannot be written", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+		const daemon = mockLocalAgents[0];
+		Object.defineProperty(LastermAgent, Symbol.hasInstance, {
+			configurable: true,
+			value: (value: unknown) => value === daemon,
+		});
+		const write = MetaDAL.prototype.updateSessionStatus;
+		const failing = vi.spyOn(MetaDAL.prototype, "updateSessionStatus").mockImplementation(function (
+			this: MetaDAL,
+			sessionId,
+			status,
+		) {
+			if (status === "disconnected") {
+				throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" });
+			}
+			return write.call(this, sessionId, status);
+		});
+		try {
+			sm.beginQuit();
+			expect(() => daemon?.simulateDisconnect()).not.toThrow();
+			await flushImmediate();
+		} finally {
+			failing.mockRestore();
+			delete (LastermAgent as unknown as Record<symbol, unknown>)[Symbol.hasInstance];
+		}
+		expect(sm.recorder.listed(started.id)?.end_reason).toBe("gone");
+		expect(sm.recordingIdOf(channelId)).toBeNull();
 	});
 
 	// AC-LOST-CONNECTION-MARKER / replayed-output: the reconnection keeps the terminal and

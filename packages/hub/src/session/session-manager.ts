@@ -3222,7 +3222,18 @@ export class SessionManager {
 			this.ctx.agents.delete(hostId);
 			// Its close comes after, as a stale one: the recordings learn of the loss here (#80).
 			this.ctx.recorder?.onAgentLost(hostId);
-			if (!this.isQuitting()) this.broadcaster.announceSessionState(hostId);
+			if (this.isQuitting()) return;
+			// Only what the windows are told. Its read of the host can throw on
+			// meta.db, and must not stop the stop or close that let go of the
+			// agent, nor the recordings' ends that follow it (#80).
+			try {
+				this.broadcaster.announceSessionState(hostId);
+			} catch (err) {
+				this.ctx.hubLogger?.log("warn", "session-manager: session state not announced", {
+					hostId,
+					code: (err as { code?: unknown } | null)?.code ?? "unknown",
+				});
+			}
 		}
 	}
 
@@ -3891,9 +3902,6 @@ export class SessionManager {
 				);
 				yesStored = true;
 				daemonOnly.onHostStored?.();
-				// The list is the host's now: what it left out ends its recording
-				// before the status write below, which can throw (#80).
-				this.lifecycle.endRecordingsOfUnlisted(hostId, listed.states, listed.askedAt);
 				this.broadcaster.updateSessionStatus(hostId, session.id, "active");
 				this.ctx.commits.adoptAgent(fence, hostId, agent);
 				this.lifecycle.takeUpListed(hostId, agent, listed);
@@ -3993,6 +4001,11 @@ export class SessionManager {
 			void agent.close();
 			throw new Error("SSH connect aborted");
 		}
+		// What the list left out is not held there: those recordings end now,
+		// before the reads and writes below, which can throw on meta.db (#80).
+		// Whether this connection is kept, and its list taken up, is still
+		// theirs to decide.
+		this.lifecycle.endRecordingsOfUnlisted(hostId, listed.states, listed.askedAt);
 		const now = this.ctx.metaDal.getHost(hostId);
 		if (now === undefined || !sameDestination(host, now)) {
 			return fail(ErrorCode.HOST_CHANGED, "The host changed while connecting. Try again.");

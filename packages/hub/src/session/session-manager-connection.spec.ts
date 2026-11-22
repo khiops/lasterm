@@ -1525,6 +1525,95 @@ describe("Stop keeping (#674)", { timeout: 20_000 }, () => {
 	});
 });
 
+// ─── A meta.db failure does not stop what ends the recordings (#80) ─────────
+
+describe("the recordings when meta.db fails around a stop or a lost link (#80)", {
+	timeout: 25_000,
+}, () => {
+	/** A terminal of the connected host, recorded. */
+	function recordedOn(h: Harness): { terminal: string; id: string } {
+		const [terminal] = terminalsOn(h, 1);
+		if (terminal === undefined) throw new Error("no terminal");
+		h.sm.recorder.startAutomatic({
+			channelId: terminal,
+			hostId: h.host.id,
+			hostLabel: h.host.label,
+			cols: 80,
+			rows: 24,
+		});
+		return { terminal, id: h.sm.recordingIdOf(terminal) ?? "" };
+	}
+
+	// A confirmed stop lets go of the agent, then announces the session; with a
+	// refusal of socket forwarding remembered (#765), that announcement reads the
+	// host, a read that can throw. Mutation caught: the announcement in
+	// releaseAgent left unguarded: the throw stops the stop's own callback, the
+	// stop never completes, and its terminal's recording stays open.
+	it.each([
+		["Replace", (h: Harness) => h.sm.replaceAgent(h.host.id, { force: true }), { replaced: true }],
+		[
+			"Stop keeping",
+			(h: Harness) => h.sm.stopKeepingAgent(h.host.id, { endTerminals: true, force: false }),
+			{ kind: "done", response: { outcome: "stopped" } },
+		],
+	])(
+		"%s completes and ends the recording gone when the session's announcement cannot read the host",
+		async (_what, stop, outcome) => {
+			const h = await hubWith({ daemon: true });
+			await connected(h);
+			const { terminal, id } = recordedOn(h);
+			h.ctx.socketForwardingRefusals.set(h.host.id, "a route seen refused");
+			const read = h.ctx.metaDal.getHost.bind(h.ctx.metaDal);
+			const failing = vi.spyOn(h.ctx.metaDal, "getHost").mockImplementation((hostId) => {
+				if (new Error().stack?.includes("announceSessionState")) {
+					throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" });
+				}
+				return read(hostId);
+			});
+			try {
+				expect(await stop(h)).toMatchObject(outcome);
+			} finally {
+				failing.mockRestore();
+			}
+			expect(h.sm.recorder.listed(id)?.end_reason).toBe("gone");
+			expect(h.sm.recordingIdOf(terminal)).toBeNull();
+		},
+	);
+
+	// A lost link announces its session disconnected, a status write that can
+	// throw, then schedules the reconnect, which starts a stdio host's terminal
+	// again: its recording ends `restarted`. Mutation caught: the write left
+	// unguarded in the close handler: the throw skips the reconnect, and the
+	// recording stays open.
+	it("reconnects a lost stdio link and ends the recording restarted when its disconnected status cannot be written", async () => {
+		const h = await hubWith({ daemon: false });
+		const first = await connected(h);
+		const { terminal, id } = recordedOn(h);
+		const write = h.ctx.metaDal.updateSessionStatus.bind(h.ctx.metaDal);
+		const failing = vi
+			.spyOn(h.ctx.metaDal, "updateSessionStatus")
+			.mockImplementation((sessionId, status) => {
+				if (status === "disconnected") {
+					throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" });
+				}
+				return write(sessionId, status);
+			});
+		try {
+			h.remote.dropLinks();
+			await until("the connection to end", () => !first.connected);
+			await until(
+				"the reconnect starts the terminal again",
+				() => h.sm.recordingIdOf(terminal) === null,
+				10_000,
+			);
+		} finally {
+			failing.mockRestore();
+		}
+		expect(h.sm.recorder.listed(id)?.end_reason).toBe("restarted");
+		expect(h.sm.recordingIdOf(terminal)).toBeNull();
+	});
+});
+
 // ─── A stop counts only once the daemon says it took it (#700) ───────────────
 
 describe("STOP_ACCEPTED over a remote daemon (#700)", { timeout: 20_000 }, () => {
@@ -1707,11 +1796,11 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		expect(h.remote.destroys).not.toContain(recorded);
 	});
 
-	// The list is the host's once Yes is stored: a terminal it leaves out ends its
-	// recording before the session's status write, which can throw (#80).
-	// Mutation caught: that recording ended only in the judgement after the
-	// write, so a failing write leaves it open.
-	it("ends the recording of a terminal its list leaves out, even when the session's status cannot be written", async () => {
+	/**
+	 * A recorded terminal of a host kept and connected, then disconnected,
+	 * whose daemon no longer holds it: the next daemon-only list leaves it out.
+	 */
+	async function recordedAndLeftOut(): Promise<{ h: Harness; gone: string; id: string }> {
 		const h = await leftOn();
 		expect(await keptAndConnected(h)).toBe(true);
 		const [gone] = terminalsOn(h, 1);
@@ -1727,6 +1816,15 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		h.sm.disconnectHost(h.host.id, { force: true });
 		await until("disconnected", () => agentOf(h) === undefined);
 		h.remote.held = [];
+		return { h, gone, id };
+	}
+
+	// The list is the host's once Yes is stored: a terminal it leaves out ends its
+	// recording before the session's status write, which can throw (#80).
+	// Mutation caught: that recording ended only in the judgement after the
+	// write, so a failing write leaves it open.
+	it("ends the recording of a terminal its list leaves out, even when the session's status cannot be written", async () => {
+		const { h, gone, id } = await recordedAndLeftOut();
 		const write = h.ctx.metaDal.updateSessionStatus.bind(h.ctx.metaDal);
 		const failing = vi
 			.spyOn(h.ctx.metaDal, "updateSessionStatus")
@@ -1742,6 +1840,51 @@ describe("Keep the agent left here and connect (#701)", { timeout: 20_000 }, () 
 		expect(h.sm.recorder.listed(id)?.end_reason).toBe("gone");
 		expect(h.sm.recordingIdOf(gone)).toBeNull();
 	});
+
+	// The same list, as soon as it arrived and the attempt is still this one:
+	// before the host's read that checks its destination and the Yes write,
+	// either of which can throw on meta.db and fail the attempt (#80). Mutation
+	// caught: the recordings ended after that read and write, in the caller, so
+	// a failing one leaves the recording open.
+	it.each([
+		[
+			"the host's read",
+			(h: Harness) => {
+				const read = h.ctx.metaDal.getHost.bind(h.ctx.metaDal);
+				return vi.spyOn(h.ctx.metaDal, "getHost").mockImplementation((hostId) => {
+					if (new Error().stack?.includes("keepTheDaemonReached")) {
+						throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" });
+					}
+					return read(hostId);
+				});
+			},
+		],
+		[
+			"the Yes write",
+			(h: Harness) => {
+				const write = h.ctx.metaDal.updateHost.bind(h.ctx.metaDal);
+				return vi.spyOn(h.ctx.metaDal, "updateHost").mockImplementation((hostId, patch) => {
+					if (patch.sshRemoteDaemon === true) {
+						throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" });
+					}
+					return write(hostId, patch);
+				});
+			},
+		],
+	])(
+		"ends the recording of a terminal its list leaves out, even when %s throws",
+		async (_what, fault) => {
+			const { h, gone, id } = await recordedAndLeftOut();
+			const failing = fault(h);
+			try {
+				expect(await keptAndConnected(h)).toBe(false);
+			} finally {
+				failing.mockRestore();
+			}
+			expect(h.sm.recorder.listed(id)?.end_reason).toBe("gone");
+			expect(h.sm.recordingIdOf(gone)).toBeNull();
+		},
+	);
 
 	it.each([
 		["No", false],

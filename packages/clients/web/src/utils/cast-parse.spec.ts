@@ -1,6 +1,6 @@
 // AC-PLAYER-PARSE (#80). New file: the parser is new and no existing spec reads casts.
 import { describe, expect, it } from "vitest";
-import { parseCast, parseCastChunks } from "./cast-parse.js";
+import { DEFAULT_MAX_LINE_UNITS, parseCast, parseCastChunks } from "./cast-parse.js";
 
 const NOT_A_CAST = "Not an asciicast v2 or v3 file";
 
@@ -120,5 +120,87 @@ describe("parseCast", () => {
 		["data that is not a string", '{"version":3,"term":{"cols":80,"rows":24}}\n[0, "o", 123]'],
 	])("refuses %s", (_label, text) => {
 		expect(parseCast(text)).toEqual({ error: NOT_A_CAST });
+	});
+});
+
+// AC-PLAYER-PARSE / line-too-long, line-units, first-error, line-limit-default
+// (freeze 2): a line over the limit is refused with its own error, counted
+// before it is joined. The limit is injected as N = 60 units.
+describe("parseCastChunks — the line limit", () => {
+	const N = 60;
+	const HEAD = '{"version":3,"term":{"cols":80,"rows":24}}\n'; // 43 units: under N
+	/** An event line of exactly `units` UTF-16 units, its line end aside. */
+	const line = (units: number) => `[0, "o", "${"a".repeat(units - 12)}"]`;
+	async function* chunks(...texts: string[]): AsyncGenerator<string> {
+		for (const text of texts) yield text;
+	}
+	const parse = (...texts: string[]) =>
+		parseCastChunks(chunks(...texts), () => false, { maxLineUnits: N });
+	const TOO_LARGE = { error: "This file has an event too large to replay" };
+
+	// Mutations caught: no limit; > read as >=; the line end counted.
+	it("reads a line of exactly N units, ended by \\n or \\r\\n", async () => {
+		expect(await parse(HEAD, `${line(N)}\n`)).toMatchObject({ events: [{ c: "o" }] });
+		expect(await parse(HEAD, `${line(N)}\r\n`)).toMatchObject({ events: [{ c: "o" }] });
+	});
+
+	it("refuses a line of N + 1 units with its own error", async () => {
+		expect(await parse(HEAD, `${line(N + 1)}\n`)).toEqual(TOO_LARGE);
+	});
+
+	// Mutation caught: the length checked only once a line has ended.
+	it("refuses it while it is still in pieces, and reads nothing after", async () => {
+		let pulled = 0;
+		async function* slow(): AsyncGenerator<string> {
+			const big = line(N + 1);
+			for (const text of [HEAD, big.slice(0, 30), big.slice(30), "\n", '[0, "o", "after"]\n']) {
+				pulled++;
+				yield text;
+			}
+		}
+		expect(await parseCastChunks(slow(), () => false, { maxLineUnits: N })).toEqual(TOO_LARGE);
+		expect(pulled).toBe(3); // the header, then the two pieces that pass N
+	});
+
+	it("counts a line whose end comes in a later chunk", async () => {
+		const big = line(N + 1);
+		expect(await parse(HEAD, big.slice(0, 40), big.slice(40), "\n")).toEqual(TOO_LARGE);
+		const fits = line(N);
+		expect(await parse(HEAD, fits.slice(0, 40), fits.slice(40), "\n")).toMatchObject({
+			events: [{ c: "o" }],
+		});
+	});
+
+	// Mutation caught: the last line, with no line end, never measured.
+	it("refuses a last line over N with no line end", async () => {
+		expect(await parse(HEAD, line(N + 1))).toEqual(TOO_LARGE);
+		expect(await parse(HEAD, line(N))).toMatchObject({ events: [{ c: "o" }] });
+	});
+
+	// line-units. Mutations caught: characters counted instead of UTF-16 units;
+	// the \r of a \r\n split across chunks counted.
+	it("counts UTF-16 units: a character outside the BMP is two", async () => {
+		// N - 1 units of "a", then one emoji (two units): N + 1 units, N characters.
+		const astral = `[0, "o", "${"a".repeat(N - 13)}😀"]`;
+		expect(astral.length).toBe(N + 1);
+		expect([...astral].length).toBe(N);
+		expect(await parse(HEAD, `${astral}\n`)).toEqual(TOO_LARGE);
+	});
+
+	it("leaves out a \\r\\n split across two chunks", async () => {
+		expect(await parse(HEAD, `${line(N)}\r`, "\n")).toMatchObject({ events: [{ c: "o" }] });
+	});
+
+	// first-error. Mutation caught: one kind of refusal looked for before the other.
+	it("gives the error of the refused line first in the file, in either order", async () => {
+		expect(await parse(HEAD, "not json\n", `${line(N + 1)}\n`)).toEqual({
+			error: "Not an asciicast v2 or v3 file",
+		});
+		expect(await parse(HEAD, `${line(N + 1)}\n`, "not json\n")).toEqual(TOO_LARGE);
+	});
+
+	// line-limit-default.
+	it("reads lines up to 134,217,728 units by default", () => {
+		expect(DEFAULT_MAX_LINE_UNITS).toBe(134_217_728);
 	});
 });

@@ -28,7 +28,8 @@ import {
  * A host's files over SSH commands, for a download (#840): a POSIX `sh`
  * script, or PowerShell calling .NET only, no cmdlet (`exec-files.ts`). The
  * path reaches the host as data. A read's bytes follow a marker line the hub
- * chose for that read and a `size mtime` line taken on the opened file: the
+ * chose for that read and a `size mtime` line (on POSIX by the path just after
+ * the file is opened; on Windows the open stream's length and the time by path): the
  * hub looks for the marker in at most the first `PRELUDE_LIMIT` bytes, so
  * whatever the account's shell prints first is passed over, and it never
  * searches the body. After exactly the bytes it was asked for, the script
@@ -54,7 +55,7 @@ const EXIT_LINK = 3;
 const EXIT_MISSING = 4;
 const EXIT_NOT_A_FILE = 5;
 
-const LOOK_LINE = /^(\d+) (\d+)$/;
+const LOOK_LINE = /^(\d+) (-?\d+)$/;
 
 // ─── Scripts ──────────────────────────────────────────────────────────────────
 
@@ -190,7 +191,7 @@ export class ExecReadBackend implements ReadBackend {
 			case "OK": {
 				const match = LOOK_LINE.exec(line.trim());
 				if (match) {
-					const look: FileLook = { size: Number(match[1]), mtime: Number(match[2]), unit };
+					const look: FileLook = { size: Number(match[1]), mtime: match[2] as string, unit };
 					return new ExecOpenedFile(this, path, look);
 				}
 				break;
@@ -315,9 +316,9 @@ class ExecStream {
 	/** The second look: the line the script printed after exactly `length` bytes. */
 	async trailer(): Promise<FileLook | null> {
 		await this.ended;
-		const match = /^\r?\n(\d+) (\d+)\r?\n?$/.exec(this.tail.toString("ascii"));
+		const match = /^\r?\n(\d+) (-?\d+)\r?\n?$/.exec(this.tail.toString("ascii"));
 		if (!match) return null;
-		return { size: Number(match[1]), mtime: Number(match[2]), unit: this.look.unit };
+		return { size: Number(match[1]), mtime: match[2] as string, unit: this.look.unit };
 	}
 
 	close(): void {
@@ -377,7 +378,7 @@ class ExecStream {
 		}
 		const look: FileLook = {
 			size: Number(match[1]),
-			mtime: Number(match[2]),
+			mtime: match[2] as string,
 			unit: this.look.unit,
 		};
 		if (!sameLook(look, this.look)) {
@@ -409,6 +410,7 @@ class ExecStream {
 
 class ExecOpenedFile implements OpenedFile {
 	private running: ExecStream | null = null;
+	private closed = false;
 
 	constructor(
 		private readonly backend: ExecReadBackend,
@@ -417,8 +419,11 @@ class ExecOpenedFile implements OpenedFile {
 	) {}
 
 	async read(start: number, length: number): Promise<Readable> {
-		this.running = await this.backend.stream(this.path, this.look, start, length);
-		return this.running.body;
+		const running = await this.backend.stream(this.path, this.look, start, length);
+		this.running = running;
+		// Closed while the command was starting: close it now that it has.
+		if (this.closed) running.close();
+		return running.body;
 	}
 
 	async recheck(): Promise<FileLook> {
@@ -432,6 +437,7 @@ class ExecOpenedFile implements OpenedFile {
 	}
 
 	async close(): Promise<void> {
+		this.closed = true;
 		this.running?.close();
 	}
 }

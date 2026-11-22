@@ -5968,7 +5968,7 @@ static DOWNLOADS: OnceLock<Mutex<HashMap<(String, String), downloads::Running>>>
 #[derive(Clone)]
 struct DownloadRoot {
     dir: PathBuf,
-    /// What the file the save dialog named was then, for a single file.
+    /// The name the save dialog returned, and what was under it then.
     existing: Option<(String, Option<downloads::Identity>)>,
 }
 
@@ -5980,6 +5980,14 @@ fn running_downloads_map() -> &'static Mutex<HashMap<(String, String), downloads
     DOWNLOADS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// What was under the name the save dialog returned, as the page hears it.
+#[derive(Serialize)]
+struct ExistingFile {
+    size: u64,
+    /// Milliseconds since the epoch, when the system says.
+    mtime: Option<u64>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 enum DownloadTarget {
@@ -5988,6 +5996,7 @@ enum DownloadTarget {
         root_id: String,
         display: String,
         name: String,
+        existing: Option<ExistingFile>,
     },
 }
 
@@ -6014,7 +6023,7 @@ async fn pick_download_target(
     let path = path
         .into_path()
         .map_err(|error| format!("INVALID_PATH: {error}"))?;
-    // Taken at once: the dialog's overwrite prompt covered the file as it is now.
+    // Taken at once: the dialog's overwrite prompt covered what is there now.
     let existing = downloads::identity_of(&path);
     let (Some(dir), Some(file_name)) = (path.parent(), path.file_name()) else {
         return Err("INVALID_PATH: the chosen path has no folder".to_string());
@@ -6035,24 +6044,37 @@ async fn pick_download_target(
         root_id,
         display: dir.display().to_string(),
         name: file_name,
+        existing: existing.map(|identity| ExistingFile {
+            size: identity.size,
+            mtime: identity
+                .modified
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|since| since.as_millis() as u64),
+        }),
     })
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct DownloadFileRequest {
     download_id: String,
     item_id: String,
     root_id: String,
     rel_path: String,
-    /// The hub path the page asks for: `/api/channels/:id/files/content?path=…`
-    /// or its host form, checked below.
-    hub_path: String,
+    host_id: String,
+    /// The file's path on the host.
+    path: String,
     port: u16,
 }
 
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+struct DownloadStarted {
+    download_id: String,
+    item_id: String,
+    etag: Option<String>,
+    total: u64,
+}
+
+#[derive(Clone, Serialize)]
 struct DownloadProgress {
     download_id: String,
     item_id: String,
@@ -6061,7 +6083,6 @@ struct DownloadProgress {
 }
 
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct DownloadEnded {
     download_id: String,
     item_id: String,
@@ -6069,39 +6090,81 @@ struct DownloadEnded {
     outcome: downloads::Outcome,
 }
 
-/// Whether `path` is one of the hub's download routes, and nothing else.
-fn is_download_route(path: &str) -> bool {
-    let Some((route, _query)) = path.split_once('?') else {
-        return false;
-    };
-    let parts: Vec<&str> = route.split('/').collect();
-    matches!(
-        parts.as_slice(),
-        ["", "api", "channels" | "hosts", id, "files", "content"]
-            if !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())
-    )
+/// A relative path under a download root. Phase A writes one file under the
+/// name the save dialog returned: one name, not empty, `.` or `..`, and on
+/// Windows nothing Windows refuses.
+fn checked_rel_path(rel: &str) -> Result<&str, String> {
+    if rel.contains('/') || rel.contains('\\') || rel.contains('\0') {
+        return Err("INVALID_PATH: one name only".to_string());
+    }
+    if rel.is_empty() || rel == "." || rel == ".." {
+        return Err("INVALID_PATH: not a name".to_string());
+    }
+    if cfg!(windows)
+        && rel
+            .chars()
+            .any(|c| matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*') || (c as u32) < 32)
+    {
+        return Err("INVALID_PATH: a name holds a character Windows refuses".to_string());
+    }
+    Ok(rel)
 }
 
-/// A relative path under a download root: `/`-separated names, none empty,
-/// `.` or `..`, no drive or root, and on Windows nothing Windows refuses.
-fn checked_rel_path(rel: &str) -> Result<Vec<&str>, String> {
-    let parts: Vec<&str> = rel.split('/').collect();
-    for part in &parts {
-        if part.is_empty() || *part == "." || *part == ".." {
-            return Err("INVALID_PATH: the path is not a plain relative path".to_string());
-        }
-        if part.contains('\\') || part.contains('\0') {
-            return Err("INVALID_PATH: the path is not a plain relative path".to_string());
-        }
-        if cfg!(windows)
-            && part
-                .chars()
-                .any(|c| matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*') || (c as u32) < 32)
-        {
-            return Err("INVALID_PATH: a name holds a character Windows refuses".to_string());
+/// The root a dialog chose in this run, by its id.
+fn download_root(root_id: &str) -> Result<DownloadRoot, String> {
+    download_roots()
+        .lock()
+        .map_err(|_| "download roots poisoned".to_string())?
+        .get(root_id)
+        .cloned()
+        .ok_or_else(|| "UNKNOWN_ROOT: that folder was not chosen in this run".to_string())
+}
+
+/// Hold a cancel flag for one item; refused while that item is being written.
+fn claim_download(key: (String, String)) -> Result<Arc<AtomicBool>, String> {
+    let mut running = running_downloads_map()
+        .lock()
+        .map_err(|_| "downloads poisoned".to_string())?;
+    if running.contains_key(&key) {
+        return Err("DOWNLOAD_RUNNING: that item is being written".to_string());
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    running.insert(
+        key,
+        downloads::Running {
+            cancel: cancel.clone(),
+        },
+    );
+    Ok(cancel)
+}
+
+/// Set the cancel flag of one item of a download, or of all its items; how many.
+fn cancel_running(download_id: &str, item_id: Option<&str>) -> Result<usize, String> {
+    let running = running_downloads_map()
+        .lock()
+        .map_err(|_| "downloads poisoned".to_string())?;
+    let mut count = 0;
+    for ((download, item), job) in running.iter() {
+        if download == download_id && item_id.map_or(true, |wanted| wanted == item) {
+            job.cancel.store(true, Ordering::SeqCst);
+            count += 1;
         }
     }
-    Ok(parts)
+    Ok(count)
+}
+
+/// The URL of a host's file as the content route serves it.
+fn download_url(port: u16, host_id: &str, path: &str) -> Result<String, String> {
+    if host_id.is_empty() || !host_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("INVALID_HOST: not a host id".to_string());
+    }
+    let mut url = reqwest::Url::parse(&relay_hub_url(
+        port,
+        &format!("/api/hosts/{host_id}/files/content"),
+    )?)
+    .map_err(|error| format!("INVALID_PATH: {error}"))?;
+    url.query_pairs_mut().append_pair("path", path);
+    Ok(url.to_string())
 }
 
 /// Write one file of a download under a root a dialog chose (#840 D4, the one-file part of A).
@@ -6110,41 +6173,24 @@ async fn download_hub_file_to(
     app: tauri::AppHandle,
     request: DownloadFileRequest,
 ) -> Result<(), String> {
-    if !is_download_route(&request.hub_path) {
-        return Err("INVALID_PATH: not a download route".to_string());
-    }
-    let parts = checked_rel_path(&request.rel_path)?;
-    let root = download_roots()
-        .lock()
-        .map_err(|_| "download roots poisoned".to_string())?
-        .get(&request.root_id)
-        .cloned()
-        .ok_or_else(|| "UNKNOWN_ROOT: that folder was not chosen in this run".to_string())?;
-    let (name, folders) = parts.split_last().expect("split gives at least one part");
-    let mut dir = root.dir.clone();
-    for folder in folders {
-        dir.push(folder);
-    }
+    let name = checked_rel_path(&request.rel_path)?.to_string();
+    let root = download_root(&request.root_id)?;
     let existing_at_dialog = match &root.existing {
-        Some((file_name, identity)) if folders.is_empty() && file_name == name => *identity,
+        Some((file_name, identity)) if *file_name == name => *identity,
         _ => None,
     };
-    let (client, url) = download_endpoint(request.port, &request.hub_path)?;
+    // reqwest's blocking client may not be built on an async worker.
+    let (port, host_id, path) = (request.port, request.host_id.clone(), request.path.clone());
+    let (client, url) = relay_off_main_thread(move || {
+        download_endpoint(port, &host_id, &path, downloads::IDLE_LIMIT)
+    })
+    .await?;
     let token = read_hub_auth_token()?.ok_or_else(|| "no hub token".to_string())?;
-    let cancel = Arc::new(AtomicBool::new(false));
     let key = (request.download_id.clone(), request.item_id.clone());
-    running_downloads_map()
-        .lock()
-        .map_err(|_| "downloads poisoned".to_string())?
-        .insert(
-            key.clone(),
-            downloads::Running {
-                cancel: cancel.clone(),
-            },
-        );
+    let cancel = claim_download(key.clone())?;
     let job = downloads::FileJob {
-        dir,
-        name: (*name).to_string(),
+        dir: root.dir,
+        name,
         partial: None,
         existing_at_dialog,
     };
@@ -6154,6 +6200,17 @@ async fn download_hub_file_to(
                 &job,
                 response,
                 &cancel,
+                |etag, total| {
+                    let _ = app.emit(
+                        "download-started",
+                        DownloadStarted {
+                            download_id: key.0.clone(),
+                            item_id: key.1.clone(),
+                            etag,
+                            total,
+                        },
+                    );
+                },
                 |written, total| {
                     let _ = app.emit(
                         "download-progress",
@@ -6167,6 +6224,7 @@ async fn download_hub_file_to(
                 },
                 &downloads::RealOps,
             ),
+            Err(_) if cancel.load(Ordering::SeqCst) => downloads::Outcome::Cancelled,
             Err(error) => downloads::Outcome::Failed {
                 error: format!(
                     "The hub could not be reached: {}",
@@ -6191,10 +6249,13 @@ async fn download_hub_file_to(
 }
 
 /// The client and URL a download fetches with: the hub this desktop
-/// established, only on its own port, over its pinned TLS identity.
+/// established, only on its own port, over its pinned TLS identity, with no
+/// total time limit and `idle` for each wait for bytes.
 fn download_endpoint(
     port: u16,
-    hub_path: &str,
+    host_id: &str,
+    path: &str,
+    idle: std::time::Duration,
 ) -> Result<(reqwest::blocking::Client, String), String> {
     let connection = established_hub_connection()?;
     if port != connection.port {
@@ -6203,39 +6264,22 @@ fn download_endpoint(
     let client = downloads::download_client(
         pinned_hub_tls_config(connection.expected_spki.clone())?,
         same_endpoint_redirects(),
-        downloads::IDLE_LIMIT,
+        idle,
     )?;
-    Ok((client, relay_hub_url(connection.port, hub_path)?))
+    Ok((client, download_url(connection.port, host_id, path)?))
 }
 
 /// Stop one file of a download, or every file of it.
 #[tauri::command]
 fn cancel_hub_download(download_id: String, item_id: Option<String>) -> Result<(), String> {
-    let running = running_downloads_map()
-        .lock()
-        .map_err(|_| "downloads poisoned".to_string())?;
-    for ((download, item), job) in running.iter() {
-        if *download == download_id && item_id.as_ref().map_or(true, |wanted| wanted == item) {
-            job.cancel.store(true, Ordering::SeqCst);
-        }
-    }
-    Ok(())
+    cancel_running(&download_id, item_id.as_deref()).map(|_| ())
 }
 
 /// Show a downloaded file in Explorer, selected.
 #[tauri::command]
 fn reveal_downloaded(root_id: String, rel_path: String) -> Result<(), String> {
-    let parts = checked_rel_path(&rel_path)?;
-    let root = download_roots()
-        .lock()
-        .map_err(|_| "download roots poisoned".to_string())?
-        .get(&root_id)
-        .cloned()
-        .ok_or_else(|| "UNKNOWN_ROOT: that folder was not chosen in this run".to_string())?;
-    let mut path = root.dir;
-    for part in parts {
-        path.push(part);
-    }
+    let name = checked_rel_path(&rel_path)?;
+    let path = download_root(&root_id)?.dir.join(name);
     #[cfg(windows)]
     {
         let mut select = std::ffi::OsString::from("/select,");
@@ -7793,6 +7837,119 @@ mod tests {
         HUB_PORT.store(0, Ordering::Relaxed);
     }
 
+    /// Clears the established hub connection when a test ends, failing or not.
+    struct ConnectionReset;
+
+    impl Drop for ConnectionReset {
+        fn drop(&mut self) {
+            if let Ok(mut connection) = HUB_CONNECTION.lock() {
+                *connection = None;
+            }
+        }
+    }
+
+    fn establish_for_test(port: u16, spki: Vec<u8>) -> ConnectionReset {
+        *HUB_CONNECTION.lock().unwrap() = Some(HubConnection {
+            port,
+            client: build_pinned_hub_client(spki.clone()).unwrap(),
+            expected_spki: spki,
+        });
+        ConnectionReset
+    }
+
+    /// A TLS server with `key_pair` that answers one request with `total`
+    /// bytes in `pieces`, `gap` apart.
+    fn trickling_tls_hub(
+        key_pair: &rcgen::KeyPair,
+        total: usize,
+        pieces: usize,
+        gap: Duration,
+    ) -> u16 {
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection, StreamOwned};
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let certificate = rcgen::CertificateParams::new(Vec::<String>::new())
+            .unwrap()
+            .self_signed(key_pair)
+            .unwrap()
+            .der()
+            .clone();
+        let private_key = key_pair.serialize_der();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let config = ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![certificate],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(private_key)),
+                )
+                .unwrap();
+            let Ok((socket, _)) = listener.accept() else {
+                return;
+            };
+            let connection = ServerConnection::new(Arc::new(config)).unwrap();
+            let mut tls = StreamOwned::new(connection, socket);
+            let mut request = [0_u8; 4096];
+            if !matches!(tls.read(&mut request), Ok(read) if read > 0) {
+                return;
+            }
+            let head =
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n");
+            if tls
+                .write_all(head.as_bytes())
+                .and_then(|()| tls.flush())
+                .is_err()
+            {
+                return;
+            }
+            let piece = vec![9_u8; total / pieces];
+            for _ in 0..pieces {
+                std::thread::sleep(gap);
+                if tls.write_all(&piece).and_then(|()| tls.flush()).is_err() {
+                    return;
+                }
+            }
+        });
+        port
+    }
+
+    fn download_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("lasterm-840-{tag}-{}", downloads::random_hex()));
+        #[expect(clippy::disallowed_methods, reason = "a test's own folder")]
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fetch_through_endpoint(port: u16, idle: Duration, tag: &str) -> downloads::Outcome {
+        let dir = download_dir(tag);
+        let (client, url) =
+            download_endpoint(port, "01K840HOST0000000000000001", "/x", idle).unwrap();
+        let job = downloads::FileJob {
+            dir,
+            name: "f.bin".to_string(),
+            partial: None,
+            existing_at_dialog: None,
+        };
+        match client.get(&url).send() {
+            Ok(response) => downloads::write_file(
+                &job,
+                response,
+                &AtomicBool::new(false),
+                |_, _| {},
+                |_, _| {},
+                &downloads::RealOps,
+            ),
+            Err(error) => downloads::Outcome::Failed {
+                error: error.to_string(),
+                code: None,
+            },
+        }
+    }
+
     #[test]
     fn download_endpoint_keeps_to_the_pinned_hub() {
         let _guard = hub_connection_test_guard();
@@ -7800,17 +7957,18 @@ mod tests {
         let impostor = rcgen::KeyPair::generate().unwrap();
         let peer = TestTlsPeer::start(&impostor);
         let port = peer.port;
-        *HUB_CONNECTION.lock().unwrap() = Some(HubConnection {
-            port,
-            expected_spki: pinned.subject_public_key_info(),
-            client: build_pinned_hub_client(pinned.subject_public_key_info()).unwrap(),
-        });
-        let path = "/api/hosts/01K840HOST0000000000000001/files/content?path=x";
+        let _reset = establish_for_test(port, pinned.subject_public_key_info());
+        let host = "01K840HOST0000000000000001";
         // Another port than the hub's: refused before any request.
-        let error = download_endpoint(port.saturating_add(1), path).unwrap_err();
+        let error = download_endpoint(port.saturating_add(1), host, "/x", downloads::IDLE_LIMIT)
+            .unwrap_err();
         assert!(error.contains("different hub endpoint"), "{error}");
         // A hub presenting another key: the TLS handshake fails, nothing is read.
-        let (client, url) = download_endpoint(port, path).unwrap();
+        let (client, url) = download_endpoint(port, host, "/x", downloads::IDLE_LIMIT).unwrap();
+        assert!(
+            url.ends_with(&format!("/api/hosts/{host}/files/content?path=%2Fx")),
+            "{url}"
+        );
         let error = client
             .get(&url)
             .send()
@@ -7820,8 +7978,61 @@ mod tests {
             "{}",
             error_with_sources(&error)
         );
-        *HUB_CONNECTION.lock().unwrap() = None;
         drop(peer);
+    }
+
+    #[test]
+    fn download_endpoint_has_no_total_timeout() {
+        let _guard = hub_connection_test_guard();
+        assert_eq!(downloads::IDLE_LIMIT, Duration::from_secs(60));
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        // Four pieces 400 ms apart: 1.6 s in all, past a 1 s limit on each wait.
+        let port = trickling_tls_hub(&key_pair, 4000, 4, Duration::from_millis(400));
+        let _reset = establish_for_test(port, key_pair.subject_public_key_info());
+        let steady = fetch_through_endpoint(port, Duration::from_secs(1), "steady-tls");
+        assert!(
+            matches!(steady, downloads::Outcome::Done { .. }),
+            "{steady:?}"
+        );
+        // One piece after 1.5 s of silence: the wait for bytes gives up.
+        let port = trickling_tls_hub(&key_pair, 4000, 1, Duration::from_millis(1500));
+        let _reset = establish_for_test(port, key_pair.subject_public_key_info());
+        let idle = fetch_through_endpoint(port, Duration::from_secs(1), "idle-tls");
+        assert!(
+            matches!(idle, downloads::Outcome::Failed { .. }),
+            "{idle:?}"
+        );
+    }
+
+    #[test]
+    fn download_commands_refuse_what_phase_a_does_not_write() {
+        assert!(checked_rel_path("report.pdf").is_ok());
+        for refused in ["a/b", "..", ".", "", "a\\b"] {
+            assert!(checked_rel_path(refused).is_err(), "{refused:?}");
+        }
+        if cfg!(windows) {
+            assert!(checked_rel_path("a:b").is_err());
+        }
+        let error = download_root("0000000000000000").err().unwrap();
+        assert!(error.starts_with("UNKNOWN_ROOT"), "{error}");
+    }
+
+    #[test]
+    fn download_items_are_claimed_once_and_cancelled_alone() {
+        let first = ("d840".to_string(), "1".to_string());
+        let second = ("d840".to_string(), "2".to_string());
+        let one = claim_download(first.clone()).unwrap();
+        let two = claim_download(second.clone()).unwrap();
+        let again = claim_download(first.clone()).unwrap_err();
+        assert!(again.starts_with("DOWNLOAD_RUNNING"), "{again}");
+        assert_eq!(cancel_running("d840", Some("2")).unwrap(), 1);
+        assert!(!one.load(Ordering::SeqCst));
+        assert!(two.load(Ordering::SeqCst));
+        assert_eq!(cancel_running("d840", None).unwrap(), 2);
+        assert!(one.load(Ordering::SeqCst));
+        let mut running = running_downloads_map().lock().unwrap();
+        running.remove(&first);
+        running.remove(&second);
     }
 
     #[test]

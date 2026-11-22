@@ -19,8 +19,8 @@ export type MtimeUnit = "ms" | "s" | "t";
 /** What one look at a file says. */
 export interface FileLook {
 	readonly size: number;
-	/** The modification time, in `unit`. */
-	readonly mtime: number;
+	/** The modification time, in `unit`, as decimal digits: Windows ticks are past 2^53. */
+	readonly mtime: string;
 	readonly unit: MtimeUnit;
 }
 
@@ -136,7 +136,7 @@ export class LocalReadBackend implements ReadBackend {
 }
 
 function lookOf(stats: import("node:fs").Stats): FileLook {
-	return { size: stats.size, mtime: Math.trunc(stats.mtimeMs), unit: "ms" };
+	return { size: stats.size, mtime: String(Math.trunc(stats.mtimeMs)), unit: "ms" };
 }
 
 class LocalOpenedFile implements OpenedFile {

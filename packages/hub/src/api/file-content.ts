@@ -49,8 +49,8 @@ export function etagOf(look: FileLook): string {
 }
 
 function millisOf(look: FileLook): number {
-	if (look.unit === "ms") return look.mtime;
-	if (look.unit === "s") return look.mtime * 1000;
+	if (look.unit === "ms") return Number(look.mtime);
+	if (look.unit === "s") return Number(look.mtime) * 1000;
 	return Number((BigInt(look.mtime) - TICKS_AT_EPOCH) / 10_000n);
 }
 
@@ -257,6 +257,12 @@ export function registerFileContentRoutes(server: FastifyInstance, deps: FileCon
 			void file.close();
 		};
 		reply.raw.once("close", finish);
+		// A client that left while the file was being opened: its close came before
+		// the listener, so nothing else would let go of the file and the count.
+		if (request.raw.destroyed || reply.raw.destroyed) {
+			finish();
+			return reply;
+		}
 		try {
 			const look = file.look;
 			const etag = etagOf(look);

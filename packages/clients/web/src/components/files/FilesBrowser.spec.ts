@@ -405,6 +405,8 @@ describe("Download… (#840)", () => {
 	}
 
 	afterEach(() => {
+		// The anchor's click and the platform, stubbed by a test that may have failed.
+		vi.restoreAllMocks();
 		mocks.tauri = false;
 		mocks.hubFetch.mockReset();
 		mocks.invoke.mockReset();
@@ -457,9 +459,10 @@ describe("Download… (#840)", () => {
 		const [command, args] = mocks.invoke.mock.calls[1] ?? [];
 		expect(command).toBe("download_hub_file_to");
 		expect((args as { request: Record<string, unknown> }).request).toMatchObject({
-			rootId: "R",
-			relPath: "a_b.txt",
-			hubPath: `/api/channels/${A}/files/content?path=${encodeURIComponent("/srv/drop/a:b.txt")}`,
+			root_id: "R",
+			rel_path: "a_b.txt",
+			host_id: "H",
+			path: "/srv/drop/a:b.txt",
 			port: 4100,
 		});
 		expect(mocks.hubFetch).not.toHaveBeenCalled();

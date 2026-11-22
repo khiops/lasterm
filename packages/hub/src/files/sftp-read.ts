@@ -114,7 +114,7 @@ export class SftpReadBackend implements ReadBackend {
 }
 
 function lookOf(stats: Stats): FileLook {
-	return { size: stats.size, mtime: stats.mtime, unit: "s" };
+	return { size: stats.size, mtime: String(stats.mtime), unit: "s" };
 }
 
 class SftpOpenedFile implements OpenedFile {
@@ -209,6 +209,11 @@ export class SftpReadStream extends Readable {
 		super({ highWaterMark: SFTP_READ_BYTES });
 		this.next = start;
 		this.end = start + length;
+		// One watch of the session's end for the whole stream: a READ in flight
+		// when it ends never answers, so the stream fails here.
+		void session.endedSignal.then(() => {
+			if (!this.destroyed && !this.readableEnded) this.destroy(hostNotConnected());
+		});
 	}
 
 	override _read(): void {
@@ -217,11 +222,16 @@ export class SftpReadStream extends Readable {
 	}
 
 	private ask(offset: number, length: number): Promise<Buffer> {
-		return this.backend.request<Buffer>(this.session, (done) => {
+		return new Promise<Buffer>((resolve, reject) => {
+			if (this.session.ended) {
+				reject(hostNotConnected());
+				return;
+			}
 			const buffer = Buffer.allocUnsafe(length);
-			this.session.channel.read(this.handle, buffer, 0, length, offset, (error, bytesRead) =>
-				done(error, buffer.subarray(0, bytesRead ?? 0)),
-			);
+			this.session.channel.read(this.handle, buffer, 0, length, offset, (error, bytesRead) => {
+				if (error) reject(error);
+				else resolve(buffer.subarray(0, bytesRead ?? 0));
+			});
 		});
 	}
 

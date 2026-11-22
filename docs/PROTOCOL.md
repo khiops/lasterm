@@ -2618,8 +2618,8 @@ Several ranges, `a` above `b`, a header that does not parse, or any range on an 
 ignored: 200 with the whole file. An `If-Range` that is not the current ETag byte for byte also
 answers 200 with the whole file.
 
-**A file that changes while it is read is never delivered whole.** The hub looks at the file it
-opened before the first byte, and again after the last: a body of at most 64 KiB is read whole
+**A file seen to change while it is read is never delivered whole.** The hub looks at the file
+(its size and modification time) before the first byte, and again after the last: a body of at most 64 KiB is read whole
 before any header and answers 409 `FILE_CHANGED` when the looks disagree; a larger one keeps its last
 64 KiB until the second look agrees, and otherwise closes the connection before them, so the client
 holds fewer bytes than `Content-Length` promised.
@@ -2645,11 +2645,11 @@ the ticket unused. Kept in memory: a restart forgets them. Query values reach no
 time compared with the `lstat`. SFTP: OPEN, FSTAT (STAT of the path where the server does not answer
 it), then up to eight 64 KiB READs at once, none asked while the client is not reading; the session
 is held for the whole read. SSH commands: a `sh` script, or an encoded PowerShell calling .NET only,
-prints a marker the hub chose for that read, the opened file's `size mtime`, exactly the bytes asked
+prints a marker the hub chose for that read, a `size mtime` line (on POSIX by the path just after the file is opened; on Windows the open stream's length and the time by path), exactly the bytes asked
 for, then a second `size mtime` line; the hub looks for the marker in the first 64 KiB, past whatever
 the account's shell printed first. A client that leaves stops the read. An open download response
-holds its host's connection as an upload does: a gesture that would close it asks first, naming
-"1 download".
+holds its host's connection as an upload does: a gesture that would close it is refused,
+naming "1 download", until it is told to stop it (`force`, `stop_transfers`).
 
 #### Transfers
 

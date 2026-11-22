@@ -25,6 +25,8 @@ export const ENDED_EVENT = "download-ended";
 /** What a download needs of the file. */
 export interface DownloadFile {
 	readonly channelId: string;
+	/** The terminal's host: the desktop fetches by host, so closing the terminal breaks nothing. */
+	readonly hostId: string | null;
 	readonly path: string;
 	readonly name: string;
 	/** The browser's or desktop's system, for the default name the dialog shows. */
@@ -129,23 +131,36 @@ async function downloadOnDesktop(
 	file: DownloadFile,
 	bridgeOf: () => Promise<DesktopBridge>,
 ): Promise<DownloadStart> {
-	const bridge = await bridgeOf();
+	if (file.hostId === null) {
+		return { kind: "failed", message: refusalText("HOST_NOT_CONNECTED", file.name) };
+	}
 	const name = file.windows ? downloadRename(file.name) : file.name;
-	const target = (await bridge.invoke(PICK_TARGET_COMMAND, { name })) as
-		| { outcome: "cancelled" }
-		| { outcome: "chosen"; root_id: string; display: string; name: string };
+	let bridge: DesktopBridge;
+	let target: { outcome: "cancelled" } | { outcome: "chosen"; root_id: string; name: string };
+	try {
+		bridge = await bridgeOf();
+		target = (await bridge.invoke(PICK_TARGET_COMMAND, { name })) as typeof target;
+	} catch (error) {
+		return {
+			kind: "failed",
+			message: `The save dialog could not be shown: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
 	if (target.outcome !== "chosen") return { kind: "cancelled" };
 	const downloadId = `d${Date.now().toString(36)}${nextDownload++}`;
 	const itemId = "1";
 	const toasts = useToastStore();
+	let cancelled = false;
+	const cancel = () => {
+		cancelled = true;
+		void bridge.invoke(CANCEL_COMMAND, { downloadId, itemId }).catch(() => {});
+	};
 	const toast = toasts.show("info", `Downloading ${target.name}`, null, {
 		label: "Cancel",
-		run: () => {
-			void bridge.invoke(CANCEL_COMMAND, { downloadId, itemId });
-		},
+		run: cancel,
 	});
 	const mine = (payload: unknown): payload is Record<string, unknown> =>
-		(payload as { downloadId?: unknown } | null)?.downloadId === downloadId;
+		(payload as { download_id?: unknown } | null)?.download_id === downloadId;
 	const unlisten: Array<() => void> = [];
 	const stop = () => {
 		for (const off of unlisten.splice(0)) off();
@@ -170,10 +185,16 @@ async function downloadOnDesktop(
 			toasts.dismiss(toast);
 			if (payload.outcome === "done") {
 				const saved = typeof payload.final_name === "string" ? payload.final_name : target.name;
-				toasts.show("info", `Saved ${saved}`, 8000, {
+				const left =
+					typeof payload.kept_partial === "string"
+						? ` (its partial ${payload.kept_partial} could not be removed)`
+						: "";
+				toasts.show("info", `Saved ${saved}${left}`, 8000, {
 					label: "Show in folder",
 					run: () => {
-						void bridge.invoke(REVEAL_COMMAND, { rootId: target.root_id, relPath: saved });
+						void bridge
+							.invoke(REVEAL_COMMAND, { rootId: target.root_id, relPath: saved })
+							.catch(() => {});
 					},
 				});
 			} else if (payload.outcome === "failed") {
@@ -192,11 +213,12 @@ async function downloadOnDesktop(
 	try {
 		await bridge.invoke(DOWNLOAD_COMMAND, {
 			request: {
-				downloadId,
-				itemId,
-				rootId: target.root_id,
-				relPath: target.name,
-				hubPath: contentPath(file.channelId, `path=${encodeURIComponent(file.path)}`),
+				download_id: downloadId,
+				item_id: itemId,
+				root_id: target.root_id,
+				rel_path: target.name,
+				host_id: file.hostId,
+				path: file.path,
 				port,
 			},
 		});
@@ -205,5 +227,7 @@ async function downloadOnDesktop(
 		toasts.dismiss(toast);
 		return { kind: "failed", message: error instanceof Error ? error.message : String(error) };
 	}
+	// A Cancel before the shell held the job found nothing to stop: ask again now.
+	if (cancelled) cancel();
 	return { kind: "started" };
 }

@@ -713,6 +713,7 @@ async function download(): Promise<void> {
 	try {
 		const started = await downloadHostFile({
 			channelId: props.channelId,
+			hostId: props.hostId,
 			path: joinPath(shown.path, entry.name, style.value),
 			name: entry.name,
 			windows: onWindows(),

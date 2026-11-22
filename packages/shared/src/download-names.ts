@@ -36,7 +36,9 @@ export function downloadRename(name: string): string {
 	const dot = renamed.indexOf(".");
 	const stem = dot === -1 ? renamed : renamed.slice(0, dot);
 	if (RESERVED_STEM.test(stem)) renamed = `${stem}_${renamed.slice(stem.length)}`;
-	return withSuffix(renamed, "");
+	// Cut to fit, then once more without what a cut may leave at the end.
+	const cut = withSuffix(renamed, "").replace(/[. ]+$/, "");
+	return cut === "" ? "_" : cut;
 }
 
 /**

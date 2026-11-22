@@ -45,14 +45,23 @@ const CHUNK_BYTES: usize = 256 * 1024;
 pub(crate) struct Identity {
     pub size: u64,
     pub modified: Option<SystemTime>,
+    /// A regular file; otherwise a link, a folder or anything else under that name.
+    pub is_file: bool,
 }
 
 /// How a download ended, as the page hears it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 pub(crate) enum Outcome {
-    Done { final_name: String },
-    Failed { error: String, code: Option<String> },
+    Done {
+        final_name: String,
+        /// The partial that could not be removed once the file was placed, left beside it.
+        kept_partial: Option<String>,
+    },
+    Failed {
+        error: String,
+        code: Option<String>,
+    },
     Cancelled,
 }
 
@@ -151,19 +160,17 @@ pub(crate) fn random_hex() -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// What `path` is now, when it is a file; None when nothing (or no file) is there, or it cannot be read.
+/// What is at `path` now, not following a link; None when nothing is there or it cannot be read.
 #[expect(
     clippy::disallowed_methods,
     reason = "looks at a download's target in a folder the person chose"
 )]
 pub(crate) fn identity_of(path: &Path) -> Option<Identity> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
     Some(Identity {
         size: metadata.len(),
         modified: metadata.modified().ok(),
+        is_file: metadata.is_file(),
     })
 }
 
@@ -189,6 +196,10 @@ pub(crate) fn long_path(path: &Path) -> PathBuf {
 pub(crate) trait Source: Read {
     fn status(&self) -> u16;
     fn content_length(&self) -> Option<u64>;
+    /// The response's ETag, for the page to record.
+    fn etag(&self) -> Option<String> {
+        None
+    }
     /// The error code the hub's JSON refusal names, in either of its shapes:
     /// `{ error: { code } }` from a route, `{ error: "<code>" }` from the auth hook.
     fn error_code(&mut self) -> Option<String> {
@@ -212,6 +223,13 @@ impl Source for reqwest::blocking::Response {
     fn content_length(&self) -> Option<u64> {
         reqwest::blocking::Response::content_length(self)
     }
+
+    fn etag(&self) -> Option<String> {
+        self.headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    }
 }
 
 /// One file to write.
@@ -233,9 +251,14 @@ pub(crate) fn write_file(
     job: &FileJob,
     mut source: impl Source,
     cancel: &AtomicBool,
+    started: impl FnOnce(Option<String>, u64),
     mut progress: impl FnMut(u64, Option<u64>),
     ops: &dyn PlaceOps,
 ) -> Outcome {
+    // A cancel that came while the request waited for its answer.
+    if cancel.load(Ordering::SeqCst) {
+        return Outcome::Cancelled;
+    }
     let status = source.status();
     if status != 200 {
         let code = source.error_code();
@@ -253,6 +276,7 @@ pub(crate) fn write_file(
             code: None,
         };
     };
+    started(source.etag(), total);
     let partial_name = job
         .partial
         .clone()
@@ -285,6 +309,11 @@ pub(crate) fn write_file(
             Ok(0) => break,
             Ok(read) => read,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) if cancel.load(Ordering::SeqCst) => {
+                drop(file);
+                let _ = ops.remove(&partial);
+                return Outcome::Cancelled;
+            }
             Err(error) => return fail(format!("The download stopped: {error}")),
         };
         if let Err(error) = file.write_all(&buffer[..read]) {
@@ -305,7 +334,11 @@ pub(crate) fn write_file(
         return fail(format!("The file could not be written: {error}"));
     }
     drop(file);
-    progress(written, Some(total));
+    // The last chance to cancel: nothing is placed after it.
+    if cancel.load(Ordering::SeqCst) {
+        let _ = ops.remove(&partial);
+        return Outcome::Cancelled;
+    }
     place(
         &partial,
         &partial_name,
@@ -362,36 +395,35 @@ fn place(
         error: format!("{why}; kept as {partial_name}"),
         code: None,
     };
-    let done = || Outcome::Done {
+    let done = |removed: bool| Outcome::Done {
         final_name: name.to_string(),
+        kept_partial: (!removed).then(|| partial_name.to_string()),
+    };
+    // What a name taken at placement is: something the dialog saw that is no
+    // plain file, or something that appeared meanwhile.
+    let taken = || match existing_at_dialog {
+        Some(seen) if !seen.is_file => kept(format!("{name} is not a plain file")),
+        _ => kept(format!("{name} appeared meanwhile")),
     };
     // The dialog asked about replacing it, and it is still that file.
     if let Some(agreed) = existing_at_dialog {
-        if identity_of(target) == Some(agreed) {
+        if agreed.is_file && identity_of(target) == Some(agreed) {
             return match with_retries(ops, || ops.rename(partial, target)) {
-                Ok(()) => done(),
+                Ok(()) => done(true),
                 Err(error) => kept(format!("{name} could not be placed: {error}")),
             };
         }
     }
     match with_retries(ops, || ops.hard_link(partial, target)) {
-        Ok(()) => {
-            let _ = with_retries(ops, || ops.remove(partial));
-            done()
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            kept(format!("{name} appeared meanwhile"))
-        }
-        Err(error) if link_unsupported(&error) => match ops.copy_new(partial, target) {
-            Ok(()) => {
-                let _ = with_retries(ops, || ops.remove(partial));
-                done()
+        Ok(()) => done(with_retries(ops, || ops.remove(partial)).is_ok()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => taken(),
+        Err(error) if link_unsupported(&error) => {
+            match with_retries(ops, || ops.copy_new(partial, target)) {
+                Ok(()) => done(with_retries(ops, || ops.remove(partial)).is_ok()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => taken(),
+                Err(error) => kept(format!("{name} could not be placed: {error}")),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                kept(format!("{name} appeared meanwhile"))
-            }
-            Err(error) => kept(format!("{name} could not be placed: {error}")),
-        },
+        }
         Err(error) => kept(format!("{name} could not be placed: {error}")),
     }
 }
@@ -566,18 +598,21 @@ mod tests {
             &job(&dir, "report.pdf"),
             ok(&body),
             &AtomicBool::new(false),
+            |_, _| {},
             |written, total| seen.push((written, total)),
             &RealOps,
         );
         assert_eq!(
             outcome,
             Outcome::Done {
-                final_name: "report.pdf".into()
+                final_name: "report.pdf".into(),
+                kept_partial: None,
             }
         );
         assert_eq!(read(&dir.join("report.pdf")), body);
         assert_eq!(entries(&dir), vec!["report.pdf"], "no partial is left");
-        assert_eq!(seen.last(), Some(&(600_000, Some(600_000))));
+        // Told when the first chunk is written; the end is the ended event's.
+        assert_eq!(seen.len(), 1);
     }
 
     #[test]
@@ -589,11 +624,150 @@ mod tests {
             &job(&dir, "big.bin"),
             ok(&body),
             &AtomicBool::new(false),
+            |_, _| {},
             |_, _| seen += 1,
             &RealOps,
         );
         // Sixteen chunks written well within 250 ms: the first and the last are told.
         assert!(seen <= 3, "told {seen} times");
+    }
+
+    /// Bytes that set `cancel` once their first chunk was read.
+    struct CancelAfterFirst<'a> {
+        inner: Bytes,
+        cancel: &'a AtomicBool,
+        reads: &'a std::cell::Cell<usize>,
+    }
+
+    impl Read for CancelAfterFirst<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let end = buf.len().min(1000);
+            let read = self.inner.read(&mut buf[..end])?;
+            self.reads.set(self.reads.get() + 1);
+            self.cancel.store(true, Ordering::SeqCst);
+            Ok(read)
+        }
+    }
+
+    impl Source for CancelAfterFirst<'_> {
+        fn status(&self) -> u16 {
+            200
+        }
+        fn content_length(&self) -> Option<u64> {
+            self.inner.length
+        }
+    }
+
+    #[test]
+    fn download_cancel_mid_stream_removes_partial() {
+        let dir = temp_dir("cancel-mid");
+        let cancel = AtomicBool::new(false);
+        let reads = std::cell::Cell::new(0);
+        let source = CancelAfterFirst {
+            inner: ok(&vec![5u8; 100_000]),
+            cancel: &cancel,
+            reads: &reads,
+        };
+        let outcome = write_file(
+            &job(&dir, "f.bin"),
+            source,
+            &cancel,
+            |_, _| {},
+            |_, _| {},
+            &RealOps,
+        );
+        assert_eq!(outcome, Outcome::Cancelled);
+        // Stopped at the next chunk, not after reading the rest.
+        assert_eq!(reads.get(), 1);
+        assert!(
+            entries(&dir).is_empty(),
+            "nothing left: {:?}",
+            entries(&dir)
+        );
+    }
+
+    /// Bytes that set `cancel` when they end.
+    struct CancelAtEnd<'a> {
+        inner: Bytes,
+        cancel: &'a AtomicBool,
+    }
+
+    impl Read for CancelAtEnd<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.inner.read(buf)?;
+            if read == 0 {
+                self.cancel.store(true, Ordering::SeqCst);
+            }
+            Ok(read)
+        }
+    }
+
+    impl Source for CancelAtEnd<'_> {
+        fn status(&self) -> u16 {
+            200
+        }
+        fn content_length(&self) -> Option<u64> {
+            self.inner.length
+        }
+    }
+
+    #[test]
+    fn download_cancel_after_the_last_byte_places_nothing() {
+        let dir = temp_dir("cancel-end");
+        let cancel = AtomicBool::new(false);
+        let source = CancelAtEnd {
+            inner: ok(b"whole"),
+            cancel: &cancel,
+        };
+        let outcome = write_file(
+            &job(&dir, "f.bin"),
+            source,
+            &cancel,
+            |_, _| {},
+            |_, _| {},
+            &RealOps,
+        );
+        assert_eq!(outcome, Outcome::Cancelled);
+        assert!(
+            entries(&dir).is_empty(),
+            "nothing placed: {:?}",
+            entries(&dir)
+        );
+    }
+
+    #[test]
+    fn download_tells_its_start_once() {
+        let dir = temp_dir("started");
+        let mut seen = Vec::new();
+        write_file(
+            &job(&dir, "f.bin"),
+            ok(b"abc"),
+            &AtomicBool::new(false),
+            |etag, total| seen.push((etag, total)),
+            |_, _| {},
+            &RealOps,
+        );
+        assert_eq!(seen, vec![(None, 3)]);
+    }
+
+    #[test]
+    fn download_over_a_name_that_is_no_plain_file() {
+        // The dialog saw a folder under that name: nothing replaced, said as it is.
+        let dir = temp_dir("not-plain");
+        #[expect(clippy::disallowed_methods, reason = "a test's own folder")]
+        std::fs::create_dir(dir.join("f.txt")).unwrap();
+        let outcome = write_file(
+            &job(&dir, "f.txt"),
+            ok(b"data"),
+            &AtomicBool::new(false),
+            |_, _| {},
+            |_, _| {},
+            &RealOps,
+        );
+        assert!(
+            matches!(&outcome, Outcome::Failed { error, .. } if error.contains("is not a plain file")),
+            "{outcome:?}"
+        );
     }
 
     #[test]
@@ -604,6 +778,7 @@ mod tests {
             &job(&dir, "f.bin"),
             ok(b"abc"),
             &cancel,
+            |_, _| {},
             |_, _| {},
             &RealOps,
         );
@@ -628,6 +803,7 @@ mod tests {
             source,
             &AtomicBool::new(false),
             |_, _| {},
+            |_, _| {},
             &RealOps,
         );
         assert!(matches!(outcome, Outcome::Failed { .. }), "{outcome:?}");
@@ -648,6 +824,7 @@ mod tests {
             source,
             &AtomicBool::new(false),
             |_, _| {},
+            |_, _| {},
             &RealOps,
         );
         assert!(
@@ -664,6 +841,7 @@ mod tests {
             &job(&dir, "f.bin"),
             source,
             &AtomicBool::new(false),
+            |_, _| {},
             |_, _| {},
             &RealOps,
         );
@@ -685,6 +863,7 @@ mod tests {
             ok(b"new"),
             &AtomicBool::new(false),
             |_, _| {},
+            |_, _| {},
             &RealOps,
         );
         assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
@@ -703,6 +882,7 @@ mod tests {
             &job(&dir, "f.txt"),
             ok(b"mine"),
             &AtomicBool::new(false),
+            |_, _| {},
             |_, _| {},
             &ops,
         );
@@ -723,6 +903,7 @@ mod tests {
             ok(b"mine"),
             &AtomicBool::new(false),
             |_, _| {},
+            |_, _| {},
             &RealOps,
         );
         assert!(matches!(outcome, Outcome::Failed { .. }), "{outcome:?}");
@@ -739,6 +920,7 @@ mod tests {
             ok(b"data"),
             &AtomicBool::new(false),
             |_, _| {},
+            |_, _| {},
             &ops,
         );
         assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
@@ -753,6 +935,7 @@ mod tests {
             &job(&dir, "f.txt"),
             ok(b"data"),
             &AtomicBool::new(false),
+            |_, _| {},
             |_, _| {},
             &ops,
         );
@@ -776,6 +959,7 @@ mod tests {
             &agreed,
             ok(b"new"),
             &AtomicBool::new(false),
+            |_, _| {},
             |_, _| {},
             &ops,
         );
@@ -836,6 +1020,7 @@ Connection: close
             response,
             &AtomicBool::new(false),
             |_, _| {},
+            |_, _| {},
             &RealOps,
         );
         assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
@@ -848,6 +1033,7 @@ Connection: close
                 &job(&dir, "f.bin"),
                 response,
                 &AtomicBool::new(false),
+                |_, _| {},
                 |_, _| {},
                 &RealOps,
             ),
@@ -873,6 +1059,7 @@ Connection: close
             &job(&dir, &ascii),
             ok(b"x"),
             &AtomicBool::new(false),
+            |_, _| {},
             |_, _| {},
             &RealOps,
         );

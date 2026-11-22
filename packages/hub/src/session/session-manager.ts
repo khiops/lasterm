@@ -2607,6 +2607,7 @@ export class SessionManager {
 							? `Send stop_transfers: true to stop the ${this.transfersWords(hostId, transfers)} this host.`
 							: "Send stop_transfers: true to stop the uploads to this host.",
 					transfers,
+					...(this.downloadsOn(hostId) > 0 ? { downloads: this.downloadsOn(hostId) } : {}),
 				};
 			}
 			if (transfers > 0) this.transfers?.interruptOn(hostId);
@@ -2877,6 +2878,7 @@ export class SessionManager {
 							? `Send stop_transfers: true to stop the ${this.transfersWords(hostId, transfers)} this host.`
 							: "Send stop_transfers: true to stop the uploads to this host.",
 					transfers,
+					...(this.downloadsOn(hostId) > 0 ? { downloads: this.downloadsOn(hostId) } : {}),
 				};
 			}
 			if (transfers > 0) this.transfers?.interruptOn(hostId);

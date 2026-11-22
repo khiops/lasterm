@@ -432,6 +432,16 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 			},
 		);
 
+		it("a file dated before 1970", async () => {
+			harness = await kind.start();
+			const bytes = randomBytes(1000);
+			writeFileSync(harness.local("old.bin"), bytes);
+			utimesSync(harness.local("old.bin"), new Date(1960, 0, 1), new Date(1960, 0, 1));
+			const response = await content(harness, harness.at("old.bin"));
+			expect(response.statusCode).toBe(200);
+			expect(response.rawPayload.equals(bytes)).toBe(true);
+		});
+
 		it("not a regular file", async () => {
 			harness = await kind.start();
 			mkdirSync(harness.local("folder"));
@@ -486,6 +496,7 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 		});
 
 		it("a client leaving stops the read", async () => {
+			let holdingWhileRunning = -1;
 			harness = await kind.start();
 			writeFileSync(harness.local("huge.bin"), randomBytes(16 * MiB));
 			await harness.server.listen({ port: 0, host: "127.0.0.1" });
@@ -494,6 +505,8 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 			await new Promise<void>((resolve, reject) => {
 				const request = get(url, (response) => {
 					response.once("data", () => {
+						// The response holds its host while it runs.
+						holdingWhileRunning = holding;
 						request.destroy();
 						resolve();
 					});
@@ -502,6 +515,7 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 				request.on("timeout", reject);
 			});
 			const h = harness;
+			expect(holdingWhileRunning).toBe(1);
 			await vi.waitFor(() => expect(h.closed()).toBe(1), { timeout: 2000 });
 			// The response held its host while it ran, and let go when the client left.
 			await vi.waitFor(() => expect(h.holding()).toBe(0), { timeout: 2000 });
@@ -514,6 +528,22 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 );
 
 describe("a download's read side, cases of one backend (#840)", () => {
+	it("a client leaving while the file opens lets go of it", async () => {
+		harness = await LOCAL.start();
+		const h = harness;
+		writeFileSync(h.local("big.bin"), randomBytes(3 * MiB));
+		h.between(() => new Promise((resolve) => setTimeout(resolve, 400)));
+		await h.server.listen({ port: 0, host: "127.0.0.1" });
+		const port = (h.server.server.address() as AddressInfo).port;
+		const request = get(
+			`http://127.0.0.1:${port}/api/channels/${CHANNEL}/files/content?path=${encodeURIComponent(h.at("big.bin"))}`,
+		);
+		request.on("error", () => {});
+		setTimeout(() => request.destroy(), 100);
+		await vi.waitFor(() => expect(h.closed()).toBe(1), { timeout: 3000 });
+		expect(h.holding()).toBe(0);
+	});
+
 	it("a small file changed between its looks answers 409", async () => {
 		harness = await LOCAL.start();
 		const h = harness;
@@ -682,8 +712,11 @@ describe("a download's read side, cases of one backend (#840)", () => {
 	});
 
 	it("the ETag carries the backend's unit of time", () => {
-		expect(etagOf({ size: 3, mtime: 1732190000123, unit: "ms" })).toBe('"3-ms1732190000123"');
-		expect(etagOf({ size: 3, mtime: 7, unit: "t" })).toBe('"3-t7"');
+		expect(etagOf({ size: 3, mtime: "1732190000123", unit: "ms" })).toBe('"3-ms1732190000123"');
+		// Windows ticks are past 2^53: kept exact, never rounded.
+		expect(etagOf({ size: 3, mtime: "639309069371006125", unit: "t" })).toBe(
+			'"3-t639309069371006125"',
+		);
 	});
 });
 

@@ -17,6 +17,12 @@ describe("downloadRename (#840)", () => {
 		expect(downloadRename(name)).toBe(renamed);
 	});
 
+	it("never leaves a trailing space after cutting", () => {
+		const renamed = downloadRename(`${"é".repeat(127)} x`);
+		expect(new TextEncoder().encode(renamed).length).toBeLessThanOrEqual(255);
+		expect(renamed.endsWith(" ")).toBe(false);
+	});
+
 	it("keeps a renamed name within 255 bytes", () => {
 		const renamed = downloadRename(`${"é".repeat(200)}:.txt`);
 		expect(new TextEncoder().encode(renamed).length).toBeLessThanOrEqual(255);

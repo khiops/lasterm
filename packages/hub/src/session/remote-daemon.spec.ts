@@ -1370,7 +1370,7 @@ describe("openRelay (#755)", () => {
 			(e: unknown) => e,
 		);
 		expect(err).toBeInstanceOf(RelayFailed);
-		expect(err).not.toBeInstanceOf(NothingListens);
+		expect((err as Error).message).toMatch(/stderr was too long/);
 	});
 
 	it("fails, rather than throwing, when the channel errs before HELLO", async () => {

@@ -1040,7 +1040,7 @@ export async function verifiedRelayAgent(
 	const unavailable: RelayAgent = {
 		kind: "refused",
 		reason:
-			"the agent on this host could not be checked: this hub could not read its own agent for that system",
+			"the agent on this host could not be checked: this hub has no copy of its own agent for that system",
 	};
 	let localBinary: string | null;
 	try {

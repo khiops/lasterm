@@ -556,6 +556,11 @@ export function openRelay(conn: Client, command: string): Promise<Duplex> {
 				if (settled) return;
 				settled = true;
 				finish();
+				try {
+					channel.close();
+				} catch {
+					// Already gone.
+				}
 				reject(new RelayFailed(`the relay's channel failed (${cause.message})`));
 			};
 			// Kept after HELLO too, until the reader attaches its own: an error
@@ -593,9 +598,9 @@ export function openRelay(conn: Client, command: string): Promise<Duplex> {
 				settled = true;
 				finish();
 				reject(
-					relayEndError(
-						stderrBytes > RELAY_STDERR_LIMIT ? "" : Buffer.concat(stderr).toString("utf8"),
-					),
+					stderrBytes > RELAY_STDERR_LIMIT
+						? new RelayFailed("the relay's stderr was too long to read before HELLO")
+						: relayEndError(Buffer.concat(stderr).toString("utf8")),
 				);
 			};
 			channel.on("data", onData);

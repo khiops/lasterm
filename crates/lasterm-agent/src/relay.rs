@@ -12,7 +12,8 @@
 //! else. stderr carries one `lasterm-attach: start` line before the endpoint
 //! is first tried, then, on a failure this relay decides, exactly one outcome
 //! line: `nothing-listens`, `denied`, `busy` or `failed <text>`. Once
-//! connected it writes nothing more there. The hub decides by those lines, not
+//! connected it writes nothing more there, so a failure after connecting
+//! (a copy that failed, a delivery it could not confirm) is exit 1 alone. The hub decides by those lines, not
 //! by the exit status: a PowerShell `DefaultShell` on Windows hands every
 //! non-zero status on as 1. The statuses still mean what [`exit`] says, for a
 //! person running it and for tests.
@@ -212,20 +213,25 @@ async fn relay(stream: Endpoint) -> i32 {
             // daemon that stopped reading does not keep the relay alive. The
             // handle stays valid: the write half still owns it.
             #[cfg(windows)]
-            {
-                let _ = tokio::time::timeout(
+            let delivered = matches!(
+                tokio::time::timeout(
                     CLOSE_GRACE,
                     tokio::task::spawn_blocking(move || unsafe {
                         windows_sys::Win32::Storage::FileSystem::FlushFileBuffers(raw as _)
                     }),
                 )
-                .await;
-            }
+                .await,
+                Ok(Ok(ok)) if ok != 0
+            );
+            #[cfg(not(windows))]
+            let delivered = true;
             downstream.abort();
             let _ = (&mut downstream).await;
             // The read half went with the aborted task; this closes the endpoint.
             drop(to_daemon);
-            exit::ENDED
+            // Unconfirmed delivery is not a clean end, even when the endpoint
+            // was closed in time.
+            if delivered { exit::ENDED } else { exit::FAILED }
         }
     }
 }

@@ -1077,6 +1077,9 @@ export class SshAgent extends AgentConnection {
 							(err) => {
 								announceReplacedAgent();
 								clearTimeout(helloTimeout);
+								// Nothing reached an agent: the connection, and the bastion
+								// it went through, go with the attempt (#755).
+								this.cleanup();
 								rejectOnce(err);
 							},
 						);

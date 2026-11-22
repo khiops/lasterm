@@ -3828,7 +3828,7 @@ describe("verifiedRelayAgent: the agent a daemon-only connection may relay throu
 		expect(result).toEqual({
 			kind: "refused",
 			reason:
-				"the agent on this host could not be checked: this hub could not read its own agent for that system",
+				"the agent on this host could not be checked: this hub has no copy of its own agent for that system",
 		});
 	});
 

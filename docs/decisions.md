@@ -295,7 +295,7 @@ NODE-SQLITE (#893).
   started just before can still be starting.
 - **The hub goes by the exit status, and words its answer by the line.** `/api/quit` answers 200
   either way, with "Local agent stopped" or "No local agent was running". The remote callers of
-  `--stop` (a refused socket forward, stop-keeping, Replace) count both as the daemon being gone.
+  `--stop` (stop-keeping, Replace) count both as the daemon being gone.
 
 ## UPLOAD-RESUME-CLIENT — a resume after a restart starts from a click, checks every file, and asks before resending a changed one (#837, 2026-11-06)
 

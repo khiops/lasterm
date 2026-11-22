@@ -1760,6 +1760,27 @@ async fn relay_exits_3_when_nothing_listens() {
     assert!(stdout.is_empty());
 }
 
+/// AC-R2 on a socket file a dead daemon left: ECONNREFUSED is nothing
+/// listening too, so the hub may start one. Mutation: ECONNREFUSED as failed.
+#[cfg(unix)]
+#[tokio::test]
+async fn relay_exits_3_on_a_socket_nobody_listens_on() {
+    let fixture = StopFixture::new("relay-stale");
+    drop(std::os::unix::net::UnixListener::bind(&fixture.socket).expect("bind"));
+    assert!(std::path::Path::new(&fixture.socket).exists());
+    let relay = spawn_relay(&fixture, &[]);
+    let (status, stderr, stdout) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 3, "{stderr:?}");
+    assert_eq!(
+        stderr.len(),
+        3,
+        "start, the marker, the human line: {stderr:?}"
+    );
+    assert_eq!(stderr[0], "lasterm-attach: start");
+    assert_eq!(stderr[1], "lasterm-attach: nothing-listens");
+    assert!(stdout.is_empty());
+}
+
 /// AC-R3. Mutation: `--wait` ignored.
 #[tokio::test]
 async fn relay_waits_for_a_late_listener() {

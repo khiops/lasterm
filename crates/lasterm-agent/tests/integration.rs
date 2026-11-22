@@ -2102,3 +2102,406 @@ async fn relay_fails_when_it_cannot_deliver_the_daemons_bytes() {
         .expect("relay status");
     assert_eq!(status.code(), Some(1));
 }
+
+// ---------------------------------------------------------------------------
+// `--daemon --detach` and the Windows idle timeout (#755)
+// ---------------------------------------------------------------------------
+
+/// Whether the detach tests run here. They start daemons outside every job,
+/// so they run only with `LASTERM_TEST_DETACH=1`: CI's Windows agent tests
+/// and a windows-sandbox run, never a developer's session. Under CI without
+/// it they fail, so that a green CI run means they ran.
+#[cfg(windows)]
+fn detach_tests_run(test: &str) -> bool {
+    if std::env::var("LASTERM_TEST_DETACH").is_ok_and(|value| value == "1") {
+        return true;
+    }
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "detach tests must run in CI: {test} needs LASTERM_TEST_DETACH=1"
+    );
+    eprintln!(
+        "skipping {test}: the detach tests run only with LASTERM_TEST_DETACH=1 (CI, windows-sandbox)"
+    );
+    false
+}
+
+#[cfg(windows)]
+mod detach {
+    use super::*;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_FILE_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+    use windows_sys::Win32::System::Threading::{
+        OpenThread, ResumeThread, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
+    };
+
+    /// A job like a Win32-OpenSSH session's: its last handle closing kills
+    /// what runs in it, and breaking away is allowed or not.
+    pub(super) struct Job(HANDLE);
+
+    // The handle is used from the blocking task that runs the launcher.
+    unsafe impl Send for Job {}
+
+    impl Job {
+        pub(super) fn new(breakaway_ok: bool) -> Self {
+            // SAFETY: a new anonymous job, and limits this function owns.
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                assert!(!job.is_null(), "CreateJobObjectW failed");
+                let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                    | if breakaway_ok {
+                        JOB_OBJECT_LIMIT_BREAKAWAY_OK
+                    } else {
+                        0
+                    };
+                let set = SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    (&raw const limits).cast(),
+                    std::mem::size_of_val(&limits) as u32,
+                );
+                assert!(set != 0, "SetInformationJobObject failed");
+                Self(job)
+            }
+        }
+
+        /// Run `command` in this job from its first instruction, to its end.
+        pub(super) fn run(&self, mut command: std::process::Command) -> std::process::Output {
+            use std::os::windows::process::CommandExt;
+            let child = command
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .creation_flags(CREATE_SUSPENDED)
+                .spawn()
+                .expect("spawn the agent suspended");
+            // SAFETY: the child's process handle, valid while `child` lives.
+            let assigned =
+                unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) };
+            assert!(assigned != 0, "AssignProcessToJobObject failed");
+            resume_threads(child.id());
+            child.wait_with_output().expect("the agent's output")
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: the job handle this value owns; closing the last one
+            // kills what is still in the job.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    fn resume_threads(pid: u32) {
+        // SAFETY: a thread snapshot walked with an entry this function owns,
+        // and thread handles closed after use.
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            assert!(snapshot != INVALID_HANDLE_VALUE, "thread snapshot failed");
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut resumed = 0;
+            let mut more = Thread32First(snapshot, &mut entry) != 0;
+            while more {
+                if entry.th32OwnerProcessID == pid {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !thread.is_null() {
+                        ResumeThread(thread);
+                        CloseHandle(thread);
+                        resumed += 1;
+                    }
+                }
+                more = Thread32Next(snapshot, &mut entry) != 0;
+            }
+            CloseHandle(snapshot);
+            assert!(resumed > 0, "no thread of process {pid} resumed");
+        }
+    }
+
+    /// Whether a pipe of that name exists, without connecting to it: a
+    /// connection would count as a hub and keep an idle daemon up.
+    pub(super) fn pipe_exists(name: &str) -> bool {
+        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        // SAFETY: a NUL-terminated name this function owns.
+        unsafe { WaitNamedPipeW(wide.as_ptr(), 1) != 0 || GetLastError() != ERROR_FILE_NOT_FOUND }
+    }
+
+    /// `--daemon --detach` on `fixture`'s pipe, with `idle_timeout` seconds.
+    pub(super) fn detach_command(
+        fixture: &StopFixture,
+        idle_timeout: &str,
+    ) -> std::process::Command {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_lasterm-agent"));
+        command
+            .args(["--daemon", "--detach", "--socket", &fixture.socket])
+            .args(["--idle-timeout", idle_timeout])
+            .env("XDG_STATE_HOME", &fixture.dir)
+            .env("XDG_CONFIG_HOME", &fixture.dir)
+            .env("LOCALAPPDATA", &fixture.dir)
+            .env("APPDATA", &fixture.dir);
+        command
+    }
+
+    /// Stops the fixture's daemon, if one runs, through `--stop` and the
+    /// fixture's own profile.
+    pub(super) struct StopOnDrop<'a>(pub(super) &'a StopFixture);
+
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new(env!("CARGO_BIN_EXE_lasterm-agent"))
+                .args(["--stop", "--socket", &self.0.socket])
+                .env("XDG_STATE_HOME", &self.0.dir)
+                .env("XDG_CONFIG_HOME", &self.0.dir)
+                .env("LOCALAPPDATA", &self.0.dir)
+                .env("APPDATA", &self.0.dir)
+                .output();
+        }
+    }
+
+    /// The lines of a launcher's stderr.
+    pub(super) fn stderr_lines(output: &std::process::Output) -> Vec<String> {
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A relay that sent AUTH and read the channel state: the live relay, its
+    /// two pipes, and the frames before CHANNEL_STATE_END.
+    pub(super) async fn authenticated_relay(
+        fixture: &StopFixture,
+    ) -> (Child, ChildStdin, ChildStdout, Vec<rmpv::Value>) {
+        let mut relay = spawn_relay(fixture, &["--wait", "10000"]);
+        let mut stdin = relay.stdin.take().expect("relay stdin");
+        let mut stdout = relay.stdout.take().expect("relay stdout");
+        let hello = read_frame_timeout(&mut stdout, 15).await;
+        assert_eq!(hello["type"].as_str(), Some("HELLO"), "{hello:?}");
+        write_frame(
+            &mut stdin,
+            &msgmap(vec![
+                ("type", sv("AUTH")),
+                ("token", sv("")),
+                ("hub_key", sv("detach-test-hub-key")),
+            ]),
+        )
+        .await;
+        let mut state = Vec::new();
+        loop {
+            let frame = read_frame_timeout(&mut stdout, 10).await;
+            if frame["type"].as_str() == Some("CHANNEL_STATE_END") {
+                break;
+            }
+            state.push(frame);
+        }
+        (relay, stdin, stdout, state)
+    }
+}
+
+/// AC-D1: a daemon started with `--detach` inside a job that allows breaking
+/// away outlives the job. Mutation: no breakaway flag (the daemon dies with
+/// the job), or a daemon inheriting the launcher's stdio (the launcher's
+/// output never ends).
+#[cfg(windows)]
+#[tokio::test]
+async fn detach_survives_the_job() {
+    if !detach_tests_run("detach_survives_the_job") {
+        return;
+    }
+    let fixture = StopFixture::new("detach-survives");
+    let _stop = detach::StopOnDrop(&fixture);
+    let job = detach::Job::new(true);
+    let launch = detach::detach_command(&fixture, "60");
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        tokio::task::spawn_blocking(move || {
+            let output = job.run(launch);
+            drop(job);
+            output
+        }),
+    )
+    .await
+    .expect("the launcher's output ended")
+    .expect("launcher task");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        detach::stderr_lines(&output),
+        vec!["lasterm-detach: started"]
+    );
+
+    let mut relay = spawn_relay(&fixture, &["--wait", "10000"]);
+    let mut stdout = relay.stdout.take().expect("relay stdout");
+    let hello = read_frame_timeout(&mut stdout, 15).await;
+    assert_eq!(hello["type"].as_str(), Some("HELLO"), "{hello:?}");
+}
+
+/// AC-D2: a job that forbids breaking away gives exit 5 and its line, and no
+/// daemon. Mutation: that refusal classified as 1.
+#[cfg(windows)]
+#[tokio::test]
+async fn detach_refused_without_breakaway() {
+    if !detach_tests_run("detach_refused_without_breakaway") {
+        return;
+    }
+    let fixture = StopFixture::new("detach-refused");
+    let _stop = detach::StopOnDrop(&fixture);
+    let job = detach::Job::new(false);
+    let launch = detach::detach_command(&fixture, "60");
+    let output = tokio::task::spawn_blocking(move || job.run(launch))
+        .await
+        .expect("launcher task");
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    assert_eq!(
+        detach::stderr_lines(&output),
+        vec![
+            "lasterm-detach: breakaway-refused",
+            "this SSH session's job does not allow a process to break away; the daemon would end with the connection",
+        ]
+    );
+    let relay = spawn_relay(&fixture, &[]);
+    let (status, stderr, _) = relay_end(relay, Duration::from_secs(10)).await;
+    assert_eq!(status, 3, "{stderr:?}");
+}
+
+/// Start a detached daemon with `idle_timeout`, outside any job of the test's.
+#[cfg(windows)]
+fn start_detached(fixture: &StopFixture, idle_timeout: &str) {
+    let output = detach::detach_command(fixture, idle_timeout)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run the launcher");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+/// Wait until the fixture's pipe exists, as the daemon binds it.
+#[cfg(windows)]
+async fn pipe_appears(fixture: &StopFixture) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !detach::pipe_exists(&fixture.socket) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the daemon never listened"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// AC-D4 / expires: a detached daemon holding nothing, with no hub, exits
+/// after its idle timeout. Mutation: today's warning-and-ignore, or a
+/// launcher that drops `--idle-timeout`.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_idle_daemon_exits() {
+    if !detach_tests_run("windows_idle_daemon_exits") {
+        return;
+    }
+    let fixture = StopFixture::new("idle-exits");
+    let _stop = detach::StopOnDrop(&fixture);
+    start_detached(&fixture, "2");
+    pipe_appears(&fixture).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while detach::pipe_exists(&fixture.socket) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the idle daemon still listens after 15 s"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// AC-D4 / connected-hub-keeps: a hub connected keeps an idle daemon up.
+/// Mutation: an expiry that ignores connections.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_idle_daemon_kept_by_a_connection() {
+    if !detach_tests_run("windows_idle_daemon_kept_by_a_connection") {
+        return;
+    }
+    let fixture = StopFixture::new("idle-connection");
+    let _stop = detach::StopOnDrop(&fixture);
+    start_detached(&fixture, "2");
+    let (_relay, _stdin, _stdout, _) = detach::authenticated_relay(&fixture).await;
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert!(
+        detach::pipe_exists(&fixture.socket),
+        "the daemon left a connected hub"
+    );
+}
+
+/// AC-D4 / zero-never: `--idle-timeout 0` never exits on idleness.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_idle_zero_never_exits() {
+    if !detach_tests_run("windows_idle_zero_never_exits") {
+        return;
+    }
+    let fixture = StopFixture::new("idle-zero");
+    let _stop = detach::StopOnDrop(&fixture);
+    start_detached(&fixture, "0");
+    pipe_appears(&fixture).await;
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert!(
+        detach::pipe_exists(&fixture.socket),
+        "a daemon with no timeout exited"
+    );
+}
+
+/// AC-D4 / terminal-keeps: a terminal held keeps an idle daemon up once its
+/// hub has gone. Mutation: a Windows condition that looks at connections only.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_idle_daemon_kept_by_a_terminal() {
+    if !detach_tests_run("windows_idle_daemon_kept_by_a_terminal") {
+        return;
+    }
+    let fixture = StopFixture::new("idle-terminal");
+    let _stop = detach::StopOnDrop(&fixture);
+    start_detached(&fixture, "2");
+    let (relay, mut stdin, mut stdout, _) = detach::authenticated_relay(&fixture).await;
+    write_frame(
+        &mut stdin,
+        &msgmap(vec![
+            ("type", sv("SPAWN")),
+            ("request_id", sv("idle-terminal")),
+            ("shell", sv("cmd.exe")),
+            ("cols", iv(80)),
+            ("rows", iv(24)),
+            ("env_mode", sv("inherit")),
+        ]),
+    )
+    .await;
+    let channel_id = loop {
+        let frame = read_frame_timeout(&mut stdout, 10).await;
+        if frame["type"].as_str() == Some("SPAWN_OK") {
+            break frame["channel_id"].as_str().expect("channel_id").to_owned();
+        }
+    };
+    drop(stdin);
+    drop(stdout);
+    drop(relay);
+
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert!(
+        detach::pipe_exists(&fixture.socket),
+        "the daemon left its terminal"
+    );
+    let (_relay, _stdin, _stdout, state) = detach::authenticated_relay(&fixture).await;
+    assert!(
+        state.iter().any(
+            |frame| frame["type"].as_str() == Some("AGENT_CHANNEL_STATE")
+                && frame["channel_id"].as_str() == Some(channel_id.as_str())
+        ),
+        "the terminal is not in the channel state: {state:?}"
+    );
+}

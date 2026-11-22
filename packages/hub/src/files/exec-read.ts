@@ -111,8 +111,9 @@ export function windowsLookScript(path: string): string {
 	return windowsScript(
 		path,
 		...WINDOWS_KIND,
-		"$i=[IO.FileInfo]::new($p)",
-		"Ans ('OK'+[char]10+$i.Length+' '+$i.LastWriteTimeUtc.Ticks)",
+		// The length of what an open reads: a file link's own FileInfo says 0.
+		"$f=[IO.File]::Open($p,'Open','Read','ReadWrite');$n=$f.Length;$f.Dispose()",
+		"Ans ('OK'+[char]10+$n+' '+[IO.File]::GetLastWriteTimeUtc($p).Ticks)",
 	);
 }
 
@@ -136,9 +137,8 @@ export function windowsReadScript(
 		"$b=[byte[]]::new(65536)",
 		`$left=[long]${length}`,
 		"while($left -gt 0){$n=$f.Read($b,0,[int][Math]::Min(65536,$left));if($n -le 0){break};$o.Write($b,0,$n);$left-=$n}",
-		"$o.Flush();$f.Dispose()",
-		"$i=[IO.FileInfo]::new($p)",
-		"$t=[Text.Encoding]::ASCII.GetBytes([string][char]10+$i.Length+' '+$i.LastWriteTimeUtc.Ticks+[char]10)",
+		"$o.Flush();$n=$f.Length;$f.Dispose()",
+		"$t=[Text.Encoding]::ASCII.GetBytes([string][char]10+$n+' '+[IO.File]::GetLastWriteTimeUtc($p).Ticks+[char]10)",
 		"$o.Write($t,0,$t.Length);$o.Flush()",
 	].join(";");
 }

@@ -53,6 +53,8 @@ export class SftpReadBackend implements ReadBackend {
 		private readonly style: PathStyle,
 		/** Called between the LSTAT and the OPEN, for tests that change the file there. */
 		private readonly betweenLookAndOpen?: (path: string) => Promise<void>,
+		/** Called before the second look, for tests that change the file there. */
+		readonly beforeRecheck?: (path: string) => Promise<void>,
 	) {}
 
 	async open(path: string): Promise<OpenedFile> {
@@ -159,6 +161,7 @@ class SftpOpenedFile implements OpenedFile {
 	}
 
 	async recheck(): Promise<FileLook> {
+		await this.backend.beforeRecheck?.(this.wire);
 		try {
 			return await this.lookNow();
 		} catch (error) {

@@ -209,6 +209,34 @@ describe("POST /api/hosts/:id/connect|reconnect|disconnect (#648)", () => {
 		});
 	});
 
+	it("names downloads apart from uploads (#840)", async () => {
+		manager.disconnectHost.mockReturnValue({
+			kind: "transfers-would-stop",
+			transfers: 1,
+			downloads: 1,
+		});
+		const alone = await post("disconnect", sshHostId);
+		expect(alone.json()).toEqual({
+			error: {
+				code: "TRANSFERS_WOULD_STOP",
+				message:
+					"1 download on this host would stop. Send force: true to stop them; a retry resumes them.",
+				transfers: 1,
+				downloads: 1,
+			},
+		});
+		manager.disconnectHost.mockReturnValue({
+			kind: "terminals-would-end",
+			terminals: 1,
+			transfers: 3,
+			downloads: 2,
+		});
+		const both = await post("disconnect", sshHostId);
+		expect(both.json().error.message).toBe(
+			"1 terminal on this host would end, and 1 upload and 2 downloads on it would stop. Send force: true to go on.",
+		);
+	});
+
 	it("answers 400 for the local host, which has no connection to act on", async () => {
 		manager.connectHost.mockReturnValue({ kind: "not-ssh" });
 		const res = await post("connect", localHostId);

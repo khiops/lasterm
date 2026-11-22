@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
 	mkdirSync,
@@ -43,6 +44,8 @@ interface ReadHarness {
 	closed(): number;
 	/** List the harness's folder through the same host's files, as the panel does. */
 	list(): Promise<unknown>;
+	/** Download responses the route counts as holding the host now. */
+	holding(): number;
 	readonly host: MockSshHost | null;
 	/** Set what runs between the `lstat` and the open (local only). */
 	between(hook: ((path: string) => Promise<void>) | null): void;
@@ -60,8 +63,12 @@ interface ReadBackendKind {
 		prelude?: string;
 		sftpIdleMs?: number;
 		sftpBetween?: (path: string) => Promise<void>;
+		sftpBeforeRecheck?: (path: string) => Promise<void>;
 	}): Promise<ReadHarness>;
 }
+
+/** Download responses holding their host, as the session manager counts them. */
+let holding = 0;
 
 async function serverFor(files: HostFilesService): Promise<FastifyInstance> {
 	const server = Fastify({ logger: false, forceCloseConnections: true });
@@ -69,7 +76,14 @@ async function serverFor(files: HostFilesService): Promise<FastifyInstance> {
 		files,
 		tickets: new DownloadTickets(),
 		enabled: () => true,
-		responseOpen: () => () => {},
+		responseOpen: () => {
+			holding++;
+			let released = false;
+			return () => {
+				if (!released) holding--;
+				released = true;
+			};
+		},
 	});
 	await server.ready();
 	return server;
@@ -123,6 +137,7 @@ const LOCAL: ReadBackendKind = {
 			read: () => count,
 			closed: () => closes,
 			list: () => files.list(CHANNEL, dir, false),
+			holding: () => holding,
 			host: null,
 			between: (hook) => {
 				between = hook;
@@ -165,6 +180,9 @@ function sftpKind(style: PathStyle): ReadBackendKind {
 				...(options.sftpBetween !== undefined
 					? { sftpBetweenLookAndOpen: options.sftpBetween }
 					: {}),
+				...(options.sftpBeforeRecheck !== undefined
+					? { sftpBeforeRecheck: options.sftpBeforeRecheck }
+					: {}),
 			});
 			const server = await serverFor(files);
 			const base = style === "windows" ? join(root, "C", "dl") : join(root, "dl");
@@ -177,6 +195,7 @@ function sftpKind(style: PathStyle): ReadBackendKind {
 				read: () => count,
 				closed: () => closes,
 				list: () => files.list(CHANNEL, dir, false),
+				holding: () => holding,
 				host,
 				between: () => {
 					throw new Error("local only");
@@ -231,6 +250,7 @@ function execKind(style: PathStyle): ReadBackendKind {
 				read: () => count,
 				closed: () => closes,
 				list: () => files.list(CHANNEL, dir, false),
+				holding: () => holding,
 				host,
 				between: () => {
 					throw new Error("local only");
@@ -433,7 +453,8 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 					else utimesSync(h.local("huge.bin"), new Date(2001, 0, 1), new Date(2001, 0, 1));
 				});
 				expect(promised, change).toBe(16 * MiB);
-				expect(got, change).toBeLessThan(promised);
+				// Cut before the 64 KiB held back for the second look.
+				expect(got, change).toBeLessThanOrEqual(16 * MiB - 65536);
 				await h.close();
 				harness = null;
 			}
@@ -482,6 +503,8 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 			});
 			const h = harness;
 			await vi.waitFor(() => expect(h.closed()).toBe(1), { timeout: 2000 });
+			// The response held its host while it ran, and let go when the client left.
+			await vi.waitFor(() => expect(h.holding()).toBe(0), { timeout: 2000 });
 			const after = harness.read();
 			await new Promise((resolve) => setTimeout(resolve, 1000));
 			expect(harness.read()).toBe(after);
@@ -508,7 +531,11 @@ describe("a download's read side, cases of one backend (#840)", () => {
 		const h = harness;
 		writeFileSync(h.local("f.bin"), randomBytes(1000));
 		writeFileSync(h.local("other.bin"), randomBytes(1000));
-		// Swapped: another file under the same name, same size.
+		// Swapped: another file under the same name, same size and time, so only
+		// its identity tells them apart.
+		const at = new Date(2010, 0, 1);
+		utimesSync(h.local("f.bin"), at, at);
+		utimesSync(h.local("other.bin"), at, at);
 		h.between(async () => {
 			renameSync(h.local("other.bin"), h.local("f.bin"));
 		});
@@ -530,13 +557,87 @@ describe("a download's read side, cases of one backend (#840)", () => {
 	});
 
 	it("sftp without fstat", async () => {
-		harness = await sftpKind("posix").start({ fstat: false });
+		let grow: (() => Promise<void>) | null = null;
+		harness = await sftpKind("posix").start({
+			fstat: false,
+			sftpBeforeRecheck: async () => {
+				await grow?.();
+			},
+		});
+		const h = harness;
 		const bytes = randomBytes(300_000);
-		writeFileSync(harness.local("f.bin"), bytes);
-		const response = await content(harness, harness.at("f.bin"));
+		writeFileSync(h.local("f.bin"), bytes);
+		const response = await content(h, h.at("f.bin"));
 		expect(response.statusCode).toBe(200);
 		expect(response.rawPayload.equals(bytes)).toBe(true);
+		// The second look, by STAT, sees a change: a small body is refused.
+		writeFileSync(h.local("small.bin"), "0123456789");
+		grow = () => appendFile(h.local("small.bin"), "x");
+		const changed = await content(h, h.at("small.bin"));
+		expect(changed.statusCode).toBe(409);
+		expect(changed.json().error.code).toBe("FILE_CHANGED");
 	});
+
+	it("refused paths reach no backend", async () => {
+		let opened = 0;
+		const real = new LocalReadBackend();
+		const files = new HostFilesService({
+			channelHost: () => ({ hostId: "local", hostType: "local" }),
+			hostOs: () => null,
+			sshHost: () => null,
+			local: {
+				backend: new LocalFileBackend(),
+				os: localHostOs(),
+				read: {
+					open: (path) => {
+						opened++;
+						return real.open(path);
+					},
+				},
+			},
+		});
+		const server = await serverFor(files);
+		try {
+			const refused = windowsMachine
+				? ["relative\\x", "C:\\a\\..\\b", "C:\\%USERPROFILE%\\x"]
+				: ["relative/x", "/a/../b", "~/x"];
+			for (const path of refused) {
+				const response = await server.inject({
+					method: "GET",
+					url: `/api/channels/${CHANNEL}/files/content?path=${encodeURIComponent(path)}`,
+				});
+				expect(response.statusCode, path).toBe(400);
+			}
+			expect(opened).toBe(0);
+		} finally {
+			await server.close();
+		}
+	});
+
+	it.runIf(!windowsMachine)("a FIFO is not a regular file", async () => {
+		harness = await LOCAL.start();
+		execFileSync("mkfifo", [harness.local("pipe")]);
+		const response = await content(harness, harness.at("pipe"));
+		expect(response.statusCode).toBe(409);
+		expect(response.json().error.code).toBe("NOT_A_FILE");
+	});
+
+	it.runIf(windowsMachine)(
+		"an exec Windows file reparse point is read as a file",
+		async (context) => {
+			harness = await execKind("windows").start();
+			writeFileSync(harness.local("target.txt"), "through the link");
+			try {
+				symlinkSync(harness.local("target.txt"), harness.local("link.txt"), "file");
+			} catch {
+				// Making a file symlink needs a privilege this account may not hold.
+				context.skip();
+			}
+			const response = await content(harness, harness.at("link.txt"));
+			expect(response.statusCode).toBe(200);
+			expect(response.body).toBe("through the link");
+		},
+	);
 
 	it.runIf(execKind(machineStyle).runs)("exec read after a prelude", async () => {
 		harness = await execKind(machineStyle).start({

@@ -60,6 +60,8 @@ export interface HostFilesDeps {
 	sftpBetweenLookAndOpen?: (path: string) => Promise<void>;
 	/** Told when a download read's SSH command closes, for tests (#840). */
 	onExecClose?: () => void;
+	/** Called before an SFTP download's second look, for tests (#840). */
+	sftpBeforeRecheck?: (path: string) => Promise<void>;
 }
 
 /** What the settings say of the folder a panel opens at, for one terminal. */
@@ -122,6 +124,7 @@ class RemoteFiles implements FileBackend {
 		private readonly onExecRead?: (bytes: number) => void,
 		private readonly sftpBetweenLookAndOpen?: (path: string) => Promise<void>,
 		private readonly onExecClose?: () => void,
+		private readonly sftpBeforeRecheck?: (path: string) => Promise<void>,
 	) {
 		this.shared = new SharedSftp(client, idleMs);
 		this.sftp = new SftpFileBackend(this.shared, style);
@@ -182,7 +185,12 @@ class RemoteFiles implements FileBackend {
 	 * file, changed) is not asked again the other way.
 	 */
 	async openForRead(path: string): Promise<OpenedFile> {
-		const sftp = new SftpReadBackend(this.shared, this.style, this.sftpBetweenLookAndOpen);
+		const sftp = new SftpReadBackend(
+			this.shared,
+			this.style,
+			this.sftpBetweenLookAndOpen,
+			this.sftpBeforeRecheck,
+		);
 		const exec = new ExecReadBackend(
 			this.client,
 			this.style,
@@ -446,6 +454,7 @@ export class HostFilesService {
 					this.deps.onExecRead,
 					this.deps.sftpBetweenLookAndOpen,
 					this.deps.onExecClose,
+					this.deps.sftpBeforeRecheck,
 				);
 			this.remotes.set(client, remote);
 		}

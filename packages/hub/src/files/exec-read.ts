@@ -59,12 +59,14 @@ const EXIT_DENIED = 8;
 const LOOK_LINE = /^(\d+) (-?\d+)$/;
 
 /**
- * What follows the first line `marker` within the first 64 KiB of `stdout`
- * (a shell's prelude may come before it), or null.
+ * What follows `marker` and its line ending within the first 64 KiB of
+ * `stdout`, or null. A shell's prelude may come before it, its last line left
+ * open (#1155): the marker is this request's own random nonce, so it is found
+ * wherever it starts.
  */
 function replyAfter(stdout: string, marker: string): string | null {
 	const head = stdout.slice(0, PRELUDE_LIMIT + marker.length + 2);
-	const match = new RegExp(`(?:^|\n)${marker}\r?\n`).exec(head);
+	const match = new RegExp(`${marker}\r?\n`).exec(head);
 	if (match === null) return null;
 	return stdout.slice(match.index + match[0].length).trim();
 }

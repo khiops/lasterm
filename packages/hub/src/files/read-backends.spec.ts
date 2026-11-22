@@ -953,14 +953,17 @@ describe("a download's read side, cases of one backend (#840)", () => {
 	);
 
 	it.runIf(execKind(machineStyle).runs)("exec read after a prelude", async () => {
-		harness = await execKind(machineStyle).start({
-			prelude: "Welcome to the host\nlasterm-read-not\n",
-		});
-		const bytes = randomBytes(200_000);
-		writeFileSync(harness.local("f.bin"), bytes);
-		const response = await content(harness, harness.at("f.bin"));
-		expect(response.statusCode).toBe(200);
-		expect(response.rawPayload.equals(bytes)).toBe(true);
+		// A prelude ending its lines, and one that leaves its last line open (#1155).
+		for (const prelude of ["Welcome to the host\nlasterm-read-not\n", "Welcome "]) {
+			harness = await execKind(machineStyle).start({ prelude });
+			const bytes = randomBytes(200_000);
+			writeFileSync(harness.local("f.bin"), bytes);
+			const response = await content(harness, harness.at("f.bin"));
+			expect(response.statusCode, JSON.stringify(prelude)).toBe(200);
+			expect(response.rawPayload.equals(bytes)).toBe(true);
+			await harness.close();
+			harness = null;
+		}
 	});
 
 	it("sftp lstat and fstat disagree", async () => {

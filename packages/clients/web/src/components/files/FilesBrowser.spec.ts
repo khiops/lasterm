@@ -9,6 +9,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick } from "vue";
 import type { IWsClient } from "../../services/ws-client.js";
+import { useAuthStore } from "../../stores/auth.js";
 import { useFilesPanelStore } from "../../stores/files-panel.js";
 import { useWriteLockStore } from "../../stores/writelock.js";
 import type { FileEntryView } from "../../utils/files-panel.js";
@@ -425,6 +426,7 @@ describe("Download… (#840)", () => {
 		) {
 			clicked.push(this.href);
 		});
+		useAuthStore().token = "SECRET-BEARER";
 		mountBrowser({ writer: false });
 		await settle();
 		expect(downloadButton().disabled).toBe(false);
@@ -436,8 +438,9 @@ describe("Download… (#840)", () => {
 			path: "/srv/drop/report.txt",
 		});
 		expect(clicked).toHaveLength(1);
-		expect(clicked[0]).toContain(`/api/channels/${A}/files/content?ticket=T1`);
-		expect(clicked[0]).not.toMatch(/token|bearer|authorization/i);
+		// Only the ticket: no bearer under any name, nothing else in the query.
+		expect(clicked[0]).toBe(`https://127.0.0.1:4100/api/channels/${A}/files/content?ticket=T1`);
+		expect(clicked[0]).not.toContain("SECRET-BEARER");
 		click.mockRestore();
 	});
 

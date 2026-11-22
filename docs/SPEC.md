@@ -318,13 +318,14 @@ no longer runs: a dialog is shown only after that thread answered.
 
 **Downloads to the desktop (#840).** "Download…" in the files panel calls `pick_download_target`,
 the native save dialog, then `download_hub_file_to`, which streams the hub's bytes over the pinned
-connection (no total time limit, 60 s without a byte ends it) into a hidden partial,
+connection (no total time limit, 60 s without a byte ends it) into a partial,
 `.<name>.<16 hex>.lasterm-download`, created exclusively beside the target. Once whole it is placed:
 over the target only when the dialog asked about replacing it and the target is still the file it
 was then, otherwise without replacing (a hard link, or an exclusive copy where hard links are
 unsupported); a name taken meanwhile keeps the partial and says so. The page hears
 `download-progress` and `download-ended`, never the bytes. A browser hands the content route's
-ticketed URL to its own download manager.
+ticketed URL to its own download manager. Until downloads are recorded, a quit or crash during a
+download leaves its partial beside the target.
 
 **Quitting the desktop while uploads run (#837, decisions.md UPLOADS-DESKTOP).** The page tells the
 shell, on every change, the uploads this window sends: `set_uploads_in_progress({ seq, inProgress,

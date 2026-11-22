@@ -6195,57 +6195,78 @@ async fn download_hub_file_to(
         existing_at_dialog,
     };
     std::thread::spawn(move || {
-        let outcome = match client.get(&url).bearer_auth(&token).send() {
-            Ok(response) => downloads::write_file(
-                &job,
-                response,
-                &cancel,
-                |etag, total| {
-                    let _ = app.emit(
-                        "download-started",
-                        DownloadStarted {
-                            download_id: key.0.clone(),
-                            item_id: key.1.clone(),
-                            etag,
-                            total,
-                        },
-                    );
-                },
-                |written, total| {
-                    let _ = app.emit(
-                        "download-progress",
-                        DownloadProgress {
-                            download_id: key.0.clone(),
-                            item_id: key.1.clone(),
-                            written,
-                            total,
-                        },
-                    );
-                },
-                &downloads::RealOps,
-            ),
-            Err(_) if cancel.load(Ordering::SeqCst) => downloads::Outcome::Cancelled,
-            Err(error) => downloads::Outcome::Failed {
-                error: format!(
-                    "The hub could not be reached: {}",
-                    error_with_sources(&error)
-                ),
-                code: None,
-            },
-        };
-        if let Ok(mut running) = running_downloads_map().lock() {
-            running.remove(&key);
-        }
-        let _ = app.emit(
-            "download-ended",
-            DownloadEnded {
-                download_id: key.0,
-                item_id: key.1,
-                outcome,
-            },
-        );
+        let response = client
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .map_err(|error| error_with_sources(&error));
+        run_download(&job, response, &cancel, &key, &|event, payload| {
+            let _ = app.emit(event, payload);
+        });
     });
     Ok(())
+}
+
+/// One file of a download, from the hub's answer to its end: what the page
+/// hears goes through `emit`, never a byte of the file (#840).
+fn run_download(
+    job: &downloads::FileJob,
+    response: Result<impl downloads::Source, String>,
+    cancel: &AtomicBool,
+    key: &(String, String),
+    emit: &dyn Fn(&str, serde_json::Value),
+) {
+    let send = |event: &str, payload: serde_json::Result<serde_json::Value>| {
+        if let Ok(payload) = payload {
+            emit(event, payload);
+        }
+    };
+    let outcome = match response {
+        Ok(response) => downloads::write_file(
+            job,
+            response,
+            cancel,
+            |etag, total| {
+                send(
+                    "download-started",
+                    serde_json::to_value(DownloadStarted {
+                        download_id: key.0.clone(),
+                        item_id: key.1.clone(),
+                        etag,
+                        total,
+                    }),
+                );
+            },
+            |written, total| {
+                send(
+                    "download-progress",
+                    serde_json::to_value(DownloadProgress {
+                        download_id: key.0.clone(),
+                        item_id: key.1.clone(),
+                        written,
+                        total,
+                    }),
+                );
+            },
+            &downloads::RealOps,
+        ),
+        Err(_) if cancel.load(Ordering::SeqCst) => downloads::Outcome::Cancelled,
+        Err(error) => downloads::Outcome::Failed {
+            error: format!("The hub could not be reached: {error}"),
+            code: None,
+        },
+    };
+    if let Ok(mut running) = running_downloads_map().lock() {
+        running.remove(key);
+    }
+    send(
+        "download-ended",
+        serde_json::to_value(DownloadEnded {
+            download_id: key.0.clone(),
+            item_id: key.1.clone(),
+            outcome,
+        }),
+    );
 }
 
 /// The client and URL a download fetches with: the hub this desktop
@@ -8015,6 +8036,86 @@ mod tests {
         }
         let error = download_root("0000000000000000").err().unwrap();
         assert!(error.starts_with("UNKNOWN_ROOT"), "{error}");
+    }
+
+    /// The hub's answer of a body, for `run_download`.
+    struct HubAnswer(std::io::Cursor<Vec<u8>>);
+
+    impl std::io::Read for HubAnswer {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            std::io::Read::read(&mut self.0, buf)
+        }
+    }
+
+    impl downloads::Source for HubAnswer {
+        fn status(&self) -> u16 {
+            200
+        }
+        fn content_length(&self) -> Option<u64> {
+            Some(self.0.get_ref().len() as u64)
+        }
+        fn etag(&self) -> Option<String> {
+            Some("\"614400-ms1\"".to_string())
+        }
+    }
+
+    #[test]
+    fn download_sends_no_bytes_to_page() {
+        // A body the payloads could not hold by chance: 600 KiB of a counter.
+        let body: Vec<u8> = (0..614_400_u32).map(|i| (i % 251) as u8 ^ 0x5a).collect();
+        let dir = download_dir("no-bytes");
+        let job = downloads::FileJob {
+            dir: dir.clone(),
+            name: "f.bin".to_string(),
+            partial: None,
+            existing_at_dialog: None,
+        };
+        let key = ("d840".to_string(), "9".to_string());
+        let seen = std::sync::Mutex::new(Vec::<(String, String)>::new());
+        run_download(
+            &job,
+            Ok(HubAnswer(std::io::Cursor::new(body.clone()))),
+            &AtomicBool::new(false),
+            &key,
+            &|event, payload| {
+                seen.lock()
+                    .unwrap()
+                    .push((event.to_string(), payload.to_string()))
+            },
+        );
+        let seen = seen.into_inner().unwrap();
+        let names: Vec<&str> = seen.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names.first(), Some(&"download-started"));
+        assert_eq!(names.last(), Some(&"download-ended"));
+        assert!(
+            names[1..names.len() - 1]
+                .iter()
+                .all(|name| *name == "download-progress"),
+            "{names:?}"
+        );
+        // No payload holds a run of the file, as text or as numbers.
+        let window = &body[1000..1032];
+        let as_numbers = window
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let as_text = String::from_utf8_lossy(window).into_owned();
+        for (name, payload) in &seen {
+            assert!(
+                payload.len() < 512,
+                "{name} carries {} bytes",
+                payload.len()
+            );
+            assert!(
+                !payload.contains(&as_numbers),
+                "{name} holds the file's bytes"
+            );
+            assert!(!payload.contains(&as_text), "{name} holds the file's bytes");
+        }
+        #[expect(clippy::disallowed_methods, reason = "a test's own folder")]
+        let written = std::fs::read(dir.join("f.bin")).unwrap();
+        assert_eq!(written, body);
     }
 
     #[test]

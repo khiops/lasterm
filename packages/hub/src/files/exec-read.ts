@@ -54,6 +54,7 @@ const WHAT = "The file could not be read";
 const EXIT_LINK = 3;
 const EXIT_MISSING = 4;
 const EXIT_NOT_A_FILE = 5;
+const EXIT_DENIED = 8;
 
 const LOOK_LINE = /^(\d+) (-?\d+)$/;
 
@@ -70,6 +71,7 @@ export function posixLookScript(path: string): string {
 			`[ -L "$p" ] && r LINK`,
 			`[ -e "$p" ] || r NOT_FOUND`,
 			`[ -f "$p" ] || r NOT_A_FILE`,
+			`[ -r "$p" ] || r PERMISSION_DENIED`,
 			`s=$(l) || r FAILED`,
 			`r "OK
 $s"`,
@@ -91,6 +93,7 @@ export function posixReadScript(
 		`if [ -L "$p" ]; then exit ${EXIT_LINK}; fi`,
 		`[ -e "$p" ] || exit ${EXIT_MISSING}`,
 		`[ -f "$p" ] || exit ${EXIT_NOT_A_FILE}`,
+		`[ -r "$p" ] || exit ${EXIT_DENIED}`,
 		`exec 3<"$p" || exit 6`,
 		`printf '%s\\n' '${marker}'`,
 		"l || exit 7",
@@ -102,9 +105,9 @@ export function posixReadScript(
 	].join("\n");
 }
 
+// The link's own attributes first, so that a junction whose target is gone is a link.
 const WINDOWS_KIND = [
-	`if(-not [IO.File]::Exists($p) -and -not [IO.Directory]::Exists($p)){Ans 'NOT_FOUND'}`,
-	"$a=[int][IO.File]::GetAttributes($p)",
+	"try{$a=[int][IO.File]::GetAttributes($p)}catch [IO.FileNotFoundException],[IO.DirectoryNotFoundException]{Ans 'NOT_FOUND'}",
 	"if(($a -band 16) -ne 0){if(($a -band 1024) -ne 0){Ans 'LINK'};Ans 'NOT_A_FILE'}",
 ];
 
@@ -113,7 +116,8 @@ export function windowsLookScript(path: string): string {
 		path,
 		...WINDOWS_KIND,
 		// The length of what an open reads: a file link's own FileInfo says 0.
-		"$f=[IO.File]::Open($p,'Open','Read','ReadWrite');$n=$f.Length;$f.Dispose()",
+		"try{$f=[IO.File]::Open($p,'Open','Read','ReadWrite')}catch [UnauthorizedAccessException]{Ans 'PERMISSION_DENIED'}",
+		"$n=$f.Length;$f.Dispose()",
 		"Ans ('OK'+[char]10+$n+' '+[IO.File]::GetLastWriteTimeUtc($p).Ticks)",
 	);
 }
@@ -127,10 +131,9 @@ export function windowsReadScript(
 	return [
 		"$ErrorActionPreference='Stop'",
 		powerShellPathVariable(path),
-		`if(-not [IO.File]::Exists($p) -and -not [IO.Directory]::Exists($p)){exit ${EXIT_MISSING}}`,
-		"$a=[int][IO.File]::GetAttributes($p)",
+		`try{$a=[int][IO.File]::GetAttributes($p)}catch [IO.FileNotFoundException],[IO.DirectoryNotFoundException]{exit ${EXIT_MISSING}}`,
 		`if(($a -band 16) -ne 0){if(($a -band 1024) -ne 0){exit ${EXIT_LINK}};exit ${EXIT_NOT_A_FILE}}`,
-		"$f=[IO.File]::Open($p,'Open','Read','ReadWrite')",
+		`try{$f=[IO.File]::Open($p,'Open','Read','ReadWrite')}catch [UnauthorizedAccessException]{exit ${EXIT_DENIED}}`,
 		"$o=[Console]::OpenStandardOutput()",
 		`$h=[Text.Encoding]::ASCII.GetBytes('${marker}'+[char]10+$f.Length+' '+[IO.File]::GetLastWriteTimeUtc($p).Ticks+[char]10)`,
 		"$o.Write($h,0,$h.Length)",
@@ -202,6 +205,8 @@ export class ExecReadBackend implements ReadBackend {
 				throw new FileAccessError("NOT_FOUND", `${WHAT}: ${REASONS.NOT_FOUND}`);
 			case "NOT_A_FILE":
 				throw notAFile(WHAT);
+			case "PERMISSION_DENIED":
+				throw new FileAccessError("PERMISSION_DENIED", `${WHAT}: ${REASONS.PERMISSION_DENIED}`);
 		}
 		if (this.lost()) throw this.gone();
 		const said = readableStderr(stderr) || `the host gave no answer (exit ${exitCode ?? "none"})`;
@@ -252,6 +257,9 @@ export class ExecReadBackend implements ReadBackend {
 			return new FileAccessError("NOT_FOUND", `${WHAT}: ${REASONS.NOT_FOUND}`);
 		}
 		if (exitCode === EXIT_NOT_A_FILE) return notAFile(WHAT);
+		if (exitCode === EXIT_DENIED) {
+			return new FileAccessError("PERMISSION_DENIED", `${WHAT}: ${REASONS.PERMISSION_DENIED}`);
+		}
 		if (this.lost()) return this.gone();
 		const said = readableStderr(stderr) || `the host gave no answer (exit ${exitCode ?? "none"})`;
 		return new FileAccessError("FILE_ACCESS_FAILED", `${WHAT}: ${said}`);
@@ -271,6 +279,7 @@ class ExecStream {
 	private settled = false;
 	private received = 0;
 	private closing = false;
+	private startTimer: ReturnType<typeof setTimeout> | undefined;
 	private tail = Buffer.alloc(0);
 	readonly ended: Promise<{ exitCode: number | null; stderr: string }>;
 
@@ -288,6 +297,11 @@ class ExecStream {
 			endedResolve = r;
 		});
 		channel.on("data", (chunk: Buffer) => this.onData(chunk));
+		// A host whose shell never runs the script: the read gives up, and its channel goes.
+		this.startTimer = setTimeout(() => {
+			this.settle(new FileAccessError("FILE_ACCESS_FAILED", `${WHAT}: the host gave no answer`));
+		}, LOOK_TIMEOUT_MS);
+		this.startTimer.unref?.();
 		channel.stderr.on("data", (chunk: Buffer) => {
 			if (this.stderr.length < PRELUDE_LIMIT) this.stderr += chunk.toString("utf8");
 		});
@@ -336,6 +350,7 @@ class ExecStream {
 	private settle(error?: Error): void {
 		if (this.settled) return;
 		this.settled = true;
+		clearTimeout(this.startTimer);
 		if (error) {
 			this.reject(error);
 			this.close();

@@ -2,7 +2,7 @@
 //! native dialog, then streams the hub's bytes to disk itself; the page gets
 //! progress and the outcome, never the bytes.
 //!
-//! A file is written to a hidden partial beside its target,
+//! A file is written to a partial beside its target,
 //! `.<name>.<16 hex>.lasterm-download`, created exclusively, and placed only
 //! once whole: over the target when the dialog asked about replacing it and
 //! the target is still the one it was then, otherwise without replacing
@@ -99,15 +99,7 @@ impl PlaceOps for RealOps {
         reason = "copies a download into a folder the person chose, never a protected file"
     )]
     fn copy_new(&self, from: &Path, to: &Path) -> std::io::Result<()> {
-        let mut source = File::open(from)?;
-        let mut target = OpenOptions::new().write(true).create_new(true).open(to)?;
-        let copied = std::io::copy(&mut source, &mut target).and_then(|_| target.sync_all());
-        if let Err(error) = copied {
-            drop(target);
-            let _ = std::fs::remove_file(to);
-            return Err(error);
-        }
-        Ok(())
+        copy_into_new(&mut File::open(from)?, to)
     }
 
     #[expect(
@@ -121,6 +113,23 @@ impl PlaceOps for RealOps {
     fn pause(&self, duration: Duration) {
         std::thread::sleep(duration);
     }
+}
+
+/// Copy `source` into a new file `to`, created exclusively; a copy that fails
+/// removes what it wrote, so no half file stays under the name.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "copies a download into a folder the person chose, never a protected file"
+)]
+pub(crate) fn copy_into_new(source: &mut impl Read, to: &Path) -> std::io::Result<()> {
+    let mut target = OpenOptions::new().write(true).create_new(true).open(to)?;
+    let copied = std::io::copy(source, &mut target).and_then(|_| target.sync_all());
+    if let Err(error) = copied {
+        drop(target);
+        let _ = std::fs::remove_file(to);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// `name` cut at a character boundary to at most `bytes` UTF-8 bytes, keeping at least one character.
@@ -403,7 +412,8 @@ fn place(
     // plain file, or something that appeared meanwhile.
     let taken = || match existing_at_dialog {
         Some(seen) if !seen.is_file => kept(format!("{name} is not a plain file")),
-        _ => kept(format!("{name} appeared meanwhile")),
+        Some(_) => kept(format!("{name} changed after the save dialog")),
+        None => kept(format!("{name} appeared meanwhile")),
     };
     // The dialog asked about replacing it, and it is still that file.
     if let Some(agreed) = existing_at_dialog {
@@ -574,10 +584,21 @@ mod tests {
         }
         fn copy_new(&self, from: &Path, to: &Path) -> std::io::Result<()> {
             if self.copy_fails {
-                // A half copy that the failing copy removes, as the real one does.
-                write(to, b"half");
-                RealOps.remove(to)?;
-                return Err(std::io::Error::other("the disk went away"));
+                // The real copy, from a source that fails after its first bytes.
+                struct FailsMidway(usize);
+                impl Read for FailsMidway {
+                    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                        if self.0 == 0 {
+                            return Err(std::io::Error::other("the disk went away"));
+                        }
+                        let n = buf.len().min(self.0);
+                        buf[..n].fill(7);
+                        self.0 -= n;
+                        Ok(n)
+                    }
+                }
+                let _ = from;
+                return copy_into_new(&mut FailsMidway(4), to);
             }
             RealOps.copy_new(from, to)
         }
@@ -906,7 +927,10 @@ mod tests {
             |_, _| {},
             &RealOps,
         );
-        assert!(matches!(outcome, Outcome::Failed { .. }), "{outcome:?}");
+        assert!(
+            matches!(&outcome, Outcome::Failed { error, .. } if error.contains("changed after the save dialog")),
+            "{outcome:?}"
+        );
         assert_eq!(read(&dir.join("f.txt")), b"changed!");
     }
 

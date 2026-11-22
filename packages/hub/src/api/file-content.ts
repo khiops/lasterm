@@ -354,6 +354,9 @@ export function registerFileContentRoutes(server: FastifyInstance, deps: FileCon
 		const tokenId = request.authTokenId ?? "local";
 		try {
 			const resolved = await deps.files.downloadTarget(target, path);
+			// What the browser's download manager would only say as a failure.
+			const opened = await deps.files.openForRead(target, path);
+			await opened.file.close();
 			const { ticket, expiresIn } = deps.tickets.issue(tokenId, {
 				kind: "file",
 				hostId: resolved.hostId,

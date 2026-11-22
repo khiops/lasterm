@@ -1,4 +1,6 @@
 import { mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { get as httpsGet } from "node:https";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { decodeMessage, encodeMessage, type ProtocolMessage } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
@@ -6,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createToken } from "../auth.js";
 import { normaliseHostPath } from "../files/host-paths.js";
 import { createServer } from "../server.fixture.js";
+import { SessionManager } from "../session/session-manager.js";
 import { type DatabaseManager, openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
@@ -490,6 +493,17 @@ describe("downloads from a terminal's host, over REST (#840)", () => {
 		const plain = (url: string) => server.inject({ method: "GET", url });
 		const contentUrl = (query: string) => `/api/channels/${CHANNEL}/files/content?${query}`;
 
+		// A ticket for something that is not there is refused when it is asked for,
+		// so the browser's own download never meets the hub's refusal.
+		const gone = await server.inject({
+			method: "POST",
+			url: `/api/channels/${CHANNEL}/files/content-ticket`,
+			headers: bearer(),
+			payload: { path: at("nothing.txt") },
+		});
+		expect(gone.statusCode).toBe(404);
+		expect(gone.json().error.code).toBe("NOT_FOUND");
+
 		// No bearer and no ticket.
 		expect((await plain(contentUrl(`path=${encodeURIComponent(at("p.txt"))}`))).statusCode).toBe(
 			401,
@@ -535,7 +549,9 @@ describe("downloads from a terminal's host, over REST (#840)", () => {
 		const slash = await ticketFor(at("p.txt"));
 		expect(
 			(await plain(`/api/channels/${CHANNEL}/files/content/?ticket=${slash}`)).statusCode,
-		).not.toBe(200);
+		).toBe(401);
+		// Refused before the ticket was taken: it still opens the exact route.
+		expect((await plain(contentUrl(`ticket=${slash}`))).statusCode).toBe(200);
 
 		// The host form takes a ticket made for its host.
 		const hostTicket = await ticketFor(
@@ -562,6 +578,40 @@ describe("downloads from a terminal's host, over REST (#840)", () => {
 		expect((await plain(contentUrl(`ticket=${tickets[32]}`))).statusCode).toBe(200);
 	});
 
+	it("an open download holds its host in the session manager", async () => {
+		await start(true);
+		writeFileSync(join(root, "files", "big.bin"), Buffer.alloc(1024 * 1024, 1));
+		const released: string[] = [];
+		const opened = vi
+			.spyOn(SessionManager.prototype, "downloadOpened")
+			.mockImplementation((hostId: string) => () => {
+				released.push(hostId);
+			});
+		try {
+			await server.listen({ port: 0, host: "127.0.0.1" });
+			const port = (server.server.address() as AddressInfo).port;
+			await new Promise<void>((resolve, reject) => {
+				const request = httpsGet(
+					`https://127.0.0.1:${port}/api/channels/${CHANNEL}/files/content?path=${encodeURIComponent(at("big.bin"))}`,
+					{ headers: bearer(), rejectUnauthorized: false },
+					(response) => {
+						response.once("data", () => {
+							expect(opened).toHaveBeenCalledTimes(1);
+							expect(opened).toHaveBeenCalledWith(localHostId);
+							request.destroy();
+							resolve();
+						});
+					},
+				);
+				request.on("error", () => {});
+				setTimeout(() => reject(new Error("no answer")), 10_000);
+			});
+			await vi.waitFor(() => expect(released).toEqual([localHostId]));
+		} finally {
+			opened.mockRestore();
+		}
+	});
+
 	it("content cors", async () => {
 		await start(true, ["https://other.example"]);
 		const preflight = await server.inject({
@@ -574,15 +624,21 @@ describe("downloads from a terminal's host, over REST (#840)", () => {
 			},
 		});
 		expect(preflight.statusCode).toBeLessThan(300);
-		const allowed = String(preflight.headers["access-control-allow-headers"]).toLowerCase();
+		const members = (value: unknown) =>
+			new Set(
+				String(value)
+					.split(",")
+					.map((name) => name.trim().toLowerCase()),
+			);
+		const allowed = members(preflight.headers["access-control-allow-headers"]);
 		for (const header of ["range", "if-range", "x-lasterm-download"]) {
-			expect(allowed).toContain(header);
+			expect(allowed.has(header), header).toBe(true);
 		}
 		writeFileSync(join(root, "files", "c.txt"), "c");
 		const response = await download(at("c.txt"), { ...bearer(), origin: "https://other.example" });
-		const exposed = String(response.headers["access-control-expose-headers"]).toLowerCase();
-		for (const header of ["etag", "content-range", "content-disposition"]) {
-			expect(exposed).toContain(header);
+		const exposed = members(response.headers["access-control-expose-headers"]);
+		for (const header of ["etag", "content-range", "content-length", "content-disposition"]) {
+			expect(exposed.has(header), header).toBe(true);
 		}
 	});
 });

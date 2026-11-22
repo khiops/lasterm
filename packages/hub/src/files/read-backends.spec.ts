@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
+	chmodSync,
 	mkdirSync,
 	renameSync,
+	rmSync,
 	symlinkSync,
 	truncateSync,
 	utimesSync,
@@ -404,20 +406,29 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 			expect(empty.headers["content-length"]).toBe("0");
 		});
 
-		it("a link is not followed", async () => {
-			if (windowsMachine && kind.transport !== "sftp") return; // symlinks need a privilege here
-			harness = await kind.start();
-			writeFileSync(harness.local("target.txt"), "target");
-			mkdirSync(harness.local("folder"));
-			symlinkSync(harness.local("target.txt"), harness.local("to-file"));
-			symlinkSync(harness.local("folder"), harness.local("to-folder"));
-			symlinkSync(harness.local("missing"), harness.local("dangling"));
-			for (const name of ["to-file", "to-folder", "dangling"]) {
-				const response = await content(harness, harness.at(name));
-				expect(response.statusCode, name).toBe(409);
-				expect(response.json().error.code, name).toBe("LINK_NOT_FOLLOWED");
-			}
-		});
+		// Over SSH commands on Windows a file link is read as a file: the junction
+		// and file-link cases below cover that host.
+		it.skipIf(windowsMachine && kind.transport === "exec")(
+			"a link is not followed",
+			async (context) => {
+				harness = await kind.start();
+				writeFileSync(harness.local("target.txt"), "target");
+				mkdirSync(harness.local("folder"));
+				try {
+					symlinkSync(harness.local("target.txt"), harness.local("to-file"));
+					symlinkSync(harness.local("folder"), harness.local("to-folder"));
+					symlinkSync(harness.local("missing"), harness.local("dangling"));
+				} catch {
+					// On Windows, making a symlink needs a privilege this account may not hold.
+					context.skip();
+				}
+				for (const name of ["to-file", "to-folder", "dangling"]) {
+					const response = await content(harness, harness.at(name));
+					expect(response.statusCode, name).toBe(409);
+					expect(response.json().error.code, name).toBe("LINK_NOT_FOLLOWED");
+				}
+			},
+		);
 
 		it.runIf(windowsMachine && kind.transport !== "sftp")(
 			"a junction is not followed",
@@ -440,6 +451,28 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 			const response = await content(harness, harness.at("old.bin"));
 			expect(response.statusCode).toBe(200);
 			expect(response.rawPayload.equals(bytes)).toBe(true);
+		});
+
+		it.runIf(windowsMachine && kind.transport !== "sftp")(
+			"a junction whose target is gone is still a link",
+			async () => {
+				harness = await kind.start();
+				mkdirSync(harness.local("gone"));
+				symlinkSync(harness.local("gone"), harness.local("dangling"), "junction");
+				rmSync(harness.local("gone"), { recursive: true });
+				const response = await content(harness, harness.at("dangling"));
+				expect(response.statusCode).toBe(409);
+				expect(response.json().error.code).toBe("LINK_NOT_FOLLOWED");
+			},
+		);
+
+		it.runIf(!windowsMachine && process.getuid?.() !== 0)("an unreadable file", async () => {
+			harness = await kind.start();
+			writeFileSync(harness.local("secret.bin"), "secret");
+			chmodSync(harness.local("secret.bin"), 0o000);
+			const response = await content(harness, harness.at("secret.bin"));
+			expect(response.statusCode).toBe(403);
+			expect(response.json().error.code).toBe("PERMISSION_DENIED");
 		});
 
 		it("not a regular file", async () => {

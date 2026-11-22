@@ -87,6 +87,8 @@ describe("sanitizeTitle tag stripping", () => {
 		expect(elapsed).toBeLessThan(1000);
 	});
 
+	// Not the reported defect: the old regex matches this in one linear pass and passes it too.
+	// It guards the other quadratic shape, a scan restarted from each '<' when a '>' does exist.
 	it("stays linear on many '<' closed only at the very end", () => {
 		const hostile = `${"<".repeat(131072)}>`;
 		const start = performance.now();

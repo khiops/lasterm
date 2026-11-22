@@ -13,12 +13,12 @@ Terminals that stay where you left them: your local and SSH shells keep running 
 
 Lasterm runs your shells in a hub on your computer, not in the window. Close the window to the tray and they keep running, SSH ones included. Open it again and each screen is as you left it.
 
-Add the machines you work on over SSH, directly or through a jump host. Lasterm copies its small agent to each one, matched to its system, and opens no port there. A Linux host can keep that agent running, so its terminals also survive a dropped connection.
+Add the machines you work on over SSH, directly or through a jump host. Lasterm copies its small agent to each one, matched to its system, and opens no port there. A Linux host, and a Windows host whose SSH server allows it, can keep that agent running, so its terminals also survive a dropped connection.
 
 HIGHLIGHTS
 • Sessions outlive the window: close it or reload it, and every terminal keeps running and comes back with its screen.
 • Remote hosts over SSH: a key, your SSH agent or a password asked each time; jump hosts; host keys checked against what you trust, including your own known_hosts.
-• Terminals that outlive the connection on Linux hosts that keep an agent running. On Windows hosts, shells end with the connection.
+• Terminals that outlive the connection on hosts that keep an agent running: Linux hosts, and Windows hosts whose SSH server allows it.
 • A rail of hosts: a badge, a colour and a status dot for each, in the groups and order you choose.
 • Tabs, split panes, and search in one pane or all of them.
 • Launch profiles: shell, environment, working directory and elevation with sudo, doas, pkexec or gsudo.
@@ -32,7 +32,7 @@ Open source, under the AGPL-3.0.
 - Local and SSH terminals that keep running when the window closes
 - Every screen restored as you left it
 - SSH hosts reached directly or through a jump host
-- Terminals that survive a dropped connection on Linux hosts
+- Terminals that survive a dropped connection on Linux and Windows hosts
 - A rail of hosts with each one's status at a glance
 - Tabs, split panes and search across panes
 - Launch profiles with environment, working directory and elevation

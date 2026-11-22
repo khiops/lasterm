@@ -1628,6 +1628,60 @@ describe("POST /api/hosts/:id/agent/replace, when no end is reported (#599)", ()
 		expectEveryOneStopped(channelIds, heard);
 	});
 
+	// The daemon's stop closes its channel, and that ends the SSH client the
+	// `--stop` exec runs on, before the exec has an exit status (#1111).
+	it.each([
+		["a non-zero exit", async () => ({ stdout: "", exitCode: 255 })],
+		[
+			"a rejection",
+			async () => {
+				throw new Error("SSH agent not connected");
+			},
+		],
+	])(
+		"counts the connection closing during its own --stop as the stop, with %s",
+		async (_name, answer) => {
+			const agent = connectedAgent();
+			const { channelIds, heard } = liveTerminalsOn(agent, 2);
+			agent.send.mockImplementation((msg: ProtocolMessage) => {
+				if (msg.type === "STOP") throw new Error("SSH agent not connected");
+			});
+			agent.execOnHost.mockImplementation(async (command: string) => {
+				if (command === REMOTE_STATE_DIR_COMMAND) {
+					return { stdout: "/home/pi/.local/state/lasterm", exitCode: 0 };
+				}
+				agent.connected = false;
+				agent.emit("close");
+				return answer();
+			});
+
+			const res = await replace();
+
+			expect(res.statusCode).toBe(200);
+			expect(res.json()).toMatchObject({ replaced: true });
+			expectEveryOneStopped(channelIds, heard);
+			expect(sm.agents.has(hostId)).toBe(false);
+		},
+	);
+
+	it("says nothing was changed only when it is known, not after a --stop whose connection stayed up and failed", async () => {
+		const agent = connectedAgent();
+		agent.send.mockImplementation((msg: ProtocolMessage) => {
+			if (msg.type === "STOP") throw new Error("SSH agent not connected");
+		});
+		agent.execOnHost.mockImplementation(async (command: string) =>
+			command === REMOTE_STATE_DIR_COMMAND
+				? { stdout: "/home/pi/.local/state/lasterm", exitCode: 0 }
+				: { stdout: "", exitCode: 1 },
+		);
+
+		const res = await replace();
+
+		expect(res.statusCode).toBe(409);
+		expect(res.json()).toMatchObject({ error: { code: "AGENT_NOT_REPLACED" } });
+		expect(sm.agents.get(hostId)).toBe(agent);
+	});
+
 	// On stdio the agent is not stopped, and nothing it runs ends.
 	it("ends nothing when the agent is not stopped", async () => {
 		const agent = connectedAgent();

@@ -3017,7 +3017,7 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 			row("ch-b", "live"),
 		]);
 
-		expect(await store.purgeDeadChannels()).toBe(1);
+		expect(await store.purgeDeadChannels()).toEqual(["ch-a"]);
 		release();
 		await fetching;
 
@@ -3048,7 +3048,7 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		const purging = store.purgeDeadChannels();
 		store.updateChannelStatus("ch-a", "live");
 		answer();
-		expect(await purging).toBe(0);
+		expect(await purging).toEqual([]);
 		release();
 		await fetching;
 
@@ -3082,7 +3082,7 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 		const purging = store.purgeDeadChannels();
 		store.updateChannelStatus("ch-b", "dead", 0);
 		answer();
-		expect(await purging).toBe(2);
+		expect(await purging).toEqual(["ch-a", "ch-b"]);
 		release();
 		await fetching;
 
@@ -3095,7 +3095,7 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 	it.each([
 		["an unreadable answer", () => Promise.reject(new Error("bad body"))],
 		["an answer without ids", () => Promise.resolve({ ok: true, purged: 1 })],
-	])("%s removes nothing and counts nothing", async (_name, body) => {
+	])("%s removes nothing and names nothing", async (_name, body) => {
 		const { store, fetching, release } = await listedThenFetching([row("ch-a", "dead")]);
 		const held = mockFetch.getMockImplementation() as (
 			u: string,
@@ -3105,7 +3105,7 @@ describe("useChannelsStore — a channel deleted while a list fetch is in flight
 			init?.method === "DELETE" ? Promise.resolve({ ok: true, json: body }) : held(url, init),
 		);
 
-		expect(await store.purgeDeadChannels()).toBe(0);
+		expect(await store.purgeDeadChannels()).toEqual([]);
 		release();
 		await fetching;
 

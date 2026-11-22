@@ -3326,3 +3326,85 @@ describe("GET /api/sessions/:id (#932)", () => {
 		expect(body.channels[0]).not.toHaveProperty("end_id");
 	});
 });
+
+// ─── A purge leaves a terminal being brought back alone (#1118) ─────────────
+//
+// A SPAWN bringing a dead terminal back claims its id until the agent
+// answers. Either purge used to delete the still-dead row meanwhile, and the
+// SPAWN_OK then announced a live terminal the hub had no row for.
+
+describe("a purge while a dead terminal is being brought back (#1118)", () => {
+	/** A dead terminal of the Pi, a SPAWN bringing it back sent and unanswered. */
+	async function respawnSent() {
+		const agent = connectedAgent();
+		const { channelId, heard } = liveTerminalOn(agent);
+		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
+		const dal = new MetaDAL(dbs.meta);
+		expect(dal.getChannel(channelId)?.status).toBe("dead");
+		const spawning = sm.handleSpawn("c-window", {
+			type: "SPAWN",
+			hostId,
+			reuseChannelId: channelId,
+		});
+		await vi.waitFor(() => expect(agent.sent.some((m) => m.type === "SPAWN")).toBe(true));
+		const spawn = agent.sent.find((m) => m.type === "SPAWN") as { requestId: string };
+		const answer = async () => {
+			agent.emit("message", { type: "SPAWN_OK", requestId: spawn.requestId, channelId });
+			return spawning;
+		};
+		return { channelId, dal, heard, answer };
+	}
+
+	// Wrong implementation: the bulk purge selects every dead row, the
+	// reserved one included (row gone, purged_ids [channelId]).
+	it("the bulk purge leaves it out, and it comes back with its row", async () => {
+		const { channelId, dal, answer } = await respawnSent();
+
+		const res = await server.inject({
+			method: "DELETE",
+			url: "/api/channels/dead",
+			payload: { host_id: hostId },
+		});
+
+		expect(res.json()).toEqual({ ok: true, purged: 0, purged_ids: [] });
+		expect(await answer()).toBe(channelId);
+		expect(dal.getChannel(channelId)?.status).toBe("live");
+	});
+
+	// Wrong implementation: the single delete purges a dead row whatever
+	// starts it (200, row gone).
+	it("the single delete refuses it, and it comes back with its row", async () => {
+		const { channelId, dal, answer } = await respawnSent();
+
+		const res = await server.inject({ method: "DELETE", url: `/api/channels/${channelId}` });
+
+		expect(res.statusCode).toBe(409);
+		expect(res.json()).toEqual({
+			error: { code: "CHANNEL_STARTING", message: "That terminal is being started again." },
+		});
+		expect(await answer()).toBe(channelId);
+		expect(dal.getChannel(channelId)?.status).toBe("live");
+	});
+
+	// Wrong implementation: reviveChannel()'s false result ignored, as before
+	// (SPAWN_OK and CHANNEL_CREATED announced, no DESTROY, no row).
+	it("a row gone by another path ends the started terminal instead of announcing it", async () => {
+		const { channelId, dal, heard, answer } = await respawnSent();
+		const agent = (sm.agents as unknown as Map<string, FakeSshAgent>).get(hostId)!;
+		dal.deleteChannel(channelId);
+		heard.length = 0;
+
+		expect(await answer()).toBeNull();
+
+		expect(agent.sent.at(-1)).toEqual({ type: "DESTROY", channelId });
+		expect(heard).toEqual([
+			{
+				type: "ERROR",
+				code: "CHANNEL_NOT_REUSABLE",
+				message: "Cannot bring that terminal back: it is not a terminal this hub knows.",
+				channelId,
+			},
+		]);
+		expect(dal.getChannel(channelId)).toBeUndefined();
+	});
+});

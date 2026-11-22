@@ -94,6 +94,57 @@ impl ChannelEventSender {
     }
 }
 
+/// Whether a workload's reader may still speak. The hub's DESTROY silences it:
+/// from then on its reader sends nothing but its CHANNEL_EXIT, so nothing of
+/// the shell it destroyed reaches the hub after the SPAWN_OK of a restart
+/// that replaces it (#1121).
+#[derive(Default)]
+pub struct Voice(std::sync::Mutex<bool>);
+
+impl Voice {
+    /// Silence it. Once this returns, no send through a [`ReaderEvents`] of
+    /// it enqueues anything.
+    pub fn silence(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+    }
+}
+
+/// What a channel's reader sends through, its exit aside: the shared
+/// pipeline, as long as its workload's [`Voice`] is not silenced.
+#[derive(Clone)]
+pub struct ReaderEvents {
+    events: ChannelEventSender,
+    voice: Arc<Voice>,
+}
+
+impl ReaderEvents {
+    pub(crate) fn new(events: ChannelEventSender, voice: Arc<Voice>) -> Self {
+        Self { events, voice }
+    }
+
+    /// Hand an event on, unless the reader is silenced; whether it was. The
+    /// check and the hand-over are one step against [`Voice::silence`]. A
+    /// dropped event's charge is released with it.
+    pub fn send(&self, event: ChannelEvent) -> bool {
+        let silenced = self.voice.0.lock().unwrap_or_else(|e| e.into_inner());
+        if *silenced {
+            return false;
+        }
+        self.events.send(event);
+        true
+    }
+
+    /// Whether the reader is silenced.
+    pub fn silenced(&self) -> bool {
+        *self.voice.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The pipeline itself, which the reader's exit takes (#1113).
+    pub fn unsilenced(&self) -> &ChannelEventSender {
+        &self.events
+    }
+}
+
 /// Batched output ready to be encoded and sent to the hub.
 pub struct BatchedOutput {
     pub owner: OwnerId,

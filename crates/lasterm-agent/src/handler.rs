@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::batch::{
     batch_loop, BatchedEvent, ChannelEvent, ChannelEventSender, Delivery, EventFrame, OutputEvent,
-    ReplyFrame,
+    ReaderEvents, ReplyFrame,
 };
 use crate::cwd::{CwdTracker, ProcessRead};
 use crate::environment::{self, EnvMode, Platform};
@@ -680,7 +680,7 @@ pub(crate) async fn handle_message(
                     true => match mgr.start_teardown(&channel_id) {
                         Ok(TeardownStart::Signalled { pid }) => {
                             let process = mgr
-                                .remove_torn_down(&channel_id)
+                                .remove_destroyed(&channel_id)
                                 .expect("signalled channel must remain registered until removal");
                             let confirmation =
                                 TeardownConfirmation::new(channel_id.clone(), pid, process);
@@ -688,7 +688,7 @@ pub(crate) async fn handle_message(
                             Some(confirmation)
                         }
                         Ok(TeardownStart::AlreadyExited(outcome)) => {
-                            mgr.remove_torn_down(&channel_id);
+                            mgr.remove_destroyed(&channel_id);
                             log_teardown_outcome(outcome, "DESTROY");
                             None
                         }
@@ -1072,7 +1072,7 @@ async fn handle_spawn(
     // Suppress unused warning — cleanup_path lifetime is managed by schedule_cleanup
     let _ = cleanup_path;
 
-    let spawn_result = loop {
+    let (replaces_destroyed, spawn_result) = loop {
         let mut mgr = pty_manager.lock().await;
         // The exit of the channel that held this id is on its way: it reaches
         // the hub before this SPAWN's answer (#1089).
@@ -1081,7 +1081,13 @@ async fn handle_spawn(
             let _ = routed.changed().await;
             continue;
         }
-        break mgr
+        // A workload the hub destroyed under this id still owes its exit: what
+        // its reader queued before the DESTROY may still be in the pipeline,
+        // and this SPAWN's answer goes after it (#1121).
+        let replaces_destroyed = channel_id
+            .as_deref()
+            .is_some_and(|id| mgr.has_torn_down(id));
+        let result = mgr
             .spawn(
                 owner.clone(),
                 channel_id,
@@ -1093,17 +1099,24 @@ async fn handle_spawn(
                 rows,
             )
             .await;
+        break (replaces_destroyed, result);
     };
 
     match spawn_result {
         Ok((ch_id, pty_pid)) => {
             // Get a reader for the new channel before releasing the broader context
-            let (pty_reader_opt, input_modes) = {
+            let (pty_reader_opt, input_modes, voice) = {
                 let mut mgr = pty_manager.lock().await;
-                (mgr.reader_for(&ch_id), mgr.input_modes_for(&ch_id))
+                (
+                    mgr.reader_for(&ch_id),
+                    mgr.input_modes_for(&ch_id),
+                    mgr.voice_for(&ch_id),
+                )
             };
 
-            if let (Some(pty_reader), Some(input_modes)) = (pty_reader_opt, input_modes) {
+            if let (Some(pty_reader), Some(input_modes), Some(voice)) =
+                (pty_reader_opt, input_modes, voice)
+            {
                 // Create a headless mirror for this channel (not Send — lives in the reader task)
                 let mirror = HeadlessMirror::new(cols, rows, 1000);
                 // Its directory, starting where the agent started it (#834).
@@ -1129,13 +1142,22 @@ async fn handle_spawn(
                 // We clone ch_id so that both the SpawnOk frame and the reader
                 // task receive their own owned copy; the original ch_id is moved
                 // into the reader task call below.
-                send_frame(
-                    &frame_tx,
-                    &AgentToHub::SpawnOk {
-                        request_id,
+                let spawn_ok = AgentToHub::SpawnOk {
+                    request_id,
+                    channel_id: ch_id.clone(),
+                };
+                if replaces_destroyed {
+                    // Down the pipeline, as a reply: after everything the
+                    // destroyed workload's reader queued before its DESTROY,
+                    // which says nothing after it (#1121).
+                    channel_events.send(ChannelEvent::Reply(ReplyFrame {
                         channel_id: ch_id.clone(),
-                    },
-                )?;
+                        frame: encode_frame(&spawn_ok)?,
+                        to: frame_tx.clone(),
+                    }));
+                } else {
+                    send_frame(&frame_tx, &spawn_ok)?;
+                }
                 tracing::info!(
                     channel_id = %ch_id,
                     pid = pty_pid,
@@ -1154,7 +1176,7 @@ async fn handle_spawn(
                     cwd,
                     cmd_rx,
                     cmd_tx,
-                    channel_events,
+                    ReaderEvents::new(channel_events, voice),
                     Arc::clone(&pty_manager),
                     Arc::clone(&cmd_senders),
                 );
@@ -1216,7 +1238,7 @@ fn spawn_reader_task(
     cwd: CwdTracker,
     mut cmd_rx: mpsc::UnboundedReceiver<ChannelCommand>,
     own_cmd_tx: mpsc::UnboundedSender<ChannelCommand>,
-    channel_events: ChannelEventSender,
+    channel_events: ReaderEvents,
     pty_manager: Arc<Mutex<PtyManager>>,
     cmd_senders: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ChannelCommand>>>>,
 ) {
@@ -1231,7 +1253,7 @@ fn spawn_reader_task(
         // it blocks once the PTY's own buffer is full, as on a terminal nobody
         // reads (#553). Snapshots, resizes and titles are still served: only
         // the read waits.
-        let flow = channel_events.flow(&owner);
+        let flow = channel_events.unsilenced().flow(&owner);
         let mut held_back = flow.full();
 
         // A dedicated task reads the terminal's process, so that it never
@@ -1254,6 +1276,8 @@ fn spawn_reader_task(
                 read_result = pty_reader.read(&mut rbuf), if !held_back => {
                     match read_result {
                         Ok(0) | Err(_) => {
+                            #[cfg(test)]
+                            crate::pty::pty_end_released(&channel_id).await;
                             let reason = match &read_result {
                                 Ok(0) => "EOF (0 bytes)".to_string(),
                                 Err(e) => format!("Error: {}", e),
@@ -1387,6 +1411,8 @@ fn spawn_reader_task(
             }
             ReaderWorkload::Gone => {
                 #[cfg(test)]
+                crate::pty::record_receipt(&channel_id, "torn-down");
+                #[cfg(test)]
                 if let Some(delay) = crate::pty::torn_down_delay_of(&channel_id) {
                     tokio::time::sleep(delay).await;
                 }
@@ -1449,7 +1475,16 @@ fn spawn_reader_task(
                 }
             };
             let routed = routed_tx.subscribe();
-            send_ending_exit(&channel_events, &flow, &owner, &channel_id, &msg, routed_tx);
+            send_ending_exit(
+                channel_events.unsilenced(),
+                &flow,
+                &owner,
+                &channel_id,
+                &msg,
+                routed_tx,
+            );
+            #[cfg(test)]
+            crate::pty::record_receipt(&channel_id, "exit-enqueued");
             routed
         };
         // Nothing is ever sent on it: it ends once the exit is routed, or
@@ -1472,7 +1507,7 @@ fn emit_output(
     mirror: &mut HeadlessMirror,
     input_modes: &InputModeCell,
     cwd: &mut CwdTracker,
-    channel_events: &ChannelEventSender,
+    channel_events: &ReaderEvents,
     flow: &Arc<Flow>,
     owner: &OwnerId,
     channel_id: &str,
@@ -1482,13 +1517,23 @@ fn emit_output(
     mirror.process(&data);
     input_modes.store(mirror.input_modes());
 
-    channel_events.send(ChannelEvent::Output(OutputEvent {
+    #[cfg(test)]
+    let printed = crate::pty::output_watched(channel_id, &data);
+    let sent = channel_events.send(ChannelEvent::Output(OutputEvent {
         owner: owner.clone(),
         channel_id: channel_id.to_owned(),
         seq,
         charge: flow.read(data.len()),
         data,
     }));
+    #[cfg(test)]
+    if sent {
+        for text in printed {
+            crate::pty::record_receipt(channel_id, &format!("output:{text}"));
+        }
+    }
+    #[cfg(not(test))]
+    let _ = sent;
 
     if let Some(title) = mirror.take_title_change() {
         let msg = AgentToHub::TitleChange {
@@ -1569,7 +1614,7 @@ async fn poll_process(pid: u32, tx: mpsc::UnboundedSender<Poll>, wake: Arc<tokio
 fn send_cwd(
     tracker: &mut CwdTracker,
     answering: bool,
-    channel_events: &ChannelEventSender,
+    channel_events: &ReaderEvents,
     flow: &Arc<Flow>,
     owner: &OwnerId,
     channel_id: &str,
@@ -1594,14 +1639,14 @@ fn send_cwd(
 /// is sent, after the output the channel sent before it (#549, #127). It is
 /// charged to the owner's flow as output is, and never waits for it (#553).
 fn send_channel_event(
-    channel_events: &ChannelEventSender,
+    channel_events: &ReaderEvents,
     flow: &Arc<Flow>,
     owner: &OwnerId,
     channel_id: &str,
     msg: &AgentToHub,
 ) {
     if let Ok(frame) = encode_frame(msg) {
-        channel_events.send(ChannelEvent::Frame(EventFrame {
+        let _ = channel_events.send(ChannelEvent::Frame(EventFrame {
             owner: owner.clone(),
             channel_id: channel_id.to_owned(),
             charge: flow.read(frame.len()),
@@ -1714,9 +1759,15 @@ fn answer_snapshot(
     request: SnapshotRequest,
     mirror: &HeadlessMirror,
     last_seq: u64,
-    channel_events: &ChannelEventSender,
+    channel_events: &ReaderEvents,
     channel_id: &str,
 ) {
+    // Destroyed: no reply, whatever its screen, and the request is not
+    // reported taken, so an ATTACH is answered as for a terminal gone
+    // (#777, #1121).
+    if channel_events.silenced() {
+        return;
+    }
     let info: SnapshotInfo = mirror.snapshot();
     let snapshot = SnapshotData {
         serialized: info.serialized,
@@ -1742,12 +1793,13 @@ fn answer_snapshot(
     };
     match encode_frame(&msg) {
         Ok(frame) => {
-            channel_events.send(ChannelEvent::Reply(ReplyFrame {
+            if channel_events.send(ChannelEvent::Reply(ReplyFrame {
                 channel_id: channel_id.to_owned(),
                 frame,
                 to: request.to,
-            }));
-            let _ = request.taken.send(());
+            })) {
+                let _ = request.taken.send(());
+            }
         }
         // A screen too large for one frame (`MAX_FRAME_SIZE`): no reply
         // comes, and the hub answers its pane from the spool once it stops
@@ -1943,6 +1995,7 @@ mod restart_identity_tests {
 #[cfg(test)]
 mod stdio_tests {
     use super::*;
+    use crate::batch::Voice;
 
     /// Stdio has nothing to stop but itself, and that is its input's to
     /// decide: STOP is answered with an error, and nothing ends.
@@ -2475,6 +2528,8 @@ mod stdio_tests {
             "the screen must be too large for one frame"
         );
         let (channel_events, mut events) = ChannelEventSender::new(Flows::default());
+        let voice = Arc::new(Voice::default());
+        let reader = ReaderEvents::new(channel_events, Arc::clone(&voice));
         let (to, mut replies) = mpsc::unbounded_channel();
         let (taken, taken_rx) = oneshot::channel();
 
@@ -2483,16 +2538,79 @@ mod stdio_tests {
                 reply: SnapshotReply::Attach {
                     request_id: Some("too-large".into()),
                 },
+                to: to.clone(),
+                taken,
+            },
+            &mirror,
+            1,
+            &reader,
+            "too-large",
+        );
+
+        assert!(taken_rx.await.is_ok(), "the reader takes the request");
+        assert!(
+            events.try_recv().is_err(),
+            "no reply goes down the pipeline"
+        );
+        assert!(replies.try_recv().is_err(), "nor to the connection");
+
+        // Destroyed since: the request is not taken either, so the ATTACH is
+        // answered as for a terminal gone (#1121).
+        voice.silence();
+        let (taken, taken_rx) = oneshot::channel();
+        answer_snapshot(
+            SnapshotRequest {
+                reply: SnapshotReply::Attach {
+                    request_id: Some("too-large-destroyed".into()),
+                },
                 to,
                 taken,
             },
             &mirror,
             1,
-            &channel_events,
+            &reader,
             "too-large",
         );
+        assert!(
+            taken_rx.await.is_err(),
+            "a destroyed terminal's reader does not take the request"
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "no reply goes down the pipeline"
+        );
+        assert!(replies.try_recv().is_err(), "nor to the connection");
+    }
 
-        assert!(taken_rx.await.is_ok(), "the reader takes the request");
+    /// A reader the hub's DESTROY silenced answers no snapshot, and does not
+    /// take the request: the ATTACH is answered as for a terminal gone, not
+    /// left waiting for a reply that never comes (#777, #1121).
+    #[tokio::test]
+    async fn a_silenced_reader_answers_no_snapshot_and_takes_no_request() {
+        let mut mirror = HeadlessMirror::new(80, 24, 0);
+        mirror.process(b"still on screen");
+        let (channel_events, mut events) = ChannelEventSender::new(Flows::default());
+        let voice = Arc::new(Voice::default());
+        voice.silence();
+        let reader = ReaderEvents::new(channel_events, voice);
+        let (to, mut replies) = mpsc::unbounded_channel();
+        let (taken, taken_rx) = oneshot::channel();
+
+        answer_snapshot(
+            SnapshotRequest {
+                reply: SnapshotReply::Attach {
+                    request_id: Some("silenced".into()),
+                },
+                to,
+                taken,
+            },
+            &mirror,
+            1,
+            &reader,
+            "silenced",
+        );
+
+        assert!(taken_rx.await.is_err(), "the request is not taken");
         assert!(
             events.try_recv().is_err(),
             "no reply goes down the pipeline"
@@ -2688,11 +2806,37 @@ mod stdio_tests {
     async fn a_terminal_torn_down_as_the_agent_ends_sends_its_exit_without_a_screen() {
         let manager = Arc::new(Mutex::new(PtyManager::new()));
         let senders: SnapshotSenders = Arc::new(Mutex::new(HashMap::new()));
+        // Its reader handles its PTY's end only once the agent has torn it
+        // down: a daemon's own end does not silence it, since its hub still
+        // records its terminals until the stop is confirmed (#1121).
+        crate::pty::hold_pty_end_of("torn-down");
         let mut events = start_terminal_in("torn-down", None, &manager, &senders).await;
         manager.lock().await.destroy_all().await;
+        crate::pty::release_pty_end_of("torn-down");
 
-        let exit = exit_of(&mut events).await;
+        let mut kinds = Vec::new();
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while let Some(event) = events.recv().await {
+                if let ChannelEvent::Frame(event) = event {
+                    let frame: serde_json::Value =
+                        rmp_serde::from_slice(&event.frame[4..]).unwrap();
+                    let kind = frame["type"].as_str().unwrap_or_default().to_owned();
+                    let text = frame["msg"].as_str().unwrap_or_default().to_owned();
+                    if kind == "CHANNEL_EXIT" {
+                        return frame;
+                    }
+                    kinds.push((kind, text));
+                }
+            }
+            panic!("the terminal's events ended without a CHANNEL_EXIT");
+        })
+        .await
+        .expect("the terminal exits");
         assert!(exit.get("screen").is_none(), "{exit}");
+        assert!(
+            kinds.contains(&("LOG".to_owned(), "PTY closed".to_owned())),
+            "its LOG comes before its exit: {kinds:?}"
+        );
     }
 
     /// The events of one terminal until its LOG `PTY closed`: each OUTPUT's

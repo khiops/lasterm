@@ -442,8 +442,9 @@ export const useChannelsStore = defineStore("channels", () => {
 
 	/**
 	 * The latest index fetch started, and the latest whose response was taken.
-	 * The index never goes back to an older response: it read the hub before a
-	 * newer one, and would drop a channel listed since (#1133). An older response
+	 * Fetches are ordered by when they started here: the hub may answer them in
+	 * any order, and an older request's response must not replace a newer one's
+	 * (#1133), or a channel listed by the newer one drops out. An older response
 	 * still applies while no newer one has, so a newer fetch the hub refused does
 	 * not leave the index stale. Separate from `fetchGeneration`, which belongs
 	 * to a host's list.
@@ -636,8 +637,8 @@ export const useChannelsStore = defineStore("channels", () => {
 			if (!res.ok) return;
 			const rows = (await res.json()) as Array<Record<string, unknown>>;
 			if (!Array.isArray(rows)) return;
-			// After the last await: a newer fetch's response has been taken since,
-			// and it, not this older one, says what the hub lists (#1133).
+			// After the last await: the response of a fetch started later has been
+			// taken, and this older one does not replace it (#1133).
 			if (myIndexGeneration < indexCommittedGeneration) return;
 			indexCommittedGeneration = myIndexGeneration;
 

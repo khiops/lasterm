@@ -435,10 +435,17 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Display titles set here DURING each in-flight index fetch, whether or not a
 	 * list holds the channel. The index is rebuilt from the response, which the
 	 * hub may have read before the title: a title heard since goes over its row
-	 * (#1128). Independent of `statusesDuringFetch`: the index fetch has no
-	 * generation and is not tied to a host list.
+	 * (#1128). Independent of `statusesDuringFetch`: the index fetch is not tied to a
+	 * host list or its generations.
 	 */
 	const indexTitlesDuringFetch = new Set<Map<string, string>>();
+
+	/**
+	 * The latest index fetch started. Only its response may replace the index: an
+	 * older one read the hub before it, and would drop a channel listed since
+	 * (#1133). Separate from `fetchGeneration`, which belongs to a host's list.
+	 */
+	let indexGeneration = 0;
 
 	/**
 	 * A run heard for a channel since the last STATE_SYNC says the hub has it:
@@ -615,6 +622,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	async function fetchChannelIndex(): Promise<void> {
 		if (authStore.token === null) return;
+		const myIndexGeneration = ++indexGeneration;
 		const myTitles = new Map<string, string>();
 		indexTitlesDuringFetch.add(myTitles);
 		try {
@@ -624,6 +632,9 @@ export const useChannelsStore = defineStore("channels", () => {
 			if (!res.ok) return;
 			const rows = (await res.json()) as Array<Record<string, unknown>>;
 			if (!Array.isArray(rows)) return;
+			// After the last await: a newer fetch has started since, and its
+			// response, not this older one, says what the hub lists (#1133).
+			if (indexGeneration !== myIndexGeneration) return;
 
 			const nextIndex = new Map<string, ChannelIndexEntry>();
 			const nextHostMap = new Map(channelHostMap.value);

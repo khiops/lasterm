@@ -571,6 +571,113 @@ describe("useChannelsStore — fetchChannelIndex", () => {
 			});
 		});
 
+		describe("overlapping fetches (#1133)", () => {
+			/** Fetches whose responses wait: `answer(i, rows)` releases the i-th request. */
+			function heldRequests() {
+				const answers: Array<(rows: unknown[]) => void> = [];
+				mockFetch.mockImplementation(
+					() =>
+						new Promise((resolve) => {
+							answers.push((rows) => resolve({ ok: true, json: () => Promise.resolve(rows) }));
+						}),
+				);
+				return answers;
+			}
+
+			it("keeps a channel listed by the newer fetch when the older response resolves last", async () => {
+				const store = useChannelsStore();
+				const answers = heldRequests();
+				const older = store.fetchChannelIndex();
+				const newer = store.fetchChannelIndex();
+				answers[1]?.([row("ch-1", "host-2", "one"), row("ch-new", "host-2", "created")]);
+				await newer;
+				answers[0]?.([row("ch-1", "host-2", "one")]);
+				await older;
+
+				expect(store.channelIndex.get("ch-new")).toEqual({
+					hostId: "host-2",
+					displayTitle: "created",
+				});
+				expect(store.channelHostMap.get("ch-new")).toBe("host-2");
+			});
+
+			it("keeps the newer fetch's metadata when the older response resolves last", async () => {
+				const store = useChannelsStore();
+				const answers = heldRequests();
+				const older = store.fetchChannelIndex();
+				const newer = store.fetchChannelIndex();
+				answers[1]?.([row("ch-1", "host-2", "newer title")]);
+				await newer;
+				answers[0]?.([row("ch-1", "host-2", "older title")]);
+				await older;
+
+				expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("newer title");
+			});
+
+			it("still applies the newest response when the older one resolves first", async () => {
+				const store = useChannelsStore();
+				const answers = heldRequests();
+				const older = store.fetchChannelIndex();
+				const newer = store.fetchChannelIndex();
+				answers[0]?.([row("ch-1", "host-2", "one")]);
+				await older;
+				answers[1]?.([row("ch-1", "host-2", "one"), row("ch-new", "host-2", "created")]);
+				await newer;
+
+				expect([...store.channelIndex.keys()].sort()).toEqual(["ch-1", "ch-new"]);
+			});
+
+			it("applies a title heard during both fetches on the response that is kept", async () => {
+				const store = useChannelsStore();
+				const answers = heldRequests();
+				const older = store.fetchChannelIndex();
+				const newer = store.fetchChannelIndex();
+				store.setDisplayTitle("ch-1", "heard");
+				answers[1]?.([row("ch-1", "host-2", "read before the title")]);
+				await newer;
+				answers[0]?.([row("ch-1", "host-2", "stale")]);
+				await older;
+
+				expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("heard");
+			});
+
+			it("keeps a title heard before the older response is ignored for the newer response that follows", async () => {
+				const store = useChannelsStore();
+				const answers = heldRequests();
+				const older = store.fetchChannelIndex();
+				const newer = store.fetchChannelIndex();
+				store.setDisplayTitle("ch-1", "heard");
+				answers[0]?.([row("ch-1", "host-2", "stale")]);
+				await older;
+				answers[1]?.([row("ch-1", "host-2", "read before the title")]);
+				await newer;
+
+				expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("heard");
+			});
+
+			it("keeps a title heard while only the ignored older fetch was in flight out of the next one", async () => {
+				const store = useChannelsStore();
+				const answers = heldRequests();
+				const older = store.fetchChannelIndex();
+				const newer = store.fetchChannelIndex();
+				answers[1]?.([row("ch-1", "host-2", "one")]);
+				await newer;
+				store.setDisplayTitle("ch-1", "heard late");
+				answers[0]?.([row("ch-1", "host-2", "stale")]);
+				await older;
+
+				mockFetch.mockImplementation(() =>
+					Promise.resolve({
+						ok: true,
+						json: () => Promise.resolve([row("ch-1", "host-2", "hub says")]),
+					}),
+				);
+				await store.fetchChannelIndex();
+
+				expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("hub says");
+			});
+		});
+
 		it("does not carry the title out of a fetch the hub refused", async () => {
 			const store = useChannelsStore();
 			let release!: () => void;

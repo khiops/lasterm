@@ -49,6 +49,7 @@ Layers 3–4 (host and channel profiles) only accept `[terminal]` keys (font, th
 | bell_sound | `"mute"` \| `"system"` \| `"custom"` | `"mute"` | Sound when the terminal receives BEL: none, a generated tone, or `bell_custom_file` |
 | bell_custom_file | string | — | With `bell_sound = "custom"`: a file name in the config dir's `sounds/` (.wav, .mp3, .ogg) |
 | bell_badge | boolean | `true` | Mark the terminal's tab when it receives BEL |
+| record_terminals | boolean | `false` | Record each terminal from its start (a new terminal, a restart), until it ends or Stop saves it as a `.cast` file (#80). Only a boolean counts. Set for every host here, or for one host or one terminal in Settings › Terminal. A recording holds everything the terminal printed, secrets included; it stays on this computer until saved or discarded |
 | scrollbar_markers | boolean | `true` | Mark a search's matches in the terminal's scrollbar. With `[appearance.scrollbar] style = "hidden"`, the gutter kept for them goes too. Settings › Search › Scrollbar Markers, for every host, one host or one terminal |
 | wallpaper | string | `""` | Wallpaper filename (jpg/jpeg/png/webp/gif/avif, max 10 MB) |
 | wallpaper_blur | number (0–20) | `0` | Wallpaper blur in pixels |
@@ -230,6 +231,14 @@ The chords themselves are not configurable yet (#632); Ctrl+/ lists them all.
 |-----|------|---------|-------------|
 | dead_retention_hours | number | `24` | Hours to keep dead channel output before GC (0 = immediate) |
 | max_size_per_channel_mb | number | `10` | Max storage per channel in MB, its last screen snapshot included; the oldest output goes first (STORAGE.md § 7) |
+
+---
+
+### [recording] — Terminal recordings
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| max_total_mb | integer ≥ 1 | `1024` | The most all recordings waiting to be saved may hold, in MB of exported `.cast`. Once reached, no recording starts and the open ones end with a marker; nothing is deleted. Any other value gives the default, with a warning (STORAGE.md § 4.3) |
 
 ---
 

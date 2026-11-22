@@ -45,6 +45,7 @@ installs on your hosts ([below](#on-the-hosts-you-add)):
 | Your terminals: title, shell, command, working directory and the environment changes you set; your launch profiles | `meta.db` |
 | Browser pairings: a hash of each token and of each pairing code, when they were used, and the addresses that used or tried them | `meta.db` |
 | What your terminals print, kept so a screen can be restored when you come back | `spool.db` in the state folder |
+| Recordings you started, or set to start, of what a terminal printed (never what you typed), until you save or discard them; saved, in the file you chose | `spool.db` in the state folder |
 | What the app needs to find and verify its hub: its port, keys and certificate | `runtime.json`, `hub-key`, `hub-tls-key.pem` and `hub-tls-generated-cert.pem` in the state folder; for the desktop app, also `identity\known_hubs.json` in `%LOCALAPPDATA%\lasterm` |
 | Logs | the `logs` folder and the `.log` and `.log.old` files in the state folder |
 | The agents downloaded for your remote hosts | `binaries` in the state folder |

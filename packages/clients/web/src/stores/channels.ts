@@ -432,6 +432,15 @@ export const useChannelsStore = defineStore("channels", () => {
 	const statusesDuringFetch = new Map<number, Map<string, Heard | "deleted">>();
 
 	/**
+	 * Display titles set here DURING each in-flight index fetch, whether or not a
+	 * list holds the channel. The index is rebuilt from the response, which the
+	 * hub may have read before the title: a title heard since goes over its row
+	 * (#1128). Independent of `statusesDuringFetch`: the index fetch has no
+	 * generation and is not tied to a host list.
+	 */
+	const indexTitlesDuringFetch = new Set<Map<string, string>>();
+
+	/**
 	 * A run heard for a channel since the last STATE_SYNC says the hub has it:
 	 * the next fetch must not mark it dead for being absent from that sync
 	 * (#1091). An end heard leaves that check in place.
@@ -606,6 +615,8 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	async function fetchChannelIndex(): Promise<void> {
 		if (authStore.token === null) return;
+		const myTitles = new Map<string, string>();
+		indexTitlesDuringFetch.add(myTitles);
 		try {
 			const res = await hubFetch(`${hubBaseUrl()}/api/channels`, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
@@ -620,7 +631,9 @@ export const useChannelsStore = defineStore("channels", () => {
 				const id = row.id;
 				const rowHostId = row.host_id;
 				if (typeof id !== "string" || typeof rowHostId !== "string") continue;
-				const title = typeof row.display_title === "string" ? row.display_title : "";
+				// Prefer the last title set during this request over the row's (#1128).
+				const title =
+					myTitles.get(id) ?? (typeof row.display_title === "string" ? row.display_title : "");
 				// Whether it runs a command, for a pane over it while another host
 				// is in view: its overlay offers Configure, and it is not restarted
 				// on its own (#574).
@@ -642,6 +655,8 @@ export const useChannelsStore = defineStore("channels", () => {
 		} catch {
 			// An index that could not be read is an index that says nothing; the
 			// tab bar falls back to what it showed before.
+		} finally {
+			indexTitlesDuringFetch.delete(myTitles);
 		}
 	}
 
@@ -991,10 +1006,12 @@ export const useChannelsStore = defineStore("channels", () => {
 	/**
 	 * Update the hub-resolved display title for a channel.
 	 * Called on TITLE_CHANGE, PROCESS_TITLE, ATTACH_OK, and STATE_SYNC.
-	 * Silently ignored if the channel is not loaded yet.
+	 * A channel no list holds is still recorded for index fetches in flight; the index
+	 * itself changes only for a channel it already holds.
 	 */
 	function setDisplayTitle(channelId: string, displayTitle: string): void {
 		titleHeardDuringFetch(channelId, { displayTitle });
+		for (const heardHere of indexTitlesDuringFetch) heardHere.set(channelId, displayTitle);
 		// The index keeps up even for a channel this host does not list, so the
 		// tab still carries the last title it was given after a host switch.
 		const indexed = channelIndex.value.get(channelId);
@@ -1196,6 +1213,13 @@ export const useChannelsStore = defineStore("channels", () => {
 			const next = new Map(pendingStatuses.value);
 			next.delete(msg.channelId);
 			pendingStatuses.value = next;
+		}
+
+		// A creation tells the display title anew, on any host: the titles heard
+		// before it, for an index fetch in flight, go (#1128).
+		for (const heardHere of indexTitlesDuringFetch) {
+			if (msg.displayTitle === undefined) heardHere.delete(msg.channelId);
+			else heardHere.set(msg.channelId, msg.displayTitle);
 		}
 
 		// Ignore channels for other hosts — this client may be viewing a

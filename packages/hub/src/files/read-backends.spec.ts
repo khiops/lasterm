@@ -513,7 +513,7 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 
 		it("reading pauses with its consumer", async () => {
 			harness = await kind.start();
-			writeFileSync(harness.local("huge.bin"), randomBytes(16 * MiB));
+			writeFileSync(harness.local("huge.bin"), randomBytes(32 * MiB));
 			const address = await harness.server.listen({ port: 0, host: "127.0.0.1" });
 			void address;
 			const port = (harness.server.server.address() as AddressInfo).port;
@@ -532,8 +532,14 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 				request.on("error", reject);
 			});
 			await new Promise((resolve) => setTimeout(resolve, 1500));
-			expect(harness.read() - taken).toBeLessThanOrEqual(4 * MiB);
-			expect(harness.read()).toBeGreaterThan(0);
+			const settled = harness.read();
+			await new Promise((resolve) => setTimeout(resolve, 1000));
+			// Reading stopped while the consumer waits.
+			expect(harness.read()).toBe(settled);
+			// The hub's own read-ahead, plus what the system's socket buffers took
+			// (on Linux loopback the send buffer alone may grow to 4 MiB).
+			expect(settled - taken).toBeLessThanOrEqual(8 * MiB);
+			expect(settled).toBeGreaterThan(0);
 		});
 
 		it("a client leaving stops the read", async () => {

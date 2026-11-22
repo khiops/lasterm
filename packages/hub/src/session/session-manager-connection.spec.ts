@@ -1565,6 +1565,34 @@ describe("STOP_ACCEPTED over a remote daemon (#700)", { timeout: 20_000 }, () =>
 	});
 });
 
+describe("A remote daemon that refuses AUTH (#1135)", { timeout: 20_000 }, () => {
+	it("stops dialling until the user connects", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		h.remote.refusesAuth = true;
+		const outcome = h.sm.connectHost(h.host.id, { clientId: h.window.id });
+		if (outcome.kind !== "connecting") throw new Error(`not connecting: ${outcome.kind}`);
+		const connectedOnce = await outcome.done;
+
+		// The first automatic reconnect starts after 1s; allow its whole dial to finish.
+		await new Promise((resolve) => setTimeout(resolve, 1_800));
+		expect(h.remote.connections).toBe(1);
+		expect(connectedOnce).toBe(false);
+		expect(errorsHeard(h)).toContainEqual(
+			expect.objectContaining({
+				code: "AGENT_REFUSED_HUB",
+				message: expect.stringMatching(/^The agent on this host refused this hub\./),
+			}),
+		);
+		expect(h.ctx.userDisconnectedHosts.has(h.host.id)).toBe(true);
+		expect(h.ctx.reconnectTimers.has(h.host.id)).toBe(false);
+
+		h.remote.refusesAuth = false;
+		await connected(h);
+		expect(h.remote.connections).toBe(2);
+		expect(h.ctx.userDisconnectedHosts.has(h.host.id)).toBe(false);
+	});
+});
+
 // ─── Keep the agent left here and connect (#701) ────────────────────────────
 
 /** A host stored No whose daemon a hub left running, with the OS known. */

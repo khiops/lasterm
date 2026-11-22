@@ -440,7 +440,11 @@ export class SessionRecorder {
 		if (active.awaiting !== null) {
 			active.awaiting.held.push(event);
 			active.awaiting.heldBytes += data.byteLength;
-			if (active.awaiting.heldBytes >= SCREEN_HOLD_BYTES) this.abandonWait(active);
+			if (active.awaiting.heldBytes >= SCREEN_HOLD_BYTES) {
+				this.abandonWait(active);
+				// Its block is written now, so no block holds much more than the limit.
+				this.maybeFlush(active);
+			}
 			return;
 		}
 		this.append(active, event);

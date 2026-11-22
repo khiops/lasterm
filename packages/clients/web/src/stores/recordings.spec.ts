@@ -449,6 +449,11 @@ describe("recordings store", () => {
 					store.mergeListed(store.listFetchStarted(), [
 						{ channelId: "ch-new", recordingId: "01RECNEW" },
 					]);
+					// REC shows at once; its details wait for the list.
+					expect(store.open.get("ch-new")).toMatchObject({
+						recordingId: "01RECNEW",
+						detailsPending: true,
+					});
 					await vi.advanceTimersByTimeAsync(150);
 					expect(requests.filter((r) => r === "GET /api/recordings")).toHaveLength(1);
 				} finally {

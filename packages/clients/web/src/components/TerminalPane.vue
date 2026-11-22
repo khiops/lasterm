@@ -221,7 +221,13 @@
 			<button class="context-menu__item" @click="onSplitDown">Split Down</button>
 			<template v-if="openRecording || mayStartRecording">
 				<hr class="context-menu__divider" />
-				<button v-if="openRecording" class="context-menu__item" @click="onStopRecording">
+				<button
+					v-if="openRecording"
+					class="context-menu__item"
+					:disabled="openRecording.detailsPending === true"
+					:title="openRecording.detailsPending ? 'Reading the recording’s details…' : undefined"
+					@click="onStopRecording"
+				>
 					Stop recording and save…
 				</button>
 				<button v-else class="context-menu__item" @click="onStartRecording">Start recording</button>

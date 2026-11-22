@@ -5772,6 +5772,31 @@ describe("TerminalPane recording (#80)", () => {
 		);
 	});
 
+	// AC-UI-SAVE / name: a recording known from a channel row alone has no title
+	// or start time yet. Mutation caught: Save offered with an invented name.
+	it("offers Stop only once the recording's details are read", async () => {
+		await openLive({ setUp: () => useHostsStore().updateSessionStatus(HOST, "active") });
+		useRecordingsStore().open = new Map([
+			[
+				T,
+				{
+					recordingId: REC.recordingId,
+					title: "",
+					hostLabel: "",
+					startedAt: "",
+					detailsPending: true,
+				},
+			],
+		]);
+		await settle();
+		await menu();
+		expect(button("Stop recording and save…")?.disabled).toBe(true);
+		useRecordingsStore().open = new Map([[T, REC]]);
+		await settle();
+		await menu();
+		expect(button("Stop recording and save…")?.disabled).toBe(false);
+	});
+
 	it("offers no Start while the host is disconnected, and Stop still", async () => {
 		await openLive({ setUp: () => useHostsStore().updateSessionStatus(HOST, "disconnected") });
 		await menu();

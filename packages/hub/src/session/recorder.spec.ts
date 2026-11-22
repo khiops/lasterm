@@ -339,6 +339,15 @@ describe("SessionRecorder", () => {
 		});
 
 		// Mutation caught: an unbounded hold (a later screen is then taken and the output dropped).
+		// Mutation caught: the held run left buffered, so the next frame makes a
+		// block well past the limit.
+		it("writes the held run as soon as it reaches 256 KiB", () => {
+			h.at(0);
+			const { id } = startManual(h);
+			h.rec.onOutput(CHANNEL, enc("a".repeat(256 * 1024)));
+			expect(h.dal.lastSeq(id)).toBe(1);
+		});
+
 		it("(e) 256 KiB of output held", () => {
 			h.at(0);
 			const { id, requestId } = startManual(h);
@@ -542,7 +551,9 @@ describe("SessionRecorder", () => {
 		const part = h.rec.exportPart(id);
 		expect(part?.lastSeq).toBe(0);
 		expect(part?.nextSeq).toBeUndefined();
-		expect(part?.body.split("\n").filter(Boolean)).toHaveLength(1);
+		expect(part?.body).toBe(
+			'{"version":3,"term":{"cols":80,"rows":24,"type":"xterm-256color"},"timestamp":1795341600,"title":"build — pi"}\n',
+		);
 	});
 
 	// AC-PARTS. Mutations caught: header repeated; blocks after last_seq served; walking from seq 1.

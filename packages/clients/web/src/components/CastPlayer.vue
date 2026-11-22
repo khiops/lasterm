@@ -97,6 +97,8 @@ const scale = ref(1);
 const markers = ref<Array<{ time: number; label: string }>>([]);
 const playback = shallowRef<CastPlayback | null>(null);
 let current: Terminal | null = null;
+/** The callback of the write the current terminal is parsing, if any. */
+let pendingWrite: (() => void) | null = null;
 let observer: ResizeObserver | null = null;
 /** Set when the player closes: a load still under way stops there. */
 let closed = false;
@@ -173,9 +175,22 @@ function load(cast: ParsedCast): void {
 		createTerminal: (cols, rows) => {
 			const term = newTerminal(cols, rows);
 			return {
-				write: (data, done) => term.write(data, done),
+				write: (data, done) => {
+					pendingWrite = done;
+					term.write(data, () => {
+						if (pendingWrite === done) pendingWrite = null;
+						done();
+					});
+				},
 				resize: (c, r) => term.resize(c, r),
-				dispose: () => term.dispose(),
+				// A write still being parsed settles, so the run it belongs to (made
+				// stale by a seek) ends instead of waiting on a disposed terminal.
+				dispose: () => {
+					const done = pendingWrite;
+					pendingWrite = null;
+					term.dispose();
+					done?.();
+				},
 			};
 		},
 		onTerminal: () => void nextTick(fit),

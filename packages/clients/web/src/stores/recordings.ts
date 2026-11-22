@@ -27,6 +27,11 @@ export interface OpenRecording {
 	title: string;
 	hostLabel: string;
 	startedAt: string;
+	/**
+	 * Known from a channel row alone: its title and start time come with the
+	 * recordings list, read now. Until then a save would suggest a wrong name.
+	 */
+	detailsPending?: true;
 }
 
 interface SocketLike {
@@ -289,6 +294,7 @@ export const useRecordingsStore = defineStore("recordings", () => {
 		if (start.lifetime !== lifetime) return;
 		let unknown = false;
 		const map = open.value;
+		const byId = new Map(rows.value.map((r) => [r.id, r]));
 		for (const { channelId, recordingId } of listed) {
 			if ((heard.get(channelId) ?? 0) !== (start.heard.get(channelId) ?? 0)) continue;
 			if (recordingId === null) {
@@ -296,14 +302,24 @@ export const useRecordingsStore = defineStore("recordings", () => {
 				continue;
 			}
 			if (map.get(channelId)?.recordingId === recordingId) continue;
-			const row = rows.value.find((r) => r.id === recordingId);
+			const row = byId.get(recordingId);
+			if (row === undefined) {
+				map.set(channelId, {
+					recordingId,
+					title: "",
+					hostLabel: "",
+					startedAt: "",
+					detailsPending: true,
+				});
+				unknown = true;
+				continue;
+			}
 			map.set(channelId, {
 				recordingId,
-				title: row?.title ?? "",
-				hostLabel: row?.host_label ?? "",
-				startedAt: row?.started_at ?? new Date().toISOString(),
+				title: row.title,
+				hostLabel: row.host_label,
+				startedAt: row.started_at,
 			});
-			if (row === undefined) unknown = true;
 		}
 		if (unknown) refreshSoon();
 	}

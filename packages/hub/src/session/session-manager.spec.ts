@@ -12181,6 +12181,26 @@ describe("SessionManager recordings (#80)", () => {
 		});
 	});
 
+	// A failed end is written at the next GC pass, through the hub's own GC.
+	// Mutation caught: the GC built without the recorder's retry before each pass.
+	it("writes a recording's failed end at the next GC pass", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		const { RecordingsDAL } = await import("../storage/recordings.js");
+		const end = vi.spyOn(RecordingsDAL.prototype, "end").mockImplementationOnce(() => {
+			throw Object.assign(new Error("full"), { code: "SQLITE_FULL" });
+		});
+		try {
+			sm.recorder.stop(started.id);
+			expect(new RecordingsDAL(dbManager.spool).get(started.id)?.endedAt).toBeNull();
+			await (sm as unknown as { gc: { collect: () => Promise<unknown> } }).gc.collect();
+			expect(new RecordingsDAL(dbManager.spool).get(started.id)?.endReason).toBe("stopped");
+		} finally {
+			end.mockRestore();
+		}
+	});
+
 	// AC-REC-AUTO-RESTART / respawn and respawn-fails.
 	it("ends a recording when a reconnection spawns its terminal again, whatever the answer", async () => {
 		await hubWithToml("[terminal]\nrecord_terminals = true\n");

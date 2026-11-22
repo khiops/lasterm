@@ -70,6 +70,8 @@ let app: App | null = null;
 let root: HTMLElement;
 const columns = ref(1);
 const badgeSize = ref<HostRailBadgeSize>("medium");
+const recordingCount = ref(0);
+const recordingsFull = ref(false);
 
 function mountRail(options: { columns?: number; badgeSize?: HostRailBadgeSize } = {}) {
 	columns.value = options.columns ?? 1;
@@ -84,7 +86,13 @@ function mountRail(options: { columns?: number; badgeSize?: HostRailBadgeSize } 
 	root = document.createElement("div");
 	document.body.appendChild(root);
 	app = createApp({
-		render: () => h(HostRail, { columns: columns.value, badgeSize: badgeSize.value }),
+		render: () =>
+			h(HostRail, {
+				columns: columns.value,
+				badgeSize: badgeSize.value,
+				recordingCount: recordingCount.value,
+				recordingsFull: recordingsFull.value,
+			}),
 	});
 	app.use(pinia);
 	app.mount(root);
@@ -94,6 +102,8 @@ function mountRail(options: { columns?: number; badgeSize?: HostRailBadgeSize } 
 let pinia: ReturnType<typeof createPinia>;
 
 beforeEach(() => {
+	recordingCount.value = 0;
+	recordingsFull.value = false;
 	localStorage.clear();
 	pinia = createPinia();
 	setActivePinia(pinia);
@@ -573,6 +583,19 @@ describe("HostRail footer", () => {
 			["Open settings panel"],
 			["Add new host"],
 		]);
+	});
+
+	// AC-UI-LIST (#80): the Recordings button, its count, and "full". Mutation caught: a badge that does not follow the count.
+	it("shows a Recordings button with their count while recordings wait", async () => {
+		mountRail({ columns: 1 });
+		expect(footerRows().flat()).not.toContain("Recordings, 2 waiting");
+		recordingCount.value = 2;
+		await nextTick();
+		expect(footerRows()[0]).toEqual(["Recordings, 2 waiting"]);
+		expect(root.querySelector(".rail-rec-badge")?.textContent?.trim()).toBe("2");
+		recordingsFull.value = true;
+		await nextTick();
+		expect(root.querySelector(".rail-rec-badge")?.textContent?.trim()).toBe("full");
 	});
 
 	it("wraps its buttons in the same rows as the badges", async () => {

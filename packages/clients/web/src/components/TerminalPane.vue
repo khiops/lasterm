@@ -8,6 +8,11 @@
 			@dragend="onDragEnd"
 		>
 			<span class="pane-title">{{ paneTitle }}</span>
+			<!-- Its terminal is being recorded (#80): visible as long as it lasts. -->
+			<span v-if="openRecording" class="pane-rec" role="status" title="This terminal is being recorded">
+				<span class="pane-rec__dot" aria-hidden="true" />
+				<span>REC</span>
+			</span>
 			<!-- Its terminal's uploads (#837), then its files (#836), left of the lock; only while
 			     file transfer is on. -->
 			<TransferChip :channel-id="effectiveChannelId" />
@@ -214,6 +219,13 @@
 		>
 			<button class="context-menu__item" @click="onSplitRight">Split Right</button>
 			<button class="context-menu__item" @click="onSplitDown">Split Down</button>
+			<template v-if="openRecording || mayStartRecording">
+				<hr class="context-menu__divider" />
+				<button v-if="openRecording" class="context-menu__item" @click="onStopRecording">
+					Stop recording and save…
+				</button>
+				<button v-else class="context-menu__item" @click="onStartRecording">Start recording</button>
+			</template>
 			<template v-if="configStore.fileTransferEnabled">
 				<hr class="context-menu__divider" />
 				<button class="context-menu__item context-menu__item--shortcut" @click="onShowFiles">
@@ -256,6 +268,7 @@ import { type InterruptedSpawnError, SPAWN_INTERRUPTED, useChannelsStore } from 
 import { useConfigStore } from '../stores/config.js';
 import { useFilesPanelStore } from '../stores/files-panel.js';
 import { useHostsStore } from '../stores/hosts.js';
+import { useRecordingsStore } from '../stores/recordings.js';
 import { useNotificationStore } from '../stores/notifications.js';
 import { useSessionStore } from '../stores/session.js';
 import { useWriteLockStore } from '../stores/writelock.js';
@@ -1735,6 +1748,41 @@ function onSplitDown(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Recording (#80)
+// ---------------------------------------------------------------------------
+
+const recordings = useRecordingsStore();
+
+/** Its terminal's open recording, if any. */
+const openRecording = computed(() => {
+	const chId = effectiveChannelId.value;
+	return chId === null ? undefined : recordings.open.get(chId);
+});
+
+/** A running terminal whose host is connected can start a recording. */
+const mayStartRecording = computed(() => {
+	const chId = effectiveChannelId.value;
+	const hostId = paneHostId.value;
+	if (chId === null || hostId === undefined) return false;
+	if (isDead.value || hasEnded.value || isGone.value || notConnected.value !== null) return false;
+	return hostsStore.isHostConnected(hostId);
+});
+
+function onStartRecording(): void {
+	contextMenuVisible.value = false;
+	const chId = effectiveChannelId.value;
+	if (chId !== null) void recordings.start(chId);
+}
+
+/** The save dialog opens in this click, before any request. */
+function onStopRecording(): void {
+	contextMenuVisible.value = false;
+	const rec = openRecording.value;
+	if (rec === undefined) return;
+	void recordings.save({ id: rec.recordingId, title: rec.title, startedAt: rec.startedAt }, true);
+}
+
+// ---------------------------------------------------------------------------
 // Uploads (#837)
 // ---------------------------------------------------------------------------
 
@@ -2118,6 +2166,29 @@ function onDragEnd(): void {
 
 .pane-lock {
 	flex-shrink: 0;
+}
+
+.pane-rec {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 8px;
+	margin-right: 6px;
+	border-radius: 4px;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	color: var(--nt-red, #e06c75);
+	background: rgba(0, 0, 0, 0.2);
+	user-select: none;
+	flex-shrink: 0;
+}
+
+.pane-rec__dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--nt-red, #e06c75);
 }
 
 .terminal-container {

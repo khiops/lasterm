@@ -23,6 +23,7 @@ import { useChannelsStore } from "../stores/channels.js";
 import { useConfigStore } from "../stores/config.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
+import { useRecordingsStore } from "../stores/recordings.js";
 import { useSessionStore } from "../stores/session.js";
 import { contrastRatio, TEXT_CONTRAST_AA, useThemeStore } from "../stores/theme.js";
 import { useToastStore } from "../stores/toast.js";
@@ -5528,5 +5529,62 @@ describe("TerminalPane asking before a paste of several lines (#1015)", () => {
 		useChannelsStore().selectChannel(T);
 		await settle();
 		expect(document.activeElement).toBe(pasteCard());
+	});
+});
+
+// ─── Recording (#80) ─────────────────────────────────────────────────────────
+
+describe("TerminalPane recording (#80)", () => {
+	const REC = {
+		recordingId: "01K80REC000000000000000000",
+		title: "build",
+		hostLabel: "pi",
+		startedAt: "2026-11-22T10:00:00.000Z",
+	};
+
+	async function menu(): Promise<void> {
+		root
+			.querySelector(".terminal-pane")
+			?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+		await settle();
+	}
+
+	const recMark = () => root.querySelector(".pane-rec");
+
+	// AC-UI-MENU. Mutation caught: a Start offered for an ended terminal, or by `status === "live"` alone.
+	it("offers Start on a running terminal whose host is connected", async () => {
+		await openLive({ setUp: () => useHostsStore().updateSessionStatus(HOST, "active") });
+		const start = vi.spyOn(useRecordingsStore(), "start").mockResolvedValue();
+		expect(recMark()).toBeNull();
+		await menu();
+		expect(button("Stop recording and save…")).toBeUndefined();
+		button("Start recording")?.click();
+		expect(start).toHaveBeenCalledWith(T);
+	});
+
+	it("shows REC and offers Stop on a recorded terminal", async () => {
+		await openLive({ setUp: () => useHostsStore().updateSessionStatus(HOST, "active") });
+		useRecordingsStore().open = new Map([[T, REC]]);
+		await settle();
+		expect(recMark()?.textContent?.trim()).toBe("REC");
+		await menu();
+		expect(button("Start recording")).toBeUndefined();
+		expect(button("Stop recording and save…")).toBeDefined();
+	});
+
+	it("offers no Start while the host is disconnected, and Stop still", async () => {
+		await openLive({ setUp: () => useHostsStore().updateSessionStatus(HOST, "disconnected") });
+		await menu();
+		expect(button("Start recording")).toBeUndefined();
+		useRecordingsStore().open = new Map([[T, REC]]);
+		await settle();
+		await menu();
+		expect(button("Stop recording and save…")).toBeDefined();
+	});
+
+	it("offers no Start on an ended terminal", async () => {
+		await openEnded({ setUp: () => useHostsStore().updateSessionStatus(HOST, "active") });
+		await menu();
+		expect(button("Start recording")).toBeUndefined();
 	});
 });

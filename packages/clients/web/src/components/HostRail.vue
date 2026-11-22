@@ -209,6 +209,30 @@
 						</svg>
 					</button>
 					<button
+						v-else-if="action === 'recordings'"
+						class="rail-icon-btn rail-rec-btn"
+						:title="recordingsFull ? 'Recordings: full' : `Recordings: ${recordingCount} waiting`"
+						:aria-label="recordingsFull ? 'Recordings, full' : `Recordings, ${recordingCount} waiting`"
+						@click="$emit('open-recordings')"
+					>
+						<svg
+							class="rail-icon-svg"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+							aria-hidden="true"
+						>
+							<circle cx="12" cy="12" r="9" />
+							<circle cx="12" cy="12" r="3.5" fill="currentColor" />
+						</svg>
+						<span class="rail-rec-badge" :class="{ 'rail-rec-badge--full': recordingsFull }">{{
+							recordingsFull ? "full" : recordingCount
+						}}</span>
+					</button>
+					<button
 						v-else-if="action === 'settings'"
 						class="rail-icon-btn"
 						:title="SETTINGS_TOOLTIP"
@@ -278,14 +302,18 @@ const props = withDefaults(
 		/** Badges to a row; more than one makes the rail a grid (#623). */
 		columns?: number;
 		badgeSize?: HostRailBadgeSize;
+		/** Recordings waiting to be saved (#80): their button shows only while there are some. */
+		recordingCount?: number;
+		recordingsFull?: boolean;
 	}>(),
-	{ columns: 1, badgeSize: "medium" },
+	{ columns: 1, badgeSize: "medium", recordingCount: 0, recordingsFull: false },
 );
 
 const emit = defineEmits<{
 	"toggle-settings": [];
 	"toggle-palette": [];
 	"add-host": [];
+	"open-recordings": [];
 	"add-group": [];
 	"rail-context-menu": [payload: { x: number; y: number }];
 	"host-context-menu": [payload: { hostId: string; event: MouseEvent }];
@@ -410,7 +438,12 @@ const FOOTER_ACTIONS = ["palette", "settings", "add-host"] as const;
 // The footer's shortcuts, from the table the window runs them from (#631, #637).
 const PALETTE_TOOLTIP = `Command palette (${shortcutLabel("palette.open")})`;
 const SETTINGS_TOOLTIP = `Settings (${shortcutLabel("settings.open")})`;
-const footerRows = computed(() => chunkIntoRows(FOOTER_ACTIONS, props.columns));
+const footerRows = computed(() =>
+	chunkIntoRows(
+		props.recordingCount > 0 ? (["recordings", ...FOOTER_ACTIONS] as const) : FOOTER_ACTIONS,
+		props.columns,
+	),
+);
 
 /**
  * Whether this host is served by an agent from before an update.
@@ -1103,4 +1136,28 @@ onMounted(() => {
 	margin-top: -1px; /* optical centering */
 }
 
+
+.rail-rec-btn {
+	position: relative;
+}
+
+.rail-rec-badge {
+	position: absolute;
+	top: -2px;
+	right: -4px;
+	min-width: 14px;
+	padding: 0 3px;
+	border-radius: 7px;
+	font-size: 9px;
+	font-weight: 600;
+	line-height: 14px;
+	text-align: center;
+	color: #fff;
+	background: var(--nt-red, #e06c75);
+	font-variant-numeric: tabular-nums;
+}
+
+.rail-rec-badge--full {
+	padding: 0 4px;
+}
 </style>

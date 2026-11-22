@@ -21,6 +21,7 @@ import { useFilesPanelStore } from "./files-panel.js";
 import { useHostVerifyStore } from "./host-verify.js";
 import { useHostsStore } from "./hosts.js";
 import { useNotificationStore } from "./notifications.js";
+import { useRecordingsStore } from "./recordings.js";
 import { useThemeStore } from "./theme.js";
 import { useToastStore } from "./toast.js";
 import { useTransfersStore } from "./transfers.js";
@@ -182,6 +183,8 @@ export const useSessionStore = defineStore("session", () => {
 		_registerFilesPanelHandlers(useFilesPanelStore());
 		// Uploads (#837): their answers, progress, conflicts and ends.
 		useTransfersStore().registerHandlers(wsClient);
+		// Recordings (#80): which terminals record, for their REC mark.
+		useRecordingsStore().registerHandlers(wsClient);
 
 		// Authenticate immediately after connecting
 		await _authenticate();
@@ -224,6 +227,8 @@ export const useSessionStore = defineStore("session", () => {
 					hubEchoesSpawnRequestId.value = msg.echoesSpawnRequestId === true;
 					authenticated.value = true;
 					authFailed.value = false;
+					// A start or end missed while the socket was down, on any host (#80).
+					void useRecordingsStore().refresh();
 					resolve();
 				}
 			});

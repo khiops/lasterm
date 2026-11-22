@@ -108,7 +108,11 @@
 			@close="railContextMenu = null"
 			@add-host="showHostModal = true"
 			@add-group="onAddGroupFromRail"
+			@open-recordings="showRecordings = true"
 		/>
+
+		<!-- Recordings waiting to be saved, and the player (#80) -->
+		<RecordingsModal v-if="showRecordings" @close="showRecordings = false" />
 
 		<!-- Rename group dialog -->
 		<GroupActionDialog
@@ -245,6 +249,9 @@
 				@toggle-settings="showSettings = !showSettings"
 				@toggle-palette="commandPalette.toggle()"
 				@add-host="showHostModal = true"
+				:recording-count="recordingsStore.rows.length"
+				:recordings-full="recordingsStore.capBytes > 0 && recordingsStore.usedBytes >= recordingsStore.capBytes"
+				@open-recordings="showRecordings = true"
 				@rail-context-menu="onRailContextMenu"
 				@host-context-menu="onHostContextMenu"
 				@group-context-menu="onGroupContextMenu"
@@ -427,6 +434,8 @@ import PairingCodeGenerator from './components/PairingCodeGenerator.vue';
 import PairingScreen from './components/PairingScreen.vue';
 import PaneLayout from './components/PaneLayout.vue';
 import RailContextMenu from './components/RailContextMenu.vue';
+import RecordingsModal from './components/RecordingsModal.vue';
+import { useRecordingsStore } from './stores/recordings.js';
 import SidebarContextMenu from './components/SidebarContextMenu.vue';
 import SettingsPanel from './components/settings/SettingsPanel.vue';
 import TabBar from './components/TabBar.vue';
@@ -1011,6 +1020,8 @@ const groupContextMenu = ref<{
 	y: number;
 } | null>(null);
 const railContextMenu = ref<{ x: number; y: number } | null>(null);
+const showRecordings = ref(false);
+const recordingsStore = useRecordingsStore();
 // Create host-group dialog
 const createGroupDialogVisible = ref(false);
 // ID of the group being renamed/deleted

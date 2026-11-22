@@ -54,6 +54,13 @@
 			/>
 			<span v-else class="tab__label" @dblclick="startRename(tab.id)">{{ getTabLabel(tab.id) }}</span>
 			<span
+				v-if="recordings.open.has(getActiveChannelId(tab.id) ?? '')"
+				class="tab__rec-dot"
+				role="img"
+				aria-label="Recording"
+				title="This terminal is being recorded"
+			></span>
+			<span
 				v-if="notificationStore.activityDots.get(getActiveChannelId(tab.id) ?? '') && idx !== activeTabIndex"
 				class="tab__activity-dot"
 				aria-label="New activity"
@@ -133,6 +140,7 @@ import { useChannelsStore } from "../stores/channels.js";
 import { useConfigStore } from "../stores/config.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
+import { useRecordingsStore } from "../stores/recordings.js";
 import { shortcutLabel, TAB_NUMBERS } from "../utils/app-shortcuts.js";
 import { listMove } from "../utils/focus-zones.js";
 import { tabToSwitchTo } from "../utils/tab-switch.js";
@@ -143,6 +151,7 @@ const channelsStore = useChannelsStore();
 const configStore = useConfigStore();
 const hostsStore = useHostsStore();
 const notificationStore = useNotificationStore();
+const recordings = useRecordingsStore();
 
 // Profile dropdown state
 const profileDropdownVisible = ref(false);
@@ -709,6 +718,14 @@ function onTabDragEnd(): void {
    nobody can tell apart. */
 .tab--host-edge {
 	box-shadow: inset 0 2px 0 0 var(--tab-host-color, var(--nt-accent));
+}
+
+.tab__rec-dot {
+	flex-shrink: 0;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--nt-red, #e06c75);
 }
 
 .tab__activity-dot {

@@ -4,6 +4,7 @@ mod charsets;
 mod color_veto;
 mod cwd;
 mod daemon;
+mod detach;
 mod elevation;
 mod environment;
 mod expand;
@@ -21,6 +22,7 @@ mod platform_dirs;
 mod process;
 mod protocol;
 mod pty;
+mod relay;
 mod report_directory;
 mod shell;
 #[cfg(unix)]
@@ -54,6 +56,29 @@ struct Cli {
     /// Stop the process described by the matching local daemon record. This does not prove that process still owns the endpoint. Unix requests graceful shutdown; Windows terminates it, so no exit record is written. Prints `stopped`, or `not running` when no record names a live process and nothing listens on the endpoint (a record whose process is gone is removed); both exit 0. This does not check for a hub; a live hub may relaunch it.
     #[arg(long, conflicts_with_all = ["daemon", "stdio"])]
     stop: bool,
+
+    /// Relay this process's stdin and stdout to a running daemon's socket, or
+    /// named pipe on Windows, and nothing else: how a hub reaches a remote
+    /// daemon where its SSH server carries no channel to that endpoint (#755).
+    /// Connects to `--socket`, else the channel's default endpoint. stderr
+    /// carries `lasterm-attach:` lines, and a plain line saying why after a
+    /// failure; the exit status is 0 once a
+    /// connection ended, 3 when nothing listens, 4 when the endpoint refused
+    /// this account, 6 when a pipe stayed busy, 1 otherwise.
+    #[arg(long, conflicts_with_all = ["daemon", "stdio", "stop"])]
+    attach: bool,
+
+    /// Windows only: start the daemon outside this SSH session's job, so that
+    /// it outlives the connection, then exit without running it here (#755).
+    /// stderr carries one `lasterm-detach:` line; the exit status is 0 once
+    /// started, 5 when the session's job forbids it, 1 otherwise.
+    #[arg(long, requires = "daemon")]
+    detach: bool,
+
+    /// Milliseconds `--attach` keeps trying an endpoint nothing listens on yet,
+    /// for a daemon that is still starting. 0 tries once.
+    #[arg(long, value_name = "MS", default_value_t = 0, requires = "attach")]
+    wait: u64,
 
     /// Agent tracing level from the shared [logging] contract
     #[arg(long = "log-level", value_enum, default_value = "info")]
@@ -198,6 +223,19 @@ async fn stop_requested_by_hub(requests: &mut tokio::sync::watch::Receiver<bool>
     }
 }
 
+/// `--detach` is a usage error outside Windows: a POSIX launch detaches
+/// through the shell (`setsid`, `nohup`).
+fn refuse_detach_off_windows(cli: &Cli, windows: bool) -> Result<(), clap::Error> {
+    if cli.detach && !windows {
+        use clap::CommandFactory;
+        return Err(Cli::command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            detach::POSIX_REFUSAL,
+        ));
+    }
+    Ok(())
+}
+
 fn daemon_process_exit_status(result: &std::io::Result<pty::DestroyAllSummary>) -> i32 {
     match result {
         Ok(summary) => daemon::teardown_exit_status(summary),
@@ -223,9 +261,34 @@ fn main() -> std::io::Result<()> {
 async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
     // Parse CLI args
     let cli = Cli::parse();
+    if let Err(error) = refuse_detach_off_windows(&cli, cfg!(windows)) {
+        error.exit();
+    }
     // Before anything resolves a directory: the log, the records, auth.json.
     platform_dirs::set_channel(cli.channel);
     let logging_config = LoggingConfig::from(&cli);
+
+    // The relay logs nothing: its stderr carries the outcome lines a hub reads,
+    // and nothing else may land between them (#755).
+    if cli.attach {
+        let socket = cli.socket;
+        let status = relay::run(
+            move || match socket {
+                Some(socket) => Ok(socket),
+                None => default_socket_path(),
+            },
+            std::time::Duration::from_millis(cli.wait),
+        )
+        .await;
+        std::process::exit(status);
+    }
+
+    // Like the relay, the launcher logs nothing: its stderr carries the
+    // outcome line a hub reads. The daemon it starts logs as usual.
+    #[cfg(windows)]
+    if cli.detach {
+        std::process::exit(detach::run());
+    }
 
     init_tracing(logging_config, cli.daemon)?;
 
@@ -706,6 +769,38 @@ mod tests {
         assert_eq!(stop.channel, platform_dirs::Channel::Dev);
         let none = Cli::try_parse_from(["lasterm-agent", "--daemon"]).unwrap();
         assert_eq!(none.channel, platform_dirs::Channel::Release);
+    }
+
+    // #755 AC-R8: the relay is a mode of its own. Mutation: a dropped
+    // `conflicts_with_all`.
+    #[test]
+    fn attach_conflicts_with_the_other_modes() {
+        for other in ["--daemon", "--stdio", "--stop"] {
+            let parsed = Cli::try_parse_from(["lasterm-agent", "--attach", other]);
+            assert!(parsed.is_err(), "--attach {other} was accepted");
+        }
+        assert!(Cli::try_parse_from(["lasterm-agent", "--wait", "5"]).is_err());
+        let attach = Cli::try_parse_from(["lasterm-agent", "--attach", "--wait", "5"]).unwrap();
+        assert!(attach.attach);
+        assert_eq!(attach.wait, 5);
+    }
+
+    // #755: `--detach` belongs to `--daemon`, and only Windows takes it
+    // (AC-D3). Mutation: a POSIX agent accepting it.
+    #[test]
+    fn detach_is_a_windows_daemon_flag() {
+        assert!(Cli::try_parse_from(["lasterm-agent", "--detach"]).is_err());
+        let cli = Cli::try_parse_from(["lasterm-agent", "--daemon", "--detach"]).unwrap();
+        assert!(cli.detach);
+        assert!(refuse_detach_off_windows(&cli, true).is_ok());
+        let error = refuse_detach_off_windows(&cli, false).expect_err("POSIX refuses --detach");
+        assert_eq!(error.exit_code(), 2);
+        assert!(
+            error
+                .to_string()
+                .contains("--detach is for Windows; a POSIX launch detaches through the shell"),
+            "{error}"
+        );
     }
 
     #[test]

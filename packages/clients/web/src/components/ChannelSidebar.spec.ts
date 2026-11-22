@@ -9,6 +9,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick } from "vue";
 import { useChannelsStore } from "../stores/channels.js";
+import { useConfigStore } from "../stores/config.js";
 import { useThemeStore } from "../stores/theme.js";
 import ChannelSidebar from "./ChannelSidebar.vue";
 
@@ -165,5 +166,23 @@ describe("ChannelSidebar keyboard", () => {
 		mark.remove();
 		expect(outline("o1")).toBe(ring);
 		expect(outline("o2")).not.toBe(ring);
+	});
+});
+
+// The setting that names the ungrouped bucket (#937).
+describe("ChannelSidebar, the ungrouped group's name", () => {
+	const headers = (): string[] =>
+		[...root.querySelectorAll(".group-header__name")].map((el) => el.textContent?.trim() ?? "");
+
+	it("reads channels.defaultGroupName", async () => {
+		mountSidebar();
+		useConfigStore(pinia).uiConfig = { channels: { defaultGroupName: "Misc" } } as never;
+		await nextTick();
+		expect(headers()).toEqual(["ops", "Misc"]);
+	});
+
+	it("reads General when the setting is unset", () => {
+		mountSidebar();
+		expect(headers()).toEqual(["ops", "General"]);
 	});
 });

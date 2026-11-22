@@ -296,6 +296,10 @@ export class MetaDAL {
 		return this.channels.listChannelsOnHost(hostId);
 	}
 
+	listDeadChannelIds(hostId?: string): string[] {
+		return this.channels.listDeadChannelIds(hostId);
+	}
+
 	/** `endReason` with `dead` only, when the hub ended it itself (#592). */
 	updateChannelStatus(
 		id: string,

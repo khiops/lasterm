@@ -243,10 +243,10 @@ export interface SharedSessionContext {
 	userDisconnectedHosts: Set<string>;
 	/**
 	 * Hosts whose SSH server refused the socket forwarding a remote daemon is
-	 * reached through (#765), each with the route it was seen on. The hub does
-	 * not try that host's daemon again, which would start one only to stop it,
-	 * until the route changes or a person's Connect or Reconnect asks it to. Kept in
-	 * memory only: a hub that restarts tries again.
+	 * reached through (#765), each with the route it was seen on. The hub
+	 * reaches that host's daemon through the relay from the start (#755) until
+	 * the route changes or a person's Connect or Reconnect asks the server
+	 * again. Kept in memory only: a hub that restarts tries again.
 	 */
 	socketForwardingRefusals: import("./remote-daemon.js").SocketForwardingRefusals;
 	/**

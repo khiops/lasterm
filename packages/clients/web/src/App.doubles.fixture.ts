@@ -49,6 +49,8 @@ export interface ChannelRow {
 	 * this one (`CLIENT_HERE`) unless another is named.
 	 */
 	writer?: string;
+	/** Whether it is its host's welcome terminal. */
+	welcome?: boolean;
 }
 
 /** The client id the hub gives the window under test. */
@@ -261,6 +263,14 @@ export class FakeHub {
 				this.channels.filter((c) => hostId === null || c.hostId === hostId).map(channelListing),
 			);
 		}
+		if (method === "DELETE" && path === "/api/channels/dead") {
+			const hostId = (body as { host_id?: string } | undefined)?.host_id;
+			const purged = this.channels
+				.filter((c) => c.status === "dead" && (hostId === undefined || c.hostId === hostId))
+				.map((c) => c.id);
+			this.channels = this.channels.filter((c) => !purged.includes(c.id));
+			return json({ ok: true, purged: purged.length, purged_ids: purged });
+		}
 		if (method === "DELETE" && parts[1] === "channels" && parts.length === 3) {
 			this.channels = this.channels.filter((c) => c.id !== parts[2]);
 			return json({ ok: true });
@@ -361,6 +371,7 @@ function channelListing(channel: ChannelRow): Record<string, unknown> {
 		updated_at: AT,
 		display_title: channel.title ?? channel.id.slice(-4),
 		...(channel.status === "dead" && { exit_code: 1 }),
+		...(channel.welcome === true && { is_welcome: true }),
 	};
 }
 

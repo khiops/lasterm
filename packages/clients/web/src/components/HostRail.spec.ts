@@ -334,6 +334,31 @@ describe("HostRail tooltip (#731)", () => {
 		await nextTick();
 		expect(groupLine("a")).toBe("Group: Live");
 	});
+	it("says an agent behind a refused socket forwarding is reached through a relay (#755)", async () => {
+		const { hostsStore } = mountRail();
+		hostsStore.rememberSocketForwardingRefused("a", true);
+		await nextTick();
+		const lines = badge("a").getAttribute("title")?.split("\n") ?? [];
+		expect(lines).toContain("Socket forwarding refused: agent reached through a relay");
+		expect(lines.join(" ")).not.toMatch(/end with the connection/);
+	});
+
+	// #755 AC-W2 / tooltip. Mutation: a tooltip that keeps the note once cleared.
+	it("says a Windows host keeps no daemon while the hub says so, and not after", async () => {
+		const { hostsStore } = mountRail();
+		const said =
+			"This host does not let Lasterm keep its agent running (this SSH session's job does not allow a process to break away; the daemon would end with the connection); its terminals run over the connection and end with it.";
+		hostsStore.rememberRemoteDaemonUnavailable(
+			"a",
+			"this SSH session's job does not allow a process to break away; the daemon would end with the connection",
+		);
+		await nextTick();
+		expect(badge("a").getAttribute("title")?.split("\n")).toContain(said);
+
+		hostsStore.rememberRemoteDaemonUnavailable("a", undefined);
+		await nextTick();
+		expect(badge("a").getAttribute("title")?.split("\n")).not.toContain(said);
+	});
 });
 
 describe("HostRail mark of an agent from before an update (#805)", () => {

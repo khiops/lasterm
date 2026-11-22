@@ -9,6 +9,8 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, type Component, createApp, h, nextTick, ref } from "vue";
 import { useChannelsStore } from "../stores/channels.js";
+import { useConfigStore } from "../stores/config.js";
+import { useHostsStore } from "../stores/hosts.js";
 import { useThemeStore } from "../stores/theme.js";
 import { shortcutLabel } from "../utils/app-shortcuts.js";
 import TabBar from "./TabBar.vue";
@@ -475,5 +477,66 @@ describe("TabBar, when a tab closes under the menu or a drag", () => {
 		await closeTabs("t2");
 		tab("t1").dispatchEvent(dragEvent("drop", data, -1));
 		expect(reorderTab).not.toHaveBeenCalled();
+	});
+});
+
+// Settings that act on the bar (#937): each is read where the bar draws.
+describe("TabBar, with the tabs settings changed", () => {
+	const closeButtons = (): HTMLElement[] => [...root.querySelectorAll<HTMLElement>(".tab__close")];
+
+	it("hides every close button when tabs.closeButton is false, and shows them when true", async () => {
+		const { pinia } = mountBar(["t0", "t1"]);
+		const config = useConfigStore(pinia);
+		config.uiConfig = { ...config.uiConfig, tabs: { closeButton: false } } as never;
+		await nextTick();
+		expect(closeButtons().map((el) => el.style.display)).toEqual(["none", "none"]);
+		config.uiConfig = { ...config.uiConfig, tabs: { closeButton: true } } as never;
+		await nextTick();
+		expect(closeButtons().map((el) => el.style.display)).toEqual(["", ""]);
+	});
+
+	/** Two tabs on two hosts, none of them the host in view. */
+	async function onTwoHosts(hostMarker: "dot" | "initials" | "edge" | "none") {
+		const { pinia } = mountBar(["t0", "t1"]);
+		useHostsStore(pinia).hosts = [
+			{ id: "ha", label: "Alpha Box", color: "#ff0000" },
+			{ id: "hb", label: "Beta Box", color: "#00ff00" },
+		] as never;
+		useChannelsStore(pinia).channelHostMap = new Map([
+			["ch-t0", "ha"],
+			["ch-t1", "hb"],
+		]);
+		const config = useConfigStore(pinia);
+		config.uiConfig = { ...config.uiConfig, tabs: { hostMarker } } as never;
+		await nextTick();
+	}
+
+	it("tabs.hostMarker initials writes each host's initials in front of the tab", async () => {
+		await onTwoHosts("initials");
+		const initials = [...root.querySelectorAll(".tab__host-initials")].map((el) => el.textContent);
+		expect(initials).toEqual(["AB", "BB"]);
+		expect(root.querySelectorAll(".tab__host-dot")).toHaveLength(0);
+		expect(root.querySelectorAll(".tab--host-edge")).toHaveLength(0);
+	});
+
+	it("tabs.hostMarker edge colours the tab's top edge and draws no dot or initials", async () => {
+		await onTwoHosts("edge");
+		expect(root.querySelectorAll(".tab--host-edge")).toHaveLength(2);
+		expect(tab("t0").style.getPropertyValue("--tab-host-color")).toBe("#ff0000");
+		expect(root.querySelectorAll(".tab__host-dot, .tab__host-initials")).toHaveLength(0);
+	});
+
+	it("tabs.hostMarker none marks nothing", async () => {
+		await onTwoHosts("none");
+		expect(
+			root.querySelectorAll(".tab__host-dot, .tab__host-initials, .tab--host-edge"),
+		).toHaveLength(0);
+		expect(tab("t0").style.getPropertyValue("--tab-host-color")).toBe("");
+	});
+
+	it("tabs.hostMarker dot draws a dot on each tab", async () => {
+		await onTwoHosts("dot");
+		expect(root.querySelectorAll(".tab__host-dot")).toHaveLength(2);
+		expect(root.querySelectorAll(".tab__host-initials")).toHaveLength(0);
 	});
 });

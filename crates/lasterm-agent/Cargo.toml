@@ -38,6 +38,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Pipes",
+    # `--detach`: whether a refused breakaway came from a job (#755).
+    "Win32_System_JobObjects",
     "Win32_Storage_FileSystem",
     # cmd.exe's directory, read from its PEB (#834), and this host's name.
     "Wdk_System_Threading",
@@ -57,3 +59,14 @@ rmpv = { version = "1", features = ["with-serde"] }
 # The UTC date a daily log file is named for, computed apart from the code
 # that names it (#646). Already built for tracing-appender.
 time = { version = "0.3", default-features = false, features = ["std"] }
+
+# The detach tests run the agent inside a job object of their own (#755).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Pipes",
+] }

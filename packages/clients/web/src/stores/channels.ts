@@ -282,14 +282,28 @@ export interface ChannelReport {
  * running again, so the fetched row's exit code, reason and end id give way
  * to its own, absent ones included (#932).
  */
-interface PendingStatus {
+interface PendingStatus extends Heard {
 	status: Channel["status"];
+}
+
+/** The titles a channel can be given while a list fetch is in flight (#1122). */
+type HeardTitles = Partial<Pick<Channel, "displayTitle" | "dynamicTitle" | "processTitle">>;
+
+/**
+ * What was heard for a channel during a fetch. `status` is absent while only
+ * a title was heard.
+ */
+interface Heard {
+	status?: Channel["status"];
 	exitCode?: number;
 	endReason?: ChannelEndReason;
 	endId?: string;
 	replacesEnd?: true;
-	/** A terminal created again: its own session and size win over a fetched row's (#1109). */
-	row?: Pick<Channel, "sessionId" | "cols" | "rows">;
+	/** A terminal created again: its own session, size, title and time win over a fetched row's (#1109). */
+	row?: Pick<Channel, "sessionId" | "cols" | "rows" | "updatedAt"> &
+		Partial<Pick<Channel, "displayTitle">>;
+	/** Titles heard since the creation, if any: the newest word over the row's (#1122). */
+	titles?: HeardTitles;
 }
 
 /**
@@ -298,14 +312,20 @@ interface PendingStatus {
  * that it replaces the fetched row's end (#932); so does an end heard after a
  * run (#1091).
  */
-function bufferedStatus(held: PendingStatus | undefined, heard: PendingStatus): PendingStatus {
-	const buffered = bufferedEnd(held, heard);
+function bufferedStatus(held: Heard | undefined, heard: PendingStatus): PendingStatus {
+	// A creation tells the display title anew: the titles heard before it go.
+	const { titles: _before, ...buffered } = bufferedEnd(held, heard);
 	// What a creation told of the terminal outlives the statuses heard after it.
 	const row = heard.row ?? held?.row;
-	return row === undefined ? buffered : { ...buffered, row };
+	const titles = heard.row === undefined ? held?.titles : undefined;
+	return {
+		...buffered,
+		...(row !== undefined && { row }),
+		...(titles !== undefined && { titles }),
+	};
 }
 
-function bufferedEnd(held: PendingStatus | undefined, heard: PendingStatus): PendingStatus {
+function bufferedEnd(held: Heard | undefined, heard: PendingStatus): PendingStatus {
 	const sameEnd =
 		held !== undefined &&
 		heard.replacesEnd !== true &&
@@ -323,14 +343,15 @@ function bufferedEnd(held: PendingStatus | undefined, heard: PendingStatus): Pen
 }
 
 /** A channel with a status heard for it over what it held (#932). */
-function withHeard(channel: Channel, heard: PendingStatus): Channel {
+function withHeard(channel: Channel, heard: Heard): Channel {
 	return {
 		...(heard.replacesEnd === true ? withoutEnd(channel) : channel),
-		status: heard.status,
+		...(heard.status !== undefined && { status: heard.status }),
 		...(heard.exitCode !== undefined && { exitCode: heard.exitCode }),
 		...(heard.endReason !== undefined && { endReason: heard.endReason }),
 		...(heard.endId !== undefined && { endId: heard.endId }),
 		...heard.row,
+		...heard.titles,
 	};
 }
 
@@ -408,7 +429,16 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * when it commits, as `pendingStatuses` does for channels not listed: the
 	 * hub may have read those rows before them (#1091).
 	 */
-	const statusesDuringFetch = new Map<number, Map<string, PendingStatus | "deleted">>();
+	const statusesDuringFetch = new Map<number, Map<string, Heard | "deleted">>();
+
+	/**
+	 * Display titles set here DURING each in-flight index fetch, whether or not a
+	 * list holds the channel. The index is rebuilt from the response, which the
+	 * hub may have read before the title: a title heard since goes over its row
+	 * (#1128). Independent of `statusesDuringFetch`: the index fetch has no
+	 * generation and is not tied to a host list.
+	 */
+	const indexTitlesDuringFetch = new Set<Map<string, string>>();
 
 	/**
 	 * A run heard for a channel since the last STATE_SYNC says the hub has it:
@@ -427,6 +457,18 @@ export const useChannelsStore = defineStore("channels", () => {
 			// Heard for a channel in the list, so it was created again since a
 			// deletion recorded here: the deletion no longer stands.
 			heardHere.set(channelId, bufferedStatus(held === "deleted" ? undefined : held, heard));
+		}
+	}
+
+	/**
+	 * Record a title set here for every fetch in flight: the hub may have read
+	 * the row before it, and the title must not go back (#1122).
+	 */
+	function titleHeardDuringFetch(channelId: string, titles: HeardTitles): void {
+		for (const heardHere of statusesDuringFetch.values()) {
+			const held = heardHere.get(channelId);
+			if (held === "deleted") continue;
+			heardHere.set(channelId, { ...held, titles: { ...held?.titles, ...titles } });
 		}
 	}
 
@@ -573,6 +615,8 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	async function fetchChannelIndex(): Promise<void> {
 		if (authStore.token === null) return;
+		const myTitles = new Map<string, string>();
+		indexTitlesDuringFetch.add(myTitles);
 		try {
 			const res = await hubFetch(`${hubBaseUrl()}/api/channels`, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
@@ -587,7 +631,9 @@ export const useChannelsStore = defineStore("channels", () => {
 				const id = row.id;
 				const rowHostId = row.host_id;
 				if (typeof id !== "string" || typeof rowHostId !== "string") continue;
-				const title = typeof row.display_title === "string" ? row.display_title : "";
+				// Prefer the last title set during this request over the row's (#1128).
+				const title =
+					myTitles.get(id) ?? (typeof row.display_title === "string" ? row.display_title : "");
 				// Whether it runs a command, for a pane over it while another host
 				// is in view: its overlay offers Configure, and it is not restarted
 				// on its own (#574).
@@ -609,6 +655,8 @@ export const useChannelsStore = defineStore("channels", () => {
 		} catch {
 			// An index that could not be read is an index that says nothing; the
 			// tab bar falls back to what it showed before.
+		} finally {
+			indexTitlesDuringFetch.delete(myTitles);
 		}
 	}
 
@@ -640,7 +688,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		wsAddedDuringFetch.value = new Map(wsAddedDuringFetch.value).set(myGeneration, myWsAdded);
 		// Older generations can no longer commit: stop recording for them.
 		statusesDuringFetch.clear();
-		const myHeard = new Map<string, PendingStatus | "deleted">();
+		const myHeard = new Map<string, Heard | "deleted">();
 		statusesDuringFetch.set(myGeneration, myHeard);
 
 		try {
@@ -942,6 +990,8 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Silently ignored if the channel is not loaded yet.
 	 */
 	function setDynamicTitle(channelId: string, title: string): void {
+		// Recorded even for a channel no list holds yet: a fetch in flight may list it.
+		titleHeardDuringFetch(channelId, { dynamicTitle: title });
 		const idx = channels.value.findIndex((c) => c.id === channelId);
 		if (idx === -1) return;
 		const existing = channels.value[idx];
@@ -956,9 +1006,12 @@ export const useChannelsStore = defineStore("channels", () => {
 	/**
 	 * Update the hub-resolved display title for a channel.
 	 * Called on TITLE_CHANGE, PROCESS_TITLE, ATTACH_OK, and STATE_SYNC.
-	 * Silently ignored if the channel is not loaded yet.
+	 * A channel no list holds is still recorded for index fetches in flight; the index
+	 * itself changes only for a channel it already holds.
 	 */
 	function setDisplayTitle(channelId: string, displayTitle: string): void {
+		titleHeardDuringFetch(channelId, { displayTitle });
+		for (const heardHere of indexTitlesDuringFetch) heardHere.set(channelId, displayTitle);
 		// The index keeps up even for a channel this host does not list, so the
 		// tab still carries the last title it was given after a host switch.
 		const indexed = channelIndex.value.get(channelId);
@@ -984,6 +1037,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Silently ignored if the channel is not loaded yet.
 	 */
 	function updateProcessTitle(channelId: string, title: string): void {
+		titleHeardDuringFetch(channelId, { processTitle: title });
 		const idx = channels.value.findIndex((c) => c.id === channelId);
 		if (idx === -1) return;
 		const existing = channels.value[idx];
@@ -1161,6 +1215,13 @@ export const useChannelsStore = defineStore("channels", () => {
 			pendingStatuses.value = next;
 		}
 
+		// A creation tells the display title anew, on any host: the titles heard
+		// before it, for an index fetch in flight, go (#1128).
+		for (const heardHere of indexTitlesDuringFetch) {
+			if (msg.displayTitle === undefined) heardHere.delete(msg.channelId);
+			else heardHere.set(msg.channelId, msg.displayTitle);
+		}
+
 		// Ignore channels for other hosts — this client may be viewing a
 		// different host and should not accumulate foreign channels.
 		if (activeHostId.value !== msg.hostId) return;
@@ -1174,8 +1235,13 @@ export const useChannelsStore = defineStore("channels", () => {
 		heardDuringFetch(msg.channelId, {
 			status: msg.status,
 			replacesEnd: true,
-			// Session and size only: a title or time changed since is the newer word.
-			row: { sessionId: msg.sessionId, cols: msg.cols, rows: msg.rows },
+			row: {
+				sessionId: msg.sessionId,
+				cols: msg.cols,
+				rows: msg.rows,
+				updatedAt: msg.updatedAt,
+				...(msg.displayTitle !== undefined && { displayTitle: msg.displayTitle }),
+			},
 		});
 		knownToHub(msg.channelId);
 
@@ -2070,10 +2136,11 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * Bulk purge all dead channels for the active host.
 	 * Removes exactly the ids the hub says it purged: it picks the dead channels
 	 * when it handles the request, which can differ from this window's list by
-	 * then (#1108). Returns the number of channels purged.
+	 * then (#1108). Returns those ids: none when the hub refused or named none,
+	 * and a window closes only what they cover (#1117).
 	 */
-	async function purgeDeadChannels(): Promise<number> {
-		if (authStore.token === null || activeHostId.value === null) return 0;
+	async function purgeDeadChannels(): Promise<string[]> {
+		if (authStore.token === null || activeHostId.value === null) return [];
 		// The host is read before the request: the list in view may be another
 		// host's by the time the hub answers (#1104).
 		const hostId = activeHostId.value;
@@ -2085,13 +2152,13 @@ export const useChannelsStore = defineStore("channels", () => {
 			},
 			body: JSON.stringify({ host_id: hostId }),
 		});
-		if (!res.ok) return 0;
+		if (!res.ok) return [];
 		// The purge is done on the hub; an unreadable answer names nothing to remove here.
 		let ids: string[];
 		try {
 			ids = ((await res.json()) as { purged_ids?: string[] }).purged_ids ?? [];
 		} catch {
-			return 0;
+			return [];
 		}
 		const purged = new Set(ids);
 		deletedDuringFetch(purged);
@@ -2099,7 +2166,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		const nextMap = new Map(channelHostMap.value);
 		for (const id of purged) nextMap.delete(id);
 		channelHostMap.value = nextMap;
-		return purged.size;
+		return [...purged];
 	}
 
 	return {

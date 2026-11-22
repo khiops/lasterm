@@ -41,9 +41,11 @@ import {
 	SFTP_PROBE_TIMEOUT_MS,
 	STALE_UPLOAD_MINUTES,
 	uploadAgentBinary,
+	verifiedRelayAgent,
 	WINDOWS_ARCH_COMMANDS,
 	WINDOWS_REPLY_MARKER,
 	windowsFindAgentScript,
+	windowsHashScript,
 	windowsKnownFolderCommand,
 	windowsLaunchCommand,
 	windowsReplaceScript,
@@ -51,6 +53,7 @@ import {
 } from "./agent-deployer.js";
 import { type FetchAgentBinaryOptions, FetchError } from "./agent-fetch.js";
 import { HelloSeeker } from "./hello-seeker.js";
+import { attachRemoteDaemon, RemoteDaemonUnavailable } from "./remote-daemon.js";
 import { SHELL_START_CEILING_MS, shellStartAllowance, sshExec } from "./ssh-exec.js";
 
 /** What cmd.exe answers, then what asks PowerShell, for a Windows host's architecture (#714). */
@@ -3720,5 +3723,228 @@ describe("deploy + verify integration", () => {
 
 		expect(error).toBeInstanceOf(DeployError);
 		expect((error as DeployError).code).toBe("AGENT_NOT_AVAILABLE");
+	});
+});
+
+// ---------- verifiedRelayAgent (#755) -----------------------------------------
+
+describe("verifiedRelayAgent: the agent a daemon-only connection may relay through (#755)", () => {
+	const onPath = "/usr/local/bin/lasterm-agent";
+	const installed = "/home/user/.local/bin/lasterm-agent";
+
+	/** A remote whose agent is at `path` (found on PATH or not) with `sha`. */
+	function remoteWith(path: string, sha: string | null, foundOnPath: boolean): SshClient {
+		const responses: Record<string, ExecResult> = {
+			"which lasterm-agent": foundOnPath
+				? { stdout: `${path}\n`, stderr: "", exitCode: 0 }
+				: { stdout: "", stderr: "", exitCode: 1 },
+			"echo $HOME": { stdout: "/home/user\n", stderr: "", exitCode: 0 },
+			[`sha256sum '${path}'`]:
+				sha === null
+					? { stdout: "", stderr: "No such file", exitCode: 1 }
+					: { stdout: `${sha}  ${path}\n`, stderr: "", exitCode: 0 },
+		};
+		return makeMockClient(responses);
+	}
+
+	function localSha(): string {
+		const sha = getLocalSha256(writeCachedAgentBinary("linux", "x64", "this-hubs-agent"));
+		if (sha === null) throw new Error("no local hash");
+		return sha;
+	}
+
+	it("accepts this hub's own agent where the deploy finds it on PATH", async () => {
+		const sha = localSha();
+		expect(
+			await verifiedRelayAgent(
+				remoteWith(onPath, sha, true),
+				{ os: "linux", arch: "x64" },
+				makeOptions(),
+			),
+		).toEqual({ kind: "verified", path: onPath, localCopy: true });
+	});
+
+	it("accepts it at the install target, off PATH", async () => {
+		const sha = localSha();
+		expect(
+			await verifiedRelayAgent(
+				remoteWith(installed, sha, false),
+				{ os: "linux", arch: "x64" },
+				makeOptions(),
+			),
+		).toEqual({ kind: "verified", path: installed, localCopy: true });
+	});
+
+	it("with a local copy, refuses a file matching only the pin: Connect would replace it", async () => {
+		localSha();
+		const result = await verifiedRelayAgent(
+			remoteWith(onPath, REMOTE_SHA_DIFFERENT, true),
+			{ os: "linux", arch: "x64" },
+			makeOptions({ pinnedSha256: REMOTE_SHA_DIFFERENT }),
+		);
+		expect(result).toEqual({
+			kind: "refused",
+			reason:
+				"the agent on this host is not one this hub can vouch for (a different version); Connect installs this hub's",
+		});
+	});
+
+	it.each([
+		["the host's pin", { pinnedSha256: REMOTE_SHA_DIFFERENT }],
+		["the hash trusted this session", { sessionTrustedSha256: REMOTE_SHA_DIFFERENT }],
+	])("without a local copy, accepts %s", async (_what, trust) => {
+		const result = await verifiedRelayAgent(
+			remoteWith(onPath, REMOTE_SHA_DIFFERENT, true),
+			{ os: "linux", arch: "x64" },
+			makeOptions(trust),
+		);
+		expect(result).toEqual({ kind: "verified", path: onPath, localCopy: false });
+	});
+
+	it("without a local copy or any trust, says it could not check, not that Connect fixes it", async () => {
+		const result = await verifiedRelayAgent(
+			remoteWith(onPath, REMOTE_SHA_DIFFERENT, true),
+			{ os: "linux", arch: "x64" },
+			makeOptions(),
+		);
+		expect(result).toEqual({
+			kind: "refused",
+			reason:
+				"the agent on this host could not be checked: this hub has no copy of its own agent for that system",
+		});
+	});
+
+	it("refuses, rather than trusting the pin, when this hub's own agent cannot be had", async () => {
+		const result = await verifiedRelayAgent(
+			remoteWith(onPath, REMOTE_SHA_DIFFERENT, true),
+			{ os: "linux", arch: "x64" },
+			makeOptions({
+				pinnedSha256: REMOTE_SHA_DIFFERENT,
+				detectSea: () => true,
+				hubVersion: TEST_HUB_VERSION,
+				fetchAgentBinary: async () => {
+					throw new FetchError("NOT_FOUND", "offline");
+				},
+			}),
+		);
+		expect(result).toEqual({
+			kind: "refused",
+			reason:
+				"the agent on this host could not be checked: this hub has no copy of its own agent for that system",
+		});
+	});
+
+	it("says no agent was found when there is none", async () => {
+		expect(
+			await verifiedRelayAgent(
+				remoteWith(installed, null, false),
+				{ os: "linux", arch: "x64" },
+				makeOptions(),
+			),
+		).toEqual({ kind: "refused", reason: "no Lasterm agent was found on this host" });
+	});
+
+	it("says its hash could not be read for an agent found but unreadable", async () => {
+		expect(
+			await verifiedRelayAgent(
+				remoteWith(onPath, null, true),
+				{ os: "linux", arch: "x64" },
+				makeOptions(),
+			),
+		).toEqual({
+			kind: "refused",
+			reason: "the agent on this host could not be checked: its hash could not be read",
+		});
+	});
+
+	it("refuses a host whose system it cannot tell", async () => {
+		expect(
+			await verifiedRelayAgent(
+				remoteWith(onPath, null, true),
+				{ os: null, arch: null },
+				makeOptions(),
+			),
+		).toMatchObject({ kind: "refused" });
+	});
+});
+
+// ---------- A Windows host's daemon (#755) -------------------------------------
+
+describe("a Windows host's daemon-only relay and launch (#755)", () => {
+	// AC-W4: the agent the deploy installs at %LOCALAPPDATA%\lasterm, a folder
+	// not on PATH, is the one a daemon-only relay runs. Mutation: the bare
+	// `lasterm-agent` of PATH.
+	it("accepts this hub's agent at %LOCALAPPDATA%\\lasterm, off PATH", async () => {
+		const sha = getLocalSha256(writeCachedAgentBinary("windows", "x64", "this-hubs-windows-agent"));
+		if (sha === null) throw new Error("no local hash");
+		const path = "C:\\Users\\pi\\AppData\\Local\\lasterm\\lasterm-agent.exe";
+		const hash = `${ENCODED_POWERSHELL}${Buffer.from(windowsHashScript(path), "utf16le").toString("base64")}`;
+		const client = makeMockClient({
+			[findAgentCommand()]: folderOutput(),
+			[folderCommand("LocalApplicationData")]: folderOutput("C:\\Users\\pi\\AppData\\Local"),
+			[hash]: { stdout: reply(sha), stderr: "", exitCode: 0 },
+		});
+
+		expect(await verifiedRelayAgent(client, { os: "windows", arch: "x64" }, makeOptions())).toEqual(
+			{ kind: "verified", path, localCopy: true },
+		);
+	});
+
+	describe("read the same under either Windows shell", () => {
+		let dir: string;
+		beforeEach(async () => {
+			dir = await makeTempDir("lasterm-755-shells");
+		});
+		afterEach(async () => {
+			await removeTempDir(dir);
+		});
+
+		/**
+		 * A stand-in for the agent, which touches no pipe: its relay finds
+		 * nothing listening (exit 3) and its launch is refused breakaway (exit
+		 * 5), with the agent's own stderr lines.
+		 */
+		function standIn(): string {
+			const path = join(dir, "stand-in-agent.cmd");
+			writeFileSync(
+				path,
+				[
+					"@echo off",
+					'if "%1"=="--attach" (',
+					"  1>&2 echo lasterm-attach: start",
+					"  1>&2 echo lasterm-attach: nothing-listens",
+					"  1>&2 echo nothing listens on the default pipe",
+					"  exit /b 3",
+					")",
+					'if "%1"=="--daemon" (',
+					"  1>&2 echo lasterm-detach: breakaway-refused",
+					"  1>&2 echo this SSH session's job does not allow a process to break away",
+					"  exit /b 5",
+					")",
+					"exit /b 1",
+					"",
+				].join("\r\n"),
+			);
+			return path;
+		}
+
+		// AC-W5. Mutation: deciding by the exit status, which PowerShell
+		// hands on as 1 for both.
+		it.runIf(process.platform === "win32").each(["cmd.exe", "powershell.exe"] as const)(
+			"a relay that finds nothing, then a refused breakaway, under %s",
+			{ timeout: 60_000 },
+			async (shell) => {
+				const err = await attachRemoteDaemon({
+					conn: localWindowsClient(shell),
+					agentPath: standIn(),
+					os: "windows",
+				}).catch((e: unknown) => e);
+
+				expect(err).toBeInstanceOf(RemoteDaemonUnavailable);
+				expect((err as RemoteDaemonUnavailable).reason).toBe(
+					"this SSH session's job does not allow a process to break away",
+				);
+			},
+		);
 	});
 });

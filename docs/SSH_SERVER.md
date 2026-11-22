@@ -36,28 +36,33 @@ requires SFTP; a host without it shows a note in its status.
 ## Keeping the agent running (#79)
 
 A POSIX host that keeps its agent running as a daemon is reached through a `direct-streamlocal`
-channel to the daemon's Unix socket. That needs `AllowStreamLocalForwarding` set to `yes` (the
-default) or `local`, not `DisableForwarding yes`, and no `restrict` or `no-port-forwarding` on the
-account's key in `authorized_keys`.
+channel to the daemon's Unix socket where the SSH server allows it: `AllowStreamLocalForwarding`
+set to `yes` (the default) or `local`, not `DisableForwarding yes`, and no `restrict` or
+`no-port-forwarding` on the account's key in `authorized_keys`.
 
-Without it, the host still works, on stdio (#765). The hub stops the daemon it started to find
-out, through the daemon's own `--stop`, and runs the agent over the connection, so its terminals end
-with it. The host's status says why: "Socket forwarding refused" in its tooltip, and a note in its
-dialog. The hub remembers this for the host until it restarts, until the host's address, account,
-port, key, jump or daemon setting changes, or until someone uses Connect or Reconnect in the host's
-menu. Until then it starts no daemon there, not even for a terminal opened there. After allowing the
-forwarding and reloading sshd, use Reconnect.
+Where it does not, the hub reaches the daemon through a relay instead (#755): it runs
+`lasterm-agent --attach` in an exec channel, which connects to the socket as the account and copies
+bytes both ways. No forwarding is needed, nothing listens on the network, and the terminals still
+outlive the connection. The relay is one more process on the host for as long as the hub is
+connected. The host's status says so: "Socket forwarding refused: agent reached through a relay" in
+its tooltip, and a note in its dialog. The hub remembers this for the host until it restarts, until
+the host's address, account, port, key, jump or daemon setting changes, or until someone uses Connect
+or Reconnect in the host's menu; until then its connections go through the relay from the start.
+Allowing the forwarding is not needed; after allowing it anyway, Reconnect goes back to the channel.
 
 OpenSSH refuses the channel with the same answer it gives for a socket nobody listens on, so the hub
 asks the host which it is: whether `/proc/net/unix` lists the socket as listening. A host without
-that file or without `awk` cannot say. There the connection still fails after 5 s, naming the
-socket, the daemon's log and this page, and the daemon stays up until its 30-minute idle timeout. A
-daemon that was already listening before the hub tried is left running, since another connection,
-through another key or from another address, may reach it.
+that file or without `awk` cannot say. There the hub asks the relay before starting anything: a
+daemon it reaches is used, and one it does not find is started, then reached through the channel, or
+through the relay once more if the channel never answers. A daemon that was already listening before
+the hub tried is used as it is, never stopped.
 
-Windows hosts stay on stdio: no SSH channel carries a named pipe, so their terminals end with the
-connection. A relay over an exec channel, planned in
-[#755](https://github.com/khiops/lasterm/issues/755), would lift both limits.
+A Windows host's daemon listens on a named pipe, which no SSH channel carries: the hub always
+reaches it through the relay, whatever `AllowStreamLocalForwarding` says (#755). The daemon must
+outlive the SSH session, whose processes Win32-OpenSSH puts in a job that kills them at its end:
+the agent starts it broken away from that job, which Win32-OpenSSH allows. Where the job does not,
+the host runs its agent on stdio, its terminals end with the connection, and its dialog and tooltip
+say why.
 
 ## Windows: the default shell
 

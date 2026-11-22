@@ -10,6 +10,7 @@ import {
 	REMOTE_STATE_DIR_COMMAND,
 	remoteDaemonPaths,
 	remoteDaemonStopCommand,
+	windowsDaemonStopCommand,
 } from "../session/remote-daemon.js";
 import type { SessionState, SharedSessionContext } from "../session/session-context.js";
 import { SessionManager } from "../session/session-manager.js";
@@ -61,6 +62,9 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 		connected = true;
 		usedRemoteDaemon = true;
 		remoteAgentPath = "/home/pi/.local/bin/lasterm-agent";
+		/** The host's system, as the connection ran its agent there (#755). */
+		remoteOs: string | null = null;
+		remoteDaemonUnavailable: string | null = null;
 		helloMessage: HelloMessage | undefined;
 		otherOwnerChannels: number | undefined;
 		/** How many terminals other hubs hold on this daemon. */
@@ -125,6 +129,18 @@ vi.mock("../session/ssh-agent.js", async (importOriginal) => {
 	}
 	return { ...actual, SshAgent: FakeSshAgent };
 });
+
+/** The arguments an encoded Windows launch passes, decoded, written out to compare (#755). */
+function windowsArgsOf(command: string): string | null {
+	const prefix = "powershell -NoProfile -NonInteractive -EncodedCommand ";
+	if (!command.startsWith(prefix)) return null;
+	const script = Buffer.from(command.slice(prefix.length), "base64").toString("utf16le");
+	const found =
+		/\$a=\[Text\.Encoding\]::UTF8\.GetString\(\[Convert\]::FromBase64String\('([^']*)'\)\)/.exec(
+			script,
+		)?.[1];
+	return found === undefined ? null : Buffer.from(found, "base64").toString("utf8");
+}
 
 type FakeSshAgent = SshAgent & {
 	connected: boolean;
@@ -1814,6 +1830,25 @@ describe("POST /api/hosts/:id/agent/replace, on an agent other hubs use (#127)",
 		expect(sm.agents.has(hostId)).toBe(false);
 	});
 
+	// #755 AC-W3. Mutation: today's state-directory resolution, which a Windows
+	// host answers with no absolute path, and the stop refused.
+	it("on a Windows host, falls back to the agent's own --stop, with no state directory", async () => {
+		const agent = connectedAgent(2);
+		agent.remoteOs = "windows";
+		agent.send.mockImplementation(() => {
+			throw new Error("SSH agent not connected");
+		});
+
+		const res = await replace();
+
+		expect(res.statusCode).toBe(200);
+		expect(agent.execOnHost.mock.calls).toEqual([
+			[windowsDaemonStopCommand("/home/pi/.local/bin/lasterm-agent")],
+		]);
+		expect(windowsArgsOf(agent.execOnHost.mock.calls[0]?.[0] as string)).toBe("--stop");
+		expect(sm.agents.has(hostId)).toBe(false);
+	});
+
 	it("refuses a force that is not a boolean, and asks the agent nothing", async () => {
 		const agent = connectedAgent(2);
 
@@ -2842,6 +2877,34 @@ describe("POST stop-keeping", () => {
 		expect(f.agent.execOnHost).toHaveBeenCalledTimes(2);
 	});
 
+	// #755 AC-W3: the Windows --stop, and the POSIX one where the system is not
+	// known. Mutation: today's `startsWith("/")` refusal on Windows.
+	it.each([
+		["windows", (path: string) => [[windowsDaemonStopCommand(path)]]],
+		...(["linux", "darwin", null] as const).map(
+			(posix) =>
+				[
+					posix,
+					(path: string) => [
+						[REMOTE_STATE_DIR_COMMAND],
+						[remoteDaemonStopCommand(path, remoteDaemonPaths("/home/pi/.local/state/lasterm"))],
+					],
+				] as const,
+		),
+	] as const)("a forced unsent STOP on a %s host runs that system's --stop", async (os, calls) => {
+		const f = fixture();
+		f.agent.remoteOs = os;
+		f.agent.send.mockImplementation(() => {
+			throw new Error("unsent");
+		});
+		const response = await stop({ end_terminals: true, force: true });
+		expect(response.json()).toMatchObject({ outcome: "stopped" });
+		expect(f.agent.execOnHost.mock.calls).toEqual(calls("/home/pi/.local/bin/lasterm-agent"));
+		if (os === "windows") {
+			expect(windowsArgsOf(f.agent.execOnHost.mock.calls[0]?.[0] as string)).toBe("--stop");
+		}
+	});
+
 	it.each([
 		"unknown",
 		"local",
@@ -3072,17 +3135,16 @@ describe("POST stop-keeping", () => {
 		},
 	);
 
-	it("PUT refuses OS policy revocation but allows unrelated edits and unchanged policy", async () => {
-		const f = fixture();
-		const os = await server.inject({
-			method: "PUT",
-			url: `/api/hosts/${hostId}`,
-			payload: { os: "windows" },
-		});
-		expect(os.statusCode).toBe(409);
-		expect(os.json().error.code).toBe("DAEMON_CONNECTED");
-		unchanged(f);
-		for (const payload of [{ label: "renamed" }, { ssh_remote_daemon: true }, { os: "linux" }]) {
+	// #755: a Windows host keeps its daemon, so no system revokes one.
+	// Mutation: the old exclusion, which answered DAEMON_CONNECTED for Windows.
+	it("PUT lets the system change, Windows included, and unrelated edits", async () => {
+		fixture();
+		for (const payload of [
+			{ os: "windows" },
+			{ label: "renamed" },
+			{ ssh_remote_daemon: true },
+			{ os: "linux" },
+		]) {
 			const response = await server.inject({ method: "PUT", url: `/api/hosts/${hostId}`, payload });
 			expect(response.statusCode).toBe(200);
 		}
@@ -3409,5 +3471,93 @@ describe("GET /api/sessions/:id (#932)", () => {
 		expect(body.channels).toHaveLength(1);
 		expect(body.channels[0]).toMatchObject({ id: channelId, status: "dead", exit_code: 2 });
 		expect(body.channels[0]).not.toHaveProperty("end_id");
+	});
+});
+
+// ─── A purge leaves a terminal being brought back alone (#1118) ─────────────
+//
+// A SPAWN bringing a dead terminal back claims its id until the agent
+// answers. Either purge used to delete the still-dead row meanwhile, and the
+// SPAWN_OK then announced a live terminal the hub had no row for.
+
+describe("a purge while a dead terminal is being brought back (#1118)", () => {
+	/** A dead terminal of the Pi, a SPAWN bringing it back sent and unanswered. */
+	async function respawnSent() {
+		const agent = connectedAgent();
+		const { channelId, heard } = liveTerminalOn(agent);
+		agent.emit("message", { type: "CHANNEL_EXIT", channelId, exitCode: 0 });
+		const dal = new MetaDAL(dbs.meta);
+		expect(dal.getChannel(channelId)?.status).toBe("dead");
+		const spawning = sm.handleSpawn("c-window", {
+			type: "SPAWN",
+			hostId,
+			reuseChannelId: channelId,
+		});
+		await vi.waitFor(() => expect(agent.sent.some((m) => m.type === "SPAWN")).toBe(true));
+		const spawn = agent.sent.find((m) => m.type === "SPAWN") as { requestId: string };
+		const answer = async () => {
+			agent.emit("message", { type: "SPAWN_OK", requestId: spawn.requestId, channelId });
+			return spawning;
+		};
+		return { channelId, dal, heard, answer };
+	}
+
+	// Wrong implementation: the bulk purge selects every dead row, the
+	// reserved one included, on either branch (row gone, purged_ids [channelId]).
+	it.each([
+		["a host's", true],
+		["every host's", false],
+	])(
+		"the bulk purge of %s dead terminals leaves it out, and it comes back with its row",
+		async (_, scoped) => {
+			const { channelId, dal, answer } = await respawnSent();
+
+			const res = await server.inject({
+				method: "DELETE",
+				url: "/api/channels/dead",
+				...(scoped && { payload: { host_id: hostId } }),
+			});
+
+			expect(res.json()).toEqual({ ok: true, purged: 0, purged_ids: [] });
+			expect(await answer()).toBe(channelId);
+			expect(dal.getChannel(channelId)?.status).toBe("live");
+		},
+	);
+
+	// Wrong implementation: the single delete purges a dead row whatever
+	// starts it (200, row gone).
+	it("the single delete refuses it, and it comes back with its row", async () => {
+		const { channelId, dal, answer } = await respawnSent();
+
+		const res = await server.inject({ method: "DELETE", url: `/api/channels/${channelId}` });
+
+		expect(res.statusCode).toBe(409);
+		expect(res.json()).toEqual({
+			error: { code: "CHANNEL_STARTING", message: "That terminal is being started again." },
+		});
+		expect(await answer()).toBe(channelId);
+		expect(dal.getChannel(channelId)?.status).toBe("live");
+	});
+
+	// Wrong implementation: reviveChannel()'s false result ignored, as before
+	// (SPAWN_OK and CHANNEL_CREATED announced, no DESTROY, no row).
+	it("a row gone by another path ends the started terminal instead of announcing it", async () => {
+		const { channelId, dal, heard, answer } = await respawnSent();
+		const agent = (sm.agents as unknown as Map<string, FakeSshAgent>).get(hostId)!;
+		dal.deleteChannel(channelId);
+		heard.length = 0;
+
+		expect(await answer()).toBeNull();
+
+		expect(agent.sent.at(-1)).toEqual({ type: "DESTROY", channelId });
+		expect(heard).toEqual([
+			{
+				type: "ERROR",
+				code: "CHANNEL_NOT_REUSABLE",
+				message: "Cannot bring that terminal back: it is not a terminal this hub knows.",
+				channelId,
+			},
+		]);
+		expect(dal.getChannel(channelId)).toBeUndefined();
 	});
 });

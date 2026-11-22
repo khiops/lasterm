@@ -2122,8 +2122,10 @@ function onAddChannelGroupFromSidebar(): void {
 }
 
 async function onPurgeDead(): Promise<void> {
-	// Close tabs whose ALL terminal panes are dead before purging
-	const deadIds = new Set(channelsStore.channels.filter((c) => c.status === 'dead').map((c) => c.id));
+	// A tab closes once the hub has deleted every terminal it shows: a purge it
+	// refused, or a terminal brought back meanwhile, leaves its tab (#1117).
+	const purged = new Set(await channelsStore.purgeDeadChannels());
+	if (purged.size === 0) return;
 	// Iterate tabs in reverse so indices stay stable as we close
 	for (let i = layout.tabs.value.length - 1; i >= 0; i--) {
 		const tab = layout.tabs.value[i];
@@ -2131,12 +2133,11 @@ async function onPurgeDead(): Promise<void> {
 		const root = layout.layouts.value[tab.id];
 		if (root !== null && root !== undefined) {
 			const termIds = collectTerminalChannelIds(root);
-			if (termIds.length > 0 && termIds.every((id) => deadIds.has(id))) {
+			if (termIds.length > 0 && termIds.every((id) => purged.has(id))) {
 				layout.closeTab(i);
 			}
 		}
 	}
-	await channelsStore.purgeDeadChannels();
 }
 
 /**
@@ -2189,6 +2190,9 @@ function onKillChannel(channelId: string): void {
 }
 
 async function onDeleteChannel(channelId: string): Promise<void> {
+	// Its tab goes once the hub deleted it: one it refused, being started
+	// again meanwhile, keeps its tab (#1117, #1118).
+	if (!(await channelsStore.deleteChannel(channelId))) return;
 	// Close the tab if this channel is its only terminal pane
 	const tabId = layout.findTabForChannel(channelId);
 	if (tabId !== null) {
@@ -2201,7 +2205,6 @@ async function onDeleteChannel(channelId: string): Promise<void> {
 			}
 		}
 	}
-	await channelsStore.deleteChannel(channelId);
 }
 
 async function onCreateChannelGroupConfirmed(name?: string): Promise<void> {

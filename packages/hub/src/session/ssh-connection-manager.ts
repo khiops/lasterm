@@ -44,7 +44,11 @@ import {
 } from "./prompt-context.js";
 import { pinJumpKey, resolveJump } from "./proxy-jump.js";
 import { captureQuitFence } from "./quit-fence.js";
-import { hostTriesDaemon, rememberSocketForwardingRefused } from "./remote-daemon.js";
+import {
+	hostKeepsDaemon,
+	rememberSocketForwardingRefused,
+	socketForwardingRefusedOn,
+} from "./remote-daemon.js";
 import {
 	agentLaunchConfig,
 	type PromptContext,
@@ -545,6 +549,12 @@ export class SshConnectionManager {
 					onSocketForwardingRefused: (reached) => {
 						rememberSocketForwardingRefused(this.ctx.socketForwardingRefusals, reached);
 					},
+					relayFirst: (reached) =>
+						socketForwardingRefusedOn(
+							reached,
+							this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+							this.ctx.socketForwardingRefusals,
+						),
 				};
 
 				// The same route as the first connection: a host behind a bastion is
@@ -565,18 +575,14 @@ export class SshConnectionManager {
 				// without it, the reconnect after a dropped link ran a new agent on
 				// stdio, and the daemon's terminals — the ones #79 keeps alive for
 				// exactly this — were left running where nothing could reach them.
-				// Unless its server refused the forwarding a daemon is reached
-				// through: then stdio, without starting one only to stop it (#765).
+				// Through the relay from the start where its server was seen to
+				// refuse the forwarding (#755).
 				const sshAgent = new SshAgent(
 					host,
 					this.buildCacheOnlyPromptAuth(),
 					deployOpts,
 					agentLaunchConfig(this.ctx),
-					hostTriesDaemon(
-						host,
-						this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
-						this.ctx.socketForwardingRefusals,
-					),
+					hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
 				);
 				const hostKey = targetRoute(host, (id) => sshAddress(this.ctx.metaDal.getHost(id)));
 				const storedFp = this.ctx.metaDal.getHostFingerprint(hostId, hostKey);

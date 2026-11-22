@@ -213,9 +213,8 @@ export class AgentConnectionManager {
 	/**
 	 * Whether this host's terminals may have outlived the hub.
 	 *
-	 * Only where a daemon was left running: that is the switch, and Windows
-	 * remotes never qualify — their daemon listens on a named pipe, which no
-	 * SSH channel carries, so they were on stdio and died with the connection.
+	 * Only where a daemon was left running: that is the switch, on Windows
+	 * remotes as elsewhere (#755).
 	 */
 	private remoteDaemonKeepsChannels(hostId: string): boolean {
 		return hostKeepsDaemon(

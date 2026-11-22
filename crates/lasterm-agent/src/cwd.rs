@@ -257,6 +257,31 @@ pub(crate) fn is_local_host(host: &str, local: &str) -> bool {
     host.eq_ignore_ascii_case(local) || first(host) == first(local)
 }
 
+/// How many times a read that fails is tried, and the wait between tries. A
+/// shell just started has a process whose parameters are not all in place
+/// yet: its first read can fail where the next, a few milliseconds later,
+/// succeeds (#1136). It narrows the race; a start slower than the whole
+/// window still reads as unknown, and the next poll reads again.
+#[cfg(any(windows, test))]
+const READ_TRIES: u32 = 10;
+#[cfg(any(windows, test))]
+const READ_RETRY_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// `read` until it gives something, at most [`READ_TRIES`] times,
+/// [`READ_RETRY_WAIT`] apart.
+#[cfg(any(windows, test))]
+fn retrying<T>(mut read: impl FnMut() -> Option<T>) -> Option<T> {
+    for attempt in 0..READ_TRIES {
+        if attempt > 0 {
+            std::thread::sleep(READ_RETRY_WAIT);
+        }
+        if let Some(found) = read() {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// Read the shell's process: its directory, and whether it is at its prompt.
 /// Never fails: what cannot be read is unknown.
 pub(crate) async fn read_process(pid: u32) -> ProcessRead {
@@ -504,6 +529,15 @@ mod windows {
         }
     }
 
+    /// The directory `current` reads: read again while it cannot, then
+    /// trimmed and checked. A directory read but refused would read the same
+    /// again, so it is not retried.
+    pub(super) fn directory_of(current: impl FnMut() -> Option<String>) -> Option<String> {
+        super::retrying(current)
+            .map(without_trailing_separator)
+            .filter(|dir| plausible_dir(dir))
+    }
+
     pub(super) fn read(pid: u32) -> ProcessRead {
         let cwd = Process::open(pid).and_then(|process| {
             // Only a program whose directory follows its shell's is read:
@@ -511,10 +545,7 @@ mod windows {
             if !directory_follows(&process.image_name()?) {
                 return None;
             }
-            process
-                .current_directory()
-                .map(without_trailing_separator)
-                .filter(|dir| plausible_dir(dir))
+            directory_of(|| process.current_directory())
         });
         ProcessRead {
             cwd,
@@ -706,6 +737,31 @@ mod tests {
         let state = tracker.change_to_send(false).unwrap();
         assert_eq!(state.cwd, None);
         assert_eq!(state.source, CwdSource::Process);
+    }
+
+    /// A read that fails at first is tried again, [`READ_RETRY_WAIT`] apart,
+    /// and given up on after [`READ_TRIES`] tries (#1136).
+    #[test]
+    fn a_read_that_fails_at_first_is_tried_again() {
+        let mut calls = 0;
+        let found = retrying(|| {
+            calls += 1;
+            (calls == READ_TRIES).then_some("dir")
+        });
+        assert_eq!((found, calls), (Some("dir"), READ_TRIES));
+
+        let started = std::time::Instant::now();
+        let mut calls = 0;
+        let never = retrying(|| {
+            calls += 1;
+            None::<String>
+        });
+        assert_eq!((never, calls), (None, READ_TRIES));
+        assert!(
+            started.elapsed() >= READ_RETRY_WAIT * (READ_TRIES - 1),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -1021,6 +1077,26 @@ mod windows_tests {
         assert!(same_dir(&at_root, root), "{at_root:?}");
         drop(shell);
         let _ = std::fs::remove_dir_all(&start_dir);
+    }
+
+    /// What the Windows read does with a PEB read that fails at first: tries
+    /// again, trims what it finally gets, and does not retry a directory it
+    /// read and refuses (#1136).
+    #[test]
+    fn a_peb_read_that_fails_at_first_gives_the_trimmed_directory() {
+        let mut calls = 0;
+        let dir = super::windows::directory_of(|| {
+            calls += 1;
+            (calls == 3).then(|| r"C:\Windows\".to_owned())
+        });
+        assert_eq!((dir.as_deref(), calls), (Some(r"C:\Windows"), 3));
+
+        let mut calls = 0;
+        let refused = super::windows::directory_of(|| {
+            calls += 1;
+            Some(String::new())
+        });
+        assert_eq!((refused, calls), (None, 1));
     }
 
     #[tokio::test]

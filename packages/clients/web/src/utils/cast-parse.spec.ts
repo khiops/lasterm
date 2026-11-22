@@ -175,6 +175,8 @@ describe("parseCastChunks — the line limit", () => {
 	it("refuses a last line over N with no line end", async () => {
 		expect(await parse(HEAD, line(N + 1))).toEqual(TOO_LARGE);
 		expect(await parse(HEAD, line(N))).toMatchObject({ events: [{ c: "o" }] });
+		// A last carriage return that no line feed follows is the line's own: N + 1 units.
+		expect(await parse(HEAD, `${line(N)}\r`)).toEqual(TOO_LARGE);
 	});
 
 	// line-units. Mutations caught: characters counted instead of UTF-16 units;

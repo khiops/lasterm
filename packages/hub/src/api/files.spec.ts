@@ -436,6 +436,22 @@ describe("downloads from a terminal's host, over REST (#840)", () => {
 		});
 		expect(host.statusCode).toBe(404);
 		expect(host.json().error.code).toBe("HOST_NOT_FOUND");
+		// A remote host with no agent connected to this hub.
+		const dal = new MetaDAL(dbs.meta);
+		const pi = dal.createHost({ type: "ssh", label: "pi", sshHost: "pi@pi.test" });
+		dal.createSession({ id: "01K840SESS0000000000000002", hostId: pi.id, status: "closed" });
+		dal.createChannel({
+			id: "01K840CHAN0000000000000002",
+			sessionId: "01K840SESS0000000000000002",
+			status: "dead",
+		});
+		const offline = await server.inject({
+			method: "GET",
+			url: "/api/channels/01K840CHAN0000000000000002/files/content?path=%2Fhome%2Fpi%2Fx",
+			headers: bearer(),
+		});
+		expect(offline.statusCode).toBe(409);
+		expect(offline.json().error.code).toBe("HOST_NOT_CONNECTED");
 	});
 
 	it("content disposition of unusual names", async () => {

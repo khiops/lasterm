@@ -6129,17 +6129,8 @@ async fn download_hub_file_to(
         Some((file_name, identity)) if folders.is_empty() && file_name == name => *identity,
         _ => None,
     };
-    let connection = established_hub_connection()?;
-    if request.port != connection.port {
-        return Err("download names a different hub endpoint".to_string());
-    }
+    let (client, url) = download_endpoint(request.port, &request.hub_path)?;
     let token = read_hub_auth_token()?.ok_or_else(|| "no hub token".to_string())?;
-    let client = downloads::download_client(
-        pinned_hub_tls_config(connection.expected_spki.clone())?,
-        same_endpoint_redirects(),
-        downloads::IDLE_LIMIT,
-    )?;
-    let url = relay_hub_url(connection.port, &request.hub_path)?;
     let cancel = Arc::new(AtomicBool::new(false));
     let key = (request.download_id.clone(), request.item_id.clone());
     running_downloads_map()
@@ -6197,6 +6188,24 @@ async fn download_hub_file_to(
         );
     });
     Ok(())
+}
+
+/// The client and URL a download fetches with: the hub this desktop
+/// established, only on its own port, over its pinned TLS identity.
+fn download_endpoint(
+    port: u16,
+    hub_path: &str,
+) -> Result<(reqwest::blocking::Client, String), String> {
+    let connection = established_hub_connection()?;
+    if port != connection.port {
+        return Err("download names a different hub endpoint".to_string());
+    }
+    let client = downloads::download_client(
+        pinned_hub_tls_config(connection.expected_spki.clone())?,
+        same_endpoint_redirects(),
+        downloads::IDLE_LIMIT,
+    )?;
+    Ok((client, relay_hub_url(connection.port, hub_path)?))
 }
 
 /// Stop one file of a download, or every file of it.
@@ -7782,6 +7791,37 @@ mod tests {
         );
         *HUB_CONNECTION.lock().unwrap() = None;
         HUB_PORT.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn download_endpoint_keeps_to_the_pinned_hub() {
+        let _guard = hub_connection_test_guard();
+        let pinned = rcgen::KeyPair::generate().unwrap();
+        let impostor = rcgen::KeyPair::generate().unwrap();
+        let peer = TestTlsPeer::start(&impostor);
+        let port = peer.port;
+        *HUB_CONNECTION.lock().unwrap() = Some(HubConnection {
+            port,
+            expected_spki: pinned.subject_public_key_info(),
+            client: build_pinned_hub_client(pinned.subject_public_key_info()).unwrap(),
+        });
+        let path = "/api/hosts/01K840HOST0000000000000001/files/content?path=x";
+        // Another port than the hub's: refused before any request.
+        let error = download_endpoint(port.saturating_add(1), path).unwrap_err();
+        assert!(error.contains("different hub endpoint"), "{error}");
+        // A hub presenting another key: the TLS handshake fails, nothing is read.
+        let (client, url) = download_endpoint(port, path).unwrap();
+        let error = client
+            .get(&url)
+            .send()
+            .expect_err("another key must be refused");
+        assert!(
+            error_chain_has_spki_mismatch(&error),
+            "{}",
+            error_with_sources(&error)
+        );
+        *HUB_CONNECTION.lock().unwrap() = None;
+        drop(peer);
     }
 
     #[test]

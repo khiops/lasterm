@@ -399,6 +399,19 @@ describe.each(KINDS.filter((kind) => kind.runs))(
 			}
 		});
 
+		it.runIf(windowsMachine && kind.transport !== "sftp")(
+			"a junction is not followed",
+			async () => {
+				// A folder reparse point, which needs no privilege to make.
+				harness = await kind.start();
+				mkdirSync(harness.local("folder"));
+				symlinkSync(harness.local("folder"), harness.local("junction"), "junction");
+				const response = await content(harness, harness.at("junction"));
+				expect(response.statusCode).toBe(409);
+				expect(response.json().error.code).toBe("LINK_NOT_FOLLOWED");
+			},
+		);
+
 		it("not a regular file", async () => {
 			harness = await kind.start();
 			mkdirSync(harness.local("folder"));

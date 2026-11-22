@@ -2372,16 +2372,16 @@ async fn detach_lets_a_powershell_launch_end() {
         .env("XDG_STATE_HOME", &fixture.dir)
         .env("XDG_CONFIG_HOME", &fixture.dir)
         .env("LOCALAPPDATA", &fixture.dir)
-        .env("APPDATA", &fixture.dir)
-        .stdin(std::process::Stdio::null());
+        .env("APPDATA", &fixture.dir);
+    // Inside a job that allows breaking away, as a Win32-OpenSSH session's.
+    let job = detach::Job::new(true);
     let output = tokio::time::timeout(
         Duration::from_secs(30),
-        tokio::task::spawn_blocking(move || launch.output()),
+        tokio::task::spawn_blocking(move || job.run(launch)),
     )
     .await
     .expect("the launch's output ended while its daemon runs")
-    .expect("launch task")
-    .expect("run powershell");
+    .expect("launch task");
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert!(
         detach::stderr_lines(&output).contains(&"lasterm-detach: started".to_owned()),
@@ -2449,13 +2449,14 @@ async fn detach_refused_without_breakaway() {
     drop(job);
 }
 
-/// Start a detached daemon with `idle_timeout`, outside any job of the test's.
+/// Start a detached daemon with `idle_timeout`, launched inside a job that
+/// allows breaking away, as a Win32-OpenSSH session's does. The job the test
+/// itself may run in need not allow it (a CI runner's does not).
 #[cfg(windows)]
 fn start_detached(fixture: &StopFixture, idle_timeout: &str) {
-    let output = detach::detach_command(fixture, idle_timeout)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("run the launcher");
+    let job = detach::Job::new(true);
+    let output = job.run(detach::detach_command(fixture, idle_timeout));
+    drop(job);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
 }
 

@@ -441,6 +441,21 @@ describe("useHostForm", () => {
 			},
 		);
 
+		// #755 AC-W4: editing a Windows host stores its new answer, as any
+		// other host's. Mutation: the old edit rule that left it out.
+		it.each([
+			[true, "no", false],
+			[null, "yes", true],
+		] as const)(
+			"stores a Windows host's changed answer: %j to %s",
+			async (sshRemoteDaemon, chosen, stored) => {
+				const body = await savedBody(storedHost({ os: "windows", sshRemoteDaemon }), (form) => {
+					form.sshRemoteDaemon = chosen;
+				});
+				expect(body).toHaveProperty("ssh_remote_daemon", stored);
+			},
+		);
+
 		// ─── Only what the user changed (#789) ─────────────────────────────
 		//
 		// The form is the host as this window knew it when the dialog opened. A

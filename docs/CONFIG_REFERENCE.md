@@ -115,7 +115,7 @@ The file-transfer keys are checked where they are written: `PUT /api/config/glob
 |-----|------|---------|-------------|
 | source | `"dynamic"` \| `"static"` \| `"process"` | `"dynamic"` | The title a program sets (OSC 0/2), a fixed one, or the foreground process's name |
 | static_title | string | — | The title shown when `source = "static"` |
-| max_length | number | `50` | Max title display characters |
+| max_length | number | `50` | Max title display characters (a fractional value is rounded down) |
 | truncation | `"start"` \| `"middle"` \| `"end"` | `"end"` | Ellipsis placement when title is truncated |
 | prefix | string | — | Global prefix prepended to all tab titles |
 | window_title | boolean | `true` | Update browser / window title |

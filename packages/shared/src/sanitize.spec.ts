@@ -59,6 +59,44 @@ describe("sanitizeTitle surrogate pairs", () => {
 	});
 });
 
+describe("sanitizeTitle tag stripping", () => {
+	// Expected values are what the former /<[^>]*>/g produced, written out.
+	it.each([
+		["a<b>c", "ac"],
+		["a<b>c<d>e", "ace"],
+		["<<a>b", "b"],
+		["a<b", "a<b"],
+		["a<b<c", "a<b<c"],
+		["a<b>c<d", "ac<d"],
+		["<>x", "x"],
+		["x<>", "x"],
+		["a>b", "a>b"],
+		["a<b\nc>d", "ad"],
+	])("sanitizeTitle(%j) is %j", (raw, expected) => {
+		expect(sanitizeTitle(raw)).toBe(expected);
+	});
+
+	// Wrong implementation: /<[^>]*>/g over the raw title, which rescans every suffix of a run
+	// of "<" with no ">" after it: about 8 s at this size, against a few milliseconds linear.
+	it("stays linear on a title of only '<' (a host controls its length)", () => {
+		const hostile = "<".repeat(131072);
+		const start = performance.now();
+		const result = sanitizeTitle(hostile);
+		const elapsed = performance.now() - start;
+		expect(result).toBe("<".repeat(256));
+		expect(elapsed).toBeLessThan(1000);
+	});
+
+	it("stays linear on many '<' closed only at the very end", () => {
+		const hostile = `${"<".repeat(131072)}>`;
+		const start = performance.now();
+		const result = sanitizeTitle(hostile);
+		const elapsed = performance.now() - start;
+		expect(result).toBe("");
+		expect(elapsed).toBeLessThan(1000);
+	});
+});
+
 describe("truncateTitle", () => {
 	it("passes through title shorter than maxLength", () => {
 		expect(truncateTitle("short", 20)).toBe("short");
@@ -152,5 +190,27 @@ describe("truncateTitle", () => {
 				expect(isWellFormed(result)).toBe(true);
 			}
 		}
+	});
+});
+
+describe("truncateTitle fractional maxLength", () => {
+	// Wrong implementation: no floor on entry, so slice(0, 5.5 - 1) and the tail's 5.5 - 1
+	// count each round up and the result is 6 units, over 5.5.
+	it.each([
+		["start", "…ghij"],
+		["end", "abcd…"],
+		["middle", "ab…ij"],
+	] as const)("%s keeps to floor(5.5) = 5 units", (position, expected) => {
+		const out = truncateTitle("abcdefghij", 5.5, position);
+		expect(out).toBe(expected);
+		expect(out.length).toBeLessThanOrEqual(5);
+	});
+
+	it("returns the title when it fits the fractional bound", () => {
+		expect(truncateTitle("abcde", 5.5)).toBe("abcde");
+	});
+
+	it("a bound between 1 and 2 is the ellipsis alone", () => {
+		expect(truncateTitle("abc", 1.5)).toBe("…");
 	});
 });

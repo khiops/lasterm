@@ -257,6 +257,33 @@ pub(crate) fn is_local_host(host: &str, local: &str) -> bool {
     host.eq_ignore_ascii_case(local) || first(host) == first(local)
 }
 
+/// How many times a directory that cannot be read is tried, and the wait
+/// between tries. A shell just started has a process whose parameters are not
+/// all in place yet: its first read can fail where the next, a few
+/// milliseconds later, succeeds (#1136).
+#[cfg(any(windows, test))]
+const READ_TRIES: u32 = 10;
+#[cfg(any(windows, test))]
+const READ_RETRY_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// `read` until it gives something, at most `tries` times, `wait` apart.
+#[cfg(any(windows, test))]
+fn read_with_retries<T>(
+    tries: u32,
+    wait: std::time::Duration,
+    mut read: impl FnMut() -> Option<T>,
+) -> Option<T> {
+    for attempt in 0..tries {
+        if attempt > 0 {
+            std::thread::sleep(wait);
+        }
+        if let Some(found) = read() {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// Read the shell's process: its directory, and whether it is at its prompt.
 /// Never fails: what cannot be read is unknown.
 pub(crate) async fn read_process(pid: u32) -> ProcessRead {
@@ -511,10 +538,12 @@ mod windows {
             if !directory_follows(&process.image_name()?) {
                 return None;
             }
-            process
-                .current_directory()
-                .map(without_trailing_separator)
-                .filter(|dir| plausible_dir(dir))
+            super::read_with_retries(super::READ_TRIES, super::READ_RETRY_WAIT, || {
+                process
+                    .current_directory()
+                    .map(without_trailing_separator)
+                    .filter(|dir| plausible_dir(dir))
+            })
         });
         ProcessRead {
             cwd,
@@ -706,6 +735,24 @@ mod tests {
         let state = tracker.change_to_send(false).unwrap();
         assert_eq!(state.cwd, None);
         assert_eq!(state.source, CwdSource::Process);
+    }
+
+    /// A directory the process cannot give yet is read again (#1136).
+    #[test]
+    fn a_read_that_fails_at_first_is_tried_again() {
+        let mut calls = 0;
+        let found = read_with_retries(READ_TRIES, std::time::Duration::ZERO, || {
+            calls += 1;
+            (calls == 3).then_some("dir")
+        });
+        assert_eq!((found, calls), (Some("dir"), 3));
+
+        let mut calls = 0;
+        let never = read_with_retries(READ_TRIES, std::time::Duration::ZERO, || {
+            calls += 1;
+            None::<String>
+        });
+        assert_eq!((never, calls), (None, READ_TRIES));
     }
 
     #[test]

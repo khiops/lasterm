@@ -319,3 +319,253 @@ describe("the files of a terminal's host, over REST (#832)", () => {
 		});
 	});
 });
+
+describe("downloads from a terminal's host, over REST (#840)", () => {
+	const CHANNEL = "01K840CHAN0000000000000001";
+	let dbs: DatabaseManager;
+	let server: FastifyInstance;
+	let root: string;
+	let dir: string;
+	let localHostId: string;
+	const style = process.platform === "win32" ? "windows" : "posix";
+
+	async function start(fileTransfer: boolean, corsOrigins?: string[]): Promise<void> {
+		dbs = openTestDatabases();
+		root = makeTempDir("lasterm-download-route-");
+		mkdirSync(join(root, "config"));
+		mkdirSync(join(root, "files"));
+		writeFileSync(
+			join(root, "config", "config.toml"),
+			`[experimental]\nfile_transfer = ${fileTransfer}\n`,
+		);
+		server = await createServer({
+			tls: getTestTls(),
+			logger: false,
+			dbManager: dbs,
+			skipShellDiscovery: true,
+			authToken: PRIMARY_TOKEN,
+			authConfig: { tokenTtlDays: 90 },
+			configDir: join(root, "config"),
+			...(corsOrigins !== undefined ? { corsOrigins } : {}),
+		});
+		await server.ready();
+		const dal = new MetaDAL(dbs.meta);
+		const [local] = dal.listLocalHosts();
+		if (!local) throw new Error("the hub made no local host");
+		localHostId = local.id;
+		dal.createSession({ id: "01K840SESS0000000000000001", hostId: local.id, status: "active" });
+		dal.createChannel({ id: CHANNEL, sessionId: "01K840SESS0000000000000001", status: "live" });
+		const normalised = normaliseHostPath(join(root, "files"), style);
+		if (!normalised.ok) throw new Error(normalised.reason);
+		dir = normalised.path;
+	}
+
+	afterEach(async () => {
+		await server?.close();
+		dbs?.close();
+		if (root) await removeTempDir(root);
+	});
+
+	const at = (name: string) => `${dir}${style === "windows" ? "\\" : "/"}${name}`;
+	const download = (path: string, headers: Record<string, string> = bearer()) =>
+		server.inject({
+			method: "GET",
+			url: `/api/channels/${CHANNEL}/files/content?path=${encodeURIComponent(path)}`,
+			headers,
+		});
+	const ticketFor = async (path: string, url = `/api/channels/${CHANNEL}/files/content-ticket`) => {
+		const response = await server.inject({
+			method: "POST",
+			url,
+			headers: bearer(),
+			payload: { path },
+		});
+		expect(response.statusCode).toBe(200);
+		return response.json().ticket as string;
+	};
+
+	it("a reader downloads", async () => {
+		await start(true);
+		writeFileSync(join(root, "files", "report.txt"), "the report");
+		// No window, no write lock, no client id: only the bearer.
+		const response = await download(at("report.txt"));
+		expect(response.statusCode).toBe(200);
+		expect(response.body).toBe("the report");
+	});
+
+	it("content waits behind the flag", async () => {
+		await start(false);
+		writeFileSync(join(root, "files", "report.txt"), "the report");
+		const response = await download(at("report.txt"));
+		expect(response.statusCode).toBe(404);
+		expect(response.json().error.code).toBe("FILE_TRANSFER_DISABLED");
+	});
+
+	it("content refuses unsupported paths", async () => {
+		await start(true);
+		const refused =
+			style === "windows"
+				? ["relative\\x", "C:\\a\\..\\b", "C:\\%USERPROFILE%\\x"]
+				: ["relative/x", "/a/../b", "~/x"];
+		for (const path of refused) {
+			const response = await download(path);
+			expect(response.statusCode, path).toBe(400);
+			expect(response.json().error.code, path).toBe("UNSUPPORTED_PATH");
+		}
+		const long = await download(`/${"a".repeat(MAX_PATH_LENGTH)}`);
+		expect(long.statusCode).toBe(400);
+		expect(long.json().error.code).toBe("VALIDATION_ERROR");
+		// Literal characters a name may hold are not refused: the file is simply looked for.
+		const literal = await download(at("$HOME x"));
+		expect(literal.statusCode).toBe(404);
+	});
+
+	it("content on an unknown channel or host", async () => {
+		await start(true);
+		const channel = await server.inject({
+			method: "GET",
+			url: `/api/channels/01K840CHAN0000000000000099/files/content?path=${encodeURIComponent(at("x"))}`,
+			headers: bearer(),
+		});
+		expect(channel.statusCode).toBe(404);
+		expect(channel.json().error.code).toBe("CHANNEL_NOT_FOUND");
+		const host = await server.inject({
+			method: "GET",
+			url: `/api/hosts/01K840HOST0000000000000099/files/content?path=${encodeURIComponent(at("x"))}`,
+			headers: bearer(),
+		});
+		expect(host.statusCode).toBe(404);
+		expect(host.json().error.code).toBe("HOST_NOT_FOUND");
+	});
+
+	it("content disposition of unusual names", async () => {
+		await start(true);
+		const names: Array<[string, string, string]> = [
+			[
+				"rapport été.pdf",
+				'filename="rapport _t_.pdf"',
+				"filename*=UTF-8''rapport%20%C3%A9t%C3%A9.pdf",
+			],
+			[
+				'say "hi" 100%.txt',
+				'filename="say _hi_ 100_.txt"',
+				"filename*=UTF-8''say%20%22hi%22%20100%25.txt",
+			],
+		];
+		if (style === "posix") {
+			names.push(["new\nline.txt", 'filename="new_line.txt"', "filename*=UTF-8''new%0Aline.txt"]);
+		}
+		for (const [name, fallback, encoded] of names) {
+			if (style === "windows" && name.includes('"')) continue; // Windows refuses `"` in a name
+			writeFileSync(join(root, "files", name), "x");
+			const response = await download(at(name));
+			expect(response.statusCode, name).toBe(200);
+			expect(response.headers["content-disposition"], name).toBe(
+				`attachment; ${fallback}; ${encoded}`,
+			);
+		}
+	});
+
+	it("download tickets", async () => {
+		await start(true);
+		writeFileSync(join(root, "files", "p.txt"), "P");
+		writeFileSync(join(root, "files", "q.txt"), "Q");
+		const plain = (url: string) => server.inject({ method: "GET", url });
+		const contentUrl = (query: string) => `/api/channels/${CHANNEL}/files/content?${query}`;
+
+		// No bearer and no ticket.
+		expect((await plain(contentUrl(`path=${encodeURIComponent(at("p.txt"))}`))).statusCode).toBe(
+			401,
+		);
+
+		// Used once; the path is the ticket's, whatever the query says.
+		const ticket = await ticketFor(at("p.txt"));
+		const first = await plain(
+			contentUrl(`ticket=${ticket}&path=${encodeURIComponent(at("q.txt"))}`),
+		);
+		expect(first.statusCode).toBe(200);
+		expect(first.body).toBe("P");
+		expect((await plain(contentUrl(`ticket=${ticket}`))).statusCode).toBe(401);
+
+		// Expired.
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			const old = await ticketFor(at("p.txt"));
+			vi.setSystemTime(Date.now() + 61_000);
+			expect((await plain(contentUrl(`ticket=${old}`))).statusCode).toBe(401);
+		} finally {
+			vi.useRealTimers();
+		}
+
+		// Another host, a listing, a trailing slash.
+		const pi = new MetaDAL(dbs.meta).createHost({
+			type: "ssh",
+			label: "pi",
+			sshHost: "pi@pi.test",
+		});
+		const forLocal = await ticketFor(at("p.txt"));
+		expect((await plain(`/api/hosts/${pi.id}/files/content?ticket=${forLocal}`)).statusCode).toBe(
+			401,
+		);
+		const forListing = await ticketFor(at("p.txt"));
+		expect(
+			(
+				await plain(
+					`/api/channels/${CHANNEL}/files?ticket=${forListing}&path=${encodeURIComponent(dir)}`,
+				)
+			).statusCode,
+		).toBe(401);
+		const slash = await ticketFor(at("p.txt"));
+		expect(
+			(await plain(`/api/channels/${CHANNEL}/files/content/?ticket=${slash}`)).statusCode,
+		).not.toBe(200);
+
+		// The host form takes a ticket made for its host.
+		const hostTicket = await ticketFor(
+			at("p.txt"),
+			`/api/hosts/${localHostId}/files/content-ticket`,
+		);
+		const byHost = await plain(`/api/hosts/${localHostId}/files/content?ticket=${hostTicket}`);
+		expect(byHost.statusCode).toBe(200);
+
+		// A request with a bearer leaves a ticket usable.
+		const kept = await ticketFor(at("p.txt"));
+		const withBearer = await server.inject({
+			method: "GET",
+			url: contentUrl(`ticket=${kept}&path=${encodeURIComponent(at("q.txt"))}`),
+			headers: bearer(),
+		});
+		expect(withBearer.body).toBe("Q");
+		expect((await plain(contentUrl(`ticket=${kept}`))).statusCode).toBe(200);
+
+		// The 33rd ticket of a token drops the first.
+		const tickets: string[] = [];
+		for (let i = 0; i < 33; i++) tickets.push(await ticketFor(at("p.txt")));
+		expect((await plain(contentUrl(`ticket=${tickets[0]}`))).statusCode).toBe(401);
+		expect((await plain(contentUrl(`ticket=${tickets[32]}`))).statusCode).toBe(200);
+	});
+
+	it("content cors", async () => {
+		await start(true, ["https://other.example"]);
+		const preflight = await server.inject({
+			method: "OPTIONS",
+			url: `/api/channels/${CHANNEL}/files/content?path=x`,
+			headers: {
+				origin: "https://other.example",
+				"access-control-request-method": "GET",
+				"access-control-request-headers": "authorization,range,if-range,x-lasterm-download",
+			},
+		});
+		expect(preflight.statusCode).toBeLessThan(300);
+		const allowed = String(preflight.headers["access-control-allow-headers"]).toLowerCase();
+		for (const header of ["range", "if-range", "x-lasterm-download"]) {
+			expect(allowed).toContain(header);
+		}
+		writeFileSync(join(root, "files", "c.txt"), "c");
+		const response = await download(at("c.txt"), { ...bearer(), origin: "https://other.example" });
+		const exposed = String(response.headers["access-control-expose-headers"]).toLowerCase();
+		for (const header of ["etag", "content-range", "content-disposition"]) {
+			expect(exposed).toContain(header);
+		}
+	});
+});

@@ -70,6 +70,12 @@ export type FileErrorCode =
 	| "PERMISSION_DENIED"
 	| "UNSUPPORTED_PATH"
 	| "NO_SPACE"
+	/** A download names something that is not a regular file (#840). */
+	| "NOT_A_FILE"
+	/** A download names a link, which is not followed (#840). */
+	| "LINK_NOT_FOLLOWED"
+	/** The file changed between two looks of one download (#840). */
+	| "FILE_CHANGED"
 	| "FILE_ACCESS_FAILED";
 
 /**
@@ -96,6 +102,9 @@ export const REASONS = {
 	PARENT_NOT_FOUND: "the folder it would be in does not exist",
 	PARENT_NOT_A_DIRECTORY: "what it would be in is not a folder",
 	NO_SPACE: "the host's disk is full",
+	NOT_A_FILE: "it is not a file",
+	LINK_NOT_FOLLOWED: "it is a link, and links are not followed",
+	FILE_CHANGED: "it changed while it was being read",
 } as const;
 
 /**

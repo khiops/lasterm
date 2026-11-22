@@ -55,7 +55,7 @@ import {
 	generateId,
 	validateCustomCommand,
 } from "@lasterm/shared";
-import { terminalsText, uploadsText } from "../api/host-connection.js";
+import { terminalsText, transfersText } from "../api/host-connection.js";
 import { HUB_VERSION } from "../build-version.js";
 import type { ConfigResolver, GcConfig } from "../config.js";
 import type { HubLogger } from "../logging/hub-logger.js";
@@ -285,9 +285,15 @@ export type HostConnectionOutcome =
 			readonly kind: "terminals-would-end";
 			readonly terminals: number;
 			readonly transfers?: number;
+			/** How many of `transfers` are downloads (#840). */
+			readonly downloads?: number;
 	  }
-	/** Closing the connection would stop uploads to the host (#833), and `force` did not say to. */
-	| { readonly kind: "transfers-would-stop"; readonly transfers: number }
+	/** Closing the connection would stop transfers to or from the host (#833, #840), and `force` did not say to. */
+	| {
+			readonly kind: "transfers-would-stop";
+			readonly transfers: number;
+			readonly downloads?: number;
+	  }
 	/** Connected already. */
 	| { readonly kind: "connected" }
 	/**
@@ -332,6 +338,8 @@ export class SessionManager {
 	private readonly agentMgr: AgentConnectionManager;
 	/** The uploads to each host (#833): they hold its connection as its terminals do. */
 	private transfers: HostTransfers | null = null;
+	/** Download responses being sent, per host (#840). */
+	private readonly downloadsOpen = new Map<string, number>();
 	/** Replaces an agent older than this hub once it holds nothing of it (#805). */
 	private readonly retirement: AgentRetirement;
 	/**
@@ -2594,7 +2602,10 @@ export class SessionManager {
 					kind: "error",
 					status: 409,
 					code: ErrorCode.TRANSFERS_WOULD_STOP,
-					message: "Send stop_transfers: true to stop the uploads to this host.",
+					message:
+						this.downloadsOn(hostId) > 0
+							? `Send stop_transfers: true to stop the ${this.transfersWords(hostId, transfers)} this host.`
+							: "Send stop_transfers: true to stop the uploads to this host.",
 					transfers,
 				};
 			}
@@ -2861,7 +2872,10 @@ export class SessionManager {
 				return {
 					replaced: false,
 					code: ErrorCode.TRANSFERS_WOULD_STOP,
-					message: "Send stop_transfers: true to stop the uploads to this host.",
+					message:
+						this.downloadsOn(hostId) > 0
+							? `Send stop_transfers: true to stop the ${this.transfersWords(hostId, transfers)} this host.`
+							: "Send stop_transfers: true to stop the uploads to this host.",
 					transfers,
 				};
 			}
@@ -3196,7 +3210,12 @@ export class SessionManager {
 		const ending = terminalsEndedByReconnect(facts);
 		const transfers =
 			this.ctx.agents.get(hostId)?.connected === true ? this.transfersOn(hostId) : 0;
-		const refused = this.wouldStop(ending, transfers, options.force);
+		const refused = this.wouldStop(
+			ending,
+			transfers,
+			options.force,
+			transfers > 0 ? this.downloadsOn(hostId) : 0,
+		);
 		if (refused !== null) return refused;
 		if (transfers > 0) this.transfers?.interruptOn(hostId);
 		this.userActsOnHost(hostId, false);
@@ -3234,7 +3253,7 @@ export class SessionManager {
 		const facts = this.connectionFacts(hostId, host);
 		const ending = terminalsEndedByDisconnect(facts);
 		const transfers = this.transfersOn(hostId);
-		const refused = this.wouldStop(ending, transfers, options.force);
+		const refused = this.wouldStop(ending, transfers, options.force, this.downloadsOn(hostId));
 		if (refused !== null) return refused;
 		if (transfers > 0) this.transfers?.interruptOn(hostId);
 		const session = this.ctx.sessions.get(hostId);
@@ -3303,7 +3322,7 @@ export class SessionManager {
 				kind: "refused",
 				code: ErrorCode.TRANSFERS_RUNNING,
 				transfers,
-				message: `${uploadsText(transfers)} to this host ${transfers === 1 ? "is" : "are"} running. Wait for them to end or cancel them, then delete the host.`,
+				message: `${this.transfersWords(hostId, transfers)} this host ${transfers === 1 ? "is" : "are"} running. Wait for them to end or cancel them, then delete the host.`,
 			};
 		const terminals = [...this.ctx.channels].filter(
 			([, ch]) => ch.hostId === hostId && ch.status !== "dead",
@@ -3363,12 +3382,20 @@ export class SessionManager {
 		terminals: number,
 		transfers: number,
 		force: boolean | undefined,
+		downloads = 0,
 	): HostConnectionOutcome | null {
 		if (force === true) return null;
 		if (terminals > 0) {
-			return { kind: "terminals-would-end", terminals, ...(transfers > 0 ? { transfers } : {}) };
+			return {
+				kind: "terminals-would-end",
+				terminals,
+				...(transfers > 0 ? { transfers } : {}),
+				...(downloads > 0 ? { downloads } : {}),
+			};
 		}
-		if (transfers > 0) return { kind: "transfers-would-stop", transfers };
+		if (transfers > 0) {
+			return { kind: "transfers-would-stop", transfers, ...(downloads > 0 ? { downloads } : {}) };
+		}
 		return null;
 	}
 
@@ -3487,9 +3514,39 @@ export class SessionManager {
 		return this.hostHasLiveChannels(hostId) || this.transfersOn(hostId) > 0;
 	}
 
-	/** How many uploads to this host are running or queued (#833). */
+	/**
+	 * How many transfers hold this host: uploads running or queued (#833), and
+	 * download responses being sent (#840).
+	 */
 	private transfersOn(hostId: string): number {
-		return this.transfers?.activeOn(hostId) ?? 0;
+		return (this.transfers?.activeOn(hostId) ?? 0) + this.downloadsOn(hostId);
+	}
+
+	/** How many download responses from this host are being sent (#840). */
+	private downloadsOn(hostId: string): number {
+		return this.downloadsOpen.get(hostId) ?? 0;
+	}
+
+	/** Count a download response from a host until the returned function is called (#840). */
+	downloadOpened(hostId: string): () => void {
+		this.downloadsOpen.set(hostId, this.downloadsOn(hostId) + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const left = this.downloadsOn(hostId) - 1;
+			if (left > 0) this.downloadsOpen.set(hostId, left);
+			else {
+				this.downloadsOpen.delete(hostId);
+				if (this.transfersOn(hostId) === 0) this.transfersEnded(hostId);
+			}
+		};
+	}
+
+	/** "1 upload", "2 downloads", "1 upload and 2 downloads": what would stop on this host. */
+	private transfersWords(hostId: string, transfers: number): string {
+		const downloads = Math.min(this.downloadsOn(hostId), transfers);
+		return `${transfersText(transfers - downloads, downloads)} ${downloads > 0 ? "on" : "to"}`;
 	}
 
 	/** Whether this hub holds a terminal on the host that has not ended. */

@@ -17,7 +17,8 @@ export const MAX_PATH_LENGTH = 4096;
 /** The header naming the window a write is made from: the id its `AUTH_OK` gave it. */
 export const CLIENT_ID_HEADER = "x-lasterm-client-id";
 
-const STATUS: Record<FileErrorCode, number> = {
+/** The HTTP status of each file error. */
+export const FILE_STATUS: Record<FileErrorCode, number> = {
 	HOST_NOT_CONNECTED: 409,
 	NOT_FOUND: 404,
 	NOT_A_DIRECTORY: 409,
@@ -25,6 +26,9 @@ const STATUS: Record<FileErrorCode, number> = {
 	PERMISSION_DENIED: 403,
 	UNSUPPORTED_PATH: 400,
 	NO_SPACE: 507,
+	NOT_A_FILE: 409,
+	LINK_NOT_FOLLOWED: 409,
+	FILE_CHANGED: 409,
 	FILE_ACCESS_FAILED: 502,
 };
 
@@ -149,7 +153,7 @@ export function registerFileRoutes(server: FastifyInstance, deps: FileRouteDeps)
 				return refuse(reply, 404, ErrorCode.CHANNEL_NOT_FOUND, "Channel not found");
 			}
 			if (error instanceof FileAccessError) {
-				return refuse(reply, STATUS[error.code], error.code, error.message);
+				return refuse(reply, FILE_STATUS[error.code], error.code, error.message);
 			}
 			request.log.error(
 				{ errorName: error instanceof Error ? error.name : typeof error },

@@ -125,6 +125,8 @@ export interface SftpServerOptions {
 	renameReplaces?: boolean;
 	/** False: FSTAT is answered "unsupported", as a server that left it out would. */
 	fstat?: boolean;
+	/** Told the bytes each READ answered (#840), for tests that bound what a download reads ahead. */
+	onRead?: (bytes: number) => void;
 }
 
 /** A path as the client sent it, mapped on to this machine's; null for one the view does not serve. */
@@ -541,7 +543,26 @@ export async function startSftpServer(options: SftpServerOptions = {}): Promise<
 							else await fs.rename(source, target);
 						});
 					});
-					for (const event of ["READ", "RMDIR", "SYMLINK"] as const) {
+					sftp.on("READ", (id, handle, offset, length) => {
+						if (intercept("READ")) return;
+						let opened: ReturnType<typeof file>;
+						try {
+							opened = file(handle);
+						} catch (error) {
+							status(id, error);
+							return;
+						}
+						const buffer = Buffer.alloc(length);
+						void opened.read(buffer, 0, length, offset).then(
+							({ bytesRead }) => {
+								options.onRead?.(bytesRead);
+								if (bytesRead === 0) sftp.status(id, codes.EOF, "End of file");
+								else sftp.data(id, buffer.subarray(0, bytesRead));
+							},
+							(error) => status(id, error),
+						);
+					});
+					for (const event of ["RMDIR", "SYMLINK"] as const) {
 						sftp.on(event, (id: number) =>
 							sftp.status(id, codes.OP_UNSUPPORTED, "Operation unsupported"),
 						);

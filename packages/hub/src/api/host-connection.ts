@@ -59,6 +59,14 @@ export function uploadsText(count: number): string {
 	return count === 1 ? "1 upload" : `${count} uploads`;
 }
 
+/** "1 upload", "2 downloads", "1 upload and 2 downloads" (#840). */
+export function transfersText(uploads: number, downloads: number): string {
+	const words: string[] = [];
+	if (uploads > 0 || downloads === 0) words.push(uploadsText(uploads));
+	if (downloads > 0) words.push(downloads === 1 ? "1 download" : `${downloads} downloads`);
+	return words.join(" and ");
+}
+
 /** Say what came of it, in the shapes PROTOCOL.md § 6 gives. */
 function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyReply {
 	switch (outcome.kind) {
@@ -103,7 +111,7 @@ function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyRep
 					message:
 						outcome.transfers === undefined
 							? `${terminalsText(outcome.terminals)} on this host would end. Send force: true to end them.`
-							: `${terminalsText(outcome.terminals)} on this host would end, and ${uploadsText(outcome.transfers)} to it would stop. Send force: true to go on.`,
+							: `${terminalsText(outcome.terminals)} on this host would end, and ${transfersText(outcome.transfers - (outcome.downloads ?? 0), outcome.downloads ?? 0)} ${outcome.downloads ? "on" : "to"} it would stop. Send force: true to go on.`,
 					terminals: outcome.terminals,
 					...(outcome.transfers !== undefined && { transfers: outcome.transfers }),
 				},
@@ -112,8 +120,9 @@ function answer(reply: FastifyReply, outcome: HostConnectionOutcome): FastifyRep
 			return reply.code(409).send({
 				error: {
 					code: ErrorCode.TRANSFERS_WOULD_STOP,
-					message: `${uploadsText(outcome.transfers)} to this host would stop. Send force: true to stop them; a retry resumes them.`,
+					message: `${transfersText(outcome.transfers - (outcome.downloads ?? 0), outcome.downloads ?? 0)} ${outcome.downloads ? "on" : "to"} this host would stop. Send force: true to stop them; a retry resumes them.`,
 					transfers: outcome.transfers,
+					...(outcome.downloads !== undefined && { downloads: outcome.downloads }),
 				},
 			});
 		case "connected":

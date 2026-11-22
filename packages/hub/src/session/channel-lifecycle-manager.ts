@@ -26,11 +26,12 @@ import type {
 } from "@lasterm/shared";
 import {
 	DEFAULT_CHANNEL_NAME,
+	ErrorCode,
 	FINAL_SCREEN_REDRAW_PREFIX,
 	generateId,
 	validateCustomCommand,
 } from "@lasterm/shared";
-import type { AgentConnection } from "./agent-connection.js";
+import { type AgentConnection, AgentRefusedHub } from "./agent-connection.js";
 import { daemonAuthFrame } from "./daemon-auth.js";
 import { hostDefaultProfile } from "./host-profile-menu.js";
 import { HostUnreachableError, hostAwayDuringSpawn } from "./host-reachability.js";
@@ -1776,7 +1777,12 @@ export class ChannelLifecycleManager {
 		return this.adoptions.get(hostId);
 	}
 
-	/** Ask a daemon what it holds of this hub's, and take that up. Never rejects. */
+	/**
+	 * Ask a daemon what it holds of this hub's, and take that up. An AUTH refusal
+	 * is not a lost link: it stops automatic reconnects until someone acts on the
+	 * host, tells every window why, and rejects the connection attempt. Other
+	 * listing failures are logged without rejecting.
+	 */
 	private async takeUpWhatTheDaemonLists(hostId: string, agent: AgentConnection): Promise<void> {
 		try {
 			const listed = await this.listDaemonChannels(agent);
@@ -1790,6 +1796,16 @@ export class ChannelLifecycleManager {
 					stateErr instanceof Error ? stateErr.message : String(stateErr)
 				}`,
 			);
+			if (stateErr instanceof AgentRefusedHub) {
+				this.ctx.userDisconnectedHosts.add(hostId);
+				this.broadcaster.broadcastToAllClients({
+					type: "ERROR",
+					code: ErrorCode.AGENT_REFUSED_HUB,
+					message: stateErr.message,
+					hostId,
+				} satisfies ErrorMessage);
+				throw stateErr;
+			}
 		}
 	}
 

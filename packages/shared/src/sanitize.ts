@@ -15,11 +15,27 @@ const ELLIPSIS = "\u2026";
  * 4. Truncate to maxRawLength UTF-16 units, never splitting a surrogate pair
  */
 export function sanitizeTitle(raw: string, maxRawLength = MAX_RAW_LENGTH): string {
-	const cleaned = raw
-		.replace(/<[^>]*>/g, "")
-		.replace(CONTROL_CHARS_RE, "")
-		.trim();
+	const cleaned = stripTags(raw).replace(CONTROL_CHARS_RE, "").trim();
 	return sliceHead(cleaned, maxRawLength);
+}
+
+/**
+ * Remove each `<` through the next `>`; a `<` with no `>` after it, and everything after, stays.
+ * One pass: a regex scanning `<[^>]*>` rescans every suffix of a title of only `<`, quadratic in a
+ * length a remote host controls.
+ */
+function stripTags(text: string): string {
+	let out = "";
+	let from = 0;
+	for (;;) {
+		const open = text.indexOf("<", from);
+		if (open === -1) break;
+		const close = text.indexOf(">", open + 1);
+		if (close === -1) break;
+		out += text.slice(from, open);
+		from = close + 1;
+	}
+	return out + text.slice(from);
 }
 
 function isHighSurrogate(code: number): boolean {
@@ -54,7 +70,7 @@ export type TruncationPosition = "end" | "middle" | "start";
  * character (U+2026) at the configured position.
  *
  * @param title     - The title to truncate
- * @param maxLength - Maximum length in UTF-16 units; a cut inside a surrogate pair moves inward,
+ * @param maxLength - Maximum length in UTF-16 units, floored when fractional; a cut inside a surrogate pair moves inward,
  *                    so the result may be one unit shorter per adjusted cut (two for "middle")
  * @param position  - Where to place the ellipsis: 'end', 'middle', or 'start'
  */
@@ -63,6 +79,7 @@ export function truncateTitle(
 	maxLength: number,
 	position: TruncationPosition = "end",
 ): string {
+	maxLength = Math.floor(maxLength);
 	if (title.length <= maxLength) return title;
 	if (maxLength < 1) return "";
 	if (maxLength === 1) return ELLIPSIS;

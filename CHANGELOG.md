@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.21.1](https://github.com/khiops/lasterm/compare/v0.21.0...v0.21.1) (2026-11-22)
+
+
+### Bug Fixes
+
+* **agent:** read a just-started cmd.exe's directory again before calling it unknown ([#1153](https://github.com/khiops/lasterm/issues/1153)) ([13a90f9](https://github.com/khiops/lasterm/commit/13a90f968e778fb06dbead4d547aa41873472395)), closes [#1136](https://github.com/khiops/lasterm/issues/1136)
+* **agent:** recognise a deploy-renamed Windows daemon ([#1163](https://github.com/khiops/lasterm/issues/1163)) ([fabafcd](https://github.com/khiops/lasterm/commit/fabafcdf80c8ba6c95536928e9254a4cfc03acde)), closes [#1144](https://github.com/khiops/lasterm/issues/1144)
+* **hub:** a SPAWN during a daemon adoption joins the acquisition ([#1167](https://github.com/khiops/lasterm/issues/1167)) ([9b86c2d](https://github.com/khiops/lasterm/commit/9b86c2db18c2c3caf4d624704a90535dc77cabb5)), closes [#1165](https://github.com/khiops/lasterm/issues/1165)
+* **hub:** stop reconnecting after daemon AUTH refusal ([#1162](https://github.com/khiops/lasterm/issues/1162)) ([36c0e47](https://github.com/khiops/lasterm/commit/36c0e477aa13d601e8e24b32d76962559e314a7d)), closes [#1135](https://github.com/khiops/lasterm/issues/1135)
+* **shared:** linear tag scan in sanitizeTitle, floor fractional maxLength ([#1166](https://github.com/khiops/lasterm/issues/1166)) ([40b535a](https://github.com/khiops/lasterm/commit/40b535a970cbf5466b3e8abebce4b8d89165d7ed)), closes [#1150](https://github.com/khiops/lasterm/issues/1150) [#1151](https://github.com/khiops/lasterm/issues/1151)
+
+
+### Documentation
+
+* **store:** news for a refusing agent no longer retried in a loop ([#1172](https://github.com/khiops/lasterm/issues/1172)) ([e205ef5](https://github.com/khiops/lasterm/commit/e205ef52e7a5333ed1e028da432eac5be5a25f37))
+* **store:** news for a Windows host's previous agent stopping after an update ([#1170](https://github.com/khiops/lasterm/issues/1170)) ([c5cc7d2](https://github.com/khiops/lasterm/commit/c5cc7d2a0e12f233a59450123e6940922239501c))
+
 ## [0.21.0](https://github.com/khiops/lasterm/compare/v0.20.0...v0.21.0) (2026-11-22)
 
 

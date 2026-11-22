@@ -2632,4 +2632,51 @@ describe("deleting every ended terminal from the sidebar", () => {
 		await vi.waitFor(() => expect(tabs().map((tab) => tab.label)).toEqual(["T2", "T3"]));
 		expect(listed("T2")).toBe(true);
 	});
+
+	// The sidebar's Delete on one ended terminal waits for the hub the same way. Wrong
+	// implementation: close its tab before the DELETE is answered.
+	it("keeps the tab of an ended terminal whose Delete the hub refuses", async () => {
+		const { hub } = await mountWindow({
+			channels: [ended("T1"), live("T3")],
+			layout: {
+				tabs: [
+					{ id: "TAB1", root: term("T1", "P1") },
+					{ id: "TAB2", root: term("T3", "P3") },
+				],
+			},
+		});
+		hub.answers.set("DELETE /api/channels/T1", () =>
+			json(
+				{ error: { code: "CHANNEL_STARTING", message: "That terminal is being started again." } },
+				409,
+			),
+		);
+
+		await rightClick(document.querySelector('.channel-sidebar [data-channel-id="T1"]'));
+		await click("Delete");
+		await settle();
+
+		expect(deleted(hub)).toEqual(["T1"]);
+		expect(tabs().map((tab) => tab.label)).toEqual(["T1", "T3"]);
+		expect(listed("T1")).toBe(true);
+	});
+
+	it("closes the tab of an ended terminal once the hub deleted it", async () => {
+		const { hub } = await mountWindow({
+			channels: [ended("T1"), live("T3")],
+			layout: {
+				tabs: [
+					{ id: "TAB1", root: term("T1", "P1") },
+					{ id: "TAB2", root: term("T3", "P3") },
+				],
+			},
+		});
+
+		await rightClick(document.querySelector('.channel-sidebar [data-channel-id="T1"]'));
+		await click("Delete");
+
+		await vi.waitFor(() => expect(tabs().map((tab) => tab.label)).toEqual(["T3"]));
+		expect(deleted(hub)).toEqual(["T1"]);
+		expect(listed("T1")).toBe(false);
+	});
 });

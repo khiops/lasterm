@@ -2190,6 +2190,9 @@ function onKillChannel(channelId: string): void {
 }
 
 async function onDeleteChannel(channelId: string): Promise<void> {
+	// Its tab goes once the hub deleted it: one it refused, being started
+	// again meanwhile, keeps its tab (#1117, #1118).
+	if (!(await channelsStore.deleteChannel(channelId))) return;
 	// Close the tab if this channel is its only terminal pane
 	const tabId = layout.findTabForChannel(channelId);
 	if (tabId !== null) {
@@ -2202,7 +2205,6 @@ async function onDeleteChannel(channelId: string): Promise<void> {
 			}
 		}
 	}
-	await channelsStore.deleteChannel(channelId);
 }
 
 async function onCreateChannelGroupConfirmed(name?: string): Promise<void> {

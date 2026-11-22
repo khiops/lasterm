@@ -3356,20 +3356,26 @@ describe("a purge while a dead terminal is being brought back (#1118)", () => {
 	}
 
 	// Wrong implementation: the bulk purge selects every dead row, the
-	// reserved one included (row gone, purged_ids [channelId]).
-	it("the bulk purge leaves it out, and it comes back with its row", async () => {
-		const { channelId, dal, answer } = await respawnSent();
+	// reserved one included, on either branch (row gone, purged_ids [channelId]).
+	it.each([
+		["a host's", true],
+		["every host's", false],
+	])(
+		"the bulk purge of %s dead terminals leaves it out, and it comes back with its row",
+		async (_, scoped) => {
+			const { channelId, dal, answer } = await respawnSent();
 
-		const res = await server.inject({
-			method: "DELETE",
-			url: "/api/channels/dead",
-			payload: { host_id: hostId },
-		});
+			const res = await server.inject({
+				method: "DELETE",
+				url: "/api/channels/dead",
+				...(scoped && { payload: { host_id: hostId } }),
+			});
 
-		expect(res.json()).toEqual({ ok: true, purged: 0, purged_ids: [] });
-		expect(await answer()).toBe(channelId);
-		expect(dal.getChannel(channelId)?.status).toBe("live");
-	});
+			expect(res.json()).toEqual({ ok: true, purged: 0, purged_ids: [] });
+			expect(await answer()).toBe(channelId);
+			expect(dal.getChannel(channelId)?.status).toBe("live");
+		},
+	);
 
 	// Wrong implementation: the single delete purges a dead row whatever
 	// starts it (200, row gone).

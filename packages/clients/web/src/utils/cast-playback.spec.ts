@@ -323,6 +323,26 @@ describe("CastPlayback", () => {
 		expect(playback.currentTime).toBe(11);
 	});
 
+	// Mutation caught: a strict comparison with the target, which float noise in
+	// summed delays (100 × 0.01 s = 1.0000000000000007) puts past it.
+	it("applies an event that falls on a seek's target despite float noise", async () => {
+		const lines = ['{"version":3,"term":{"cols":80,"rows":24}}'];
+		for (let i = 0; i < 99; i++) lines.push('[0.01, "o", "."]');
+		lines.push('[0.01, "o", "END"]');
+		const { playback, last } = player(lines.join("\n"));
+		await playback.seek(1);
+		expect(last().text.endsWith("END")).toBe(true);
+	});
+
+	// The total and the markers are read after every event: computed once.
+	it("hands back the same markers until Skip idle changes", () => {
+		const { playback } = player(LITERAL);
+		const first = playback.markers();
+		expect(playback.markers()).toBe(first);
+		playback.setSkipIdle(false);
+		expect(playback.markers()).not.toBe(first);
+	});
+
 	// A wait asked while the seek runs would be left behind and play a later event early.
 	it("leaves no wait behind when Play is pressed during a seek", async () => {
 		const text = [

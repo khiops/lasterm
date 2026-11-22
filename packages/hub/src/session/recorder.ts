@@ -180,11 +180,14 @@ const utf8 = new TextDecoder("utf-8", { ignoreBOM: true });
  * terminal at most, fed where the hub receives the agent's OUTPUT, written in
  * blocks of asciicast v3 event lines, kept until the user saves or discards it.
  */
-/** The bytes of output among events: what a lost-bytes marker counts. */
-function outputBytes(events: readonly PendingEvent[]): number {
+/**
+ * The bytes a dropped block held: every event's data in UTF-8, output, size
+ * changes, markers and exits alike, so a block of control events alone is
+ * marked too.
+ */
+function droppedBytes(events: readonly PendingEvent[]): number {
 	let bytes = 0;
 	for (const event of events) {
-		if (event.code !== "o") continue;
 		bytes += typeof event.data === "string" ? Buffer.byteLength(event.data) : event.data.byteLength;
 	}
 	return bytes;
@@ -250,7 +253,9 @@ export class SessionRecorder {
 		if (this.stopped) return { refused: "RECORDING_STORAGE_ERROR" };
 		const existing = this.byChannel.get(input.channelId);
 		if (existing) return { refused: "ALREADY_RECORDING", openId: existing.id };
-		if (this.usedBytes() >= this.deps.capBytes) return { refused: "RECORDING_CAP" };
+		const used = this.usedBytes();
+		if (used === null) return { refused: "RECORDING_STORAGE_ERROR" };
+		if (used >= this.deps.capBytes) return { refused: "RECORDING_CAP" };
 		const active = this.open(input);
 		if (active === null) return { refused: "RECORDING_STORAGE_ERROR" };
 		const requestId = generateId();
@@ -279,7 +284,18 @@ export class SessionRecorder {
 	 */
 	startAutomatic(input: StartInput): void {
 		if (this.stopped || this.byChannel.has(input.channelId)) return;
-		if (this.usedBytes() >= this.deps.capBytes) {
+		const used = this.usedBytes();
+		if (used === null) {
+			this.deps.broadcast({
+				type: "RECORDING_STATE",
+				channelId: input.channelId,
+				recordingId: null,
+				title: this.deps.titleOf(input.channelId),
+				refused: "storage",
+			});
+			return;
+		}
+		if (used >= this.deps.capBytes) {
 			this.deps.log(
 				"info",
 				`[lasterm-recording] not started for channel ${input.channelId}: storage cap reached`,
@@ -623,8 +639,7 @@ export class SessionRecorder {
 				...(active.sizePending && { size: { cols: active.cols, rows: active.rows } }),
 			});
 		} catch (err) {
-			// What the terminal printed, in bytes: sizes, markers and exits are not output.
-			const dropped = outputBytes(events) + active.heldUtf8.length;
+			const dropped = droppedBytes(events) + active.heldUtf8.length;
 			active.heldUtf8 = new Uint8Array(0);
 			active.lost += dropped;
 			const code = (err as { code?: unknown } | null)?.code;
@@ -679,12 +694,13 @@ export class SessionRecorder {
 	}
 
 	/** What all recordings hold; a failed read counts as full, so nothing starts past the cap. */
-	private usedBytes(): number {
+	/** What recordings hold, or null when it cannot be read (logged): no start then. */
+	private usedBytes(): number | null {
 		try {
 			return this.deps.dal.usedBytes();
 		} catch (err) {
 			this.logFailure("used-bytes", "*", err);
-			return Number.POSITIVE_INFINITY;
+			return null;
 		}
 	}
 
@@ -694,7 +710,8 @@ export class SessionRecorder {
 		const rows = this.deps.dal.list();
 		return {
 			recordings: rows.map((row) => this.toListed(row)),
-			used_bytes: Math.min(this.usedBytes(), Number.MAX_SAFE_INTEGER),
+			// Read as it is: a failure answers an error, not a list that says full.
+			used_bytes: this.deps.dal.usedBytes(),
 			cap_bytes: this.deps.capBytes,
 		};
 	}

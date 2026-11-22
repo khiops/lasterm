@@ -9,6 +9,8 @@ export interface PlaybackTerminal {
 
 /** A delay over this many seconds plays as this many with Skip idle on. */
 export const IDLE_CAP_S = 2;
+/** How far past a seek's target an event still counts as on it: far below a millisecond. */
+const BOUNDARY_S = 1e-6;
 /** The longest single timer: a longer wait is taken in steps (timers count in 32 bits). */
 export const MAX_TIMER_MS = 24 * 60 * 60 * 1000;
 /**
@@ -67,6 +69,8 @@ export class CastPlayback {
 	/** A seek is replaying: a Skip idle change waits for it, then applies. */
 	private seeking = false;
 	private pendingSkipIdle: boolean | null = null;
+	private timelineCache: { total: number; markers: Array<{ time: number; label: string }> } | null =
+		null;
 	private timer: unknown = null;
 	/** The played clock: `clockBase` played seconds at `clockAt`, running only while playing. */
 	private clockBase = 0;
@@ -107,18 +111,25 @@ export class CastPlayback {
 
 	/** The played length: with Skip idle on, long pauses count as 2 s. */
 	get totalTime(): number {
-		return this.cast.events.reduce((sum, e) => sum + this.played(e), 0);
+		return this.timeline().total;
 	}
 
 	/** Where each marker falls, in played seconds, and its label. */
 	markers(): Array<{ time: number; label: string }> {
-		const out: Array<{ time: number; label: string }> = [];
+		return this.timeline().markers;
+	}
+
+	/** The total and the markers, computed once per Skip idle value: a read per event costs nothing. */
+	private timeline(): { total: number; markers: Array<{ time: number; label: string }> } {
+		if (this.timelineCache !== null) return this.timelineCache;
+		const markers: Array<{ time: number; label: string }> = [];
 		let t = 0;
 		for (const e of this.cast.events) {
 			t += this.played(e);
-			if (e.c === "m") out.push({ time: t, label: e.t });
+			if (e.c === "m") markers.push({ time: t, label: e.t });
 		}
-		return out;
+		this.timelineCache = { total: t, markers };
+		return this.timelineCache;
 	}
 
 	play(): void {
@@ -162,6 +173,7 @@ export class CastPlayback {
 		const due = this.due();
 		const sinceLast = clock - this.position;
 		this.skipIdleValue = on;
+		this.timelineCache = null;
 		this.position = this.cast.events.slice(0, this.index).reduce((s, e) => s + this.played(e), 0);
 		const next = this.cast.events[this.index];
 		if (next === undefined) this.setClock(this.position);
@@ -185,7 +197,9 @@ export class CastPlayback {
 			while (this.index < this.cast.events.length) {
 				const event = this.cast.events[this.index] as CastEvent;
 				const at = this.position + this.played(event);
-				if (at > seconds) break;
+				// Sums of decimal delays carry float noise (100 × 0.01 s ends at
+				// 1.0000000000000007): an event on the target, within it, belongs.
+				if (at > seconds + BOUNDARY_S) break;
 				await this.apply(event, gen, 0, false);
 				if (gen !== this.generation) return;
 				this.position = at;

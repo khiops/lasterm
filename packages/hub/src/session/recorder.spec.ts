@@ -601,17 +601,30 @@ describe("SessionRecorder", () => {
 
 	// Mutation caught: a lost count that adds the text of size changes and markers
 	// to the output bytes.
-	it("counts only output bytes in a failed block's loss", () => {
+	// AC-WFAIL: a failed block's bytes are every event's data, in UTF-8. Mutations
+	// caught: control events left out (a block of them alone lost unmarked), and
+	// UTF-16 lengths counted as bytes.
+	it.each([
+		["a size change alone", (): void => h.rec.onResize(CHANNEL, 120, 40), 6],
+		[
+			"a size change and an accented output",
+			(): void => {
+				h.rec.onResize(CHANNEL, 120, 40);
+				h.rec.onOutput(CHANNEL, enc("é"));
+			},
+			8,
+		],
+	])("marks the loss of a failed block holding %s", (_label, events, bytes) => {
 		const id = startAuto(h);
-		h.rec.onOutput(CHANNEL, enc("ab"));
-		h.rec.onResize(CHANNEL, 120, 40);
-		h.rec.onAgentLost("host-1");
+		events();
 		vi.spyOn(h.dal, "writeBlock").mockImplementationOnce(() => {
 			throw sqliteFull();
 		});
 		h.rec.exportPart(id); // its flush fails
 		h.rec.stop(id);
-		expect(h.body(id)).toContain('[0.000, "m", "lasterm: 2 bytes not recorded (storage error)"]');
+		expect(h.body(id)).toContain(
+			`[0.000, "m", "lasterm: ${bytes} bytes not recorded (storage error)"]`,
+		);
 	});
 
 	// AC-PART-DELETED. Mutation caught: a missing block read as the end.
@@ -1015,10 +1028,26 @@ describe("SessionRecorder", () => {
 		});
 	});
 
+	// An unreadable total refuses a start as a storage error, never as the cap,
+	// and the list answers an error rather than "full". Mutation caught: the
+	// failure taken as an infinite total.
 	it("refuses a start when what recordings hold cannot be read", () => {
 		vi.spyOn(h.dal, "usedBytes").mockImplementation(() => {
 			throw sqliteFull();
 		});
+		h.rec.startAutomatic({
+			channelId: "auto",
+			hostId: "host-1",
+			hostLabel: "pi",
+			cols: 80,
+			rows: 24,
+		});
+		expect(h.broadcasts.at(-1)).toMatchObject({
+			channelId: "auto",
+			recordingId: null,
+			refused: "storage",
+		});
+		expect(() => h.rec.list()).toThrow();
 		expect(
 			h.rec.startManual({
 				channelId: CHANNEL,
@@ -1028,7 +1057,7 @@ describe("SessionRecorder", () => {
 				rows: 24,
 			}),
 		).toEqual({
-			refused: "RECORDING_CAP",
+			refused: "RECORDING_STORAGE_ERROR",
 		});
 	});
 

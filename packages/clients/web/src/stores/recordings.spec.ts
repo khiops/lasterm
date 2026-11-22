@@ -1,5 +1,4 @@
 // AC-UI-SAVE, AC-UI-STATE-ORDER, AC-UI-CAP (#80). New file: the recordings store is new.
-import { recordingFileName } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -263,7 +262,6 @@ describe("recordings store", () => {
 				{ id: open.recordingId, title: open.title, startedAt: open.startedAt },
 				true,
 			);
-			expect(state.suggestedName).toBe(recordingFileName("build", "2026-11-22T10:00:00.900Z"));
 			expect(state.suggestedName).toBe("lasterm-build-20261122-100000.cast");
 		});
 	});

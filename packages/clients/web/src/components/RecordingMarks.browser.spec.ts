@@ -19,7 +19,9 @@ import RecordingsModal from "./RecordingsModal.vue";
 
 let app: App | null = null;
 
-afterEach(() => {
+afterEach(async () => {
+	// The pointer leaves whatever a test hovered, even one that failed on it.
+	await userEvent.unhover(document.body);
 	app?.unmount();
 	app = null;
 	document.body.replaceChildren();
@@ -133,6 +135,9 @@ describe("recording controls' contrast (#80)", () => {
 			expect(hovered, `hovered Save: ${hovered.toFixed(2)}`).toBeGreaterThanOrEqual(
 				TEXT_CONTRAST_AA,
 			);
+			// Mutation caught: no hover cue at all (an empty or missing hover rule).
+			const style = getComputedStyle(save);
+			expect(style.boxShadow, "hovered Save edge").toBe(`${style.color} 0px 0px 0px 1px inset`);
 			await userEvent.unhover(document.body);
 
 			// Mutation caught: the confirmation's white on red, and red text from the ANSI palette.

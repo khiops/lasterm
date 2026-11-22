@@ -179,6 +179,23 @@ function createMockSshServerWithSocket(
 					const session = accept();
 					session.on("exec", (accept, _reject, info) => {
 						const stream = accept();
+						// The relay (#755), reached where the host cannot say whether
+						// its socket listens: it answers as the socket does.
+						if (info.command.includes("--attach")) {
+							const relay = stream as unknown as NodeJS.ReadWriteStream & {
+								stderr: NodeJS.WritableStream;
+								exit: (code: number) => void;
+							};
+							relay.stderr.write("lasterm-attach: start\n");
+							if (socketAnswers()) {
+								relay.write(makeHelloFrame());
+								return;
+							}
+							relay.stderr.write("lasterm-attach: nothing-listens\n");
+							relay.exit(3);
+							relay.end();
+							return;
+						}
 						onExec(stream, info.command);
 					});
 				});
@@ -223,14 +240,24 @@ function createMockSshServerWithSocket(
  * an agent unless `refusesStdio`.
  */
 function createForwardingRefusingServer(
-	options: { outright?: boolean; alreadyListening?: boolean; refusesStdio?: boolean } = {},
+	options: {
+		outright?: boolean;
+		alreadyListening?: boolean;
+		refusesStdio?: boolean;
+		refusesAttach?: boolean;
+		relayPrelude?: number;
+	} = {},
 ): {
 	server: Promise<{ server: SshServer; port: number }>;
 	commands: string[];
 	listening: () => boolean;
+	streamlocalAttempts: () => number;
+	relayReceived: () => Buffer;
 } {
 	const commands: string[] = [];
 	let listening = options.alreadyListening === true;
+	let streamlocalAttempts = 0;
+	let relayReceived = Buffer.alloc(0);
 	const server = new Promise<{ server: SshServer; port: number }>((resolve) => {
 		const srv = new Server({ hostKeys: [HOST_KEY] }, (client) => {
 			client.on("error", () => {});
@@ -245,11 +272,36 @@ function createForwardingRefusingServer(
 							rejectExec();
 							return;
 						}
+						if (command.includes("--attach") && options.refusesAttach) {
+							rejectExec();
+							return;
+						}
 						const stream = acceptExec() as unknown as NodeJS.ReadWriteStream & {
 							exit: (code: number) => void;
 						};
 						if (command.includes("--stdio")) {
 							stream.write(makeHelloFrame());
+							return;
+						}
+						// The relay (#755): the daemon's HELLO when it listens, else what
+						// the relay says on stderr, with the 1 a PowerShell shell leaves.
+						if (command.includes("--attach")) {
+							const relay = stream as unknown as NodeJS.ReadWriteStream & {
+								stderr: NodeJS.WritableStream;
+								exit: (code: number) => void;
+							};
+							relay.stderr.write("lasterm-attach: start\n");
+							if (listening) {
+								if (options.relayPrelude) relay.write(Buffer.alloc(options.relayPrelude, 0x2e));
+								relay.write(makeHelloFrame());
+								relay.on("data", (chunk: Buffer) => {
+									relayReceived = Buffer.concat([relayReceived, chunk]);
+								});
+								return;
+							}
+							relay.stderr.write("lasterm-attach: nothing-listens\n");
+							relay.exit(1);
+							relay.end();
 							return;
 						}
 						if (command.includes("XDG_STATE_HOME")) {
@@ -275,7 +327,10 @@ function createForwardingRefusingServer(
 							cb: (accept: unknown, reject: () => void) => void,
 						) => void;
 					}
-				).on("openssh.streamlocal", (_accept, reject) => reject());
+				).on("openssh.streamlocal", (_accept, reject) => {
+					streamlocalAttempts += 1;
+					reject();
+				});
 			});
 		});
 		srv.on("error", () => {});
@@ -283,7 +338,13 @@ function createForwardingRefusingServer(
 			resolve({ server: srv, port: (srv.address() as { port: number }).port });
 		});
 	});
-	return { server, commands, listening: () => listening };
+	return {
+		server,
+		commands,
+		listening: () => listening,
+		streamlocalAttempts: () => streamlocalAttempts,
+		relayReceived: () => relayReceived,
+	};
 }
 
 /** Build a minimal Host object for a mock SSH server on localhost. */
@@ -791,10 +852,9 @@ describe("SshAgent", () => {
 	// A host whose sshd refuses socket forwarding (#765): the daemon cannot be
 	// reached, however long the hub waits for it.
 	describe("on a server that refuses socket forwarding", () => {
-		const socket = "/home/pi/.local/state/lasterm/agent.sock";
-
 		async function reach(
 			server: Promise<{ server: SshServer; port: number }>,
+			relayFirst = false,
 		): Promise<{ agent: SshAgent; refused: ReturnType<typeof vi.fn>; start: Promise<unknown> }> {
 			const { server: srv, port } = await server;
 			servers.push(srv);
@@ -803,7 +863,11 @@ describe("SshAgent", () => {
 			const agent = new SshAgent(
 				makeHost(port),
 				undefined,
-				{ binaryCache: "/tmp/fake-cache", onSocketForwardingRefused: refused },
+				{
+					binaryCache: "/tmp/fake-cache",
+					onSocketForwardingRefused: refused,
+					relayFirst: () => relayFirst,
+				},
 				undefined,
 				true,
 			);
@@ -811,67 +875,79 @@ describe("SshAgent", () => {
 			return { agent, refused, start: agent.start(fp) };
 		}
 
-		it("stops the daemon it started, runs the agent on stdio, and says why", async () => {
-			const remote = createForwardingRefusingServer();
-			const logged = vi.spyOn(console, "error").mockImplementation(() => {});
-			try {
-				const { agent, refused, start } = await reach(remote.server);
-				const { hello } = (await start) as { hello: HelloMessage };
+		const launches = (commands: string[]) => commands.filter((c) => c.includes("--daemon")).length;
+		const stops = (commands: string[]) => commands.filter((c) => c.includes("--stop")).length;
+		const stdio = (commands: string[]) => commands.filter((c) => c.includes("--stdio")).length;
 
-				expect(hello.type).toBe("HELLO");
-				expect(agent.socketForwardingRefused).toBe(true);
-				expect(agent.usedRemoteDaemon).toBe(false);
-				expect(refused).toHaveBeenCalledWith(expect.objectContaining({ id: makeHost(0).id }));
-				// Started, seen listening, stopped through its own --stop, then stdio.
-				const launch = remote.commands.findIndex((c) => c.includes("--daemon"));
-				const stop = remote.commands.indexOf(`lasterm-agent --stop --socket ${socket}`);
-				const stdio = remote.commands.indexOf("lasterm-agent --stdio");
-				expect(launch).toBeGreaterThanOrEqual(0);
-				expect(stop).toBeGreaterThan(launch);
-				expect(stdio).toBeGreaterThan(stop);
-				expect(remote.listening()).toBe(false);
-				const said = logged.mock.calls.map((call) => String(call[0])).join("\n");
-				expect(said).toMatch(
-					/refuses socket forwarding \(AllowStreamLocalForwarding or DisableForwarding.*docs\/SSH_SERVER\.md\. The daemon this connection started there is stopped\./,
-				);
-			} finally {
-				logged.mockRestore();
-			}
+		it("keeps the daemon it started and reaches it through the relay (#755)", async () => {
+			const remote = createForwardingRefusingServer();
+			const { agent, refused, start } = await reach(remote.server);
+			const { hello } = (await start) as { hello: HelloMessage };
+
+			expect(hello.type).toBe("HELLO");
+			expect(agent.usedRemoteDaemon).toBe(true);
+			expect(agent.reachedThrough).toBe("relay");
+			expect(agent.socketForwardingRefused).toBe(true);
+			expect(refused).toHaveBeenCalledWith(expect.objectContaining({ id: makeHost(0).id }));
+			expect(launches(remote.commands)).toBe(1);
+			expect(stops(remote.commands)).toBe(0);
+			expect(stdio(remote.commands)).toBe(0);
+			expect(remote.listening()).toBe(true);
+			const relay = remote.commands.find((c) => c.includes("--attach")) ?? "";
+			expect(relay).toMatch(
+				/--attach --socket \/home\/pi\/\.local\/state\/lasterm\/agent\.sock --wait [1-9]/,
+			);
+
+			// The relay is the agent's transport: what the hub sends arrives on its stdin.
+			agent.send({ type: "HEARTBEAT", ts: "2026-11-22T00:00:00Z" });
+			await vi.waitFor(() => expect(remote.relayReceived().length).toBeGreaterThan(0));
 		}, 15_000);
 
-		it("starts nothing where the server refuses the channel type outright", async () => {
+		it("relays first where the channel type is refused outright, launching once", async () => {
 			const remote = createForwardingRefusingServer({ outright: true });
 			const { agent, start } = await reach(remote.server);
 			await start;
 
+			expect(agent.reachedThrough).toBe("relay");
 			expect(agent.socketForwardingRefused).toBe(true);
-			expect(remote.commands.some((c) => c.includes("--daemon"))).toBe(false);
-			expect(remote.commands.some((c) => c.includes("--stop"))).toBe(false);
-			expect(remote.commands).toContain("lasterm-agent --stdio");
+			expect(launches(remote.commands)).toBe(1);
+			expect(stops(remote.commands)).toBe(0);
+			expect(stdio(remote.commands)).toBe(0);
 		}, 15_000);
 
-		it("leaves a daemon that was already listening alone", async () => {
-			// Another connection, through another key or from another address,
-			// may reach it and hold terminals there.
-			const remote = createForwardingRefusingServer({ alreadyListening: true });
+		it("relays to a daemon that was already listening, and leaves it alone", async () => {
+			const remote = createForwardingRefusingServer({ alreadyListening: true, relayPrelude: 40 });
 			const { agent, start } = await reach(remote.server);
 			await start;
 
-			expect(agent.socketForwardingRefused).toBe(true);
-			expect(remote.commands.some((c) => c.includes("--daemon"))).toBe(false);
-			expect(remote.commands.some((c) => c.includes("--stop"))).toBe(false);
-			expect(remote.listening()).toBe(true);
-			expect(remote.commands).toContain("lasterm-agent --stdio");
+			expect(agent.reachedThrough).toBe("relay");
+			expect(agent.reachedRunningDaemon).toBe(true);
+			expect(launches(remote.commands)).toBe(0);
+			expect(stops(remote.commands)).toBe(0);
+			expect(stdio(remote.commands)).toBe(0);
 		}, 15_000);
 
-		it("says the forwarding was refused when stdio is refused too", async () => {
-			const remote = createForwardingRefusingServer({ refusesStdio: true });
+		it("goes straight to the relay for a host remembered as refusing", async () => {
+			const remote = createForwardingRefusingServer({ alreadyListening: true });
+			const { agent, start } = await reach(remote.server, true);
+			await start;
+
+			expect(remote.streamlocalAttempts()).toBe(0);
+			expect(agent.reachedThrough).toBe("relay");
+		}, 15_000);
+
+		it("fails with the relay's reason when the relay cannot run, and never falls back to stdio", async () => {
+			const remote = createForwardingRefusingServer({
+				alreadyListening: true,
+				refusesAttach: true,
+			});
 			const { start } = await reach(remote.server);
 
 			await expect(start).rejects.toThrow(
-				/refuses socket forwarding .* The daemon this connection started there is stopped\. Running the agent on stdio failed too/,
+				/could not reach the agent through its relay: the SSH server refused the command/,
 			);
-			expect(remote.listening()).toBe(false);
+			expect(stdio(remote.commands)).toBe(0);
+			expect(launches(remote.commands)).toBe(0);
 		}, 15_000);
 	});
 

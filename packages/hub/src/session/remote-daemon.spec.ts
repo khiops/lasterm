@@ -13,7 +13,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import type { Host } from "@lasterm/shared";
+import { encodeFrame, type Host, type ProtocolMessage } from "@lasterm/shared";
 import type { Client } from "ssh2";
 import { describe, expect, it } from "vitest";
 import {
@@ -22,24 +22,31 @@ import {
 	DETACH_SCRIPT,
 	describeRemoteDaemonPlacement,
 	hostKeepsDaemon,
-	hostTriesDaemon,
 	IDLE_TIMEOUT_SECONDS,
+	NoRunningDaemon,
+	NothingListens,
 	newRemoteDaemonScopeUnit,
+	openRelay,
 	parseRemoteDaemonPlacement,
 	parseRemoteSocketState,
 	quotePosix,
+	RelayFailed,
+	relayCommand,
 	rememberSocketForwardingRefused,
 	remoteDaemonLaunchCommand,
 	remoteDaemonPaths,
 	remoteDaemonStopCommand,
 	remoteSocketStateCommand,
-	SOCKET_FORWARDING_REFUSED_MESSAGE,
 	type SocketForwardingRefusals,
-	SocketForwardingRefused,
 	socketForwardingRefusedOn,
 } from "./remote-daemon.js";
 
 const conn = {} as Client;
+
+/** A relay that finds nothing listening, for a host whose probe says nothing (#755). */
+const nothingListens = async (): Promise<never> => {
+	throw new NothingListens();
+};
 
 function stateDirReply(dir: string) {
 	return { stdout: dir, exitCode: 0 };
@@ -164,6 +171,7 @@ describe("attachRemoteDaemon", () => {
 		const commands: string[] = [];
 		const attachment = await attachRemoteDaemon({
 			conn,
+			relay: nothingListens,
 			agentPath: "/usr/bin/lasterm-agent",
 			exec: async (_c, command) => {
 				commands.push(command);
@@ -184,6 +192,7 @@ describe("attachRemoteDaemon", () => {
 		const commands: string[] = [];
 		const attachment = await attachRemoteDaemon({
 			conn,
+			relay: nothingListens,
 			agentPath: "/usr/bin/lasterm-agent",
 			exec: async (_c, command) => {
 				commands.push(command);
@@ -206,6 +215,7 @@ describe("attachRemoteDaemon", () => {
 		const commands: string[] = [];
 		await attachRemoteDaemon({
 			conn,
+			relay: nothingListens,
 			agentPath: "/usr/bin/lasterm-agent",
 			logFilesKept: 0,
 			exec: async (_c, command) => {
@@ -228,6 +238,7 @@ describe("attachRemoteDaemon", () => {
 		let opens = 0;
 		const attachment = await attachRemoteDaemon({
 			conn,
+			relay: nothingListens,
 			agentPath: "/usr/bin/lasterm-agent",
 			exec: async (_c, command) =>
 				command.includes("--daemon")
@@ -247,6 +258,7 @@ describe("attachRemoteDaemon", () => {
 	it("claims no placement for a daemon it did not start", async () => {
 		const attachment = await attachRemoteDaemon({
 			conn,
+			relay: nothingListens,
 			agentPath: "/usr/bin/lasterm-agent",
 			exec: async () => stateDirReply(dir),
 			open: async () => new PassThrough(),
@@ -259,6 +271,7 @@ describe("attachRemoteDaemon", () => {
 		await expect(
 			attachRemoteDaemon({
 				conn,
+				relay: nothingListens,
 				agentPath: "/usr/bin/lasterm-agent",
 				exec: async () => ({ stdout: "lasterm", exitCode: 0 }),
 				open: async () => new PassThrough(),
@@ -270,6 +283,7 @@ describe("attachRemoteDaemon", () => {
 		await expect(
 			attachRemoteDaemon({
 				conn,
+				relay: nothingListens,
 				agentPath: "/usr/bin/lasterm-agent",
 				exec: async (_c, command) =>
 					command.includes("--daemon") ? { stdout: "", exitCode: 127 } : stateDirReply(dir),
@@ -286,6 +300,7 @@ describe("attachRemoteDaemon", () => {
 		await expect(
 			attachRemoteDaemon({
 				conn,
+				relay: nothingListens,
 				agentPath: "/usr/bin/lasterm-agent",
 				exec: async () => stateDirReply(dir),
 				open: async () => {
@@ -308,6 +323,7 @@ describe("attachRemoteDaemon", () => {
 			let launchedAt: number | null = null;
 			return attachRemoteDaemon({
 				conn,
+				relay: nothingListens,
 				agentPath: "/usr/bin/lasterm-agent",
 				exec: async (_c, command) => {
 					if (command.includes("--daemon")) launchedAt = clock;
@@ -784,6 +800,7 @@ describe("attachRemoteDaemon — saying why", () => {
 		await expect(
 			attachRemoteDaemon({
 				conn,
+				relay: nothingListens,
 				agentPath: "/usr/bin/lasterm-agent",
 				exec: async (_c, command) =>
 					command.startsWith("tail ")
@@ -806,6 +823,7 @@ describe("attachRemoteDaemon — saying why", () => {
 		await expect(
 			attachRemoteDaemon({
 				conn,
+				relay: nothingListens,
 				agentPath: "/usr/bin/lasterm-agent",
 				exec: async (_c, command) => {
 					if (command.startsWith("tail ")) throw new Error("channel closed");
@@ -826,7 +844,7 @@ describe("attachRemoteDaemon — saying why", () => {
 
 // ─── A server that refuses socket forwarding (#765) ──────────────────────────
 
-describe("attachRemoteDaemon — a server that refuses socket forwarding (#765)", () => {
+describe("attachRemoteDaemon — through the relay (#765, #755)", () => {
 	const dir = "/home/pi/.local/state/lasterm";
 	const socket = `${dir}/agent.sock`;
 	/**
@@ -835,19 +853,28 @@ describe("attachRemoteDaemon — a server that refuses socket forwarding (#765)"
 	 */
 	const openFailed = (): Error =>
 		Object.assign(new Error("(SSH) Channel open failure: open failed"), { reason: 2 });
+	const refusedWith = (reason: number): Error =>
+		Object.assign(new Error("(SSH) Channel open failure: "), { reason });
 
 	/**
-	 * A remote whose probe sees the daemon listening once it is launched, until
-	 * a `--stop` says `stopped`; `stopSays` is what each `--stop` prints.
+	 * A remote whose probe sees the daemon listening once it is launched.
 	 * `probe: false` is a remote that cannot say, and `binds: false` one whose
-	 * daemon never listens.
+	 * daemon never listens. Its relay reaches the daemon whenever it listens,
+	 * and says nothing listens otherwise, unless `relayFails` names what it
+	 * fails with (on its `relayFailsAt`th attempt, the first by default).
 	 */
 	function remote(
-		options: { listening?: boolean; stopSays?: string[]; probe?: boolean; binds?: boolean } = {},
+		options: {
+			listening?: boolean;
+			probe?: boolean;
+			binds?: boolean;
+			relayFails?: string;
+			relayFailsAt?: number;
+		} = {},
 	) {
 		let listening = options.listening ?? false;
-		const stopSays = [...(options.stopSays ?? ["stopped"])];
 		const commands: string[] = [];
+		const relays: { socket: string; waitMs: number }[] = [];
 		const exec = async (_c: Client, command: string) => {
 			commands.push(command);
 			if (command.includes("/proc/net/unix")) {
@@ -858,211 +885,485 @@ describe("attachRemoteDaemon — a server that refuses socket forwarding (#765)"
 				if (options.binds !== false) listening = true;
 				return { stdout: "", exitCode: 0 };
 			}
-			if (command.includes("--stop")) {
-				const said = stopSays.shift() ?? "stopped";
-				if (said === "stopped") listening = false;
-				return { stdout: `${said}\n`, exitCode: said === "stopped" ? 0 : 1 };
-			}
 			return stateDirReply(dir);
+		};
+		const relay = async (_c: Client, socketPath: string, waitMs: number) => {
+			relays.push({ socket: socketPath, waitMs });
+			if (options.relayFails !== undefined && relays.length === (options.relayFailsAt ?? 1)) {
+				throw new RelayFailed(options.relayFails);
+			}
+			if (!listening) throw new NothingListens();
+			return new PassThrough();
 		};
 		return {
 			exec,
+			relay,
 			commands,
-			listening: () => listening,
-			stops: () => commands.filter((c) => c.includes("--stop")),
+			relays,
+			launches: () => commands.filter((c) => c.includes("--daemon")).length,
+			stops: () => commands.filter((c) => c.includes("--stop")).length,
 		};
 	}
 
-	/** What the attempt was rejected with, which must be a refusal. */
-	async function refusal(attempt: Promise<unknown>): Promise<SocketForwardingRefused> {
-		const err = await attempt.then(
-			() => new Error("reached a daemon that cannot be reached"),
-			(caught: unknown) => caught,
-		);
-		expect(err).toBeInstanceOf(SocketForwardingRefused);
-		return err as SocketForwardingRefused;
+	/** A clock that moves a second at each look, so deadlines pass at once. */
+	function ticking(): () => number {
+		let clock = 0;
+		return () => {
+			clock += 1_000;
+			return clock;
+		};
 	}
 
-	it.each([1, 3])(
-		"reaching only a running daemon (#701), a channel refused with reason %i is unreachable, and launches nothing",
-		async (reason) => {
-			const host = remote();
-			const err = await attachRemoteDaemon({
-				conn,
-				agentPath: "lasterm-agent",
-				exec: host.exec,
-				open: async () => {
-					throw Object.assign(new Error("(SSH) Channel open failure: "), { reason });
-				},
-				sleep: async () => {},
-				launch: false,
-			}).then(
-				() => new Error("reached a daemon that cannot be reached"),
-				(caught: unknown) => caught,
-			);
-			expect(err).toBeInstanceOf(DaemonUnreachable);
-			expect(host.commands.some((c) => c.includes("--daemon"))).toBe(false);
-		},
-	);
+	async function rejection(attempt: Promise<unknown>): Promise<Error> {
+		return attempt.then(
+			() => new Error("reached a daemon that cannot be reached"),
+			(caught: unknown) => caught as Error,
+		);
+	}
 
-	it("starts nothing when the server prohibits the channel type outright", async () => {
-		const host = remote();
-		const err = await refusal(
-			attachRemoteDaemon({
-				conn,
-				agentPath: "/usr/bin/lasterm-agent",
-				exec: host.exec,
-				open: async () => {
-					throw Object.assign(new Error("(SSH) Channel open failure: "), { reason: 1 });
-				},
-				sleep: async () => {},
-			}),
+	describe("a channel type refused outright (reasons 1 and 3)", () => {
+		it.each([1, 3])(
+			"relays to a listening daemon, launches nothing, and proves the refusal (%i)",
+			async (reason) => {
+				const host = remote({ listening: true });
+				const attachment = await attachRemoteDaemon({
+					conn,
+					agentPath: "/usr/bin/lasterm-agent",
+					exec: host.exec,
+					relay: host.relay,
+					open: async () => {
+						throw refusedWith(reason);
+					},
+					sleep: async () => {},
+				});
+				expect(attachment.reachedThrough).toBe("relay");
+				expect(attachment.refusalProven).toBe(true);
+				expect(attachment.started).toBe(false);
+				expect(host.launches()).toBe(0);
+				expect(host.stops()).toBe(0);
+			},
 		);
 
-		expect(err.daemon).toEqual({ kind: "none" });
-		expect(err.message).toBe(SOCKET_FORWARDING_REFUSED_MESSAGE);
-		expect(host.commands.some((c) => c.includes("--daemon"))).toBe(false);
-		expect(host.stops()).toEqual([]);
+		it.each([1, 3])(
+			"launches once when the relay finds nothing, then waits through it (%i)",
+			async (reason) => {
+				const host = remote();
+				const attachment = await attachRemoteDaemon({
+					conn,
+					agentPath: "/usr/bin/lasterm-agent",
+					exec: host.exec,
+					relay: host.relay,
+					open: async () => {
+						throw refusedWith(reason);
+					},
+					sleep: async () => {},
+				});
+				expect(attachment.started).toBe(true);
+				expect(attachment.refusalProven).toBe(true);
+				expect(host.launches()).toBe(1);
+				expect(host.relays).toEqual([
+					{ socket, waitMs: 0 },
+					{ socket, waitMs: 5_000 },
+				]);
+			},
+		);
+
+		it.each([1, 3])(
+			"reaching only a running daemon (#701), nothing listening is NoRunningDaemon (%i)",
+			async (reason) => {
+				const host = remote();
+				const err = await rejection(
+					attachRemoteDaemon({
+						conn,
+						agentPath: "lasterm-agent",
+						exec: host.exec,
+						relay: host.relay,
+						open: async () => {
+							throw refusedWith(reason);
+						},
+						sleep: async () => {},
+						launch: false,
+					}),
+				);
+				expect(err).toBeInstanceOf(NoRunningDaemon);
+				expect(host.launches()).toBe(0);
+			},
+		);
 	});
 
-	it("leaves a daemon that already listens alone", async () => {
+	it("relays to a daemon seen listening whose channel still fails, and stops nothing", async () => {
 		// Another connection, through another key or from another address, may
-		// reach it and hold terminals there: stopping it is not this one's call.
+		// reach it and hold terminals there.
 		const host = remote({ listening: true });
-		const err = await refusal(
-			attachRemoteDaemon({
-				conn,
-				agentPath: "/usr/bin/lasterm-agent",
-				exec: host.exec,
-				open: async () => {
-					throw openFailed();
-				},
-				sleep: async () => {},
-			}),
-		);
-
-		expect(err.daemon).toEqual({ kind: "already-running" });
-		expect(host.commands.some((c) => c.includes("--daemon"))).toBe(false);
-		expect(host.stops()).toEqual([]);
-		expect(host.listening()).toBe(true);
-	});
-
-	it("stops the daemon it started once it listens and the channel still fails", async () => {
-		const host = remote();
-		let clock = 0;
-		const err = await refusal(
-			attachRemoteDaemon({
-				conn,
-				agentPath: "/usr/bin/lasterm-agent",
-				exec: host.exec,
-				open: async () => {
-					throw openFailed();
-				},
-				now: () => clock,
-				sleep: async (ms) => {
-					clock += ms;
-				},
-			}),
-		);
-
-		expect(err.daemon).toEqual({ kind: "stopped" });
-		expect(err.message).toBe(
-			"This host's SSH server refuses socket forwarding (AllowStreamLocalForwarding or " +
-				"DisableForwarding in its sshd_config); the remote daemon needs it, see " +
-				"docs/SSH_SERVER.md. The daemon this connection started there is stopped.",
-		);
-		expect(host.stops()).toEqual([`/usr/bin/lasterm-agent --stop --socket ${socket}`]);
-		expect(host.listening()).toBe(false);
-		// Said at the first poll that saw it listening, not at the deadline.
-		expect(clock).toBeLessThan(1_000);
-	});
-
-	it("asks again when its stop came before the daemon published its record", async () => {
-		const host = remote({ stopSays: ["no record", "stopped"] });
-		const err = await refusal(
-			attachRemoteDaemon({
-				conn,
-				agentPath: "/usr/bin/lasterm-agent",
-				exec: host.exec,
-				open: async () => {
-					throw openFailed();
-				},
-				sleep: async () => {},
-			}),
-		);
-
-		expect(err.daemon).toEqual({ kind: "stopped" });
-		expect(host.stops()).toHaveLength(2);
-	});
-
-	it("says what --stop said when the daemon could not be stopped", async () => {
-		const host = remote({ stopSays: ["still running at the bound"] });
-		const err = await refusal(
-			attachRemoteDaemon({
-				conn,
-				agentPath: "/usr/bin/lasterm-agent",
-				exec: host.exec,
-				open: async () => {
-					throw openFailed();
-				},
-				sleep: async () => {},
-			}),
-		);
-
-		expect(err.daemon).toEqual({ kind: "not-stopped", said: "still running at the bound" });
-		expect(err.message).toMatch(
-			/could not be stopped \(still running at the bound\); it ends by itself after 30 minutes/,
-		);
-	});
-
-	it("waits for a daemon that does not listen yet, and stops nothing", async () => {
-		const host = remote({ binds: false });
-		let opens = 0;
 		const attachment = await attachRemoteDaemon({
 			conn,
 			agentPath: "/usr/bin/lasterm-agent",
 			exec: host.exec,
+			relay: host.relay,
 			open: async () => {
-				opens += 1;
-				if (opens < 4) throw openFailed();
-				return new PassThrough();
+				throw openFailed();
 			},
 			sleep: async () => {},
 		});
-
-		expect(attachment.started).toBe(true);
-		expect(host.stops()).toEqual([]);
+		expect(attachment.reachedThrough).toBe("relay");
+		expect(attachment.refusalProven).toBe(true);
+		expect(host.launches()).toBe(0);
+		expect(host.stops()).toBe(0);
 	});
 
-	it("names the server as a cause it cannot rule out only when the host cannot say", async () => {
-		const failure = async (probe: boolean): Promise<string> => {
-			let clock = 0;
-			const host = remote({ probe, binds: false });
-			const err = await attachRemoteDaemon({
+	it("keeps the daemon it started once it listens and the channel still fails", async () => {
+		const host = remote();
+		const attachment = await attachRemoteDaemon({
+			conn,
+			agentPath: "/usr/bin/lasterm-agent",
+			exec: host.exec,
+			relay: host.relay,
+			open: async () => {
+				throw openFailed();
+			},
+			sleep: async () => {},
+		});
+		expect(attachment.started).toBe(true);
+		expect(attachment.reachedThrough).toBe("relay");
+		expect(attachment.refusalProven).toBe(true);
+		expect(host.launches()).toBe(1);
+		expect(host.stops()).toBe(0);
+		expect(host.relays).toHaveLength(1);
+		expect(host.relays[0]?.waitMs).toBeGreaterThan(0);
+	});
+
+	describe("a host that cannot say whether anything listens", () => {
+		it("asks the relay before launching, and records nothing when it answers (u1)", async () => {
+			const host = remote({ probe: false, listening: true });
+			const attachment = await attachRemoteDaemon({
 				conn,
 				agentPath: "/usr/bin/lasterm-agent",
 				exec: host.exec,
+				relay: host.relay,
 				open: async () => {
 					throw openFailed();
 				},
-				now: () => {
-					clock += 1_000;
-					return clock;
+				sleep: async () => {},
+			});
+			expect(attachment.reachedThrough).toBe("relay");
+			expect(attachment.refusalProven).toBe(false);
+			expect(host.launches()).toBe(0);
+		});
+
+		it("launches once on nothing listening, then takes the channel that answers (u2)", async () => {
+			const host = remote({ probe: false });
+			let launched = false;
+			const attachment = await attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: async (c, command) => {
+					if (command.includes("--daemon")) launched = true;
+					return host.exec(c, command);
+				},
+				relay: host.relay,
+				open: async () => {
+					if (!launched) throw openFailed();
+					return new PassThrough();
 				},
 				sleep: async () => {},
-			}).then(
-				() => new Error("reached a daemon that never listened"),
-				(caught: unknown) => caught as Error,
-			);
-			return err.message;
-		};
+			});
+			expect(attachment.reachedThrough).toBe("streamlocal");
+			expect(attachment.refusalProven).toBe(false);
+			expect(host.relays).toHaveLength(1);
+		});
 
-		expect(await failure(false)).toMatch(
-			/did not answer.*could not say whether it listens.*docs\/SSH_SERVER\.md/,
+		it("relays once more at the deadline, and records nothing (u3)", async () => {
+			const host = remote({ probe: false });
+			const attachment = await attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: host.exec,
+				relay: host.relay,
+				open: async () => {
+					throw openFailed();
+				},
+				now: ticking(),
+				sleep: async () => {},
+			});
+			expect(attachment.reachedThrough).toBe("relay");
+			expect(attachment.refusalProven).toBe(false);
+			expect(host.launches()).toBe(1);
+			expect(host.relays.at(-1)?.waitMs).toBe(0);
+		});
+
+		it("times out after its one launch when the last relay finds nothing either (u3)", async () => {
+			const host = remote({ probe: false, binds: false });
+			const err = await rejection(
+				attachRemoteDaemon({
+					conn,
+					agentPath: "/usr/bin/lasterm-agent",
+					exec: host.exec,
+					relay: host.relay,
+					open: async () => {
+						throw openFailed();
+					},
+					now: ticking(),
+					sleep: async () => {},
+				}),
+			);
+			expect(err.message).toMatch(/did not answer/);
+			expect(host.launches()).toBe(1);
+		});
+
+		it("fails with the last relay's own reason, after exactly one launch (u3)", async () => {
+			const host = remote({
+				probe: false,
+				binds: false,
+				relayFails: "the agent's socket refused this account",
+				relayFailsAt: 2,
+			});
+			const err = await rejection(
+				attachRemoteDaemon({
+					conn,
+					agentPath: "/usr/bin/lasterm-agent",
+					exec: host.exec,
+					relay: host.relay,
+					open: async () => {
+						throw openFailed();
+					},
+					now: ticking(),
+					sleep: async () => {},
+				}),
+			);
+			expect(err).toBeInstanceOf(RelayFailed);
+			expect(err.message).toMatch(/refused this account/);
+			expect(host.launches()).toBe(1);
+		});
+	});
+
+	describe("the relay route, for a host remembered as refusing", () => {
+		it("never tries the channel, and relays first", async () => {
+			const host = remote({ listening: true });
+			let opens = 0;
+			const attachment = await attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: host.exec,
+				relay: host.relay,
+				open: async () => {
+					opens += 1;
+					return new PassThrough();
+				},
+				route: "relay",
+			});
+			expect(opens).toBe(0);
+			expect(attachment.reachedThrough).toBe("relay");
+			expect(host.relays).toEqual([{ socket, waitMs: 0 }]);
+		});
+
+		it("launches only when nothing listens, then waits through the relay", async () => {
+			const host = remote();
+			const attachment = await attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: host.exec,
+				relay: host.relay,
+				route: "relay",
+			});
+			expect(attachment.started).toBe(true);
+			expect(host.launches()).toBe(1);
+			expect(host.commands.findIndex((c) => c.includes("--daemon"))).toBeGreaterThan(-1);
+			expect(host.relays).toEqual([
+				{ socket, waitMs: 0 },
+				{ socket, waitMs: 5_000 },
+			]);
+		});
+
+		it("gives up after its one launch when the daemon never answers", async () => {
+			const host = remote({ binds: false });
+			const err = await rejection(
+				attachRemoteDaemon({
+					conn,
+					agentPath: "/usr/bin/lasterm-agent",
+					exec: host.exec,
+					relay: host.relay,
+					route: "relay",
+				}),
+			);
+			expect(err.message).toMatch(/did not answer on .*agent\.sock within 5000ms/);
+			expect(host.launches()).toBe(1);
+		});
+
+		it("waits as long as the host's connection timeout allows (#1034)", async () => {
+			const host = remote();
+			await attachRemoteDaemon({
+				conn,
+				agentPath: "/usr/bin/lasterm-agent",
+				exec: host.exec,
+				relay: host.relay,
+				route: "relay",
+				connectTimeoutMs: 25_000,
+			});
+			expect(host.relays.at(-1)?.waitMs).toBe(10_000);
+		});
+
+		it.each([
+			"the agent's socket refused this account",
+			"the agent's endpoint stayed busy",
+			"the agent on this host predates the relay",
+		])("fails on a relay that fails (%s), launching nothing", async (reason) => {
+			const host = remote({ relayFails: reason });
+			const err = await rejection(
+				attachRemoteDaemon({
+					conn,
+					agentPath: "/usr/bin/lasterm-agent",
+					exec: host.exec,
+					relay: host.relay,
+					route: "relay",
+				}),
+			);
+			expect(err).toBeInstanceOf(RelayFailed);
+			expect(host.launches()).toBe(0);
+		});
+
+		it("reaching only a running daemon (#701): nothing listening is NoRunningDaemon, a failure is unreachable", async () => {
+			const none = remote();
+			expect(
+				await rejection(
+					attachRemoteDaemon({
+						conn,
+						agentPath: "lasterm-agent",
+						exec: none.exec,
+						relay: none.relay,
+						route: "relay",
+						launch: false,
+					}),
+				),
+			).toBeInstanceOf(NoRunningDaemon);
+			const failing = remote({ relayFails: "exec refused" });
+			const err = await rejection(
+				attachRemoteDaemon({
+					conn,
+					agentPath: "lasterm-agent",
+					exec: failing.exec,
+					relay: failing.relay,
+					route: "relay",
+					launch: false,
+				}),
+			);
+			expect(err).toBeInstanceOf(DaemonUnreachable);
+			expect(err.message).toMatch(/exec refused/);
+			expect(none.launches() + failing.launches()).toBe(0);
+		});
+	});
+});
+
+describe("openRelay (#755)", () => {
+	const HELLO = Buffer.from(
+		encodeFrame({
+			type: "HELLO",
+			version: 1,
+			agentVersion: "0.0.0-test",
+			capabilities: ["multiplex"],
+		} as ProtocolMessage),
+	);
+
+	/** A connection whose exec channel the test drives. */
+	function fakeConn(refuse = false) {
+		const channel = Object.assign(new PassThrough(), {
+			stderr: new PassThrough(),
+			close() {
+				channel.emit("close");
+			},
+		});
+		const commands: string[] = [];
+		const client = {
+			exec(command: string, cb: (err: Error | undefined, ch?: typeof channel) => void) {
+				commands.push(command);
+				if (refuse) cb(new Error("no exec for you"));
+				else cb(undefined, channel);
+			},
+		} as unknown as Client;
+		return { client, channel, commands };
+	}
+
+	it("decides by the markers, not the exit status a PowerShell shell flattens to 1", async () => {
+		const { client, channel } = fakeConn();
+		const opened = openRelay(client, relayCommand("/a/lasterm-agent", "/s/agent.sock", 0));
+		channel.stderr.write(
+			"lasterm-attach: start\nlasterm-attach: nothing-listens\nnothing listens on /s\n",
 		);
-		const probed = await failure(true);
-		expect(probed).toMatch(/did not answer/);
-		expect(probed).not.toMatch(/SSH_SERVER/);
+		channel.emit("exit", 1);
+		channel.emit("close");
+		await expect(opened).rejects.toBeInstanceOf(NothingListens);
+	});
+
+	it.each([
+		["lasterm-attach: denied", /refused this account/],
+		["lasterm-attach: busy", /stayed busy/],
+		["lasterm-attach: failed boom here", /boom here/],
+	])("fails on %s", async (marker, reason) => {
+		const { client, channel } = fakeConn();
+		const opened = openRelay(client, "x");
+		channel.stderr.write(`lasterm-attach: start\n${marker}\n`);
+		channel.emit("close");
+		const err = await opened.then(
+			() => null,
+			(e: unknown) => e as RelayFailed,
+		);
+		expect(err).toBeInstanceOf(RelayFailed);
+		expect(err?.message).toMatch(reason);
+	});
+
+	it("says the agent predates the relay when it never said it started", async () => {
+		const { client, channel } = fakeConn();
+		const opened = openRelay(client, "x");
+		channel.stderr.write("error: unexpected argument '--attach' found\n");
+		channel.emit("close");
+		const err = await opened.then(
+			() => null,
+			(e: unknown) => e as RelayFailed,
+		);
+		expect(err?.predates).toBe(true);
+		expect(err?.message).toMatch(/predates the relay/);
+	});
+
+	it("says why when a relay that started ended without an outcome", async () => {
+		const { client, channel } = fakeConn();
+		const opened = openRelay(client, "x");
+		channel.stderr.write("lasterm-attach: start\n");
+		channel.emit("close");
+		await expect(opened).rejects.toThrow(/ended without saying why/);
+	});
+
+	it("fails when the server refuses the command", async () => {
+		const { client } = fakeConn(true);
+		await expect(openRelay(client, "x")).rejects.toThrow(/refused the command/);
+	});
+
+	it("skips what the shell printed, and hands the HELLO on first", async () => {
+		const { client, channel } = fakeConn();
+		const opened = openRelay(client, "x");
+		channel.write(Buffer.alloc(40, 0x2e));
+		channel.write(HELLO);
+		const stream = await opened;
+		const first = await new Promise<Buffer>((resolve) => {
+			stream.once("data", resolve);
+			stream.resume();
+		});
+		expect(first.subarray(0, HELLO.length).equals(HELLO)).toBe(true);
+	});
+
+	it("still finds nothing listening after the shell printed", async () => {
+		const { client, channel } = fakeConn();
+		const opened = openRelay(client, "x");
+		channel.write(Buffer.alloc(40, 0x2e));
+		channel.stderr.write("lasterm-attach: start\nlasterm-attach: nothing-listens\n");
+		channel.emit("close");
+		await expect(opened).rejects.toBeInstanceOf(NothingListens);
+	});
+
+	it("builds the relay command with the socket and the wait", () => {
+		expect(
+			relayCommand("/home/pi/.local/bin/lasterm-agent", "/home/pi/x y/agent.sock", 5000.7),
+		).toBe(
+			"/home/pi/.local/bin/lasterm-agent --attach --socket '/home/pi/x y/agent.sock' --wait 5000",
+		);
 	});
 });
 
@@ -1155,14 +1456,15 @@ describe("remembering a refused forwarding (#765)", () => {
 			...overrides,
 		}) as Host;
 
-	it("keeps the next connection off the daemon, for the route it was seen on", () => {
+	it("sends the next connection through the relay, for the route it was seen on (#755)", () => {
 		const refusals: SocketForwardingRefusals = new Map();
-		expect(hostTriesDaemon(host(), false, refusals)).toBe(true);
+		expect(socketForwardingRefusedOn(host(), false, refusals)).toBe(false);
 
 		rememberSocketForwardingRefused(refusals, host());
 
-		expect(hostTriesDaemon(host(), false, refusals)).toBe(false);
 		expect(socketForwardingRefusedOn(host(), false, refusals)).toBe(true);
+		// Still a host that keeps its daemon: the relay reaches it.
+		expect(hostKeepsDaemon(host(), false)).toBe(true);
 	});
 
 	it.each([
@@ -1174,11 +1476,10 @@ describe("remembering a refused forwarding (#765)", () => {
 		["another user for the jump", { sshProxyHostId: "gw", sshProxyUser: "relay" }],
 		["another port for the jump", { sshProxyHostId: "gw", sshProxyPort: 2200 }],
 		["its own answer about a daemon changed", { sshRemoteDaemon: null }],
-	] as const)("tries the daemon again through %s", (_what, change) => {
+	] as const)("tries the channel again through %s", (_what, change) => {
 		const refusals: SocketForwardingRefusals = new Map();
 		rememberSocketForwardingRefused(refusals, host());
 
-		expect(hostTriesDaemon(host(change), true, refusals)).toBe(true);
 		expect(socketForwardingRefusedOn(host(change), true, refusals)).toBe(false);
 	});
 

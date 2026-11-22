@@ -25,16 +25,19 @@
  * and OpenSSH has no channel type that carries one. They stay on stdio, and
  * their terminals still end with the connection.
  *
- * Nor are hosts whose SSH server refuses socket forwarding
+ * A host whose SSH server refuses socket forwarding
  * (`AllowStreamLocalForwarding no`, `DisableForwarding yes`, a key's
- * `restrict`): `SocketForwardingRefused` says so, and the connection runs its
- * agent on stdio instead (#765).
+ * `restrict`) is reached through a relay instead (#755): the hub runs
+ * `lasterm-agent --attach` in an exec channel, which connects to the socket
+ * as the account and copies bytes both ways. What comes back speaks what the
+ * socket speaks, so nothing after the stream changes.
  */
 
 import { randomBytes } from "node:crypto";
 import type { Duplex } from "node:stream";
 import { DEFAULT_AGENT_LOG_FILES_KEPT, type Host } from "@lasterm/shared";
 import type { Client } from "ssh2";
+import { HelloSeeker } from "./hello-seeker.js";
 
 /**
  * Whether this host may keep an agent of its own running.
@@ -104,24 +107,6 @@ export function socketForwardingRefusedOn(
 ): boolean {
 	if (host === undefined || !hostKeepsDaemon(host, globalDefault)) return false;
 	return refusals.get(host.id) === socketForwardingRoute(host);
-}
-
-/**
- * Whether reaching this host goes through its daemon: it keeps one, and its
- * SSH server has not refused the forwarding a daemon is reached through. A
- * refused host runs its agent on stdio from the next connection on, without
- * starting a daemon only to stop it, and its terminals end with the
- * connection, which is what everything that asks this says (#765).
- */
-export function hostTriesDaemon(
-	host: Host | undefined,
-	globalDefault: boolean,
-	refusals: ReadonlyMap<string, string>,
-): boolean {
-	return (
-		hostKeepsDaemon(host, globalDefault) &&
-		!socketForwardingRefusedOn(host, globalDefault, refusals)
-	);
 }
 
 /** Where a remote daemon keeps its socket and its log, under one directory. */
@@ -463,48 +448,142 @@ export function parseRemoteSocketState(stdout: string): RemoteSocketState {
 /** What the hub says when a host's SSH server refuses socket forwarding (#765). */
 export const SOCKET_FORWARDING_REFUSED_MESSAGE =
 	"This host's SSH server refuses socket forwarding (AllowStreamLocalForwarding or " +
-	"DisableForwarding in its sshd_config); the remote daemon needs it, see docs/SSH_SERVER.md.";
+	"DisableForwarding in its sshd_config); Lasterm reaches the agent through a relay over " +
+	"the SSH command channel instead, see docs/SSH_SERVER.md.";
 
-/** What became of the daemon when the socket forwarding was refused. */
-export type RefusedDaemon =
-	/** None was started: the server refused the channel type before any launch. */
-	| { kind: "none" }
-	/** One was already listening, which this connection cannot reach. Left alone. */
-	| { kind: "already-running" }
-	/** This connection started one and stopped it, through its `--stop`. */
-	| { kind: "stopped" }
-	/** This connection started one, and its `--stop` said this. */
-	| { kind: "not-stopped"; said: string };
+/** What starts every line `lasterm-agent --attach` writes on stderr (#755). */
+const RELAY_MARKER = "lasterm-attach:";
+
+/** The most of a relay's stderr read before HELLO; past it, it says nothing. */
+const RELAY_STDERR_LIMIT = 64 * 1024;
 
 /**
- * The host's SSH server will not carry a channel to the daemon's socket. The
- * daemon cannot be reached however long one waits, so nothing waits: the
- * caller runs the agent on stdio instead (#765).
+ * Nothing listens on the daemon's socket, as the relay found when it tried
+ * it (#755): the one relay outcome that lets a daemon be started.
  */
-export class SocketForwardingRefused extends Error {
-	constructor(
-		readonly paths: RemoteDaemonPaths,
-		readonly daemon: RefusedDaemon,
-	) {
-		super(`${SOCKET_FORWARDING_REFUSED_MESSAGE}${describeRefusedDaemon(daemon, paths)}`);
-		this.name = "SocketForwardingRefused";
+export class NothingListens extends Error {
+	constructor() {
+		super("Nothing listens on the agent's socket.");
+		this.name = "NothingListens";
 	}
 }
 
-function describeRefusedDaemon(daemon: RefusedDaemon, paths: RemoteDaemonPaths): string {
-	switch (daemon.kind) {
-		case "none":
-			return "";
-		case "already-running":
-			return ` A daemon already listens on ${paths.socket}; it is left as it is.`;
-		case "stopped":
-			return " The daemon this connection started there is stopped.";
-		case "not-stopped":
-			return (
-				` The daemon this connection started there could not be stopped (${daemon.said}); ` +
-				`it ends by itself after ${IDLE_TIMEOUT_SECONDS / 60} minutes with nothing to do.`
-			);
+/**
+ * The relay could not reach the daemon for a reason of its own: the socket
+ * refused this account, the relay could not run, or it ended without saying
+ * why. Nothing is started over it, and nothing falls back to stdio (#755).
+ */
+export class RelayFailed extends Error {
+	constructor(
+		readonly reason: string,
+		/** The binary ran, and never said it started: it has no `--attach`. */
+		readonly predates = false,
+	) {
+		super(`Lasterm could not reach the agent through its relay: ${reason}.`);
+		this.name = "RelayFailed";
 	}
+}
+
+/**
+ * The command that relays the exec channel to the daemon's socket, waiting up
+ * to `waitMs` for a daemon still starting. Windows remotes never reach this
+ * module (yet).
+ */
+export function relayCommand(agentPath: string, socketPath: string, waitMs: number): string {
+	const wait = Math.max(0, Math.trunc(waitMs));
+	return `${quotePosix(agentPath)} --attach --socket ${quotePosix(socketPath)} --wait ${wait}`;
+}
+
+/**
+ * What the relay's stderr says it did, from its `lasterm-attach:` lines: the
+ * last outcome line, and whether it started at all. Its exit status is not
+ * read: a PowerShell `DefaultShell` hands every non-zero one on as 1.
+ */
+export function parseRelayStderr(stderr: string): { started: boolean; outcome: string | null } {
+	let started = false;
+	let outcome: string | null = null;
+	for (const line of stderr.split(/\r?\n/)) {
+		if (!line.startsWith(RELAY_MARKER)) continue;
+		const said = line.slice(RELAY_MARKER.length).trim();
+		if (said === "start") started = true;
+		else if (said !== "") outcome = said;
+	}
+	return { started, outcome };
+}
+
+/** The error a relay that ended before HELLO stands for. */
+export function relayEndError(stderr: string): NothingListens | RelayFailed {
+	const { started, outcome } = parseRelayStderr(stderr);
+	if (outcome === "nothing-listens") return new NothingListens();
+	if (outcome === "denied") return new RelayFailed("the agent's socket refused this account");
+	if (outcome === "busy") return new RelayFailed("the agent's endpoint stayed busy");
+	if (outcome?.startsWith("failed")) {
+		const text = outcome.slice("failed".length).trim();
+		return new RelayFailed(text === "" ? "the relay failed" : text);
+	}
+	return started
+		? new RelayFailed("the relay ended without saying why")
+		: new RelayFailed("the agent on this host predates the relay", true);
+}
+
+/**
+ * Open the relay: run `command` in an exec channel and resolve with that
+ * channel once the daemon's HELLO comes through it. What the account's shell
+ * printed before (#749) is skipped and logged; the HELLO and whatever came
+ * with it are put back at the front of the channel, so whoever reads it next
+ * gets them first; the channel is handed over paused, for its reader to
+ * resume. A channel that ends before HELLO rejects by what the relay
+ * said on stderr (`relayEndError`).
+ */
+export function openRelay(conn: Client, command: string): Promise<Duplex> {
+	return new Promise((resolve, reject) => {
+		conn.exec(command, (err, channel) => {
+			if (err) {
+				reject(new RelayFailed(`the SSH server refused the command (${err.message})`));
+				return;
+			}
+			let stderr = "";
+			let settled = false;
+			const seeker = new HelloSeeker();
+			const onStderr = (chunk: Buffer): void => {
+				if (stderr.length < RELAY_STDERR_LIMIT) stderr += chunk.toString("utf8");
+			};
+			const finish = (): void => {
+				channel.off("data", onData);
+				channel.stderr.off("data", onStderr);
+				channel.off("close", onClose);
+			};
+			const onData = (chunk: Buffer): void => {
+				const seek = seeker.push(chunk);
+				if (seek.found) {
+					settled = true;
+					finish();
+					if (seek.prelude > 0) {
+						console.error(
+							`[lasterm-ssh] skipped ${seek.prelude} bytes the remote shell printed before the relay's HELLO`,
+						);
+					}
+					channel.pause();
+					channel.unshift(seek.frames);
+					resolve(channel as unknown as Duplex);
+				} else if (seek.given) {
+					settled = true;
+					finish();
+					channel.close();
+					reject(new RelayFailed("the remote shell printed too much before the agent's HELLO"));
+				}
+			};
+			const onClose = (): void => {
+				if (settled) return;
+				settled = true;
+				finish();
+				reject(stderr.length > RELAY_STDERR_LIMIT ? relayEndError("") : relayEndError(stderr));
+			};
+			channel.on("data", onData);
+			channel.stderr.on("data", onStderr);
+			channel.on("close", onClose);
+		});
+	});
 }
 
 /** How long to keep trying the socket after starting the daemon. */
@@ -516,12 +595,6 @@ const READY_DEADLINE_MS = 5_000;
 export const DAEMON_DIAGNOSIS_MARGIN_MS = 15_000;
 /** How long to wait between those attempts. */
 const READY_POLL_MS = 150;
-/**
- * How many times to ask a daemon this connection started to stop. It
- * publishes the record `--stop` goes by just after it starts listening, so a
- * stop sent in between finds none.
- */
-const STOP_ATTEMPTS = 4;
 
 export interface AttachRemoteDaemonOptions {
 	conn: Client;
@@ -535,6 +608,11 @@ export interface AttachRemoteDaemonOptions {
 	exec?: (client: Client, command: string) => Promise<{ stdout: string; exitCode: number }>;
 	/** Injected in tests; defaults to a real `direct-streamlocal` channel. */
 	open?: (client: Client, socketPath: string) => Promise<Duplex>;
+	/**
+	 * Injected in tests; defaults to `openRelay` running `relayCommand`. Rejects
+	 * with `NothingListens` or `RelayFailed`.
+	 */
+	relay?: (client: Client, socketPath: string, waitMs: number) => Promise<Duplex>;
 	now?: () => number;
 	sleep?: (ms: number) => Promise<void>;
 	/**
@@ -551,6 +629,11 @@ export interface AttachRemoteDaemonOptions {
 	 * when the host cannot say that nothing listens.
 	 */
 	launch?: boolean;
+	/**
+	 * `"relay"` to go through the relay from the start, for a host this hub
+	 * saw refuse socket forwarding (#755). The relay's binary is `agentPath`.
+	 */
+	route?: "streamlocal" | "relay";
 }
 
 /** Nothing listens on the daemon's socket, and none was started (#701). */
@@ -563,12 +646,19 @@ export class NoRunningDaemon extends Error {
 
 /**
  * The daemon's socket could not be reached, and the host cannot say whether
- * one listens: forwarding refused, a listening socket the channel still
- * fails on, or a host whose socket table cannot be read (#701).
+ * one listens: a listening socket the channel still fails on with no relay to
+ * reach it, a relay that failed, or a host whose socket table cannot be read
+ * (#701, #755).
  */
 export class DaemonUnreachable extends Error {
-	constructor(readonly paths: RemoteDaemonPaths | null) {
-		super("Lasterm could not reach an agent on this host, and cannot tell whether one is running.");
+	constructor(
+		readonly paths: RemoteDaemonPaths | null,
+		reason?: string,
+	) {
+		super(
+			"Lasterm could not reach an agent on this host, and cannot tell whether one is running." +
+				(reason === undefined ? "" : ` ${reason}`),
+		);
 		this.name = "DaemonUnreachable";
 	}
 }
@@ -583,6 +673,15 @@ export interface RemoteDaemonAttachment {
 	 * session (#600). `null` when it did not start it, or the launch did not say.
 	 */
 	placement: RemoteDaemonPlacement | null;
+	/** What carries the stream: a `direct-streamlocal` channel, or the relay (#755). */
+	reachedThrough: "streamlocal" | "relay";
+	/**
+	 * Whether this call proved that the server refuses socket forwarding: the
+	 * channel type refused outright, or the socket seen listening and the
+	 * channel still failing after that (#765). A relay that reached the daemon
+	 * after any other failure proves nothing about forwarding, and sets nothing.
+	 */
+	refusalProven: boolean;
 }
 
 /**
@@ -592,11 +691,10 @@ export interface RemoteDaemonAttachment {
  * about `bind_with_retry`. Starting first would take the socket from a daemon
  * that is holding someone's terminals.
  *
- * A server that refuses socket forwarding rejects with
- * `SocketForwardingRefused`, as soon as that is known (#765): the channel
- * fails while the remote's own table shows the socket listening. A daemon this
- * call started is stopped first; one that was there before is left alone,
- * since it may hold terminals another connection reaches.
+ * Where the `direct-streamlocal` channel cannot reach the socket, the call
+ * goes on through the relay, on the same connection and to the same daemon
+ * (#755): a daemon this call started is kept, never stopped, and never
+ * started twice.
  */
 export async function attachRemoteDaemon(
 	options: AttachRemoteDaemonOptions,
@@ -607,6 +705,10 @@ export async function attachRemoteDaemon(
 			? READY_DEADLINE_MS
 			: options.connectTimeoutMs - DAEMON_DIAGNOSIS_MARGIN_MS;
 	const open = options.open ?? openRemoteSocket;
+	const relay =
+		options.relay ??
+		((client: Client, socketPath: string, waitMs: number) =>
+			openRelay(client, relayCommand(options.agentPath, socketPath, waitMs)));
 	const now = options.now ?? Date.now;
 	const sleep = options.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
 
@@ -628,124 +730,153 @@ export async function attachRemoteDaemon(
 			return "unknown";
 		}
 	};
+	const daemonOnly = options.launch === false;
+	let placement: RemoteDaemonPlacement | null = null;
+	let started = false;
+
+	const streamlocal = (stream: Duplex): RemoteDaemonAttachment => ({
+		stream,
+		paths,
+		started,
+		placement,
+		reachedThrough: "streamlocal",
+		refusalProven: false,
+	});
+	/** One relay attempt; `RelayFailed` is final, `NothingListens` is the caller's. */
+	const relayOnce = async (waitMs: number, refusalProven: boolean) => {
+		try {
+			const stream = await relay(options.conn, paths.socket, waitMs);
+			const attachment: RemoteDaemonAttachment = {
+				stream,
+				paths,
+				started,
+				placement,
+				reachedThrough: "relay",
+				refusalProven,
+			};
+			return attachment;
+		} catch (err) {
+			if (err instanceof RelayFailed && daemonOnly) {
+				throw new DaemonUnreachable(paths, err.message);
+			}
+			throw err;
+		}
+	};
+	const launchDaemon = async (): Promise<void> => {
+		const launched = await exec(
+			options.conn,
+			remoteDaemonLaunchCommand({
+				agentPath: options.agentPath,
+				paths,
+				...(options.logLevel !== undefined && { logLevel: options.logLevel }),
+				...(options.logFormat !== undefined && { logFormat: options.logFormat }),
+				...(options.logFilesKept !== undefined && { logFilesKept: options.logFilesKept }),
+			}),
+		);
+		if (launched.exitCode !== 0) {
+			throw new Error(
+				`The remote agent daemon would not start (exit ${launched.exitCode}). Its log is at ${paths.log}.` +
+					(await logTail(exec, options.conn, paths.log)),
+			);
+		}
+		started = true;
+		placement = parseRemoteDaemonPlacement(launched.stdout);
+	};
+	const notAnswering = async (lastError: unknown, hint: string): Promise<Error> =>
+		new Error(
+			`The remote agent daemon did not answer on ${paths.socket} within ${readyDeadlineMs}ms. ` +
+				`Its log is at ${paths.log}. Last error: ${String(lastError)}` +
+				(await logTail(exec, options.conn, paths.log)) +
+				hint,
+		);
+	/**
+	 * The relay route from here on: the relay first; nothing listening, the one
+	 * launch, then one relay that waits for the daemon to bind.
+	 */
+	const throughRelay = async (refusalProven: boolean): Promise<RemoteDaemonAttachment> => {
+		try {
+			return await relayOnce(0, refusalProven);
+		} catch (err) {
+			if (!(err instanceof NothingListens)) throw err;
+		}
+		if (daemonOnly) throw new NoRunningDaemon(paths);
+		await launchDaemon();
+		try {
+			return await relayOnce(readyDeadlineMs, refusalProven);
+		} catch (err) {
+			if (err instanceof NothingListens) throw await notAnswering(err, "");
+			throw err;
+		}
+	};
+
+	if (options.route === "relay") return throughRelay(true);
 
 	// What listened before anything was started. Only `silent` makes the
-	// daemon found listening later this call's own, and so one it may stop.
+	// daemon found listening later this call's own.
 	let before: RemoteSocketState;
 	try {
-		return {
-			stream: await open(options.conn, paths.socket),
-			paths,
-			started: false,
-			placement: null,
-		};
+		return streamlocal(await open(options.conn, paths.socket));
 	} catch (err) {
-		if (refusedOutright(err)) {
-			if (options.launch === false) throw new DaemonUnreachable(paths);
-			throw new SocketForwardingRefused(paths, { kind: "none" });
-		}
+		// The channel type refused outright: proven, before any probe.
+		if (refusedOutright(err)) return throughRelay(true);
 		// Nothing listening yet, the ordinary case on a first connect, or a
 		// server that refuses the channel in the same words.
 		before = await socketState();
 	}
 	if (before === "listening") {
 		try {
-			return {
-				stream: await open(options.conn, paths.socket),
-				paths,
-				started: false,
-				placement: null,
-			};
+			return streamlocal(await open(options.conn, paths.socket));
 		} catch {
-			if (options.launch === false) throw new DaemonUnreachable(paths);
-			throw new SocketForwardingRefused(paths, { kind: "already-running" });
+			// Listening, and the channel still fails: the server's refusal.
+			return throughRelay(true);
 		}
 	}
-	// Only a socket seen silent is said to have no agent: `unknown` is not
-	// "missing" (#701).
-	if (options.launch === false) {
-		if (before === "silent") throw new NoRunningDaemon(paths);
-		throw new DaemonUnreachable(paths);
+	if (before === "unknown") {
+		// The host cannot say whether anything listens: the relay can, before
+		// anything is launched over a daemon that may be running (u1).
+		try {
+			return await relayOnce(0, false);
+		} catch (err) {
+			if (!(err instanceof NothingListens)) throw err;
+		}
 	}
+	// Only a socket seen silent, or a relay that found nothing, says no agent
+	// runs (#701).
+	if (daemonOnly) throw new NoRunningDaemon(paths);
 
-	const launch = await exec(
-		options.conn,
-		remoteDaemonLaunchCommand({
-			agentPath: options.agentPath,
-			paths,
-			...(options.logLevel !== undefined && { logLevel: options.logLevel }),
-			...(options.logFormat !== undefined && { logFormat: options.logFormat }),
-			...(options.logFilesKept !== undefined && { logFilesKept: options.logFilesKept }),
-		}),
-	);
-	if (launch.exitCode !== 0) {
-		throw new Error(
-			`The remote agent daemon would not start (exit ${launch.exitCode}). Its log is at ${paths.log}.` +
-				(await logTail(exec, options.conn, paths.log)),
-		);
-	}
-
-	const placement = parseRemoteDaemonPlacement(launch.stdout);
+	await launchDaemon();
 	const deadline = now() + readyDeadlineMs;
 	let lastError: unknown;
 	while (now() < deadline) {
 		await sleep(READY_POLL_MS);
 		try {
-			return { stream: await open(options.conn, paths.socket), paths, started: true, placement };
+			return streamlocal(await open(options.conn, paths.socket));
 		} catch (err) {
 			lastError = err;
 		}
 		// Listening first, then the channel still refused: the server's doing,
 		// not a daemon still starting. The other order would race its bind.
-		if (before !== "unknown" && (await socketState()) === "listening") {
+		if (before === "silent" && (await socketState()) === "listening") {
 			try {
-				return { stream: await open(options.conn, paths.socket), paths, started: true, placement };
+				return streamlocal(await open(options.conn, paths.socket));
 			} catch {
-				const said = await stopStartedDaemon(exec, options.conn, options.agentPath, paths, sleep);
-				throw new SocketForwardingRefused(
-					paths,
-					said === null ? { kind: "stopped" } : { kind: "not-stopped", said },
-				);
+				return relayOnce(Math.max(0, deadline - now()), true).catch(async (err) => {
+					if (err instanceof NothingListens) throw await notAnswering(err, "");
+					throw err;
+				});
 			}
 		}
 	}
-	throw new Error(
-		`The remote agent daemon did not answer on ${paths.socket} within ${readyDeadlineMs}ms. ` +
-			`Its log is at ${paths.log}. Last error: ${String(lastError)}` +
-			(await logTail(exec, options.conn, paths.log)) +
-			// The remote could not say whether the daemon listens: the one cause
-			// this message cannot rule out is the server's.
-			(before === "unknown"
-				? " The host could not say whether it listens: if its SSH server refuses socket " +
-					"forwarding (AllowStreamLocalForwarding or DisableForwarding), see docs/SSH_SERVER.md."
-				: ""),
-	);
-}
-
-/**
- * Stop the daemon this connection started, through its own `--stop`: null
- * once it says it stopped, else what it said.
- */
-async function stopStartedDaemon(
-	exec: (client: Client, command: string) => Promise<{ stdout: string; exitCode: number }>,
-	conn: Client,
-	agentPath: string,
-	paths: RemoteDaemonPaths,
-	sleep: (ms: number) => Promise<void>,
-): Promise<string | null> {
-	let said = "";
-	for (let attempt = 0; attempt < STOP_ATTEMPTS; attempt++) {
-		if (attempt > 0) await sleep(READY_POLL_MS);
+	if (before === "unknown") {
+		// u3: one last relay before saying the daemon never answered.
 		try {
-			const stop = await exec(conn, remoteDaemonStopCommand(agentPath, paths));
-			if (stop.exitCode === 0) return null;
-			said = stop.stdout.trim().split(/\r?\n/).at(-1)?.trim() || `exit ${stop.exitCode}`;
+			return await relayOnce(0, false);
 		} catch (err) {
-			return err instanceof Error ? err.message : String(err);
+			if (!(err instanceof NothingListens)) throw err;
+			lastError = err;
 		}
-		if (said !== "no record") return said;
 	}
-	return said;
+	throw await notAnswering(lastError, "");
 }
 
 /**

@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import type { Duplex } from "node:stream";
 import type {
 	AgentConfig,
 	HelloMessage,
@@ -22,7 +23,9 @@ import {
 	type DeployResult,
 	deployAgentIfNeeded,
 	probeSftp,
+	type RelayAgent,
 	type SftpSupport,
+	verifiedRelayAgent,
 	windowsLaunchCommand,
 } from "./agent-deployer.js";
 import { AskAgainError } from "./ask-again.js";
@@ -42,7 +45,10 @@ import type { ResolvedJump } from "./proxy-jump.js";
 import {
 	attachRemoteDaemon,
 	describeRemoteDaemonPlacement,
-	SocketForwardingRefused,
+	openRelay,
+	RelayFailed,
+	relayCommand,
+	SOCKET_FORWARDING_REFUSED_MESSAGE,
 } from "./remote-daemon.js";
 import { SendQueue } from "./send-queue.js";
 import { noSshAgentMessage, sshAgentAddress, windowsAgentPipeExists } from "./ssh-agent-address.js";
@@ -354,11 +360,18 @@ export interface SshAgentDeployOptions {
 	 */
 	onAgentUpdated?: (hostId: string, installed: { besideRunningDaemon: boolean }) => void;
 	/**
-	 * Called when the host's SSH server refused the socket forwarding its
-	 * daemon is reached through, with the host as this connection reached it.
-	 * The connection runs its agent on stdio instead (#765).
+	 * Called when this connection proved that the host's SSH server refuses
+	 * the socket forwarding its daemon is reached through, with the host as
+	 * this connection reached it (#765). The connection reaches the daemon
+	 * through the relay instead (#755).
 	 */
 	onSocketForwardingRefused?: (host: Host) => void;
+	/**
+	 * Whether this hub already saw the host's server refuse socket forwarding,
+	 * on the route it still has: the connection then goes through the relay
+	 * from the start (#755).
+	 */
+	relayFirst?: (host: Host) => boolean;
 }
 
 /**
@@ -407,11 +420,14 @@ export class SshAgent extends AgentConnection {
 	usedRemoteDaemon = false;
 
 	/**
-	 * Whether this connection meant to reach a daemon and the host's SSH server
-	 * refused the socket forwarding that takes (#765). Its agent then runs on
-	 * stdio, as on a host that keeps none.
+	 * Whether this connection proved that the host's SSH server refuses the
+	 * socket forwarding a daemon is reached through (#765). It reached the
+	 * daemon through the relay instead (#755).
 	 */
 	socketForwardingRefused = false;
+
+	/** What carried this connection's agent, once it was reached (#755). */
+	reachedThrough: "streamlocal" | "relay" | "stdio" | null = null;
 
 	/**
 	 * Where the agent this connection reached lives on the remote, once the
@@ -477,6 +493,44 @@ export class SshAgent extends AgentConnection {
 	}
 
 	/**
+	 * The relay a connection that deploys nothing runs (#701, #755): only an
+	 * agent `verifiedRelayAgent` accepts, never the bare `lasterm-agent` of
+	 * PATH, which nothing verified (#43). Checked once per connection, when a
+	 * relay is first needed.
+	 */
+	private daemonOnlyRelay(
+		hostname: string,
+	): (client: Client, socketPath: string, waitMs: number) => Promise<Duplex> {
+		let checked: Promise<RelayAgent> | null = null;
+		return async (client, socketPath, waitMs) => {
+			const options = this.deployOptions;
+			if (options === undefined)
+				throw new RelayFailed("this hub cannot check the agent on this host");
+			checked ??= verifiedRelayAgent(
+				client,
+				this.host,
+				toDeployOptions(options, this.host, hostname),
+			);
+			const agent = await checked;
+			if (agent.kind === "refused") throw new RelayFailed(agent.reason);
+			try {
+				return await openRelay(client, relayCommand(agent.path, socketPath, waitMs));
+			} catch (err) {
+				if (err instanceof RelayFailed && err.predates) {
+					throw new RelayFailed(
+						err.reason +
+							(agent.localCopy
+								? "; Connect installs this hub's"
+								: "; this hub has no copy of its own agent to install"),
+						true,
+					);
+				}
+				throw err;
+			}
+		};
+	}
+
+	/**
 	 * The binary to run as a daemon, or undefined to keep it on stdio.
 	 *
 	 * A daemon is only worth reaching where a socket can be reached: Windows
@@ -517,6 +571,7 @@ export class SshAgent extends AgentConnection {
 		this.reachedRunningDaemon = false;
 		this.sftpSupport = null;
 		this.socketForwardingRefused = false;
+		this.reachedThrough = null;
 		this.keySigner = null;
 		if (!this.host.sshHost) {
 			throw new Error("Host has no sshHost configured");
@@ -896,6 +951,7 @@ export class SshAgent extends AgentConnection {
 								});
 							};
 							if (daemonPath === undefined) {
+								this.reachedThrough = "stdio";
 								execStdio();
 								return;
 							}
@@ -909,39 +965,32 @@ export class SshAgent extends AgentConnection {
 									logFilesKept: this.loggingConfig.logFilesKept,
 								}),
 								...(this.daemonOnly && { launch: false }),
+								...(this.deployOptions?.relayFirst?.(this.host) === true && {
+									route: "relay" as const,
+								}),
+								...(this.daemonOnly && { relay: this.daemonOnlyRelay(hostname) }),
 							})
 								.then((attachment) => {
 									this.usedRemoteDaemon = true;
+									this.reachedThrough = attachment.reachedThrough;
 									this.reachedRunningDaemon = !attachment.started;
+									if (attachment.refusalProven) {
+										this.socketForwardingRefused = true;
+										this.deployOptions?.onSocketForwardingRefused?.(this.host);
+										console.error(`[lasterm-ssh] ${SOCKET_FORWARDING_REFUSED_MESSAGE}`);
+									}
 									console.error(
 										`[lasterm-ssh] reached the remote daemon on ${attachment.paths.socket}` +
 											(!attachment.started
 												? " (already running)"
 												: attachment.placement === null
 													? " (started it)"
-													: ` (started it ${describeRemoteDaemonPlacement(attachment.placement)})`),
+													: ` (started it ${describeRemoteDaemonPlacement(attachment.placement)})`) +
+											(attachment.reachedThrough === "relay" ? " through the relay" : ""),
 									);
 									onStream(attachment.stream as unknown as ClientChannel);
 								})
 								.catch((err: unknown) => {
-									if (err instanceof SocketForwardingRefused && !this.daemonOnly) {
-										// No daemon can be reached here, however long one waits
-										// (#765): the agent runs on stdio, as on a host that keeps
-										// none, and its terminals end with this connection.
-										this.socketForwardingRefused = true;
-										this.deployOptions?.onSocketForwardingRefused?.(this.host);
-										console.error(
-											`[lasterm-ssh] ${err.message} The agent runs on stdio on this connection, and its terminals end with it.`,
-										);
-										seeker = new HelloSeeker();
-										execStdio(
-											(execErr) =>
-												new Error(
-													`${err.message} Running the agent on stdio failed too: ${execErr.message}`,
-												),
-										);
-										return;
-									}
 									onError(err instanceof Error ? err : new Error(String(err)));
 								});
 						};
@@ -986,6 +1035,10 @@ export class SshAgent extends AgentConnection {
 										this.cleanup();
 									}
 								});
+
+								// A relay hands its channel over paused, its HELLO put back in
+								// front (#755): reading starts here.
+								stream.resume();
 
 								stream.on("close", () => {
 									clearTimeout(helloTimeout);

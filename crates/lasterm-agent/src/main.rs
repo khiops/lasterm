@@ -21,6 +21,7 @@ mod platform_dirs;
 mod process;
 mod protocol;
 mod pty;
+mod relay;
 mod report_directory;
 mod shell;
 #[cfg(unix)]
@@ -54,6 +55,21 @@ struct Cli {
     /// Stop the process described by the matching local daemon record. This does not prove that process still owns the endpoint. Unix requests graceful shutdown; Windows terminates it, so no exit record is written. Prints `stopped`, or `not running` when no record names a live process and nothing listens on the endpoint (a record whose process is gone is removed); both exit 0. This does not check for a hub; a live hub may relaunch it.
     #[arg(long, conflicts_with_all = ["daemon", "stdio"])]
     stop: bool,
+
+    /// Relay this process's stdin and stdout to a running daemon's socket, or
+    /// named pipe on Windows, and nothing else: how a hub reaches a remote
+    /// daemon where its SSH server carries no channel to that endpoint (#755).
+    /// Connects to `--socket`, else the channel's default endpoint. stderr
+    /// carries `lasterm-attach:` lines only; the exit status is 0 once a
+    /// connection ended, 3 when nothing listens, 4 when the endpoint refused
+    /// this account, 6 when a pipe stayed busy, 1 otherwise.
+    #[arg(long, conflicts_with_all = ["daemon", "stdio", "stop"])]
+    attach: bool,
+
+    /// Milliseconds `--attach` keeps trying an endpoint nothing listens on yet,
+    /// for a daemon that is still starting. 0 tries once.
+    #[arg(long, value_name = "MS", default_value_t = 0, requires = "attach")]
+    wait: u64,
 
     /// Agent tracing level from the shared [logging] contract
     #[arg(long = "log-level", value_enum, default_value = "info")]
@@ -226,6 +242,17 @@ async fn run(stripped: Vec<&'static str>) -> std::io::Result<()> {
     // Before anything resolves a directory: the log, the records, auth.json.
     platform_dirs::set_channel(cli.channel);
     let logging_config = LoggingConfig::from(&cli);
+
+    // The relay logs nothing: its stderr carries the outcome lines a hub reads,
+    // and nothing else may land between them (#755).
+    if cli.attach {
+        let socket = match cli.socket {
+            Some(socket) => socket,
+            None => default_socket_path()?,
+        };
+        let status = relay::run(socket, std::time::Duration::from_millis(cli.wait)).await;
+        std::process::exit(status);
+    }
 
     init_tracing(logging_config, cli.daemon)?;
 
@@ -706,6 +733,20 @@ mod tests {
         assert_eq!(stop.channel, platform_dirs::Channel::Dev);
         let none = Cli::try_parse_from(["lasterm-agent", "--daemon"]).unwrap();
         assert_eq!(none.channel, platform_dirs::Channel::Release);
+    }
+
+    // #755 AC-R8: the relay is a mode of its own. Mutation: a dropped
+    // `conflicts_with_all`.
+    #[test]
+    fn attach_conflicts_with_the_other_modes() {
+        for other in ["--daemon", "--stdio", "--stop"] {
+            let parsed = Cli::try_parse_from(["lasterm-agent", "--attach", other]);
+            assert!(parsed.is_err(), "--attach {other} was accepted");
+        }
+        assert!(Cli::try_parse_from(["lasterm-agent", "--wait", "5"]).is_err());
+        let attach = Cli::try_parse_from(["lasterm-agent", "--attach", "--wait", "5"]).unwrap();
+        assert!(attach.attach);
+        assert_eq!(attach.wait, 5);
     }
 
     #[test]

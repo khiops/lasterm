@@ -41,6 +41,7 @@ import {
 	SFTP_PROBE_TIMEOUT_MS,
 	STALE_UPLOAD_MINUTES,
 	uploadAgentBinary,
+	verifiedRelayAgent,
 	WINDOWS_ARCH_COMMANDS,
 	WINDOWS_REPLY_MARKER,
 	windowsFindAgentScript,
@@ -3720,5 +3721,127 @@ describe("deploy + verify integration", () => {
 
 		expect(error).toBeInstanceOf(DeployError);
 		expect((error as DeployError).code).toBe("AGENT_NOT_AVAILABLE");
+	});
+});
+
+// ---------- verifiedRelayAgent (#755) -----------------------------------------
+
+describe("verifiedRelayAgent: the agent a daemon-only connection may relay through (#755)", () => {
+	const onPath = "/usr/local/bin/lasterm-agent";
+	const installed = "/home/user/.local/bin/lasterm-agent";
+
+	/** A remote whose agent is at `path` (found on PATH or not) with `sha`. */
+	function remoteWith(path: string, sha: string | null, foundOnPath: boolean): SshClient {
+		const responses: Record<string, ExecResult> = {
+			"which lasterm-agent": foundOnPath
+				? { stdout: `${path}\n`, stderr: "", exitCode: 0 }
+				: { stdout: "", stderr: "", exitCode: 1 },
+			"echo $HOME": { stdout: "/home/user\n", stderr: "", exitCode: 0 },
+			[`sha256sum '${path}'`]:
+				sha === null
+					? { stdout: "", stderr: "No such file", exitCode: 1 }
+					: { stdout: `${sha}  ${path}\n`, stderr: "", exitCode: 0 },
+		};
+		return makeMockClient(responses);
+	}
+
+	function localSha(): string {
+		const sha = getLocalSha256(writeCachedAgentBinary("linux", "x64", "this-hubs-agent"));
+		if (sha === null) throw new Error("no local hash");
+		return sha;
+	}
+
+	it("accepts this hub's own agent where the deploy finds it on PATH", async () => {
+		const sha = localSha();
+		expect(
+			await verifiedRelayAgent(
+				remoteWith(onPath, sha, true),
+				{ os: "linux", arch: "x64" },
+				makeOptions(),
+			),
+		).toEqual({ kind: "verified", path: onPath, localCopy: true });
+	});
+
+	it("accepts it at the install target, off PATH", async () => {
+		const sha = localSha();
+		expect(
+			await verifiedRelayAgent(
+				remoteWith(installed, sha, false),
+				{ os: "linux", arch: "x64" },
+				makeOptions(),
+			),
+		).toEqual({ kind: "verified", path: installed, localCopy: true });
+	});
+
+	it("with a local copy, refuses a file matching only the pin: Connect would replace it", async () => {
+		localSha();
+		const result = await verifiedRelayAgent(
+			remoteWith(onPath, REMOTE_SHA_DIFFERENT, true),
+			{ os: "linux", arch: "x64" },
+			makeOptions({ pinnedSha256: REMOTE_SHA_DIFFERENT }),
+		);
+		expect(result).toEqual({
+			kind: "refused",
+			reason:
+				"the agent on this host is not one this hub can vouch for (a different version); Connect installs this hub's",
+		});
+	});
+
+	it.each([
+		["the host's pin", { pinnedSha256: REMOTE_SHA_DIFFERENT }],
+		["the hash trusted this session", { sessionTrustedSha256: REMOTE_SHA_DIFFERENT }],
+	])("without a local copy, accepts %s", async (_what, trust) => {
+		const result = await verifiedRelayAgent(
+			remoteWith(onPath, REMOTE_SHA_DIFFERENT, true),
+			{ os: "linux", arch: "x64" },
+			makeOptions(trust),
+		);
+		expect(result).toEqual({ kind: "verified", path: onPath, localCopy: false });
+	});
+
+	it("without a local copy or any trust, says it could not check, not that Connect fixes it", async () => {
+		const result = await verifiedRelayAgent(
+			remoteWith(onPath, REMOTE_SHA_DIFFERENT, true),
+			{ os: "linux", arch: "x64" },
+			makeOptions(),
+		);
+		expect(result).toEqual({
+			kind: "refused",
+			reason:
+				"the agent on this host could not be checked: this hub has no copy of its own agent for that system",
+		});
+	});
+
+	it("says no agent was found when there is none", async () => {
+		expect(
+			await verifiedRelayAgent(
+				remoteWith(installed, null, false),
+				{ os: "linux", arch: "x64" },
+				makeOptions(),
+			),
+		).toEqual({ kind: "refused", reason: "no Lasterm agent was found on this host" });
+	});
+
+	it("says its hash could not be read for an agent found but unreadable", async () => {
+		expect(
+			await verifiedRelayAgent(
+				remoteWith(onPath, null, true),
+				{ os: "linux", arch: "x64" },
+				makeOptions(),
+			),
+		).toEqual({
+			kind: "refused",
+			reason: "the agent on this host could not be checked: its hash could not be read",
+		});
+	});
+
+	it("refuses a host whose system it cannot tell", async () => {
+		expect(
+			await verifiedRelayAgent(
+				remoteWith(onPath, null, true),
+				{ os: null, arch: null },
+				makeOptions(),
+			),
+		).toMatchObject({ kind: "refused" });
 	});
 });

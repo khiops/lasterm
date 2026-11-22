@@ -980,6 +980,90 @@ async function resolveRemotePath(client: SshClient, os: HostOs): Promise<string>
 }
 
 /**
+ * Where the agent is on the remote, as the deploy looks for it: the place
+ * `checkRemoteAgent` finds (PATH, then the known folders), and otherwise the
+ * place an upload would go, resolved only when asked. The deploy and a relay
+ * that may not deploy (#755) go by the same answer.
+ */
+export async function selectRemoteAgentPath(
+	client: SshClient,
+	os: HostOs,
+): Promise<{ existing: string | null; installTarget: () => Promise<string> }> {
+	const existing = await checkRemoteAgent(client, os);
+	return { existing, installTarget: () => resolveRemotePath(client, os) };
+}
+
+/** An agent a relay may run without deploying, or why there is none (#755). */
+export type RelayAgent =
+	| { kind: "verified"; path: string; localCopy: boolean }
+	| { kind: "refused"; reason: string };
+
+/**
+ * The agent a connection that deploys nothing ("Keep the agent left here and
+ * connect", #701) may run as its relay, read-only: the file the deploy would
+ * use, accepted with the deploy's own priority (#755). When this hub has its
+ * own agent for the host's system, only that agent's hash is accepted, since
+ * Connect would replace any other file. Only without it is the host's pinned
+ * hash or the one trusted this session accepted. Nothing is uploaded, and
+ * nothing unverified runs (#43).
+ */
+export async function verifiedRelayAgent(
+	client: SshClient,
+	host: { os: HostOs | null; arch: HostArch | null },
+	options: DeployOptions,
+): Promise<RelayAgent> {
+	let { os, arch } = host;
+	// Read as the deploy reads it, when the host's record lacks it.
+	if (!os || !arch) {
+		const detected = (await readRemoteSystem(client))?.parsed;
+		if (!detected) return { kind: "refused", reason: "Lasterm could not tell this host's system" };
+		os = detected.os;
+		arch = detected.arch;
+	}
+	const selection = await selectRemoteAgentPath(client, os);
+	const path = selection.existing ?? (await selection.installTarget());
+	const remoteSha = await getRemoteSha256(client, path, os);
+	let localBinary: string | null = null;
+	try {
+		localBinary = await resolveLocalAgentBinary(
+			os,
+			arch,
+			options,
+			options.hubVersion ?? HUB_VERSION,
+		);
+	} catch {
+		localBinary = null;
+	}
+	const localSha = localBinary === null ? null : getLocalSha256(localBinary);
+	if (remoteSha === null) {
+		return {
+			kind: "refused",
+			reason:
+				selection.existing === null
+					? "no Lasterm agent was found on this host"
+					: "the agent on this host could not be checked: its hash could not be read",
+		};
+	}
+	if (localSha !== null) {
+		return remoteSha === localSha
+			? { kind: "verified", path, localCopy: true }
+			: {
+					kind: "refused",
+					reason:
+						"the agent on this host is not one this hub can vouch for (a different version); Connect installs this hub's",
+				};
+	}
+	if (remoteSha === options.sessionTrustedSha256 || remoteSha === options.pinnedSha256) {
+		return { kind: "verified", path, localCopy: false };
+	}
+	return {
+		kind: "refused",
+		reason:
+			"the agent on this host could not be checked: this hub has no copy of its own agent for that system",
+	};
+}
+
+/**
  * Full auto-deploy flow with SHA256 integrity verification and TOFU support.
  *
  * Branch A — agent found on remote:
@@ -1018,7 +1102,8 @@ export async function deployAgentIfNeeded(
 		os = detected.os;
 		arch = detected.arch;
 	}
-	const existingPath = await checkRemoteAgent(client, os);
+	const selection = await selectRemoteAgentPath(client, os);
+	const existingPath = selection.existing;
 
 	if (existingPath) {
 		// --- Branch A: agent already exists ---
@@ -1138,7 +1223,7 @@ export async function deployAgentIfNeeded(
 	}
 
 	// 4. Determine remote install path (expands ~ using remote $HOME)
-	const remotePath = await resolveRemotePath(client, os);
+	const remotePath = await selection.installTarget();
 
 	// 5. Upload: SFTP where the server offers it, else over an exec channel (#722)
 	await uploadAgentBinary(client, localBinary, remotePath, os, options.sftp);

@@ -664,6 +664,15 @@ table (APP-SHORTCUTS), which the window and the terminals still both read. The r
 
 ---
 
+## REMOTE-DAEMON-RELAY — a daemon the SSH channel cannot reach goes through a relay (#755, 2026-11-22)
+
+- Where the SSH server refuses `direct-streamlocal` (`DisableForwarding`, `AllowStreamLocalForwarding no`, a key's `restrict`), the hub runs `lasterm-agent --attach` in an exec channel. It connects to the daemon's socket as the account and copies bytes both ways, as Docker's `docker system dial-stdio` does for `ssh://` hosts.
+- Chosen over loopback TCP with `direct-tcpip`, which any local account could reach and which forwarding refusals block too. Also chosen over AF_UNIX on Windows, which depends on Win32-OpenSSH serving `direct-streamlocal` and does nothing for hardened hosts.
+- The channel stays first where it works: it needs no process on the host. Only a proven refusal (the channel type refused outright, or the socket seen listening and the channel still failing) is remembered, so that a first connection to a stopped daemon on a host without `/proc/net/unix` does not mark a working server as refusing.
+- The hub decides by the relay's `lasterm-attach:` lines on stderr, never by its exit status: a PowerShell `DefaultShell` turns every non-zero status into 1.
+- A relay failure fails the connection. It never falls back to stdio: on a reconnection that would start new shells under the ids of terminals the daemon still holds.
+- "Keep the agent left here and connect" deploys nothing, so its relay runs only an agent it verified: the file the deploy would use, accepted with the deploy's own priority (this hub's agent when it has one, else the pin or the hash trusted this session), never the bare `lasterm-agent` of PATH (#43).
+
 ## REMOTE-DAEMON — a remote agent that outlives its SSH connection, on request (#79, 2026-09-22)
 
 - Over stdio the agent is a child of the SSH session, so a dropped transport or a hub restart ends it and every PTY it holds. A daemon is started detached, listens on a Unix socket in its state directory on the remote, and the SSH connection reaches that socket through `direct-streamlocal`. What comes back speaks what the local daemon speaks, so `LastermAgent` drives it unchanged.

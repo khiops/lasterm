@@ -111,11 +111,11 @@ import {
 } from "./quit-fence.js";
 import {
 	hostKeepsDaemon,
-	hostTriesDaemon,
 	REMOTE_STATE_DIR_COMMAND,
 	rememberSocketForwardingRefused,
 	remoteDaemonPaths,
 	remoteDaemonStopCommand,
+	socketForwardingRefusedOn,
 } from "./remote-daemon.js";
 import * as Acq from "./session-acquisition.js";
 import {
@@ -553,11 +553,7 @@ export class SessionManager {
 					promptAuth,
 					deployOpts,
 					agentLaunchConfig(ctx),
-					hostTriesDaemon(
-						host,
-						ctx.configResolver?.sshConfig?.remoteDaemon === true,
-						ctx.socketForwardingRefusals,
-					),
+					hostKeepsDaemon(host, ctx.configResolver?.sshConfig?.remoteDaemon === true),
 				);
 
 				const hostKey = targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id)));
@@ -946,6 +942,12 @@ export class SessionManager {
 			onSocketForwardingRefused: (reached) => {
 				rememberSocketForwardingRefused(this.ctx.socketForwardingRefusals, reached);
 			},
+			relayFirst: (reached) =>
+				socketForwardingRefusedOn(
+					reached,
+					this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
+					this.ctx.socketForwardingRefusals,
+				),
 			onAgentUpdated: (hid, { besideRunningDaemon }) => {
 				this.ctx.hubLogger?.log(
 					"info",
@@ -3420,12 +3422,11 @@ export class SessionManager {
 							connected: agent.connected,
 							usedRemoteDaemon: agent instanceof SshAgent && agent.usedRemoteDaemon,
 						},
-			// A host whose server refused the forwarding runs its agent on stdio
-			// (#765): its terminals end with the connection, daemon or not.
-			hostKeepsDaemon: hostTriesDaemon(
+			// A host whose server refuses the forwarding still keeps its daemon,
+			// reached through the relay (#755).
+			hostKeepsDaemon: hostKeepsDaemon(
 				host,
 				this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
-				this.ctx.socketForwardingRefusals,
 			),
 			liveTerminals,
 		};
@@ -3443,9 +3444,9 @@ export class SessionManager {
 
 	/**
 	 * A person's Connect or Reconnect: the connection it opens tries the
-	 * host's daemon again, since the server may allow socket forwarding now
+	 * socket's channel again, since the server may allow socket forwarding now
 	 * (#765). Nothing else forgets a refusal, short of a change to the route it
-	 * was seen on: a terminal opened there goes straight to stdio.
+	 * was seen on: a terminal opened there goes straight to the relay (#755).
 	 */
 	private askServerAgain(hostId: string): void {
 		this.ctx.socketForwardingRefusals.delete(hostId);
@@ -3751,8 +3752,17 @@ export class SessionManager {
 		if (stored === undefined) {
 			return fail("INTERNAL_ERROR", "The agent was reached, but the setting could not be saved.");
 		}
-		// A socket that answered proves the server forwards it now.
-		this.askServerAgain(hostId);
+		// A socket that answered through its own channel proves the server
+		// forwards it now. One reached through the relay proves nothing of the
+		// sort (#755): a refusal this reach proved is kept, under the host as it
+		// is now stored, since the Yes just written is part of its route.
+		if (agent instanceof SshAgent && agent.reachedThrough === "relay") {
+			if (agent.socketForwardingRefused) {
+				rememberSocketForwardingRefused(this.ctx.socketForwardingRefusals, stored);
+			}
+		} else {
+			this.askServerAgain(hostId);
+		}
 		return listed;
 	}
 
@@ -3784,12 +3794,9 @@ export class SessionManager {
 		// Only where something may still be holding the terminal. On stdio the
 		// agent died with its connection, so dialling out would reach a machine
 		// nobody asked for — and ask for a password — to find nothing.
-		// Nor where the server refused the forwarding a daemon is reached
-		// through (#765): its agent ran on stdio too.
-		const keepsDaemon = hostTriesDaemon(
+		const keepsDaemon = hostKeepsDaemon(
 			this.ctx.metaDal.getHost(hostId),
 			this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
-			this.ctx.socketForwardingRefusals,
 		);
 		if (!keepsDaemon) return false;
 
@@ -3899,11 +3906,7 @@ export class SessionManager {
 			promptAuth,
 			deployOpts,
 			agentLaunchConfig(this.ctx),
-			hostTriesDaemon(
-				host,
-				this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
-				this.ctx.socketForwardingRefusals,
-			),
+			hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
 			daemonOnly,
 		);
 
@@ -4089,11 +4092,7 @@ export class SessionManager {
 					promptAuth,
 					deployOpts,
 					agentLaunchConfig(this.ctx),
-					hostTriesDaemon(
-						host,
-						this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
-						this.ctx.socketForwardingRefusals,
-					),
+					hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
 					daemonOnly,
 				);
 				console.error(`[lasterm-ssh] creating SshAgent for host ${host.id} (retry)`);

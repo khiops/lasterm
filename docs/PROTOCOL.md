@@ -73,8 +73,9 @@ Hub ──── Unix domain socket / named pipe ──── Agent (daemon)
 
 - Agent runs as a standalone daemon: `lasterm-agent --daemon --socket <path>`
 - Hub connects to the UDS via `connectOrLaunch(socketPath, config, binaryPath)`. A remote daemon's
-  socket is reached through the host's SSH connection, over a `direct-streamlocal` channel
-  (SPEC.md § 3.2); what that channel carries is the same
+  socket is reached through the host's SSH connection, over a `direct-streamlocal` channel, or
+  through `lasterm-agent --attach` in an exec channel where the SSH server refuses that channel
+  (SPEC.md § 3.2, #755); what either carries is the same
 - Same length-prefixed MessagePack framing as stdio
 - Connection displacement: a daemon serves several hubs at once, one connection per hub, and a new
   connection replaces only the same hub's previous one (§ 3.1b). The replaced connection gets
@@ -1333,9 +1334,9 @@ absent from `channels` has ended, or is unknown.
   // absent once another connection serves the host.
   sftp_unavailable?: true,
   // Only when the host keeps a daemon (#79) and the hub saw its SSH server refuse the
-  // socket forwarding a daemon is reached through (#765): the hub runs the agent on
-  // stdio there, so the host's terminals end with its connection (SPEC.md § 3). A note,
-  // not an error. Remembered in the hub's memory for the route it was seen on, so said
+  // socket forwarding a daemon is reached through (#765): the hub reaches the daemon
+  // through a relay there, and the host's terminals still outlive its connection
+  // (SPEC.md § 3, #755). A note, not an error. Remembered in the hub's memory for the route it was seen on, so said
   // with or without a connection, until that route changes, a person's Connect or
   // Reconnect of the host asks the server again, or the hub restarts.
   socket_forwarding_refused?: true,

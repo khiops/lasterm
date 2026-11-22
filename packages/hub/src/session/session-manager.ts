@@ -2393,9 +2393,10 @@ export class SessionManager {
 		const changed = channel.cols !== cols || channel.rows !== rows;
 		channel.cols = cols;
 		channel.rows = rows;
+		// Recorded as soon as the PTY has it, before a meta.db write that can fail.
+		if (changed) this.ctx.recorder?.onResize(channelId, cols, rows);
 		this.ctx.metaDal.updateChannelDimensions(channelId, cols, rows);
 		if (changed) {
-			this.ctx.recorder?.onResize(channelId, cols, rows);
 			this.broadcaster.broadcastToChannel(channelId, {
 				type: "CHANNEL_SIZE",
 				channelId,

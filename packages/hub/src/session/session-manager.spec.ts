@@ -12114,6 +12114,30 @@ describe("SessionManager recordings (#80)", () => {
 		expect(sm.recorder.listed(started.id)?.end_reason).toBe("exited");
 	});
 
+	// A size the PTY was given is recorded even when meta.db refuses to store it.
+	// Mutation caught: the recorder told only after the meta.db write.
+	it("records a size change whose meta.db write fails", async () => {
+		const channelId = await spawnLocal();
+		const started = sm.startRecording(channelId);
+		if (!started.ok) throw new Error(started.code);
+		await flushImmediate();
+		const write = vi.spyOn(MetaDAL.prototype, "updateChannelDimensions").mockImplementation(() => {
+			throw new Error("SQLITE_IOERR");
+		});
+		try {
+			expect(() => sm.handleResize("c1", channelId, 100, 30)).toThrow("SQLITE_IOERR");
+		} finally {
+			write.mockRestore();
+		}
+		const codes = exportOf(sm, started.id)
+			.slice(1)
+			.map((l) => (JSON.parse(l) as [number, string, string]).slice(1));
+		expect(codes).toEqual([
+			["o", "<mock-snapshot>"],
+			["r", "100x30"],
+		]);
+	});
+
 	// AC-REC-AUTO variants. Mutations caught: profile ignored, default on, layers ORed.
 	describe("by the terminal's profile", () => {
 		// Through a real resolver, so DEFAULT_PROFILE decides. Mutation caught: a default of true.

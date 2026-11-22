@@ -575,8 +575,9 @@ export class SessionRecorder {
 			}
 			const tail = incompleteTail(joined);
 			const complete = joined.subarray(0, joined.length - tail);
+			// A held run keeps the position of its first byte while later frames extend it.
+			if (complete.length > 0 || active.heldUtf8.length === 0) active.heldUtf8Pos = pos;
 			active.heldUtf8 = joined.slice(joined.length - tail);
-			active.heldUtf8Pos = pos;
 			if (complete.length > 0) this.push(active, { pos, code: "o", data: complete });
 		} else {
 			this.flushHeldUtf8(active);

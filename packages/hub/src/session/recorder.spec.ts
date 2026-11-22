@@ -504,6 +504,34 @@ describe("SessionRecorder", () => {
 			expect(h.body(id)).toEqual(['[0.000, "o", "�"]', '[0.000, "r", "81x24"]']);
 		});
 
+		// "At the position they were received": a held run that a later frame extends
+		// keeps its first byte's time. Mutations caught: the position moved to each
+		// frame; a new run after a completed one kept at the old run's time.
+		it("(e) writes held bytes two frames extended at the first one's time", () => {
+			h.at(0);
+			const id = startAuto(h);
+			h.at(10);
+			h.rec.onOutput(CHANNEL, new Uint8Array([0xe2]));
+			h.at(40);
+			h.rec.onOutput(CHANNEL, new Uint8Array([0x82]));
+			h.at(70);
+			h.rec.onResize(CHANNEL, 81, 24);
+			// A frame that completes the held run and holds a new one starts a new run.
+			h.at(100);
+			h.rec.onOutput(CHANNEL, new Uint8Array([0xc3]));
+			h.at(130);
+			h.rec.onOutput(CHANNEL, new Uint8Array([0xa9, 0xc3]));
+			h.at(160);
+			h.rec.endChannel(CHANNEL, "exited", 0);
+			expect(h.body(id)).toEqual([
+				'[0.010, "o", "�"]',
+				'[0.060, "r", "81x24"]',
+				'[0.060, "o", "é"]',
+				'[0.000, "o", "�"]',
+				'[0.030, "x", "0"]',
+			]);
+		});
+
 		it("(f) writes a held byte before the exit", () => {
 			const id = startAuto(h);
 			h.rec.onOutput(CHANNEL, new Uint8Array([0xc3]));

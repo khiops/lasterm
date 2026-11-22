@@ -203,7 +203,7 @@ async function onFile(event: Event): Promise<void> {
 }
 
 .rec-usage--full {
-	color: var(--nt-red, #e06c75);
+	color: var(--nt-status-error);
 	font-weight: 600;
 }
 
@@ -254,7 +254,7 @@ async function onFile(event: Event): Promise<void> {
 	width: 7px;
 	height: 7px;
 	border-radius: 50%;
-	background: var(--nt-red, #e06c75);
+	background: var(--nt-status-error);
 }
 
 .rec-row__meta {
@@ -276,8 +276,8 @@ async function onFile(event: Event): Promise<void> {
 }
 
 .btn-danger {
-	background: var(--nt-red, #e06c75);
-	color: #fff;
+	background: var(--nt-danger);
+	color: var(--nt-danger-fg);
 }
 
 .rec-empty {
@@ -298,7 +298,7 @@ async function onFile(event: Event): Promise<void> {
 
 .rec-file-error {
 	font-size: 12px;
-	color: var(--nt-red, #e06c75);
+	color: var(--nt-status-error);
 }
 
 .rec-close {

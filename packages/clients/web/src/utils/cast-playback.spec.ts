@@ -172,6 +172,55 @@ describe("CastPlayback", () => {
 		expect(last().text).toBe(line.repeat(5000));
 	});
 
+	// Mutation caught: no generation check before a piece of a batch, or after the
+	// write that empties a full batch (the replaced seek writes on, or moves the new one's place).
+	it("stops a seek replaced between two pieces of a batch", async () => {
+		const big = "A".repeat(2 * PIECE);
+		const text = [
+			'{"version":3,"term":{"cols":80,"rows":24}}',
+			JSON.stringify([0, "o", big]),
+			...Array.from({ length: 3 }, () => JSON.stringify([0.001, "o", "b"])),
+		].join("\n");
+		const { playback, terminals, last } = player(text, false);
+		const forward = playback.seek(10);
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		const replaced = terminals[1] as FakeTerminal;
+		expect(replaced.calls).toEqual([`write:${PIECE}:0`]);
+		replaced.flush(); // its first piece parsed; the seek is replaced before it goes on
+		const back = playback.seek(0);
+		for (let i = 0; i < 20 && last().text !== big; i++) {
+			last().flush();
+			await Promise.resolve();
+		}
+		await Promise.all([forward, back]);
+		expect(replaced.calls).toEqual([`write:${PIECE}:0`]);
+		expect(last().calls).toEqual([`write:${PIECE}:0`, `write:${PIECE}:0`]);
+		expect(last().text).toBe(big);
+		expect(playback.currentTime).toBe(0);
+	});
+
+	// Mutation caught: no generation check after a seek's last write (the replaced seek sets the clock).
+	it("leaves the clock to the new seek when the replaced one's last write ends after it", async () => {
+		const text = [
+			'{"version":3,"term":{"cols":80,"rows":24}}',
+			'[0, "o", "a"]',
+			'[1, "o", "b"]',
+		].join("\n");
+		const { playback, terminals, last } = player(text, false);
+		const forward = playback.seek(5);
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		const replaced = terminals[1] as FakeTerminal;
+		const back = playback.seek(0.5);
+		for (let i = 0; i < 5; i++) await Promise.resolve();
+		last().flush();
+		await back;
+		expect(playback.currentTime).toBe(0.5);
+		replaced.flush(); // the replaced seek's write ends last
+		await forward;
+		expect(playback.currentTime).toBe(0.5);
+		expect(last().text).toBe("a");
+	});
+
 	// COR1: time is continuous. Mutation caught: the whole delay waited again after a seek or a pause.
 	it("goes on from a seek between two events with only what remains", async () => {
 		const text = [

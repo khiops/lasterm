@@ -437,8 +437,16 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * hub may have read before the title: a title heard since goes over its row
 	 * (#1128). Independent of `statusesDuringFetch`: the index fetch is not tied to a
 	 * host list or its generations.
+	 *
+	 * `listed` is what a host list published into the index while the fetch was in
+	 * flight: those entries stay over the response's rows, which the hub may have
+	 * read before the list did (#1148). Titles heard still go over them.
 	 */
-	const indexTitlesDuringFetch = new Set<Map<string, string>>();
+	interface IndexHeard {
+		titles: Map<string, string>;
+		listed: Map<string, ChannelIndexEntry>;
+	}
+	const indexTitlesDuringFetch = new Set<IndexHeard>();
 
 	/**
 	 * The latest index fetch started, and the latest whose response was taken.
@@ -628,8 +636,8 @@ export const useChannelsStore = defineStore("channels", () => {
 	async function fetchChannelIndex(): Promise<void> {
 		if (authStore.token === null) return;
 		const myIndexGeneration = ++indexGeneration;
-		const myTitles = new Map<string, string>();
-		indexTitlesDuringFetch.add(myTitles);
+		const myHeard: IndexHeard = { titles: new Map(), listed: new Map() };
+		indexTitlesDuringFetch.add(myHeard);
 		try {
 			const res = await hubFetch(`${hubBaseUrl()}/api/channels`, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
@@ -649,7 +657,8 @@ export const useChannelsStore = defineStore("channels", () => {
 				if (typeof id !== "string" || typeof rowHostId !== "string") continue;
 				// Prefer the last title set during this request over the row's (#1128).
 				const title =
-					myTitles.get(id) ?? (typeof row.display_title === "string" ? row.display_title : "");
+					myHeard.titles.get(id) ??
+					(typeof row.display_title === "string" ? row.display_title : "");
 				// Whether it runs a command, for a pane over it while another host
 				// is in view: its overlay offers Configure, and it is not restarted
 				// on its own (#574).
@@ -666,6 +675,12 @@ export const useChannelsStore = defineStore("channels", () => {
 				});
 				nextHostMap.set(id, rowHostId);
 			}
+			// What a host list published meanwhile is newer than these rows (#1148);
+			// a title heard since goes over it.
+			for (const [id, listed] of myHeard.listed) {
+				const title = myHeard.titles.get(id);
+				nextIndex.set(id, title === undefined ? listed : { ...listed, displayTitle: title });
+			}
 			indexCommittedGeneration = myIndexGeneration;
 			channelIndex.value = nextIndex;
 			channelHostMap.value = nextHostMap;
@@ -673,7 +688,7 @@ export const useChannelsStore = defineStore("channels", () => {
 			// An index that could not be read is an index that says nothing; the
 			// tab bar falls back to what it showed before.
 		} finally {
-			indexTitlesDuringFetch.delete(myTitles);
+			indexTitlesDuringFetch.delete(myHeard);
 		}
 	}
 
@@ -803,13 +818,17 @@ export const useChannelsStore = defineStore("channels", () => {
 			const nextIndex = new Map(channelIndex.value);
 			for (const ch of merged) {
 				nextHostMap.set(ch.id, hostId);
-				nextIndex.set(ch.id, {
+				const entry: ChannelIndexEntry = {
 					hostId,
 					displayTitle: ch.displayTitle ?? "",
 					...(ch.directProcess === true && { directProcess: true as const }),
 					...(ch.status === "dead" && ch.endReason !== undefined && { endReason: ch.endReason }),
 					...(ch.status === "dead" && { ended: true as const }),
-				});
+				};
+				nextIndex.set(ch.id, entry);
+				// An index fetch in flight reads rows the hub may have listed before
+				// this list: what this list publishes stays over them (#1148).
+				for (const heardHere of indexTitlesDuringFetch) heardHere.listed.set(ch.id, entry);
 			}
 			channelHostMap.value = nextHostMap;
 			channelIndex.value = nextIndex;
@@ -1028,7 +1047,7 @@ export const useChannelsStore = defineStore("channels", () => {
 	 */
 	function setDisplayTitle(channelId: string, displayTitle: string): void {
 		titleHeardDuringFetch(channelId, { displayTitle });
-		for (const heardHere of indexTitlesDuringFetch) heardHere.set(channelId, displayTitle);
+		for (const heardHere of indexTitlesDuringFetch) heardHere.titles.set(channelId, displayTitle);
 		// The index keeps up even for a channel this host does not list, so the
 		// tab still carries the last title it was given after a host switch.
 		const indexed = channelIndex.value.get(channelId);
@@ -1235,8 +1254,8 @@ export const useChannelsStore = defineStore("channels", () => {
 		// A creation tells the display title anew, on any host: the titles heard
 		// before it, for an index fetch in flight, go (#1128).
 		for (const heardHere of indexTitlesDuringFetch) {
-			if (msg.displayTitle === undefined) heardHere.delete(msg.channelId);
-			else heardHere.set(msg.channelId, msg.displayTitle);
+			if (msg.displayTitle === undefined) heardHere.titles.delete(msg.channelId);
+			else heardHere.titles.set(msg.channelId, msg.displayTitle);
 		}
 
 		// Ignore channels for other hosts — this client may be viewing a

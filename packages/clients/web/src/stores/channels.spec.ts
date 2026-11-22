@@ -751,6 +751,113 @@ describe("useChannelsStore — fetchChannelIndex", () => {
 			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("hub says");
 		});
 	});
+
+	describe("a host list committed while the fetch is in flight (#1148)", () => {
+		/**
+		 * The index request waits for `release`; the host list (`host_id=`) and the
+		 * groups answer at once.
+		 */
+		function holdingIndex(hostRows: unknown[], indexRows: unknown[]) {
+			let release!: () => void;
+			const held = new Promise<void>((r) => {
+				release = r;
+			});
+			mockFetch.mockImplementation((url: string) => {
+				if (url.includes("/api/groups")) {
+					return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+				}
+				if (url.includes("host_id=")) {
+					return Promise.resolve({ ok: true, json: () => Promise.resolve(hostRows) });
+				}
+				return held.then(() => ({ ok: true, json: () => Promise.resolve(indexRows) }));
+			});
+			return release;
+		}
+
+		it("keeps a channel the host list listed and the older index response does not", async () => {
+			const store = useChannelsStore();
+			const release = holdingIndex(
+				[row("ch-1", "host-1", "one"), row("ch-new", "host-1", "created")],
+				[row("ch-1", "host-1", "one")],
+			);
+			const fetching = store.fetchChannelIndex();
+			await store.fetchChannels("host-1");
+			release();
+			await fetching;
+
+			expect(store.channelIndex.get("ch-new")).toEqual({
+				hostId: "host-1",
+				displayTitle: "created",
+			});
+			expect(store.channelHostMap.get("ch-new")).toBe("host-1");
+		});
+
+		it("keeps the title the host list carries over the older index response's", async () => {
+			const store = useChannelsStore();
+			const release = holdingIndex(
+				[row("ch-1", "host-1", "recent")],
+				[row("ch-1", "host-1", "old")],
+			);
+			const fetching = store.fetchChannelIndex();
+			await store.fetchChannels("host-1");
+			release();
+			await fetching;
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("recent");
+		});
+
+		it("keeps the rows of other hosts the index response lists", async () => {
+			const store = useChannelsStore();
+			const release = holdingIndex(
+				[row("ch-1", "host-1", "one")],
+				[row("ch-1", "host-1", "one"), row("ch-2", "host-2", "htop")],
+			);
+			const fetching = store.fetchChannelIndex();
+			await store.fetchChannels("host-1");
+			release();
+			await fetching;
+
+			expect(store.channelIndex.get("ch-2")).toEqual({ hostId: "host-2", displayTitle: "htop" });
+		});
+
+		it("lets a title set after the host list committed go over what the list carried", async () => {
+			const store = useChannelsStore();
+			const release = holdingIndex(
+				[row("ch-1", "host-1", "listed")],
+				[row("ch-1", "host-1", "old")],
+			);
+			const fetching = store.fetchChannelIndex();
+			await store.fetchChannels("host-1");
+			store.setDisplayTitle("ch-1", "set later");
+			release();
+			await fetching;
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("set later");
+		});
+
+		it("does not carry what the list published into a later index fetch", async () => {
+			const store = useChannelsStore();
+			const release = holdingIndex(
+				[row("ch-1", "host-1", "listed")],
+				[row("ch-1", "host-1", "old")],
+			);
+			const fetching = store.fetchChannelIndex();
+			await store.fetchChannels("host-1");
+			release();
+			await fetching;
+
+			mockFetch.mockImplementation(() =>
+				Promise.resolve({
+					ok: true,
+					json: () => Promise.resolve([row("ch-1", "host-1", "hub says")]),
+				}),
+			);
+			await store.fetchChannelIndex();
+
+			expect(store.channelIndex.get("ch-1")?.displayTitle).toBe("hub says");
+			expect(store.channelIndex.has("ch-new")).toBe(false);
+		});
+	});
 });
 
 // ---------------------------------------------------------------------------

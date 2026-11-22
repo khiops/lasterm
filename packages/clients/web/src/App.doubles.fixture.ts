@@ -323,6 +323,9 @@ export class FakeHub {
 			return json({ ok: true });
 		}
 		if (method === "GET" && path === "/api/transfers") return json({ transfers: [] });
+		if (method === "GET" && path === "/api/recordings") {
+			return json({ recordings: [], used_bytes: 0, cap_bytes: 1024 * 1024 * 1024 });
+		}
 		if (method === "GET") {
 			if (
 				path === "/api/fonts" ||

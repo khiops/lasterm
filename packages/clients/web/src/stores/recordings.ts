@@ -108,19 +108,20 @@ export const useRecordingsStore = defineStore("recordings", () => {
 			return;
 		}
 		if (!res.ok) return;
-		const body = (await res.json()) as {
-			recordings: RecordingRow[];
-			used_bytes: number;
-			cap_bytes: number;
-		};
-		rows.value = body.recordings;
-		usedBytes.value = body.used_bytes;
-		capBytes.value = body.cap_bytes;
+		const body = (await res.json().catch(() => null)) as {
+			recordings?: unknown;
+			used_bytes?: unknown;
+			cap_bytes?: unknown;
+		} | null;
+		if (body === null || !Array.isArray(body.recordings)) return;
+		rows.value = body.recordings as RecordingRow[];
+		usedBytes.value = typeof body.used_bytes === "number" ? body.used_bytes : 0;
+		capBytes.value = typeof body.cap_bytes === "number" ? body.cap_bytes : 0;
 		const next = new Map<string, OpenRecording>();
 		for (const [channelId, rec] of open.value) {
 			if ((heard.get(channelId) ?? 0) !== (before.get(channelId) ?? 0)) next.set(channelId, rec);
 		}
-		for (const row of body.recordings) {
+		for (const row of rows.value) {
 			if (row.ended_at !== null) continue;
 			if ((heard.get(row.channel_id) ?? 0) !== (before.get(row.channel_id) ?? 0)) continue;
 			next.set(row.channel_id, {

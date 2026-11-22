@@ -147,7 +147,7 @@ function answerAttach(h: Harness, requestId: string, snapshot: Record<string, un
 		requestId,
 		snapshot,
 		lastSeq: 0,
-	} as ProtocolMessage);
+	} as unknown as ProtocolMessage);
 }
 
 describe("SessionRecorder", () => {
@@ -241,7 +241,7 @@ describe("SessionRecorder", () => {
 					code: "CHANNEL_NOT_FOUND",
 					message: "x",
 					requestId: rid,
-				} as ProtocolMessage),
+				} as unknown as ProtocolMessage),
 			);
 			expect(lines).toEqual([MARKER, '[0.010, "o", "held"]']);
 		});
@@ -260,7 +260,7 @@ describe("SessionRecorder", () => {
 				requestId,
 				snapshot: { serialized: "LATE", cols: 1, rows: 1, cursorX: 0, cursorY: 0 },
 				lastSeq: 0,
-			} as ProtocolMessage);
+			} as unknown as ProtocolMessage);
 			expect(h.body(id)).toEqual([MARKER, '[0.010, "o", "held"]']);
 		});
 
@@ -635,7 +635,7 @@ describe("SessionRecorder", () => {
 				requestId,
 				snapshot: { serialized: "LATE", cols: 1, rows: 1, cursorX: 0, cursorY: 0 },
 				lastSeq: 0,
-			} as ProtocolMessage);
+			} as unknown as ProtocolMessage);
 			expect(h.body(b)).toEqual([
 				'[0.000, "m", "lasterm: the screen before this point is not available"]',
 				'[0.000, "o", "b"]',

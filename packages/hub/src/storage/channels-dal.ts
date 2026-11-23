@@ -358,6 +358,13 @@ export class ChannelsDAL {
 			.run(title, now, channelId);
 	}
 
+	/** A new run has set no title yet: the replaced run's are forgotten (#1171). */
+	clearRunTitles(channelId: string): void {
+		this.db
+			.prepare("UPDATE channels SET dynamic_title = NULL, process_title = NULL WHERE id = ?")
+			.run(channelId);
+	}
+
 	updateChannelConfig(
 		channelId: string,
 		config: {

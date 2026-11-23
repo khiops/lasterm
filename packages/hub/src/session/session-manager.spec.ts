@@ -1546,6 +1546,72 @@ describe("SessionManager", () => {
 				expect(ctxOf().channels.get(channelId)?.status).not.toBe("dead");
 			},
 		);
+
+		// A deleted terminal stays ended, and the shell that answered is
+		// destroyed (#1168).
+		it("a terminal deleted during its restart stays ended, and the shell that answers is destroyed", async () => {
+			const { channelId, heard, agent, emit } = await liveTerminal();
+			nextLocalSpawnUnanswered = true;
+			const restarting = sm.restartChannel(channelId);
+			await vi.waitFor(() => expect(spawnsNaming(agent, channelId)).toHaveLength(1));
+
+			expect(sm.destroyChannel(channelId)).toBe(true);
+			const [spawn] = spawnsNaming(agent, channelId);
+			agent.send.mockClear();
+			emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
+
+			expect(await restarting).toBe(false);
+			expect(agent.send).toHaveBeenCalledWith({ type: "DESTROY", channelId });
+			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
+			expect(ctxOf().channels.has(channelId)).toBe(false);
+			expect(statesOf(heard, channelId).map((s) => s.status)).toEqual(["dead"]);
+		});
+
+		it("a session closed during a terminal's restart leaves it ended, and the shell that answers is destroyed", async () => {
+			const { channelId, heard, agent, emit } = await liveTerminal();
+			nextLocalSpawnUnanswered = true;
+			const restarting = sm.restartChannel(channelId);
+			await vi.waitFor(() => expect(spawnsNaming(agent, channelId)).toHaveLength(1));
+
+			const sessionId = ctxOf().channels.get(channelId)?.sessionId;
+			if (sessionId === undefined) throw new Error("expected the terminal's session");
+			await sm.closeSession(sessionId);
+			const [spawn] = spawnsNaming(agent, channelId);
+			agent.send.mockClear();
+			emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
+
+			expect(await restarting).toBe(false);
+			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
+			expect(ctxOf().channels.has(channelId)).toBe(false);
+			expect(statesOf(heard, channelId).some((s) => s.status === "live")).toBe(false);
+		});
+
+		// What the replaced shell titled is not the new shell's (#1171).
+		it("a restarted terminal keeps none of the replaced shell's titles, stored or about to be", async () => {
+			const { channelId, agent, emit } = await liveTerminal();
+			emit({ type: "TITLE_CHANGE", channelId, title: "old dynamic" });
+			emit({ type: "PROCESS_TITLE", channelId, title: "old process" });
+			await vi.waitFor(() => {
+				const stored = new MetaDAL(dbManager.meta).getChannel(channelId);
+				expect(stored?.dynamicTitle).toBe("old dynamic");
+				expect(stored?.processTitle).toBe("old process");
+			});
+			nextLocalSpawnUnanswered = true;
+			const restarting = sm.restartChannel(channelId);
+			await vi.waitFor(() => expect(spawnsNaming(agent, channelId)).toHaveLength(1));
+			// Heard just before the answer: its stored write is 100 ms away.
+			emit({ type: "TITLE_CHANGE", channelId, title: "late dynamic" });
+			emit({ type: "PROCESS_TITLE", channelId, title: "late process" });
+			const [spawn] = spawnsNaming(agent, channelId);
+			emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
+			expect(await restarting).toBe(true);
+			await new Promise((r) => setTimeout(r, 250));
+
+			const stored = new MetaDAL(dbManager.meta).getChannel(channelId);
+			expect(stored?.dynamicTitle).toBeUndefined();
+			expect(stored?.processTitle).toBeUndefined();
+			expect(sm.resolveDisplayTitle(channelId)).toBe("Terminal");
+		});
 	});
 
 	// ─── DB persistence ─────────────────────────────────────────────────────

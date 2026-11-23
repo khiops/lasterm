@@ -130,6 +130,14 @@ export class ChannelLifecycleManager {
 	/** The live restarts' holds, by channel id (#1113): see `restartChannel`. */
 	private readonly restartHolds = new Map<string, RestartHold>();
 
+	/**
+	 * The restarts waiting for their agent's answer, by the id of the terminal
+	 * they replace (#1168). A kill or a session close ends the terminal on
+	 * purpose and removes its restart here: the answer then finds a terminal
+	 * that is no more, and ends the shell it started instead of writing it back.
+	 */
+	private readonly pendingRestarts = new Map<string, { readonly hostId: string }>();
+
 	/** The daemon list adoption under way on each host, until it settles (#1113). */
 	private readonly adoptions = new Map<string, Promise<void>>();
 
@@ -638,6 +646,7 @@ export class ChannelLifecycleManager {
 	 * again.
 	 */
 	destroyChannel(channelId: string): boolean {
+		this.pendingRestarts.delete(channelId);
 		const ch = this.ctx.channels.get(channelId);
 		if (!ch) return false;
 		this.clearElevationForChannel(channelId);
@@ -683,6 +692,7 @@ export class ChannelLifecycleManager {
 	 * One whose end did arrive, `stopped` already, is only forgotten.
 	 */
 	endChannelsOfStoppedAgent(hostId: string): void {
+		this.cancelRestartsOfHost(hostId);
 		this.endRecordingsOfHost(hostId);
 		for (const [channelId, ch] of this.ctx.channels.entries()) {
 			if (ch.hostId !== hostId) continue;
@@ -744,6 +754,12 @@ export class ChannelLifecycleManager {
 	 * End the recordings of every terminal of a host about to be forgotten,
 	 * before the status writes that can throw and stop the loop over them (#80).
 	 */
+	private cancelRestartsOfHost(hostId: string): void {
+		for (const [channelId, pending] of this.pendingRestarts) {
+			if (pending.hostId === hostId) this.pendingRestarts.delete(channelId);
+		}
+	}
+
 	private endRecordingsOfHost(hostId: string): void {
 		for (const [channelId, ch] of this.ctx.channels) {
 			if (ch.hostId === hostId) this.ctx.recorder?.endChannel(channelId, "gone");
@@ -782,6 +798,22 @@ export class ChannelLifecycleManager {
 		const { channel, hostId } = info;
 		const ch = this.ctx.channels.get(channelId);
 
+		const pending = { hostId };
+		this.pendingRestarts.set(channelId, pending);
+		try {
+			return await this.restartPending(channelId, channel, hostId, ch, requestingClientId);
+		} finally {
+			if (this.pendingRestarts.get(channelId) === pending) this.pendingRestarts.delete(channelId);
+		}
+	}
+
+	private async restartPending(
+		channelId: string,
+		channel: Channel,
+		hostId: string,
+		ch: ChannelState | undefined,
+		requestingClientId: string | undefined,
+	): Promise<boolean> {
 		const live = this.ctx.agents.get(hostId);
 		if (!live?.connected || !ch || ch.status === "dead") {
 			return await this.startAgain(channelId, channel, hostId, ch, requestingClientId);
@@ -1161,6 +1193,14 @@ export class ChannelLifecycleManager {
 				}
 				if (incoming.type === "SPAWN_OK") {
 					const { channelId } = incoming as AgentSpawnOkMessage;
+					// Deleted, or its session closed, while this restart waited
+					// (#1168): the shell that answered has no terminal to live in.
+					// The agent keeps it running under its id until told otherwise.
+					if (spawnMsg.channelId !== undefined && !this.pendingRestarts.has(spawnMsg.channelId)) {
+						agent.send({ type: "DESTROY", channelId } as DestroyMessage);
+						resolve({ ok: false, channelId: null, errCode: "CHANNEL_GONE" });
+						return;
+					}
 					try {
 						started(channelId);
 					} catch (err) {
@@ -1241,6 +1281,11 @@ export class ChannelLifecycleManager {
 		// here, before its entry is replaced, so its title is that run's (#80).
 		this.ctx.recorder?.endChannel(channelId, "restarted");
 		this.ctx.metaDal.updateChannelStatus(channelId, "live");
+		// The new shell has set no title yet: nothing of the replaced one's is
+		// stored, or written 100 ms from now (#1171).
+		this.broadcaster.clearTitleDebounce(channelId);
+		this.broadcaster.clearProcessTitleDebounce(channelId);
+		this.ctx.metaDal.clearRunTitles(channelId);
 		this.ctx.channels.set(channelId, {
 			sessionId: sessionEntry.id,
 			hostId,
@@ -1323,6 +1368,7 @@ export class ChannelLifecycleManager {
 		// for as long as the hub lives, and a spawn that names it to bring it back
 		// is refused because "it is still running". One already marked dead is the
 		// one most likely to be in both traps, so it is the last thing to skip.
+		this.cancelRestartsOfHost(hostId);
 		this.endRecordingsOfHost(hostId);
 		for (const [channelId, ch] of this.ctx.channels.entries()) {
 			if (ch.hostId !== hostId) continue;

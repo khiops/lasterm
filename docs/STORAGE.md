@@ -428,6 +428,64 @@ CREATE TABLE schema_version (
 INSERT INTO schema_version VALUES (1, datetime('now'));
 ```
 
+Migration `002-recordings.sql` adds the recordings (§ 4.3) and version 2.
+
+### 4.3 Recordings (#80)
+
+A terminal's recording, kept only until the user saves or discards it (`002-recordings.sql`):
+
+```sql
+CREATE TABLE recordings (
+  id                   TEXT PRIMARY KEY,   -- ULID
+  channel_id           TEXT NOT NULL,      -- no link to meta.db: a recording outlives its terminal
+  host_label           TEXT NOT NULL,      -- the host's name when it started
+  title                TEXT NOT NULL,      -- the terminal's resolved title, replaced at the end
+  started_at           TEXT NOT NULL,      -- wall clock of the start (the file name, the header's timestamp)
+  ended_at             TEXT,               -- NULL while it records
+  end_reason           TEXT CHECK(end_reason IN ('stopped', 'exited', 'killed', 'restarted',
+                                                 'gone', 'cap', 'interrupted', 'crashed')),
+  cols                 INTEGER NOT NULL,   -- the header's size
+  rows                 INTEGER NOT NULL,
+  duration_ms          INTEGER NOT NULL DEFAULT 0,
+  bytes                INTEGER NOT NULL DEFAULT 0,   -- sum of its blocks' sizes
+  unmarked_lost_bytes  INTEGER NOT NULL DEFAULT 0,   -- lost to failed writes, not marked in a block yet
+  deleting             INTEGER NOT NULL DEFAULT 0 CHECK(deleting IN (0, 1))
+);
+CREATE UNIQUE INDEX idx_recordings_open_channel ON recordings(channel_id) WHERE ended_at IS NULL;
+
+CREATE TABLE recording_blocks (
+  recording_id  TEXT NOT NULL,
+  seq           INTEGER NOT NULL,   -- from 1
+  data_blob     BLOB NOT NULL,      -- asciicast v3 event lines, each ending with \n
+  PRIMARY KEY (recording_id, seq)
+) WITHOUT ROWID;
+```
+
+**What is recorded.** The output the hub receives from the agent for that terminal (`o`), each size
+change the hub applies (`r`), its exit status (`x`) and markers (`m`) for what could not be
+recorded: the screen before a start the agent could not draw, a lost agent connection, a storage
+error, the storage cap, a hub that stopped without shutting down. Never input. The writer is fed
+where the hub receives OUTPUT, not from `chunks`: the spool keeps one timestamp per up-to-one-second
+concatenation of frames (§ 5.1), and a recording keeps each frame's time, in milliseconds of the
+hub's monotonic clock. A manual start asks the agent for its screen with an ATTACH of its own
+(PROTOCOL.md § 3.3), which comes after every OUTPUT the screen holds: that screen is the first event.
+
+**Blocks.** Events are written as one block once 256 KiB are buffered or a second after the first,
+at every end and at hub shutdown. A block stores the event lines exactly as the export gives them,
+so `bytes` is the exported size. An `o` event never ends inside a UTF-8 sequence: its incomplete tail
+waits for the next output, and is written alone before any other event, at the end, or dropped with
+a block whose write fails.
+
+**Limits.** One total cap, `[recording] max_total_mb` (1024 by default, CONFIG_REFERENCE.md): a
+start is refused once it is reached, and the block that reaches it ends every open recording with a
+marker. A recording also ends once its own export reaches 512 MiB. Neither deletes anything.
+
+**Deletion.** Only a save or a discard deletes a recording (`DELETE /api/recordings/:id`): the row is
+marked `deleting`, hidden from every route, and its blocks are deleted in the spool GC's bounded
+batches, the row with the last one (§ 7.2). A deletion a failure or a hub stop cut short is finished
+by the next GC pass or hub start. The GC's age, size and dead-retention rules never touch a
+recording; a channel purge or a host deletion leaves its recordings.
+
 ## 5. Chunking Strategy
 
 ### 5.1 Output Chunks
@@ -495,7 +553,8 @@ agent that says `"input-modes"` (PROTOCOL.md § 3.3, #1012); an older agent's sn
 }
 ```
 
-Kind=resize. Stored for replay accuracy.
+The `resize` kind is allowed by the table but nothing writes it: the spool keeps no size history.
+A recording keeps its own size changes (§ 4.3).
 
 ## 6. Cache Index
 
@@ -549,7 +608,10 @@ Every 10 minutes, unless the previous pass is still running:
       or takes the channel past max_size_per_channel_mb, is the cut: it and
       every older chunk that is not a snapshot go
 
-3. Run PRAGMA incremental_vacuum on spool.db, a bounded number of pages at a
+3. Delete the blocks of every recording marked for deletion (§ 4.3), in
+   the same bounded batches, its row with its last block
+
+4. Run PRAGMA incremental_vacuum on spool.db, a bounded number of pages at a
    time, until the free list is empty
 ```
 

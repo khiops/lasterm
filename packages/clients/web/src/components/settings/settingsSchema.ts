@@ -147,6 +147,18 @@ export const settingsSchema: SettingDefinition[] = [
 		description: "Show notification badge on tab when terminal receives BEL",
 	},
 
+	// ─── Terminal category — recording (#80) ──────────────────────────
+	{
+		key: "recordTerminals",
+		label: "Record when the terminal starts",
+		type: "toggle",
+		category: "terminal",
+		section: "terminal",
+		scopes: ["global", "host", "channel"],
+		description:
+			"Record each terminal from its start; Stop saves the recording as a .cast file. A recording holds everything the terminal printed, secrets included, and stays on this computer.",
+	},
+
 	// ─── Terminal category — a paste of several lines (#1015) ─────────
 	{
 		key: "pasteWarning",

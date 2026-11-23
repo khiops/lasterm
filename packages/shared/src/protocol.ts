@@ -685,6 +685,22 @@ export interface ChannelSizeMessage {
 	rows: number;
 }
 
+/**
+ * Hub → UI, to every client: a terminal's recording started, ended, or an
+ * automatic start was refused (#80). `title`, `hostLabel` and `startedAt`
+ * come with a start, so a pane can name the file it saves without a fetch.
+ */
+export interface RecordingStateMessage {
+	type: "RECORDING_STATE";
+	channelId: string;
+	recordingId: string | null;
+	title?: string;
+	hostLabel?: string;
+	startedAt?: string;
+	endReason?: string;
+	refused?: "cap" | "storage";
+}
+
 /** UI → Hub: detach this client from a channel (keep channel alive) */
 export interface DetachMessage {
 	type: "DETACH";
@@ -1281,6 +1297,7 @@ export type HubToUiMessage =
 	| UiSpawnOkMessage
 	| UiAttachOkMessage
 	| ChannelSizeMessage
+	| RecordingStateMessage
 	| FilesPanelMessage
 	| OutputMessage
 	| SessionStateMessage
@@ -1353,6 +1370,7 @@ export type ProtocolMessage =
 	| UiAttachMessage
 	| UiAttachOkMessage
 	| ChannelSizeMessage
+	| RecordingStateMessage
 	| FilesPanelMessage
 	| DetachMessage
 	| WriteClaimMessage

@@ -103,11 +103,17 @@ export interface GcConfig {
 	deadRetentionHours: number;
 	/** Max spool size per channel in MB. Default: 10. */
 	maxSizePerChannelMb: number;
+	/**
+	 * `[recording] max_total_mb`: the most all recordings together may hold (#80).
+	 * An integer of at least 1; anything else gives the default, 1024.
+	 */
+	recordingMaxTotalMb: number;
 }
 
 export const DEFAULT_GC_CONFIG: GcConfig = {
 	deadRetentionHours: 24,
 	maxSizePerChannelMb: 10,
+	recordingMaxTotalMb: 1024,
 };
 
 /**
@@ -124,6 +130,21 @@ function extractGcConfig(parsed: TOML.JsonMap): GcConfig {
 		}
 		if (typeof gcRaw.max_size_per_channel_mb === "number") {
 			config.maxSizePerChannelMb = Math.max(0, gcRaw.max_size_per_channel_mb);
+		}
+	}
+	const recording = parsed.recording;
+	if (recording != null && typeof recording === "object") {
+		const value = (recording as Record<string, unknown>).max_total_mb;
+		if (value !== undefined) {
+			if (typeof value === "number" && Number.isInteger(value) && value >= 1) {
+				config.recordingMaxTotalMb = value;
+			} else {
+				// A cap of 0 would refuse every recording: the default instead, said each
+				// time config.toml is read.
+				process.stderr.write(
+					"[lasterm-config] [recording] max_total_mb must be an integer of at least 1; using 1024\n",
+				);
+			}
 		}
 	}
 	return config;

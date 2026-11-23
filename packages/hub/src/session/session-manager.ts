@@ -68,6 +68,7 @@ import {
 } from "../ssh/known-hosts.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
+import { RecordingsDAL } from "../storage/recordings.js";
 import { SpoolDAL } from "../storage/spool.js";
 import type { TransferConnectOutcome } from "../transfers/transfer-service.js";
 import { type AgentConnection, AgentRefusedHub } from "./agent-connection.js";
@@ -109,6 +110,7 @@ import {
 	HubQuittingError,
 	type QuitFence,
 } from "./quit-fence.js";
+import { SessionRecorder } from "./recorder.js";
 import {
 	hostKeepsDaemon,
 	REMOTE_STATE_DIR_COMMAND,
@@ -457,6 +459,7 @@ export class SessionManager {
 			elevationPromptOwners: new Map(),
 			promptIndex: new Map(),
 			getWriteLockHolder: null,
+			recorder: null,
 			pastes: null,
 			metaDal,
 			spoolDal,
@@ -614,7 +617,38 @@ export class SessionManager {
 			}
 		};
 
-		this.gc = new SpoolGarbageCollector(spoolDal, metaDal, gcConfig, { logger: hubLogger ?? null });
+		const recordingsDal = new RecordingsDAL(dbManager.spool);
+		this.gc = new SpoolGarbageCollector(spoolDal, metaDal, gcConfig, {
+			logger: hubLogger ?? null,
+			recordings: recordingsDal,
+			beforePass: () => ctx.recorder?.retryPendingEnds(),
+		});
+		ctx.recorder = new SessionRecorder({
+			dal: recordingsDal,
+			now: () => performance.now(),
+			wallNow: () => new Date(),
+			capBytes: (gcConfig?.recordingMaxTotalMb ?? 1024) * 1024 * 1024,
+			broadcast: (msg) => this.broadcaster.broadcastToAllClients(msg),
+			log: (level, msg, fields) => {
+				if (hubLogger) hubLogger.log(level, msg, fields);
+				else if (level !== "debug") console.warn(msg);
+			},
+			sendAttach: (hostId, channelId, requestId) => {
+				const agent = ctx.agents.get(hostId);
+				if (!agent?.connected) return false;
+				agent.send({ type: "ATTACH", channelId, requestId });
+				return true;
+			},
+			agentMatchesHub: (hostId) =>
+				ctx.agents.get(hostId)?.helloMessage?.agentVersion === HUB_VERSION,
+			pendingRequests: ctx.pendingRequests,
+			titleOf: (channelId) => this.broadcaster.resolveDisplayTitle(channelId),
+			purge: (ids) => {
+				void this.gc.purgeRecordings(ids);
+			},
+		});
+		// Before any channel is adopted: rows a crash left open, deletions a stop cut short.
+		ctx.recorder.recoverAtStart();
 		this.gc.start();
 	}
 
@@ -682,6 +716,7 @@ export class SessionManager {
 		this.ctx.elevationCache.clear();
 		this.ctx.scheduler.shutdown();
 		this.ctx.chunker.shutdown();
+		this.ctx.recorder?.shutdown();
 		this.gc.stop();
 		const agentCloseResults = await Promise.allSettled(
 			[...this.ctx.agents.values()].map((agent) => closeAgentWithTimeout(agent)),
@@ -804,6 +839,98 @@ export class SessionManager {
 		return this.broadcaster.resolveDisplayTitle(channelId);
 	}
 
+	// ─── Recordings (#80) ─────────────────────────────────────────────────────
+
+	/** The recorder; set in the constructor. */
+	get recorder(): SessionRecorder {
+		const recorder = this.ctx.recorder;
+		if (!recorder) throw new Error("recorder not set");
+		return recorder;
+	}
+
+	/** The answer to a start whose metadata or storage could not be read. */
+	private recordingStorageError(): { ok: false; status: 500; code: string; message: string } {
+		return {
+			ok: false,
+			status: 500,
+			code: "RECORDING_STORAGE_ERROR",
+			message: "The recording could not be stored",
+		};
+	}
+
+	/** The open recording of a terminal, or null. */
+	recordingIdOf(channelId: string): string | null {
+		return this.ctx.recorder?.recordingIdOf(channelId) ?? null;
+	}
+
+	/**
+	 * Start recording a terminal now: it must be live in this hub and its
+	 * host's agent connected. The screen is asked of the agent.
+	 */
+	startRecording(
+		channelId: string,
+	):
+		| { ok: true; id: string }
+		| { ok: false; status: 404 | 409 | 500; code: string; message: string; openId?: string } {
+		let known: boolean;
+		try {
+			known = this.ctx.metaDal.getChannel(channelId) !== undefined;
+		} catch {
+			return this.recordingStorageError();
+		}
+		if (!known) {
+			return { ok: false, status: 404, code: "CHANNEL_NOT_FOUND", message: "Channel not found" };
+		}
+		const ch = this.ctx.channels.get(channelId);
+		const agent = ch ? this.ctx.agents.get(ch.hostId) : undefined;
+		if (ch?.status !== "live" || !agent?.connected) {
+			return {
+				ok: false,
+				status: 409,
+				code: "CHANNEL_NOT_LIVE",
+				message: "Only a running terminal whose host is connected can be recorded",
+			};
+		}
+		let hostLabel: string;
+		try {
+			hostLabel = this.ctx.metaDal.getHost(ch.hostId)?.label ?? ch.hostId;
+		} catch {
+			return this.recordingStorageError();
+		}
+		const result = this.recorder.startManual({
+			channelId,
+			hostId: ch.hostId,
+			hostLabel,
+			cols: ch.cols,
+			rows: ch.rows,
+		});
+		if ("id" in result) return { ok: true, id: result.id };
+		switch (result.refused) {
+			case "ALREADY_RECORDING":
+				return {
+					ok: false,
+					status: 409,
+					code: "ALREADY_RECORDING",
+					message: "This terminal is already being recorded",
+					...(result.openId !== undefined && { openId: result.openId }),
+				};
+			case "RECORDING_CAP":
+				return {
+					ok: false,
+					status: 409,
+					code: "RECORDING_CAP",
+					message: "Recordings already take all the space allowed: save or discard some first",
+				};
+			default:
+				return {
+					ok: false,
+					status: 500,
+					code: "RECORDING_STORAGE_ERROR",
+					message: "The recording could not be stored",
+				};
+		}
+	}
+
 	// ─── Channel operations ───────────────────────────────────────────────────
 
 	destroyChannel(channelId: string): boolean {
@@ -835,7 +962,14 @@ export class SessionManager {
 		// that no exit of the run its DESTROY ends reaches that adoption, which
 		// takes exits up outside the restart's hold.
 		const adoption = hostId === undefined ? undefined : this.lifecycle.adoptionSettled(hostId);
-		if (adoption !== undefined) await adoption;
+		if (adoption !== undefined) {
+			try {
+				await adoption;
+			} catch (err) {
+				if (err instanceof AgentRefusedHub) return false;
+				throw err;
+			}
+		}
 		if (hostId !== undefined && this.hostIsBeingStopped(hostId)) return "busy";
 		if (this.isQuitting()) return false;
 		// Its host is away: the reconnect has the next attempt, and a restart
@@ -1234,7 +1368,9 @@ export class SessionManager {
 		// Invariant 3: release checks leases.size===0 && no channels → reap if needed.
 		try {
 			// B1: outer try wraps all paths that hold a lease (B1 fix — every early return hits this finally)
-			if (!agent?.connected && host.type === "ssh") {
+			// A connected agent whose acquisition is still open has its daemon list being
+			// taken up (#1165): it is not the host's yet, so this SPAWN joins the acquisition.
+			if ((!agent?.connected || this.ctx.acquisitions.has(hostId)) && host.type === "ssh") {
 				// ── SSH: no live agent — use acquisition state machine ────────────────
 				const existing = this.ctx.acquisitions.get(hostId);
 
@@ -1308,14 +1444,16 @@ export class SessionManager {
 					try {
 						// getOrCreateSession is async; the session object is created here.
 						const sessionState = await this.agentMgr.getOrCreateSession(hostId, true, spawnFence);
+						const neverConnected = sessionState.status === "starting";
 						// The pane stops its own clock until the hub answers: each wait of
 						// the connection below has its own bound, and the host's may be
 						// longer than the pane's 15 s (#1034). Every way out of the
 						// connection below answers it.
 						client.send({ type: "HOST_CONNECTING", hostId } satisfies HostConnectingMessage);
 						// B4 fix: _connectSshAgent returns the wired agent WITHOUT setting
-						// ctx.agents — we set it here, atomically with commit(), so no
-						// concurrent SPAWN can observe "agent live + acq live" simultaneously.
+						// ctx.agents — we set it here, inside the commit guard. The agent is
+						// live while the acq stays open through the adoption; a SPAWN seeing
+						// both joins the acq (#1165).
 						let connectedAgent: import("./agent-connection.js").AgentConnection;
 						try {
 							connectedAgent = await this._connectSshAgent(
@@ -1362,18 +1500,28 @@ export class SessionManager {
 
 						// Connect succeeded — commit: P1 synchronous guarded step (invariant 7).
 						// Guard: map identity + state + signal + session currency.
-						// B4 fix: ctx.agents.set is done HERE, inside the guard, atomically with
-						// commit() — no microtask gap between "agent visible" and "acq deleted".
+						// B4 fix: ctx.agents.set is done HERE, inside the guard; the acq is
+						// deleted by commit() after the daemon's list is taken up (#1165).
 						if (
 							this.ctx.acquisitions.get(hostId) === connectingAcq &&
 							connectingAcq.state === "CONNECTING" &&
 							!connectingAcq.controller.signal.aborted &&
 							this.ctx.sessions.get(hostId)?.id === sessionState.id
 						) {
-							// P2: set agent + commit atomically — agent becomes visible only when
-							// the acq is simultaneously deleted (no dual-authority window).
+							// P2: the agent is visible (connected) while the adoption below runs and
+							// the acq stays open until it is over: a SPAWN meeting both joins the
+							// acq instead of taking the fast path (#1165).
 							this.ctx.commits.adoptAgent(spawnFence, hostId, connectedAgent);
-							await this.lifecycle.adoptWhatTheDaemonHolds(hostId, connectedAgent);
+							try {
+								await this.lifecycle.adoptWhatTheDaemonHolds(hostId, connectedAgent);
+							} catch (err) {
+								if (err instanceof AgentRefusedHub) {
+									this.releaseAgent(hostId, connectedAgent);
+									void connectedAgent.close();
+									this.settleFailedConnect(hostId, sessionState, neverConnected);
+								}
+								throw err;
+							}
 							Acq.commit(this.ctx, connectingAcq, sessionState);
 							clearContext(this.ctx, connectingAcq.id);
 							agent = connectedAgent;
@@ -1401,6 +1549,15 @@ export class SessionManager {
 						}
 					} catch (err) {
 						this.failConnectingAcq(connectingAcq, err, lease, releaseConnectingLease);
+						if (err instanceof AgentRefusedHub) {
+							client.send({
+								type: "ERROR",
+								code: ErrorCode.AGENT_REFUSED_HUB,
+								message: err.message,
+								hostId,
+								...(reuseChannelId !== undefined && { channelId: reuseChannelId }),
+							} satisfies ErrorMessage);
+						}
 						return null;
 					}
 
@@ -2266,6 +2423,8 @@ export class SessionManager {
 		const changed = channel.cols !== cols || channel.rows !== rows;
 		channel.cols = cols;
 		channel.rows = rows;
+		// Recorded as soon as the PTY has it, before a meta.db write that can fail.
+		if (changed) this.ctx.recorder?.onResize(channelId, cols, rows);
 		this.ctx.metaDal.updateChannelDimensions(channelId, cols, rows);
 		if (changed) {
 			this.broadcaster.broadcastToChannel(channelId, {
@@ -3091,7 +3250,20 @@ export class SessionManager {
 	private releaseAgent(hostId: string, agent: AgentConnection): void {
 		if (this.ctx.agents.get(hostId) === agent) {
 			this.ctx.agents.delete(hostId);
-			if (!this.isQuitting()) this.broadcaster.announceSessionState(hostId);
+			// Its close comes after, as a stale one: the recordings learn of the loss here (#80).
+			this.ctx.recorder?.onAgentLost(hostId);
+			if (this.isQuitting()) return;
+			// Only what the windows are told. Its read of the host can throw on
+			// meta.db, and must not stop the stop or close that let go of the
+			// agent, nor the recordings' ends that follow it (#80).
+			try {
+				this.broadcaster.announceSessionState(hostId);
+			} catch (err) {
+				this.ctx.hubLogger?.log("warn", "session-manager: session state not announced", {
+					hostId,
+					code: (err as { code?: unknown } | null)?.code ?? "unknown",
+				});
+			}
 		}
 	}
 
@@ -3258,6 +3430,9 @@ export class SessionManager {
 			// Deploying nothing, this connection detects nothing, and which way
 			// a daemon is reached depends on the system (#701, #755).
 			if (host.os === null || host.os === undefined) return { kind: "daemon-not-possible" };
+			// An agent published while its acquisition is open is still being taken up
+			// (#1165): another connection is under way, whatever the agent says.
+			if (this.ctx.acquisitions.has(hostId)) return { kind: "connecting-already" };
 			const agent = this.ctx.agents.get(hostId);
 			if (agent?.connected === true) {
 				if (!(agent instanceof SshAgent) || !agent.usedRemoteDaemon) {
@@ -3859,6 +4034,11 @@ export class SessionManager {
 			void agent.close();
 			throw new Error("SSH connect aborted");
 		}
+		// What the list left out is not held there: those recordings end now,
+		// before the reads and writes below, which can throw on meta.db (#80).
+		// Whether this connection is kept, and its list taken up, is still
+		// theirs to decide.
+		this.lifecycle.endRecordingsOfUnlisted(hostId, listed.states, listed.askedAt);
 		const now = this.ctx.metaDal.getHost(hostId);
 		if (now === undefined || !sameDestination(host, now)) {
 			return fail(ErrorCode.HOST_CHANGED, "The host changed while connecting. Try again.");
@@ -4271,7 +4451,7 @@ export class SessionManager {
 				}
 				if (!daemonOnly) this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 				this.agentMgr.wireAgentEvents(hostId, sessionId, retryAgent);
-				// B4: do NOT set ctx.agents here — caller sets it atomically with commit().
+				// B4: do NOT set ctx.agents here — caller sets it, inside its commit guard.
 				return retryAgent;
 			}
 			// A prompt cancelled is no failure: it is said as what it is, and a
@@ -4299,7 +4479,7 @@ export class SessionManager {
 		// First connection succeeded without TOFU/mismatch prompt
 		if (!daemonOnly) this.broadcaster.updateSessionStatus(hostId, sessionId, "active");
 		this.agentMgr.wireAgentEvents(hostId, sessionId, sshAgent);
-		// B4: do NOT set ctx.agents here — caller sets it atomically with commit().
+		// B4: do NOT set ctx.agents here — caller sets it, inside its commit guard.
 		return sshAgent;
 	}
 

@@ -388,6 +388,7 @@ export class AgentConnectionManager {
 				this.broadcaster.broadcastToChannel(outputMsg.channelId, outputMsg);
 				this.ctx.scheduler.onOutput(outputMsg.channelId);
 				this.ctx.chunker.onOutput(outputMsg.channelId, outputMsg.data);
+				this.ctx.recorder?.onOutput(outputMsg.channelId, outputMsg.data);
 			} else if (msg.type === "SNAPSHOT_RES") {
 				const res = msg as AgentSnapshotResMessage;
 				this.ctx.scheduler.onSnapshotResponse(res.channelId);
@@ -483,7 +484,6 @@ export class AgentConnectionManager {
 			this.ctx.pastes?.agentGone(agent);
 			if (this.ctx.quitState === "QUITTING" && this.ctx.stoppingAgents.has(hostId)) return;
 			const session = this.ctx.sessions.get(hostId);
-			const host = this.ctx.metaDal.getHost(hostId);
 			// Fix C (invariant 10): identity-guard ALL side effects — not just agents.delete.
 			// A stale close from a REPLACED agent must not trigger disconnect/reconnect for
 			// the new agent's session.  Compute once, apply to every branch below.
@@ -494,19 +494,23 @@ export class AgentConnectionManager {
 
 			// Guard: stale close events from replaced agents produce no further side effects.
 			if (!isCurrentAgent) return;
+			// Output until a new connection may be missing or late (#80). Marked
+			// before any meta.db access here, which can throw: the loss happened.
+			this.ctx.recorder?.onAgentLost(hostId);
 
 			if (!session) return;
 
 			if (agent instanceof LastermAgent) {
-				this.broadcaster.updateSessionStatus(hostId, session.id, "disconnected");
+				this.announceDisconnected(hostId, session.id);
 				this.reconnectDaemon(hostId, session.id).catch(() => {
 					this.lifecycle.closeSession(hostId, session.id);
 				});
 				return;
 			}
 
+			const host = this.ctx.metaDal.getHost(hostId);
 			if (host?.type === "ssh") {
-				this.broadcaster.updateSessionStatus(hostId, session.id, "disconnected");
+				this.announceDisconnected(hostId, session.id);
 				if (!this.ctx.stoppingAgents.has(hostId)) {
 					this.sshMgr.scheduleReconnect(hostId, session.id, 0, Date.now());
 				}
@@ -516,6 +520,23 @@ export class AgentConnectionManager {
 				});
 			}
 		});
+	}
+
+	/**
+	 * Say a host's session lost its agent. Its status write can throw on
+	 * meta.db, and the reconnect or session close that follows it must still
+	 * run, and end the recordings as it does (#80): the failure is logged by
+	 * its code.
+	 */
+	private announceDisconnected(hostId: string, sessionId: string): void {
+		try {
+			this.broadcaster.updateSessionStatus(hostId, sessionId, "disconnected");
+		} catch (err) {
+			this.ctx.hubLogger?.log("warn", "agent-connection-manager: disconnected status not written", {
+				hostId,
+				code: (err as { code?: unknown } | null)?.code ?? "unknown",
+			});
+		}
 	}
 
 	/**
@@ -535,6 +556,8 @@ export class AgentConnectionManager {
 		);
 		if (this.ctx.agents.get(hostId) === agent) {
 			this.ctx.agents.delete(hostId);
+			// Its close comes after, as a stale one: the recordings learn of the loss here (#80).
+			this.ctx.recorder?.onAgentLost(hostId);
 			if (this.ctx.quitState !== "QUITTING") this.broadcaster.announceSessionState(hostId);
 		}
 		agent.close();
@@ -587,6 +610,7 @@ export class AgentConnectionManager {
 				sessionId,
 			});
 			this.ctx.agents.delete(hostId);
+			this.ctx.recorder?.onAgentLost(hostId);
 			existing.close();
 		}
 

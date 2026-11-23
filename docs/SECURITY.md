@@ -473,10 +473,31 @@ not even an empty one. Before #127 no hub sent an empty token, and that marker m
 | Host configs | meta.db | chmod 600 | SQLCipher |
 | Terminal output | spool.db | chmod 600 | SQLCipher |
 | Snapshots | spool.db | chmod 600 | SQLCipher |
+| Recordings waiting to be saved (#80): what a recorded terminal printed, secrets included, never its input | spool.db, until discarded or saved through the save dialog; a download without that dialog keeps it until Discard (STORAGE.md § 4.3) | chmod 600 | SQLCipher |
+| A saved recording | the `.cast` file the user chose | The file system's, as the user saved it | — |
 | Config prefs | config.toml | Standard file perms | — |
 | SSH private key uploaded through the key browser | `~/.ssh/<name>`, the bytes as uploaded (§ 3.2) | 0600 once written, on Unix; on Windows the profile's default ACL | — |
 | Client token and UI state | `localStorage` of the browser for the hub's origin, or of the desktop's webview: the token (`lasterm_token`), the tab layout, the terminal search history | The browser or webview profile's own protection; nothing here encrypts it | — |
 | Web UI files (PWA) | The browser's Cache Storage for the hub's origin | Only the build's hashed static files: the service worker never caches `/api/*`, `/ws`, `/public/*`, `index.html`, or any request carrying credentials (SPEC.md § 3.4) | — |
+
+### 4.1b Session recordings (#80)
+
+- **What is captured.** The output the hub receives for a recorded terminal, its size changes and
+  its exit status. Not the input messages; but a shell echoes what is typed, so a typed command, and
+  a secret a program prints or echoes, are in the recording. A password typed at a prompt that does
+  not echo is not.
+- **When.** Only when the user starts it from a pane, or sets `record_terminals` for every host, a
+  host or a terminal; off by default. A pane shows REC, and its tab a dot, while it records.
+- **Where.** In spool.db (STORAGE.md § 4.3), under the same file protection as terminal output,
+  until the user discards it, or saves it through the save dialog to a file they choose. A browser
+  without that dialog downloads the file and keeps the recording until Discard: nothing tells the
+  page the download succeeded. Nothing is sent anywhere.
+- **Who can read it.** Any client holding the hub's bearer, as for terminal output: every
+  `/api/recordings` route and `POST /api/channels/:id/recording` is under the global bearer check;
+  no asset token opens them.
+- **Deletion.** Save (through the native save dialog) or Discard deletes the hub's copy, in bounded
+  batches; a deletion cut short is finished by the next GC pass or hub start. No age or size rule
+  deletes a recording silently: the storage cap refuses and ends recordings instead.
 
 ### 4.2 In Transit
 
@@ -784,7 +805,6 @@ Security notes:
 | OS keychain | P1 | Store auth token in OS keychain (keytar) |
 | TLS for non-localhost | P2 | If hub exposed beyond loopback |
 | mTLS | P2 | Mutual TLS for hub ↔ remote |
-| Session recording | P2 | Record and replay your own sessions, stored on your machine (#80) |
 
 Features only organisations need are not planned in this repository: single sign-on (OIDC, SAML),
 a control plane over several hubs, audit retention, compliance exports and forwarding to a SIEM.

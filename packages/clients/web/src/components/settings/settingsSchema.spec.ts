@@ -283,6 +283,7 @@ const STORED_AT: Record<string, string> = {
 	"terminal.bellCustomFile": "terminal:bellCustomFile",
 	"terminal.bellBadge": "terminal:bellBadge",
 	"terminal.pasteWarning": "terminal:pasteWarning",
+	"terminal.recordTerminals": "terminal:recordTerminals",
 	"terminal.whenEnded": "terminal:whenEnded",
 	"panes.keepEnded": "ui:panes.keepEnded",
 	"title.source": "ui:title.source",

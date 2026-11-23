@@ -10,10 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createToken, PRIMARY_TOKEN_ID, revokeToken } from "../auth.js";
 import { type SecurityFields, SecurityLog } from "../logging/security-log.js";
 import { createServer } from "../server.fixture.js";
+import type { SharedSessionContext } from "../session/session-context.js";
 import { SessionManager } from "../session/session-manager.js";
 import { WriteLockManager } from "../session/write-lock.js";
 import type { DatabaseManager } from "../storage/db.js";
 import { openTestDatabases } from "../storage/db.js";
+import { MetaDAL } from "../storage/meta.js";
 import { getTestTls } from "../test-tls.fixture.js";
 import { TransferService } from "../transfers/transfer-service.js";
 import {
@@ -660,6 +662,145 @@ describe("WebSocket authentication against the token store", () => {
 			} finally {
 				await owned.close();
 				ownedDbs.close();
+			}
+		});
+	});
+
+	// A hub stopping closes its windows' sockets, and its shutdown ends every open
+	// recording `interrupted`. A socket that ends before that shutdown detaches
+	// from its terminals, a status write that can throw on meta.db. Thrown out of
+	// the socket's listener, it is an uncaught exception: this hub installs no
+	// handler for one, so the process ends there, before its shutdown (#80).
+	// Vitest keeps the process up, which is why the tests watch the listener
+	// itself. A socket the hub's own close ends here answers only after that
+	// shutdown has cleared what it held, so the window ends its socket first, as
+	// a window closing while the hub stops does.
+	describe("when a window's detach cannot be written as the hub stops (#80)", () => {
+		const CHANNEL = "01HZZZZZZZZZZZZZZZZZZZZZC1";
+
+		async function recordedWindow(): Promise<{
+			hub: FastifyInstance;
+			hubDbs: DatabaseManager;
+			ws: InjectedSocket;
+			manager: SessionManager;
+			clientId: string;
+			id: string;
+		}> {
+			const hubDbs = openTestDatabases();
+			const hub = await createServer({
+				tls: getTestTls(),
+				logger: false,
+				authToken: TEST_TOKEN,
+				dbManager: hubDbs,
+				skipShellDiscovery: true,
+			});
+			await hub.ready();
+			let manager: SessionManager | undefined;
+			const addClient = SessionManager.prototype.addClient;
+			vi.spyOn(SessionManager.prototype, "addClient").mockImplementation(function (
+				this: SessionManager,
+				client,
+			) {
+				manager = this;
+				return addClient.call(this, client);
+			});
+			const ws = await hub.injectWS("/ws");
+			const observed = observe(ws);
+			ws.send(encodeMessage({ type: "AUTH", token: TEST_TOKEN }));
+			await vi.waitFor(() => expect(observed.types()).toContain("AUTH_OK"));
+			if (manager === undefined) throw new Error("no session manager");
+			const clientId = (
+				observed.messages.find((message) => message.type === "AUTH_OK") as AuthOkMessage
+			).clientId;
+			// The window shows a live terminal, which is being recorded.
+			const { ctx } = manager as unknown as { ctx: SharedSessionContext };
+			ctx.channels.set(CHANNEL, {
+				sessionId: "01HZZZZZZZZZZZZZZZZZZZZZS1",
+				hostId: "01HZZZZZZZZZZZZZZZZZZZZZH1",
+				status: "live",
+				clients: new Set([clientId]),
+				cols: 80,
+				rows: 24,
+				dynamicTitle: null,
+				processTitle: null,
+				displayTitle: "bash",
+			});
+			ctx.clients.get(clientId)?.attachedChannels.add(CHANNEL);
+			manager.recorder.startAutomatic({
+				channelId: CHANNEL,
+				hostId: "01HZZZZZZZZZZZZZZZZZZZZZH1",
+				hostLabel: "box",
+				cols: 80,
+				rows: 24,
+			});
+			return { hub, hubDbs, ws, manager, clientId, id: manager.recordingIdOf(CHANNEL) ?? "" };
+		}
+
+		function failDetachWrite(): void {
+			vi.spyOn(MetaDAL.prototype, "updateChannelStatus").mockImplementation(() => {
+				throw Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" });
+			});
+		}
+
+		// Mutation caught: the socket's "close" listener calling release() unguarded,
+		// so the detach write's throw escapes it.
+		it("logs a closed window's failed release by its code, and the stop still ends the recording interrupted", async () => {
+			const { hub, hubDbs, ws, manager, clientId, id } = await recordedWindow();
+			const { ctx } = manager as unknown as { ctx: SharedSessionContext };
+			const escaped: unknown[] = [];
+			const onUncaught = (err: unknown) => escaped.push(err);
+			process.on("uncaughtException", onUncaught);
+			try {
+				const errors = vi.spyOn(hub.log, "error");
+				failDetachWrite();
+				ws.terminate();
+				await vi.waitFor(() => expect(ctx.clients.has(clientId)).toBe(false));
+				expect(vi.mocked(MetaDAL.prototype.updateChannelStatus)).toHaveBeenCalledWith(
+					CHANNEL,
+					"orphan",
+					undefined,
+					undefined,
+				);
+				expect(escaped).toEqual([]);
+				expect(errors).toHaveBeenCalledWith(
+					{ clientId, code: "SQLITE_IOERR" },
+					"ws: releasing an ended socket failed",
+				);
+				vi.mocked(MetaDAL.prototype.updateChannelStatus).mockRestore();
+				await hub.close();
+				expect(manager.recorder.listed(id)?.end_reason).toBe("interrupted");
+			} finally {
+				process.off("uncaughtException", onUncaught);
+				hubDbs.close();
+			}
+		});
+
+		// The ws library emits "error" before "close" on a socket that fails; the
+		// first releases it. Mutation caught: the "error" listener calling
+		// release() unguarded, so the detach write's throw escapes it.
+		it("releases a failing socket without throwing out of its error listener, and still ends the recording interrupted", async () => {
+			const { hub, hubDbs, manager, clientId, id } = await recordedWindow();
+			const { ctx } = manager as unknown as { ctx: SharedSessionContext };
+			try {
+				const errors = vi.spyOn(hub.log, "error");
+				failDetachWrite();
+				const [socket] = [...hub.websocketServer.clients];
+				expect(() =>
+					socket?.emit(
+						"error",
+						Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+					),
+				).not.toThrow();
+				expect(ctx.clients.has(clientId)).toBe(false);
+				expect(errors).toHaveBeenCalledWith(
+					{ clientId, code: "SQLITE_IOERR" },
+					"ws: releasing an ended socket failed",
+				);
+				vi.mocked(MetaDAL.prototype.updateChannelStatus).mockRestore();
+				await hub.close();
+				expect(manager.recorder.listed(id)?.end_reason).toBe("interrupted");
+			} finally {
+				hubDbs.close();
 			}
 		});
 	});

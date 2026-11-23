@@ -269,6 +269,7 @@ export const DEFAULT_PROFILE: TerminalProfile = {
 	scrollback: 5000,
 	bellSound: "mute" as BellSound,
 	bellBadge: true,
+	recordTerminals: false,
 	scrollbarMarkers: true,
 	wallpaper: "",
 	wallpaperBlur: 0,
@@ -406,6 +407,7 @@ export const TERMINAL_PROFILE_KEYS = [
 	"bellSound",
 	"bellCustomFile",
 	"bellBadge",
+	"recordTerminals",
 	"scrollbarMarkers",
 	"wallpaper",
 	"wallpaperBlur",
@@ -438,6 +440,8 @@ export function isPasteWarning(value: unknown): value is PasteWarning {
 export const TERMINAL_PROFILE_VALIDATORS: Readonly<Record<string, (value: unknown) => boolean>> = {
 	...TRANSFER_PROFILE_VALIDATORS,
 	pasteWarning: isPasteWarning,
+	// Recording is consent: only a real boolean turns it on (#80).
+	recordTerminals: (value) => typeof value === "boolean",
 };
 
 export const MAX_WALLPAPER_BLUR = 20;

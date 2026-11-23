@@ -54,6 +54,13 @@
 			/>
 			<span v-else class="tab__label" @dblclick="startRename(tab.id)">{{ getTabLabel(tab.id) }}</span>
 			<span
+				v-if="tabRecords(tab.id)"
+				class="tab__rec-dot"
+				role="img"
+				aria-label="Recording"
+				title="This terminal is being recorded"
+			></span>
+			<span
 				v-if="notificationStore.activityDots.get(getActiveChannelId(tab.id) ?? '') && idx !== activeTabIndex"
 				class="tab__activity-dot"
 				aria-label="New activity"
@@ -133,6 +140,7 @@ import { useChannelsStore } from "../stores/channels.js";
 import { useConfigStore } from "../stores/config.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
+import { useRecordingsStore } from "../stores/recordings.js";
 import { shortcutLabel, TAB_NUMBERS } from "../utils/app-shortcuts.js";
 import { listMove } from "../utils/focus-zones.js";
 import { tabToSwitchTo } from "../utils/tab-switch.js";
@@ -143,6 +151,7 @@ const channelsStore = useChannelsStore();
 const configStore = useConfigStore();
 const hostsStore = useHostsStore();
 const notificationStore = useNotificationStore();
+const recordings = useRecordingsStore();
 
 // Profile dropdown state
 const profileDropdownVisible = ref(false);
@@ -162,12 +171,22 @@ const props = defineProps<{
 	getTabLabel: (tabId: string) => string;
 	/** Get the channelId of the active pane for a tab by its tab.id. */
 	getActiveChannelId: (tabId: string) => string | null;
+	/** Every terminal a tab shows, each of its panes, by its tab.id. */
+	getTabChannelIds: (tabId: string) => string[];
 	/**
 	 * The tabs to show, by id, or null to show them all. Resolved by the layout
 	 * so that closing "the others" and this bar agree on what is on screen.
 	 */
 	visibleTabIds?: ReadonlySet<string> | null;
 }>();
+
+/**
+ * Whether any pane of the tab records: the dot says so even when the
+ * recorded pane is not the one in focus, the tab in the background.
+ */
+function tabRecords(tabId: string): boolean {
+	return props.getTabChannelIds(tabId).some((id) => recordings.open.has(id));
+}
 
 const emit = defineEmits<{
 	(e: "select-tab", index: number): void;
@@ -709,6 +728,14 @@ function onTabDragEnd(): void {
    nobody can tell apart. */
 .tab--host-edge {
 	box-shadow: inset 0 2px 0 0 var(--tab-host-color, var(--nt-accent));
+}
+
+.tab__rec-dot {
+	flex-shrink: 0;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--nt-red, #e06c75);
 }
 
 .tab__activity-dot {

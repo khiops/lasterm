@@ -24,6 +24,7 @@ import { createHostsChangeAnnouncer } from "./api/hosts-changed.js";
 import { registerLaunchProfileRoutes } from "./api/launch-profiles.js";
 import { registerLogRoutes } from "./api/logs.js";
 import { registerPairRoutes } from "./api/pair.js";
+import { registerRecordingRoutes } from "./api/recordings.js";
 import { registerSessionRoutes } from "./api/sessions.js";
 import { registerSshKeyRoutes } from "./api/ssh-keys.js";
 import { registerThemeRoutes } from "./api/themes.js";
@@ -306,8 +307,17 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			cb(null, isCorsOriginAllowed(origin));
 		},
 		methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-		// What a web client on another allowed origin reads of a download (#840).
-		exposedHeaders: ["ETag", "Content-Range", "Content-Length", "Content-Disposition"],
+		// What a web client on another allowed origin reads of a download (#840),
+		// and where a recording's export goes on (#80).
+		exposedHeaders: [
+			"ETag",
+			"Content-Range",
+			"Content-Length",
+			"Content-Disposition",
+			"X-Lasterm-Cast-Last-Seq",
+			"X-Lasterm-Cast-Next-Seq",
+			"X-Lasterm-Cast-Lost",
+		],
 		allowedHeaders: [
 			"Content-Type",
 			"Authorization",
@@ -615,6 +625,7 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 		registerSessionRoutes(server, metaDal, activeSessionManager);
 		registerHostConnectionRoutes(server, metaDal, activeSessionManager, hostsChange.announce);
 		registerChannelRoutes(server, metaDal, activeSessionManager);
+		registerRecordingRoutes(server, activeSessionManager);
 		registerFileRoutes(server, { files: hostFiles, writerCheck: wsRoutes.writerCheck });
 		registerFileContentRoutes(server, {
 			files: hostFiles,

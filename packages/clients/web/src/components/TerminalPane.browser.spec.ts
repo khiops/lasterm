@@ -12,7 +12,8 @@ import { ref } from "vue";
 import "../styles/base.css";
 import { useChannelsStore } from "../stores/channels.js";
 import { useHostsStore } from "../stores/hosts.js";
-import { useThemeStore } from "../stores/theme.js";
+import { useRecordingsStore } from "../stores/recordings.js";
+import { contrastRatio, TEXT_CONTRAST_AA, useThemeStore } from "../stores/theme.js";
 import {
 	attaches,
 	button,
@@ -196,4 +197,58 @@ describe("TerminalPane buttons under the pointer", () => {
 		await vi.waitFor(() => expect(getComputedStyle(cancel).borderTopColor).toBe(strong));
 		expect(reading(cancel)).toEqual(before);
 	});
+});
+
+/** A computed colour's channels and alpha. */
+function rgba(css: string): [number, number, number, number] {
+	const m = /^rgba?\(([\d.]+), ([\d.]+), ([\d.]+)(?:, ([\d.]+))?\)$/.exec(css);
+	if (m === null) throw new Error(`cannot read the colour ${css}`);
+	return [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4] ?? 1)];
+}
+
+/** What `el` is drawn on: its own background over each ancestor's, down to the first opaque one. */
+function groundOf(el: Element): [number, number, number] {
+	const layers: Array<[number, number, number, number]> = [];
+	for (let at: Element | null = el; at !== null; at = at.parentElement) {
+		const layer = rgba(getComputedStyle(at).backgroundColor);
+		if (layer[3] > 0) layers.push(layer);
+		if (layer[3] === 1) break;
+	}
+	const base = layers.pop();
+	if (base === undefined || base[3] !== 1) throw new Error("no opaque ground under the element");
+	let ground: [number, number, number] = [base[0], base[1], base[2]];
+	for (const [r, g, b, a] of layers.reverse()) {
+		ground = [
+			r * a + ground[0] * (1 - a),
+			g * a + ground[1] * (1 - a),
+			b * a + ground[2] * (1 - a),
+		];
+	}
+	return ground;
+}
+
+describe("TerminalPane REC mark, drawn (#80)", () => {
+	for (const [name, theme] of Object.entries(BUNDLED_THEMES)) {
+		// Mutation caught: the theme's red on a darkened ground (2.2:1 in one-half-light).
+		it(`reads the REC mark in ${name}`, async () => {
+			useThemeStore().applyTheme(theme);
+			mountPane(ref(T), "live");
+			sized();
+			await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+			const recordings = useRecordingsStore();
+			vi.spyOn(recordings, "refresh").mockResolvedValue();
+			recordings.onState({
+				type: "RECORDING_STATE",
+				channelId: T,
+				recordingId: "01K80REC000000000000000000",
+				title: "build",
+			});
+			await settle();
+			const mark = one(".pane-rec");
+			const color = rgba(getComputedStyle(mark).color);
+			expect(color[3], "the REC text is see-through").toBe(1);
+			const ratio = contrastRatio([color[0], color[1], color[2]], groundOf(mark));
+			expect(ratio, `REC: ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(TEXT_CONTRAST_AA);
+		});
+	}
 });

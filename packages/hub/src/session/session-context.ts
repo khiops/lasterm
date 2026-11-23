@@ -294,6 +294,8 @@ export interface SharedSessionContext {
 	processTitleDebounceTimers: Map<string, ReturnType<typeof setTimeout>>;
 	/** Optional callback to resolve the current write-lock holder for a channel */
 	getWriteLockHolder: ((channelId: string) => string | null) | null;
+	/** Terminal recordings (#80); set by SessionManager. */
+	recorder: import("./recorder.js").SessionRecorder | null;
 	/** Pastes on their way from a window to an agent (#1014); set by SessionManager. */
 	pastes: import("./paste-relay.js").PasteRelay | null;
 	/** DALs */

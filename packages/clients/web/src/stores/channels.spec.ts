@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChannelsStore } from "./channels.js";
 import { useConfigStore } from "./config.js";
 import { useHostsStore } from "./hosts.js";
+import { useRecordingsStore } from "./recordings.js";
 import { useSessionStore } from "./session.js";
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,46 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 // toggleGroupCollapsed — persists to localStorage
 // ---------------------------------------------------------------------------
+
+// AC-UI-STATE-ORDER (#80): a host's channel rows say which of its terminals
+// record. Mutation caught: fetchChannels not merging recording_id.
+describe("useChannelsStore — recordings in the channel rows", () => {
+	it("merges each row's recording_id into the recordings store", async () => {
+		mockFetch.mockImplementation((url: string) => {
+			const body = url.includes("/api/channels")
+				? [
+						{
+							id: "ch-1",
+							session_id: "s",
+							cols: 80,
+							rows: 24,
+							status: "live",
+							recording_id: "01RECROW",
+						},
+						{ id: "ch-2", session_id: "s", cols: 80, rows: 24, status: "live", recording_id: null },
+					]
+				: url.includes("/api/recordings")
+					? { recordings: [], used_bytes: 0, cap_bytes: 0 }
+					: [];
+			return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+		});
+		const recordings = useRecordingsStore();
+		recordings.open = new Map([
+			[
+				"ch-2",
+				{
+					recordingId: "01RECGONE",
+					title: "t",
+					hostLabel: "h",
+					startedAt: "2026-11-22T10:00:00.000Z",
+				},
+			],
+		]);
+		await useChannelsStore().fetchChannels("host-1");
+		expect(recordings.open.get("ch-1")?.recordingId).toBe("01RECROW");
+		expect(recordings.open.has("ch-2")).toBe(false);
+	});
+});
 
 describe("useChannelsStore — toggleGroupCollapsed", () => {
 	it("persists collapsed=true for a group on first toggle", async () => {

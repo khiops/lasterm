@@ -180,6 +180,9 @@ describe("TERMINAL_VALUE_VALIDATORS", () => {
 		["transferVerify", "refuses", "true"],
 		["pasteWarning", "accepts", "never"],
 		["pasteWarning", "refuses", "sometimes"],
+		["recordTerminals", "accepts", true],
+		["recordTerminals", "accepts", false],
+		["recordTerminals", "refuses", "yes"],
 	];
 
 	it.each(cases)("%s %s %j", (key, verdict, value) => {
@@ -373,6 +376,22 @@ describe("terminal profile writes: value validation", () => {
 		expect((await server.inject({ method: "GET", url })).json()).toEqual({
 			profile: { pasteWarning: "never" },
 		});
+	});
+
+	// AC-PROFILE (#80). Mutation caught: the key missing from TERMINAL_PROFILE_KEYS.
+	it("PATCH stores recordTerminals for a host and for a terminal", async () => {
+		const { hostId, channelId } = await makeChannel();
+		for (const url of [`/api/hosts/${hostId}/profile`, `/api/channels/${channelId}/profile`]) {
+			const accepted = await server.inject({
+				method: "PATCH",
+				url,
+				payload: { profile: { recordTerminals: true } },
+			});
+			expect(accepted.statusCode, url).toBe(200);
+			expect((await server.inject({ method: "GET", url })).json(), url).toEqual({
+				profile: { recordTerminals: true },
+			});
+		}
 	});
 
 	it("PATCH /api/channels/:id/profile refuses a value the table refuses, and a key of the host's", async () => {

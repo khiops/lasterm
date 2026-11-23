@@ -13,6 +13,9 @@
 			<button class="ctx-item" @click="onAddGroup">
 				Add new group
 			</button>
+			<button class="ctx-item" @click="onOpenRecordings">
+				Recordings…
+			</button>
 		</div>
 	</Teleport>
 </template>
@@ -30,6 +33,7 @@ const emit = defineEmits<{
 	(e: "close"): void;
 	(e: "add-host"): void;
 	(e: "add-group"): void;
+	(e: "open-recordings"): void;
 }>();
 
 const menuEl = ref<HTMLElement | null>(null);
@@ -51,6 +55,11 @@ onUnmounted(() => {
 });
 
 // ── Action handlers ──────────────────────────────────────────────────────
+
+function onOpenRecordings(): void {
+	emit("open-recordings");
+	emit("close");
+}
 
 function onAddHost(): void {
 	emit("add-host");

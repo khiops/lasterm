@@ -6,6 +6,7 @@ use async_xpty::{CommandBuilder, ExitStatus, PtyProcess};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::batch::Voice;
 use crate::input::{wake_record_for, InputQueue, INPUT_QUEUE_BYTES};
 use crate::input_modes::InputModeCell;
 use crate::owner::OwnerId;
@@ -24,6 +25,9 @@ pub(crate) struct PtyChannelState {
     /// The modes its reader last saw, which decide how its input is written
     /// (#1012).
     pub(crate) input_modes: Arc<InputModeCell>,
+    /// Whether its reader may still speak: silenced by the hub's DESTROY
+    /// (#1121).
+    pub(crate) voice: Arc<Voice>,
 }
 
 impl PtyChannelState {
@@ -193,6 +197,113 @@ pub(crate) fn torn_down_delay_of(channel_id: &str) -> Option<Duration> {
         .iter()
         .find(|(id, _)| id == channel_id)
         .map(|(_, delay)| *delay)
+}
+
+/// What test-only receipts readers have left, by channel: the reader states
+/// a test waits for before its next step, never sent to the hub (#1121).
+#[cfg(test)]
+static RECEIPTS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Record that the reader of `channel_id` reached `what`.
+#[cfg(test)]
+pub(crate) fn record_receipt(channel_id: &str, what: &str) {
+    RECEIPTS
+        .lock()
+        .expect("receipts")
+        .push((channel_id.to_owned(), what.to_owned()));
+}
+
+/// Wait until the readers of `channel_id` have reached `what` `times` times
+/// in all (a restart's readers share the id): `exit-enqueued`
+/// (its CHANNEL_EXIT is in the pipeline), `torn-down` (it found its workload
+/// torn down, before any delay it then waits), or `output:<text>` (it
+/// enqueued an OUTPUT containing a text given to [`watch_output_of`]).
+#[cfg(test)]
+pub(crate) async fn receipt(channel_id: &str, what: &str, times: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let found = RECEIPTS
+            .lock()
+            .expect("receipts")
+            .iter()
+            .filter(|(id, seen)| id == channel_id && seen == what)
+            .count()
+            >= times;
+        if found {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no receipt {what:?} from the reader of {channel_id}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Texts whose OUTPUT a test waits for, by channel.
+#[cfg(test)]
+static WATCHED_OUTPUT: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Have the reader of `channel_id` leave an `output:<text>` receipt once it
+/// has enqueued an OUTPUT containing `text`.
+#[cfg(test)]
+pub(crate) fn watch_output_of(channel_id: &str, text: &str) {
+    WATCHED_OUTPUT
+        .lock()
+        .expect("watched output")
+        .push((channel_id.to_owned(), text.to_owned()));
+}
+
+/// The watched texts of `channel_id` that `data` contains.
+#[cfg(test)]
+pub(crate) fn output_watched(channel_id: &str, data: &[u8]) -> Vec<String> {
+    let printed = String::from_utf8_lossy(data);
+    WATCHED_OUTPUT
+        .lock()
+        .expect("watched output")
+        .iter()
+        .filter(|(id, text)| id == channel_id && printed.contains(text.as_str()))
+        .map(|(_, text)| text.clone())
+        .collect()
+}
+
+/// The channels whose reader, at its PTY's end, waits for the test to let it
+/// handle that end (#1121).
+#[cfg(test)]
+static HELD_PTY_ENDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Have the reader of `channel_id`, at its PTY's end, wait for
+/// [`release_pty_end_of`] before it handles that end.
+#[cfg(test)]
+pub(crate) fn hold_pty_end_of(channel_id: &str) {
+    HELD_PTY_ENDS
+        .lock()
+        .expect("held PTY ends")
+        .push(channel_id.to_owned());
+}
+
+/// Let the reader of `channel_id` handle its PTY's end.
+#[cfg(test)]
+pub(crate) fn release_pty_end_of(channel_id: &str) {
+    HELD_PTY_ENDS
+        .lock()
+        .expect("held PTY ends")
+        .retain(|id| id != channel_id);
+}
+
+/// At its PTY's end, the reader of `channel_id` waits while it is held,
+/// having left a `pty-end` receipt.
+#[cfg(test)]
+pub(crate) async fn pty_end_released(channel_id: &str) {
+    record_receipt(channel_id, "pty-end");
+    while HELD_PTY_ENDS
+        .lock()
+        .expect("held PTY ends")
+        .iter()
+        .any(|id| id == channel_id)
+    {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 pub struct PtyManager {
@@ -393,6 +504,20 @@ impl PtyManager {
             .map(|channel| Arc::clone(&channel.input_modes))
     }
 
+    /// The voice of `channel_id`'s reader, while it is registered.
+    pub(crate) fn voice_for(&self, channel_id: &str) -> Option<Arc<Voice>> {
+        self.channels
+            .get(channel_id)
+            .map(|channel| Arc::clone(&channel.voice))
+    }
+
+    /// Whether a workload torn down under `channel_id` still owes its exit:
+    /// its reader may have frames on their way, and a SPAWN replacing it
+    /// answers after them (#1121).
+    pub(crate) fn has_torn_down(&self, channel_id: &str) -> bool {
+        self.torn_down.contains_key(channel_id)
+    }
+
     /// Take a reader only while its channel remains registered. A daemon sweep
     /// can remove the channel between spawn and reader registration.
     pub(crate) fn reader_for(&mut self, channel_id: &str) -> Option<async_xpty::PtyReader> {
@@ -483,6 +608,7 @@ impl PtyManager {
                 owner,
                 input,
                 input_modes: Arc::default(),
+                voice: Arc::default(),
             },
         );
         Ok((id, pid))
@@ -572,6 +698,15 @@ impl PtyManager {
                 None => EndingSend::Withdrawn,
             },
         }
+    }
+
+    /// Remove `channel_id` as the hub's DESTROY tears it down: its reader is
+    /// silenced first, and sends nothing more but its exit (#1121). Not for
+    /// `destroy_all`, whose terminals the hub still records until the stop is
+    /// confirmed.
+    pub(crate) fn remove_destroyed(&mut self, channel_id: &str) -> Option<PtyProcess> {
+        self.channels.get(channel_id)?.voice.silence();
+        self.remove_torn_down(channel_id)
     }
 
     /// Remove `channel_id` as it is torn down (DESTROY, `destroy_all`), its

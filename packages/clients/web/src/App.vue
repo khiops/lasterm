@@ -108,7 +108,11 @@
 			@close="railContextMenu = null"
 			@add-host="showHostModal = true"
 			@add-group="onAddGroupFromRail"
+			@open-recordings="showRecordings = true"
 		/>
+
+		<!-- Recordings waiting to be saved, and the player (#80) -->
+		<RecordingsModal v-if="showRecordings" @close="showRecordings = false" />
 
 		<!-- Rename group dialog -->
 		<GroupActionDialog
@@ -245,6 +249,9 @@
 				@toggle-settings="showSettings = !showSettings"
 				@toggle-palette="commandPalette.toggle()"
 				@add-host="showHostModal = true"
+				:recording-count="recordingsStore.rows.length"
+				:recordings-full="recordingsStore.capBytes > 0 && recordingsStore.usedBytes >= recordingsStore.capBytes"
+				@open-recordings="showRecordings = true"
 				@rail-context-menu="onRailContextMenu"
 				@host-context-menu="onHostContextMenu"
 				@group-context-menu="onGroupContextMenu"
@@ -290,6 +297,7 @@
 					:active-tab-index="layout.activeTabIndex.value"
 					:get-tab-label="layout.getTabLabel"
 					:get-active-channel-id="layout.getActiveChannelId"
+					:get-tab-channel-ids="tabChannelIds"
 					:visible-tab-ids="tabsInView"
 					@select-tab="layout.setActiveTab"
 					@close-tab="onCloseTab"
@@ -427,6 +435,8 @@ import PairingCodeGenerator from './components/PairingCodeGenerator.vue';
 import PairingScreen from './components/PairingScreen.vue';
 import PaneLayout from './components/PaneLayout.vue';
 import RailContextMenu from './components/RailContextMenu.vue';
+import RecordingsModal from './components/RecordingsModal.vue';
+import { useRecordingsStore } from './stores/recordings.js';
 import SidebarContextMenu from './components/SidebarContextMenu.vue';
 import SettingsPanel from './components/settings/SettingsPanel.vue';
 import TabBar from './components/TabBar.vue';
@@ -593,6 +603,12 @@ const layout = useLayout();
 // The spawns the page before this one owed are kept for the panes that show
 // them; one whose id the saved layout no longer holds has none, and goes (#992).
 // A layout that could not be read says nothing of them: they stay.
+/** Every terminal a tab's panes show. */
+function tabChannelIds(tabId: string): string[] {
+	const root = layout.layouts.value[tabId];
+	return root === null || root === undefined ? [] : collectTerminalChannelIds(root);
+}
+
 if (layout.loadedSavedLayout) {
 	channelsStore.forgetPendingSpawnsNotIn(
 		new Set(
@@ -1011,6 +1027,8 @@ const groupContextMenu = ref<{
 	y: number;
 } | null>(null);
 const railContextMenu = ref<{ x: number; y: number } | null>(null);
+const showRecordings = ref(false);
+const recordingsStore = useRecordingsStore();
 // Create host-group dialog
 const createGroupDialogVisible = ref(false);
 // ID of the group being renamed/deleted

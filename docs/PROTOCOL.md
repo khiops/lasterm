@@ -291,6 +291,17 @@ hub (`AGENT_CHANNEL_STATE`, § 3.16) and does not count among the channels other
 hubs hold (`other_owner_channels`, § 3.16, § 3.17): the hub that destroyed it
 let it go.
 
+From its DESTROY on, a destroyed workload's reader
+sends nothing but its CHANNEL_EXIT: no OUTPUT, LOG, title, directory, bell,
+notification or snapshot reply (an ATTACH reaching it then gets
+`CHANNEL_NOT_FOUND`) (#1121). The SPAWN_OK
+of a SPAWN of the id handled after that DESTROY comes after every frame that
+workload sent before it, when that connection is its owner's current one; no
+order is promised against a refusal (SPAWN_ERR), as for the exit. A kill or a
+session close therefore also drops the destroyed shell's last output. The agent
+ending (STOP, a signal) is not a DESTROY: its terminals keep speaking until
+their exit.
+
 The hub, which sent the DESTROY, does not apply that exit while the restart can
 still succeed. It drops it once the restart's SPAWN_OK says a new workload holds
 the id; otherwise it records it as the terminal's end, with `end_reason:
@@ -298,7 +309,9 @@ the id; otherwise it records it as the terminal's end, with `end_reason:
 quits (§ 4.7). An exit that comes only after the restart failed is recorded the
 same way. An agent older than this ordering may send the destroyed shell's exit after
 the SPAWN_OK; the hub then reads it as the new run's end, until that agent is
-replaced (SPEC.md § 3.3, #805).
+replaced (SPEC.md § 3.3, #805). Such an agent may likewise send the destroyed
+shell's last output, title or directory after the SPAWN_OK, which the hub then
+shows in the new run (#1121).
 
 **The environment a terminal starts with (`env-modes`, #576).** The agent builds it whole and
 starts the PTY from a cleared environment, in this order:
@@ -2168,6 +2181,25 @@ to the owning window only, and forgets a paste at its final answer or a cancel.
 - stops a paste when its socket drops, it loses the write lock or leaves the terminal, dropping what
   it held; refuses a second paste until the first's final answer.
 
+### 4.22 RECORDING_STATE (Hub → UI)
+
+```typescript
+{
+  type: "RECORDING_STATE",
+  channel_id: string,
+  recording_id: string | null,   // the open recording, or null once it ended or was refused
+  title?: string,                // with a start: what a pane names the file it saves with
+  host_label?: string,
+  started_at?: string,
+  end_reason?: string,           // with an end: stopped, exited, killed, restarted, gone, cap, interrupted
+  refused?: "cap" | "storage"    // an automatic start that did not happen
+}
+```
+
+Sent to every authenticated client at each start and end of a terminal's recording, and when the
+profile's automatic start is refused (#80). It may come before the terminal's `CHANNEL_CREATED`. A
+client that reconnects reads `GET /api/recordings` again: news sent while it was away reached nobody.
+
 ## 5. Protocol Sequences
 
 ### 5.1 Local Session
@@ -2825,6 +2857,19 @@ hub drops its record; an interrupted one stays across restarts until it is resum
 |--------|------|------|--------------|
 | GET | `/api/auth/tokens` | ● | `{ tokens }`, each `{ id, label, created_at, expires_at, revoked_at, swept_at, last_used_at }`; never the hash |
 | DELETE | `/api/auth/tokens/:id` | ● | → `{ ok: true }`, or 404 `TOKEN_NOT_FOUND` if unknown or already revoked. Closes the WebSockets the token authenticated (`1008 AUTH_REVOKED`). `primary` answers 409 `PRIMARY_TOKEN_NOT_REVOCABLE` and closes nothing: it is retired by replacing `auth.json` (SECURITY.md § 2.1). Every answer is recorded as `token.revoke` (SECURITY.md § 7.1) |
+
+#### Recordings (#80)
+
+| Method | Path | Auth | Body / Notes |
+|--------|------|------|--------------|
+| POST | `/api/channels/:id/recording` | Bearer | Start recording a live terminal whose host is connected: `201` with the listed row. `404 CHANNEL_NOT_FOUND`; `409 CHANNEL_NOT_LIVE`; `409 ALREADY_RECORDING` (`error.recording_id` names the open one); `409 RECORDING_CAP`; `500 RECORDING_STORAGE_ERROR` |
+| GET | `/api/recordings` | Bearer | `{recordings: [{id, channel_id, host_label, title, started_at, ended_at, end_reason, cols, rows, duration_ms, bytes}], used_bytes, cap_bytes}`, newest first, without those being deleted |
+| POST | `/api/recordings/:id/stop` | Bearer | End it (`stopped`); on an ended one, `200` with its row unchanged. `404 RECORDING_NOT_FOUND` |
+| GET | `/api/recordings/:id/cast` | Bearer | The first part of its export, asciicast v3 (`application/x-asciicast; charset=utf-8`): the header line, then event lines `[<delay s, 3 decimals>, "<code>", "<data>"]`. Headers: `Content-Disposition: attachment; filename="lasterm-<title>-<YYYYMMDD-HHMMSS>.cast"`, `X-Lasterm-Cast-Last-Seq` (the last block at this request, 0 when none), `X-Lasterm-Cast-Lost` (bytes lost to storage errors), and `X-Lasterm-Cast-Next-Seq` while parts remain. For an open recording it first writes what is buffered |
+| GET | `/api/recordings/:id/cast?from_seq=&last_seq=&lost=` | Bearer | A later part: blocks from `from_seq` up to `last_seq` (at most 4 MiB, a larger block alone), the last part ending with the lost-bytes marker when `lost` > 0. `404` when a block in range is missing (a deletion started), so a save never ends early; `400` for values that are not non-negative integers or an incomplete cursor |
+| DELETE | `/api/recordings/:id` | Bearer | Discard it (ended first if open): `204`, hidden at once, its blocks deleted in bounded batches (STORAGE.md § 4.3). `404 RECORDING_NOT_FOUND` |
+
+`GET /api/channels` rows carry `recording_id`, the terminal's open recording or null.
 
 #### Logs
 

@@ -4962,8 +4962,7 @@ mod tests {
                 .await;
                 // Its shell ends: its reader has seen its PTY close, and sends
                 // its exit, before the SPAWN is sent.
-                a.read_through(|frame| is_about(frame, "LOG", "live-restarted"))
-                    .await;
+                crate::pty::receipt("live-restarted", "exit-enqueued", 1).await;
                 let answered = spawned(&mut a, interactive("live-restarted")).await;
                 assert!(
                     mentions(&answered, "live-restarted").contains(&"CHANNEL_EXIT".to_string()),
@@ -4995,13 +4994,160 @@ mod tests {
                 })
                 .await;
                 // Its reader has seen its PTY close, and waits.
-                a.read_through(|frame| is_about(frame, "LOG", "restart-first"))
-                    .await;
+                crate::pty::receipt("restart-first", "torn-down", 1).await;
                 spawned(&mut a, interactive("restart-first")).await;
                 let later = a.frames_until_quiet(Duration::from_millis(3000)).await;
                 assert!(
                     !mentions(&later, "restart-first").contains(&"CHANNEL_EXIT".to_string()),
                     "an exit after the SPAWN_OK marks the restarted terminal dead"
+                );
+
+                daemon.stop().await;
+            }
+
+            /// A live restart while what the destroyed shell's reader read
+            /// before its DESTROY is still on its way: none of it comes after
+            /// the SPAWN_OK, where the hub would show it in the new terminal,
+            /// and the new run is heard from its SPAWN_OK on, not before it
+            /// (#1121).
+            #[tokio::test]
+            async fn a_live_restart_gets_none_of_the_replaced_shells_output_after_its_spawn_ok() {
+                crate::pty::delay_torn_down_of("stale-output", Duration::from_millis(3000));
+                crate::pty::watch_output_of("stale-output", "OLDMARK1121");
+                let daemon = TestDaemon::start("stale-output").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("stale-output")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+                crate::pty::hold_routes_of("stale-output", Duration::from_millis(1000));
+
+                a.send(&input("stale-output", prints("OLDMARK1121"))).await;
+                // Its reader has queued that output; the router holds it.
+                crate::pty::receipt("stale-output", "output:OLDMARK1121", 1).await;
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "stale-output".to_string(),
+                })
+                .await;
+                // The new run starts elsewhere: its first CWD_CHANGE is its own.
+                let new_dir = temp_dir("stale-output-new").await;
+                let new_dir_name = new_dir.file_name().unwrap().to_string_lossy().into_owned();
+                let mut restart = interactive("stale-output");
+                if let HubToAgent::Spawn { cwd, .. } = &mut restart {
+                    *cwd = Some(new_dir.to_string_lossy().into_owned());
+                }
+                let answered = spawned(&mut a, restart).await;
+                assert!(
+                    output_of(&answered, "stale-output").contains("OLDMARK1121"),
+                    "what the replaced shell printed before its DESTROY comes before the SPAWN_OK"
+                );
+                assert!(
+                    !answered
+                        .iter()
+                        .any(|frame| is_about(frame, "CWD_CHANGE", "stale-output")
+                            && frame["cwd"]
+                                .as_str()
+                                .is_some_and(|cwd| cwd.contains(&new_dir_name))),
+                    "the new run was heard before its SPAWN_OK: {:?}",
+                    answered.iter().map(frame_type).collect::<Vec<_>>()
+                );
+
+                let mut later = print(&mut a, "stale-output", "NEWMARK1121").await;
+                later.extend(a.frames_until_quiet(Duration::from_millis(1500)).await);
+                assert!(
+                    !output_of(&later, "stale-output").contains("OLDMARK1121"),
+                    "the replaced shell's output came after the SPAWN_OK"
+                );
+                assert!(
+                    !later
+                        .iter()
+                        .any(|frame| is_about(frame, "LOG", "stale-output")
+                            && frame["msg"].as_str() == Some("PTY closed")),
+                    "the replaced shell's LOG came after the SPAWN_OK"
+                );
+                // The new run's directory, checked absent before the SPAWN_OK,
+                // does come.
+                assert!(
+                    later
+                        .iter()
+                        .any(|frame| is_about(frame, "CWD_CHANGE", "stale-output")
+                            && frame["cwd"]
+                                .as_str()
+                                .is_some_and(|cwd| cwd.contains(&new_dir_name))),
+                    "the new run's directory never came"
+                );
+
+                daemon.stop().await;
+            }
+
+            /// A live restart whose destroyed shell's reader handles its PTY's
+            /// end only after the replacement's SPAWN_OK: it says nothing then,
+            /// its exit aside, which the replacement took over (#1121).
+            #[tokio::test]
+            async fn a_live_restart_gets_nothing_the_replaced_shells_reader_sends_after_the_destroy(
+            ) {
+                crate::pty::hold_pty_end_of("after-destroy");
+                let daemon = TestDaemon::start("after-destroy").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("after-destroy")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "after-destroy".to_string(),
+                })
+                .await;
+                // Its reader is at its PTY's end, held there.
+                crate::pty::receipt("after-destroy", "pty-end", 1).await;
+                spawned(&mut a, interactive("after-destroy")).await;
+                crate::pty::release_pty_end_of("after-destroy");
+
+                let later = a.frames_until_quiet(Duration::from_millis(3000)).await;
+                assert!(
+                    !later
+                        .iter()
+                        .any(|frame| is_about(frame, "LOG", "after-destroy")
+                            && frame["msg"].as_str() == Some("PTY closed")),
+                    "the replaced shell's reader spoke after the SPAWN_OK: {:?}",
+                    later.iter().map(frame_type).collect::<Vec<_>>()
+                );
+
+                daemon.stop().await;
+            }
+
+            /// A SPAWN of a new id while another terminal's frames are held on
+            /// their way, that terminal destroyed and its exit still owed: it is
+            /// answered at once, not after them (#1121).
+            #[tokio::test]
+            async fn a_spawn_of_another_id_is_answered_at_once() {
+                crate::pty::delay_torn_down_of("busy-other", Duration::from_millis(3000));
+                crate::pty::watch_output_of("busy-other", "BUSYMARK1121");
+                let daemon = TestDaemon::start("busy-other").await;
+                let (mut a, _) = daemon.connect_as(KEY_A).await;
+                spawned(&mut a, interactive("busy-other")).await;
+                a.frames_until_quiet(Duration::from_millis(300)).await;
+                crate::pty::hold_routes_of("busy-other", Duration::from_millis(2000));
+
+                a.send(&input("busy-other", prints("BUSYMARK1121"))).await;
+                crate::pty::receipt("busy-other", "output:BUSYMARK1121", 1).await;
+                a.send(&HubToAgent::Destroy {
+                    channel_id: "busy-other".to_string(),
+                })
+                .await;
+                crate::pty::receipt("busy-other", "torn-down", 1).await;
+                let early = a.frames_until_quiet(Duration::from_millis(100)).await;
+                assert!(
+                    !output_of(&early, "busy-other").contains("BUSYMARK1121"),
+                    "the other terminal's output must still be held"
+                );
+
+                let asked = std::time::Instant::now();
+                let answered = spawned(&mut a, interactive("fresh-id")).await;
+                let waited = asked.elapsed();
+                assert!(
+                    waited < Duration::from_millis(500),
+                    "a SPAWN of another id waited {waited:?}"
+                );
+                assert!(
+                    !output_of(&answered, "busy-other").contains("BUSYMARK1121"),
+                    "the other terminal's output was still to be held"
                 );
 
                 daemon.stop().await;
@@ -5022,8 +5168,7 @@ mod tests {
                     channel_id: "restart-ends".to_string(),
                 })
                 .await;
-                a.read_through(|frame| is_about(frame, "LOG", "restart-ends"))
-                    .await;
+                crate::pty::receipt("restart-ends", "torn-down", 1).await;
                 spawned(&mut a, spawn("restart-ends", "exit 5")).await;
                 let later = a.frames_until_quiet(Duration::from_millis(3000)).await;
                 let exits: Vec<Option<i64>> = later
@@ -5097,8 +5242,7 @@ mod tests {
                 })
                 .await;
                 // Its reader has seen its PTY close, and waits.
-                a.read_through(|frame| is_about(frame, "LOG", "restart-refused"))
-                    .await;
+                crate::pty::receipt("restart-refused", "torn-down", 1).await;
                 let mut seen = refused(&mut a, "restart-refused").await;
                 seen.extend(a.frames_until_quiet(Duration::from_millis(3000)).await);
                 let exits = seen
@@ -5128,8 +5272,7 @@ mod tests {
                 })
                 .await;
                 // The first reader has seen its PTY close, and waits 3 s from here.
-                a.read_through(|frame| is_about(frame, "LOG", "late-reader"))
-                    .await;
+                crate::pty::receipt("late-reader", "torn-down", 1).await;
                 let first_closed = std::time::Instant::now();
                 spawned(&mut a, interactive("late-reader")).await;
                 // The replacement's reader then wakes 1.5 s or more after the
@@ -5141,8 +5284,7 @@ mod tests {
                 })
                 .await;
                 // The replacement's reader has seen its PTY close too.
-                a.read_through(|frame| is_about(frame, "LOG", "late-reader"))
-                    .await;
+                crate::pty::receipt("late-reader", "torn-down", 2).await;
                 let mut first_window = refused(&mut a, "late-reader").await;
                 let first_woke = first_closed + Duration::from_millis(3750);
                 while let Some(limit) = first_woke.checked_duration_since(std::time::Instant::now())
@@ -5226,8 +5368,7 @@ mod tests {
                 .await;
                 // Its reader has seen its PTY close, and sent its exit, which
                 // the router holds.
-                a.read_through(|frame| is_about(frame, "LOG", "torn-listed"))
-                    .await;
+                crate::pty::receipt("torn-listed", "exit-enqueued", 1).await;
                 tokio::time::sleep(Duration::from_millis(300)).await;
 
                 let (_a2, listed) = daemon.connect_as(KEY_A).await;
@@ -5250,8 +5391,7 @@ mod tests {
                     channel_id: "torn-count".to_string(),
                 })
                 .await;
-                a.read_through(|frame| is_about(frame, "LOG", "torn-count"))
-                    .await;
+                crate::pty::receipt("torn-count", "exit-enqueued", 1).await;
                 tokio::time::sleep(Duration::from_millis(300)).await;
 
                 let (_b, frames) = daemon.connect_as(KEY_B).await;

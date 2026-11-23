@@ -23,6 +23,8 @@ const visibleTabIds = ref<ReadonlySet<string> | null>(null);
 const tabList = ref<string[]>([]);
 /** A tab's active pane's channel where a test moved it; `ch-<tab id>` otherwise. */
 const activeChannel = new Map<string, string>();
+/** A tab's panes, when it has more than its active one. */
+const tabPanes = new Map<string, string[]>();
 
 function mountBar(tabIds: string[], active = 0, bar: Component = TabBar) {
 	activeTabIndex.value = active;
@@ -44,6 +46,7 @@ function mountBar(tabIds: string[], active = 0, bar: Component = TabBar) {
 				activeTabIndex: activeTabIndex.value,
 				getTabLabel: (id: string) => `Label ${id}`,
 				getActiveChannelId: (id: string) => activeChannel.get(id) ?? `ch-${id}`,
+				getTabChannelIds: (id: string) => tabPanes.get(id) ?? [activeChannel.get(id) ?? `ch-${id}`],
 				visibleTabIds: visibleTabIds.value,
 				onSelectTab: selectTab,
 				onCloseTab: closeTab,
@@ -62,6 +65,7 @@ beforeEach(() => {
 	setActivePinia(createPinia());
 	visibleTabIds.value = null;
 	activeChannel.clear();
+	tabPanes.clear();
 });
 
 afterEach(() => {
@@ -477,6 +481,39 @@ describe("TabBar, when a tab closes under the menu or a drag", () => {
 		await closeTabs("t2");
 		tab("t1").dispatchEvent(dragEvent("drop", data, -1));
 		expect(reorderTab).not.toHaveBeenCalled();
+	});
+});
+
+// AC-UI-MENU (#80): a tab whose terminal records shows a dot. Mutation caught: the dot not following the store.
+describe("TabBar recording dot", () => {
+	it("marks the tab whose terminal records", async () => {
+		mountBar(["t0", "t1"]);
+		const { useRecordingsStore } = await import("../stores/recordings.js");
+		expect(tab("t1").querySelector(".tab__rec-dot")).toBeNull();
+		useRecordingsStore().open = new Map([
+			[
+				"ch-t1",
+				{ recordingId: "01REC", title: "t", hostLabel: "h", startedAt: "2026-11-22T10:00:00.000Z" },
+			],
+		]);
+		await nextTick();
+		expect(tab("t1").querySelector(".tab__rec-dot")).not.toBeNull();
+		expect(tab("t0").querySelector(".tab__rec-dot")).toBeNull();
+	});
+
+	// Mutation caught: the dot following only the pane in focus.
+	it("marks a split tab whose recorded pane is not the one in focus", async () => {
+		tabPanes.set("t1", ["ch-t1", "ch-t1-right"]);
+		mountBar(["t0", "t1"]);
+		const { useRecordingsStore } = await import("../stores/recordings.js");
+		useRecordingsStore().open = new Map([
+			[
+				"ch-t1-right",
+				{ recordingId: "01REC", title: "t", hostLabel: "h", startedAt: "2026-11-22T10:00:00.000Z" },
+			],
+		]);
+		await nextTick();
+		expect(tab("t1").querySelector(".tab__rec-dot")).not.toBeNull();
 	});
 });
 

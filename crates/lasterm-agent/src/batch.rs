@@ -33,7 +33,10 @@ pub struct EventFrame {
     pub routed: Option<tokio::sync::watch::Sender<()>>,
 }
 
-/// A channel's ATTACH_OK or SNAPSHOT_RES, rendered by its reader (#931).
+/// A channel's ATTACH_OK or SNAPSHOT_RES, rendered by its reader (#931), or
+/// the SPAWN_OK of a SPAWN that replaces a destroyed workload of that id, sent
+/// by the connection's handler after what that workload's reader queued
+/// (#1121).
 ///
 /// It is a reply: it goes to the connection that asked, and is charged to
 /// nothing (#553). It travels the channel's pipeline all the same, so that it
@@ -54,7 +57,8 @@ impl ReplyFrame {
     }
 }
 
-/// What a channel's reader task sends towards the hub.
+/// What a channel's reader task sends towards the hub, and a replacing
+/// SPAWN's SPAWN_OK (a reply, #1121).
 ///
 /// Output and events travel the same pipeline, so both reach the connection
 /// their hub has when they are sent, not the connection that spawned the
@@ -91,6 +95,57 @@ impl ChannelEventSender {
     /// is ending, and the event's charge goes with it.
     pub fn send(&self, event: ChannelEvent) {
         let _ = self.tx.send(event);
+    }
+}
+
+/// Whether a workload's reader may still speak. The hub's DESTROY silences it:
+/// from then on its reader sends nothing but its CHANNEL_EXIT, so nothing of
+/// the shell it destroyed reaches the hub after the SPAWN_OK of a restart
+/// that replaces it (#1121).
+#[derive(Default)]
+pub struct Voice(std::sync::Mutex<bool>);
+
+impl Voice {
+    /// Silence it. Once this returns, no send through a [`ReaderEvents`] of
+    /// it enqueues anything.
+    pub fn silence(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+    }
+}
+
+/// What a channel's reader sends through, its exit aside: the shared
+/// pipeline, as long as its workload's [`Voice`] is not silenced.
+#[derive(Clone)]
+pub struct ReaderEvents {
+    events: ChannelEventSender,
+    voice: Arc<Voice>,
+}
+
+impl ReaderEvents {
+    pub(crate) fn new(events: ChannelEventSender, voice: Arc<Voice>) -> Self {
+        Self { events, voice }
+    }
+
+    /// Hand an event on, unless the reader is silenced; whether it was. The
+    /// check and the hand-over are one step against [`Voice::silence`]. A
+    /// dropped event's charge is released with it.
+    pub fn send(&self, event: ChannelEvent) -> bool {
+        let silenced = self.voice.0.lock().unwrap_or_else(|e| e.into_inner());
+        if *silenced {
+            return false;
+        }
+        self.events.send(event);
+        true
+    }
+
+    /// Whether the reader is silenced.
+    pub fn silenced(&self) -> bool {
+        *self.voice.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The pipeline itself, which the reader's exit takes (#1113).
+    pub fn unsilenced(&self) -> &ChannelEventSender {
+        &self.events
     }
 }
 
@@ -494,5 +549,32 @@ mod tests {
         assert!(one.owner == first && one.data == b"of the first");
         let two = expect_output(rx.try_recv().ok());
         assert!(two.owner == second && two.data == b"of the second");
+    }
+
+    /// A destroyed terminal's reader drains its PTY with nothing sent: what it
+    /// reads is charged, then dropped with its charge released at once, so it
+    /// never holds back its hub's other terminals (#1121).
+    #[test]
+    fn a_silenced_reader_releases_what_it_is_charged() {
+        let flows = crate::flow::Flows::default();
+        let owner = OwnerId::stdio();
+        let flow = flows.of(&owner);
+        let (events, mut rx) = ChannelEventSender::new(flows);
+        let voice = Arc::new(Voice::default());
+        voice.silence();
+        let reader = ReaderEvents::new(events, voice);
+
+        let sent = reader.send(ChannelEvent::Output(OutputEvent {
+            owner: owner.clone(),
+            channel_id: "silenced".into(),
+            seq: 1,
+            charge: flow.read(crate::flow::HIGH_WATER),
+            data: vec![b'x'; 16],
+        }));
+
+        assert!(!sent, "a silenced reader sends nothing");
+        assert!(rx.try_recv().is_err(), "nothing enters the pipeline");
+        assert_eq!(flow.pending(), 0, "its charge is released");
+        assert!(!flow.full());
     }
 }

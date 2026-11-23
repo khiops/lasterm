@@ -26,7 +26,12 @@ const activeChannel = new Map<string, string>();
 /** A tab's panes, when it has more than its active one. */
 const tabPanes = new Map<string, string[]>();
 
-function mountBar(tabIds: string[], active = 0, bar: Component = TabBar) {
+function mountBar(
+	tabIds: string[],
+	active = 0,
+	bar: Component = TabBar,
+	labelFor: (id: string) => string = (id) => `Label ${id}`,
+) {
 	activeTabIndex.value = active;
 	tabList.value = tabIds;
 	const selectTab = vi.fn((index: number) => {
@@ -44,7 +49,7 @@ function mountBar(tabIds: string[], active = 0, bar: Component = TabBar) {
 			h(bar, {
 				tabs: tabList.value.map((id) => ({ id })),
 				activeTabIndex: activeTabIndex.value,
-				getTabLabel: (id: string) => `Label ${id}`,
+				getTabLabel: labelFor,
 				getActiveChannelId: (id: string) => activeChannel.get(id) ?? `ch-${id}`,
 				getTabChannelIds: (id: string) => tabPanes.get(id) ?? [activeChannel.get(id) ?? `ch-${id}`],
 				visibleTabIds: visibleTabIds.value,
@@ -575,5 +580,55 @@ describe("TabBar, with the tabs settings changed", () => {
 		await onTwoHosts("dot");
 		expect(root.querySelectorAll(".tab__host-dot")).toHaveLength(2);
 		expect(root.querySelectorAll(".tab__host-initials")).toHaveLength(0);
+	});
+});
+
+describe("TabBar title length", () => {
+	const LONG_LABEL = "a very long channel title that runs well past fifty characters";
+
+	function labelText(id: string): string {
+		const el = tab(id).querySelector(".tab__label");
+		if (!el) throw new Error(`no label for ${id}`);
+		return el.textContent ?? "";
+	}
+
+	it("truncates the tab label at the configured Max Title Length", async () => {
+		mountBar(["t0"], 0, TabBar, () => LONG_LABEL);
+		useConfigStore().uiConfig = { onChannelDead: "readonly", title: { maxLength: 12 } } as never;
+		await nextTick();
+		// Twelve characters, the last of them the ellipsis.
+		expect(labelText("t0")).toBe("a very long…");
+		expect(labelText("t0")).toHaveLength(12);
+	});
+
+	it("leaves the label alone while Max Title Length is unset", async () => {
+		mountBar(["t0"], 0, TabBar, () => LONG_LABEL);
+		await nextTick();
+		expect(labelText("t0")).toBe(LONG_LABEL);
+	});
+
+	// The bar hands the setting's truncation to truncateTitle, so the ellipsis
+	// moves to where the setting says. Every case above uses the default end, and
+	// a bar hard-wired to end would pass them all.
+	it("puts the ellipsis where the setting's truncation says", async () => {
+		mountBar(["t0"], 0, TabBar, () => LONG_LABEL);
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			title: { maxLength: 12, truncation: "start" },
+		} as never;
+		await nextTick();
+		// Twelve characters, the ellipsis first, then the label's last eleven.
+		expect(labelText("t0")).toBe("… characters");
+		expect(labelText("t0")).toHaveLength(12);
+	});
+
+	it("shows a label longer than the built-in 50 when the setting asks for it", async () => {
+		// The label the bar is given comes from resolveTabLabel, which does not
+		// truncate. A length above the old default has to come through whole, or
+		// the setting would only ever shorten a tab (#1110).
+		mountBar(["t0"], 0, TabBar, () => LONG_LABEL);
+		useConfigStore().uiConfig = { onChannelDead: "readonly", title: { maxLength: 80 } } as never;
+		await nextTick();
+		expect(labelText("t0")).toBe(LONG_LABEL);
 	});
 });

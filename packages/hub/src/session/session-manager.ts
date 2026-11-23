@@ -2164,7 +2164,7 @@ export class SessionManager {
 				this.letGoOfStaleAttach(client, channel, channelId);
 				return this.handleAttach(clientId, channelId);
 			}
-			if (!this.ctx.clients.has(clientId)) return false;
+			if (!this.ctx.clients.has(clientId) || !client.attachedChannels.has(channelId)) return false;
 		}
 
 		let agent = this.ctx.agents.get(channel.hostId);
@@ -4178,12 +4178,6 @@ export class SessionManager {
 			this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
 		);
 		if (!keepsDaemon) return false;
-
-		// An adoption under way is a connection already made (#1169).
-		if (this.lifecycle.adoptionSettled(hostId) !== undefined) {
-			if ((await this.adoptionRefusal(hostId)) !== undefined) return false;
-			if (this.hostIsBeingStopped(hostId)) return false;
-		}
 
 		const inFlight = this.reconnectForAttachInFlight.get(hostId);
 		if (inFlight !== undefined) return inFlight;

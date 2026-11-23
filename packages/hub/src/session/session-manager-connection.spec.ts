@@ -2938,15 +2938,59 @@ describe("a request during a reconnect's adoption of the daemon's list (#1169)",
 		const [id] = [...h.ctx.channels.keys()];
 		if (id === undefined) throw new Error("no terminal");
 
-		void h.sm.handleAttach(h.window.id, id);
+		const attaching = h.sm.handleAttach(h.window.id, id);
 		await new Promise((resolve) => setTimeout(resolve, 100));
 		h.sm.handleDetach(h.window.id, id);
 		h.remote.releaseList();
 		await adoption;
-		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(await attaching).toBe(false);
 
 		expect(h.ctx.channels.get(id)?.clients.has(h.window.id)).toBe(false);
 		expect(h.window.attachedChannels.has(id)).toBe(false);
+	});
+
+	it("sends nothing to a client that left while its ATTACH waited for the adoption", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		const { adoption } = await reconnectAdopting(h);
+		const agent = agentOf(h);
+		const [id] = [...h.ctx.channels.keys()];
+		if (agent === undefined || id === undefined) throw new Error("nothing to attach");
+		const sent = vi.spyOn(agent, "send");
+
+		const attaching = h.sm.handleAttach(h.window.id, id);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		h.sm.removeClient(h.window.id);
+		h.remote.releaseList();
+		await adoption;
+
+		expect(await attaching).toBe(false);
+		expect(sent.mock.calls.filter(([frame]) => frame.type === "ATTACH")).toEqual([]);
+	});
+
+	it("starts an ATTACH over when the terminal was replaced while it waited", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		const { adoption } = await reconnectAdopting(h);
+		const agent = agentOf(h);
+		const [id] = [...h.ctx.channels.keys()];
+		const old = id === undefined ? undefined : h.ctx.channels.get(id);
+		if (agent === undefined || id === undefined || old === undefined)
+			throw new Error("no terminal");
+		const sent = vi.spyOn(agent, "send");
+
+		const attaching = h.sm.handleAttach(h.window.id, id);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		const replacement = { ...old, clients: new Set<string>() };
+		h.ctx.channels.set(id, replacement);
+		h.remote.releaseList();
+		await adoption;
+		await until("the ATTACH reaches the agent", () =>
+			sent.mock.calls.some(([frame]) => frame.type === "ATTACH"),
+		);
+		await answered(h, attaching, sent);
+
+		expect(old.clients.has(h.window.id)).toBe(false);
+		expect(replacement.clients.has(h.window.id)).toBe(true);
+		expect(sent.mock.calls.filter(([frame]) => frame.type === "ATTACH")).toHaveLength(1);
 	});
 
 	it("starts a SPAWN on the agent a replacement the adoption started puts in place", async () => {

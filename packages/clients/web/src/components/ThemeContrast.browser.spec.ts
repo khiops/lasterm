@@ -453,11 +453,40 @@ describe("filled controls' contrast (#1173)", () => {
 			if (preview === null) throw new Error("no Add Host preview badge");
 			expect(preview.textContent?.trim()).toBe("PR");
 			expect(getComputedStyle(preview).backgroundColor).toBe("rgb(53, 53, 212)");
+			expect(getComputedStyle(preview).color).toBe("rgb(255, 255, 255)");
 			const ratio = textOnFill(preview, "Add Host preview badge");
 			expect(ratio, `Add Host preview: ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(
 				TEXT_CONTRAST_AA,
 			);
 			await expectFilledButton(".source-tab.active", "Add Host active source tab", "Manual");
+
+			const picked: Host = {
+				id: "prod",
+				type: "ssh",
+				label: "prod",
+				iconType: "auto",
+				color: "#ffe066",
+				trustRemoteHints: "ask",
+				sortOrder: 0,
+				os: null,
+				arch: null,
+				createdAt: "2026-11-23T00:00:00.000Z",
+				updatedAt: "2026-11-23T00:00:00.000Z",
+			};
+			mount(HostModal, { visible: true, editHost: picked }, () => {
+				useHostsStore().hosts = [picked];
+			});
+			useThemeStore().applyTheme(theme);
+			await nextTick();
+			const pickedPreview = document.querySelector(".preview-badge");
+			if (pickedPreview === null) throw new Error("no Edit Host preview badge");
+			expect(pickedPreview.textContent?.trim()).toBe("PR");
+			expect(getComputedStyle(pickedPreview).backgroundColor).toBe("rgb(255, 224, 102)");
+			expect(getComputedStyle(pickedPreview).color).toBe("rgb(0, 0, 0)");
+			const pickedRatio = textOnFill(pickedPreview, "Edit Host preview badge");
+			expect(pickedRatio, `Edit Host preview: ${pickedRatio.toFixed(2)}`).toBeGreaterThanOrEqual(
+				TEXT_CONTRAST_AA,
+			);
 		});
 
 		it(`reads every remaining changed dialog control in ${name}`, async () => {

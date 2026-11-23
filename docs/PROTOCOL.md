@@ -291,6 +291,17 @@ hub (`AGENT_CHANNEL_STATE`, § 3.16) and does not count among the channels other
 hubs hold (`other_owner_channels`, § 3.16, § 3.17): the hub that destroyed it
 let it go.
 
+From its DESTROY on, a destroyed workload's reader
+sends nothing but its CHANNEL_EXIT: no OUTPUT, LOG, title, directory, bell,
+notification or snapshot reply (an ATTACH reaching it then gets
+`CHANNEL_NOT_FOUND`) (#1121). The SPAWN_OK
+of a SPAWN of the id handled after that DESTROY comes after every frame that
+workload sent before it, when that connection is its owner's current one; no
+order is promised against a refusal (SPAWN_ERR), as for the exit. A kill or a
+session close therefore also drops the destroyed shell's last output. The agent
+ending (STOP, a signal) is not a DESTROY: its terminals keep speaking until
+their exit.
+
 The hub, which sent the DESTROY, does not apply that exit while the restart can
 still succeed. It drops it once the restart's SPAWN_OK says a new workload holds
 the id; otherwise it records it as the terminal's end, with `end_reason:
@@ -298,7 +309,9 @@ the id; otherwise it records it as the terminal's end, with `end_reason:
 quits (§ 4.7). An exit that comes only after the restart failed is recorded the
 same way. An agent older than this ordering may send the destroyed shell's exit after
 the SPAWN_OK; the hub then reads it as the new run's end, until that agent is
-replaced (SPEC.md § 3.3, #805).
+replaced (SPEC.md § 3.3, #805). Such an agent may likewise send the destroyed
+shell's last output, title or directory after the SPAWN_OK, which the hub then
+shows in the new run (#1121).
 
 **The environment a terminal starts with (`env-modes`, #576).** The agent builds it whole and
 starts the PTY from a cleared environment, in this order:

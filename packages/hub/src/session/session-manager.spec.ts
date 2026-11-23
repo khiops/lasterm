@@ -11676,7 +11676,11 @@ describe("SessionManager — an answer about a terminal started again since (#59
 		await flushImmediate();
 
 		expectRunning(window, asked);
-		// The attach that waited was answered as ended, and asked the daemon nothing.
+		// The attach that waited was answered as ended (the list judged it so)...
+		expect(window).toContainEqual(
+			expect.objectContaining({ type: "ERROR", code: "CHANNEL_DEAD", channelId: asked }),
+		);
+		// ...and asked the daemon nothing.
 		expect(
 			daemon.sent("ATTACH").filter((m) => (m as { channelId?: string }).channelId === asked),
 		).toEqual([]);

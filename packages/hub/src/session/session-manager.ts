@@ -1335,16 +1335,6 @@ export class SessionManager {
 				} satisfies ErrorMessage);
 				return null;
 			}
-			if (this.hostIsBeingStopped(hostId)) {
-				client.send({
-					type: "ERROR",
-					code: ErrorCode.HOST_BUSY,
-					message: "This host's agent is being stopped.",
-					hostId,
-					...(reuseChannelId !== undefined && { channelId: reuseChannelId }),
-				});
-				return null;
-			}
 		}
 
 		// Its user disconnected it (#648). A start nobody asked for waits for
@@ -2086,10 +2076,17 @@ export class SessionManager {
 		const adoption =
 			adopting === undefined ? undefined : this.lifecycle.adoptionSettled(adopting.hostId);
 		if (adoption !== undefined) {
-			await Promise.race([
-				adoption.catch(() => undefined),
-				new Promise((resolve) => setTimeout(resolve, SessionManager.ATTACH_RECONNECT_BUDGET)),
-			]);
+			let budget: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await Promise.race([
+					adoption.catch(() => undefined),
+					new Promise((resolve) => {
+						budget = setTimeout(resolve, SessionManager.ATTACH_RECONNECT_BUDGET);
+					}),
+				]);
+			} finally {
+				clearTimeout(budget);
+			}
 		}
 		const client = this.ctx.clients.get(clientId);
 		if (!client) return false;

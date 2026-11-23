@@ -237,7 +237,16 @@ function serveAgent(stream: Stream, remote?: MockHost): void {
 				}
 				if (remote.holdsList) {
 					remote.listStream = stream;
-					remote.releaseList = () => listHeld(stream, remote);
+					// A daemon that refuses says so when it answers, whenever that is.
+					remote.releaseList = () => {
+						if (!remote.refusesAuth) return listHeld(stream, remote);
+						stream.write(
+							Buffer.from(
+								encodeFrame({ type: "ERROR", code: "AUTH_INVALID", message: "not this hub" }),
+							),
+						);
+						stream.end();
+					};
 					continue;
 				}
 				listHeld(stream, remote);
@@ -2900,5 +2909,105 @@ describe("a request during a reconnect's adoption of the daemon's list (#1169)",
 		await until("the ATTACH reaches the agent", () =>
 			sent.mock.calls.some(([frame]) => frame.type === "ATTACH"),
 		);
+	});
+
+	it("answers a SPAWN and ends a reconnect when the daemon refuses the hub in the adoption", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		const { adoption } = await reconnectAdopting(h);
+		const [id] = [...h.ctx.channels.keys()];
+		const reconnect = lifecycleOf(h).onReconnectAgent;
+		if (id === undefined || reconnect === undefined) throw new Error("nothing to spawn on");
+		// An ended terminal, which a SPAWN may bring back under its id.
+		const ended = h.ctx.channels.get(id);
+		if (ended === undefined) throw new Error("terminal not tracked");
+		ended.status = "dead";
+		const spawning = h.sm.handleSpawn(h.window.id, {
+			type: "SPAWN",
+			hostId: h.host.id,
+			reuseChannelId: id,
+			requestId: "spawn-real-refusal",
+		});
+		const reconnecting = reconnect(h.host.id);
+		expect(await settledSoon(spawning)).toBe(false);
+
+		h.remote.refusesAuth = true;
+		h.remote.releaseList();
+		await adoption.catch(() => undefined);
+
+		expect(await spawning).toBeNull();
+		expect(await reconnecting).toBe(false);
+		expect(
+			errorsHeard(h).filter(
+				(error) => error.code === "AGENT_REFUSED_HUB" && error.requestId === "spawn-real-refusal",
+			),
+		).toEqual([
+			expect.objectContaining({
+				hostId: h.host.id,
+				channelId: id,
+				message: expect.stringMatching(/^The agent on this host refused this hub\./),
+			}),
+		]);
+	});
+
+	it("turns a SPAWN and a reconnect away when the host's agent is stopped during the wait", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		const { adoption } = await reconnectAdopting(h);
+		const reconnect = lifecycleOf(h).onReconnectAgent;
+		if (reconnect === undefined) throw new Error("no reconnect");
+		const spawning = h.sm.handleSpawn(h.window.id, {
+			type: "SPAWN",
+			hostId: h.host.id,
+			requestId: "spawn-while-stopping",
+		});
+		const reconnecting = reconnect(h.host.id);
+		expect(await settledSoon(spawning)).toBe(false);
+
+		h.ctx.stoppingAgents.add(h.host.id);
+		h.remote.releaseList();
+		await adoption;
+
+		expect(await spawning).toBeNull();
+		expect(await reconnecting).toBe(false);
+		expect(errorsHeard(h).filter((error) => error.requestId === "spawn-while-stopping")).toEqual([
+			expect.objectContaining({ code: "HOST_BUSY", hostId: h.host.id }),
+		]);
+		h.ctx.stoppingAgents.delete(h.host.id);
+	});
+
+	it("goes on with an ATTACH when the adoption it waited for refuses", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		const agent = await connected(h);
+		const [id] = terminalsOn(h, 1);
+		if (id === undefined) throw new Error("no terminal");
+		vi.spyOn(lifecycleOf(h), "adoptionSettled").mockReturnValue(
+			Promise.reject(new AgentRefusedHub("not this hub")),
+		);
+		const sent = vi.spyOn(agent, "send");
+
+		void h.sm.handleAttach(h.window.id, id);
+
+		await until("the ATTACH reaches the agent", () =>
+			sent.mock.calls.some(([frame]) => frame.type === "ATTACH"),
+		);
+	});
+
+	it("goes on with an ATTACH once the budget is spent when the adoption never settles", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		const agent = await connected(h);
+		const [id] = terminalsOn(h, 1);
+		if (id === undefined) throw new Error("no terminal");
+		vi.spyOn(lifecycleOf(h), "adoptionSettled").mockReturnValue(new Promise<void>(() => undefined));
+		const sent = vi.spyOn(agent, "send");
+		const manager = SessionManager as unknown as { ATTACH_RECONNECT_BUDGET: number };
+		const budget = manager.ATTACH_RECONNECT_BUDGET;
+		manager.ATTACH_RECONNECT_BUDGET = 100;
+		try {
+			void h.sm.handleAttach(h.window.id, id);
+			await until("the ATTACH reaches the agent", () =>
+				sent.mock.calls.some(([frame]) => frame.type === "ATTACH"),
+			);
+		} finally {
+			manager.ATTACH_RECONNECT_BUDGET = budget;
+		}
 	});
 });

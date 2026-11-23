@@ -599,7 +599,12 @@ const { tabTitle: paneTitle } = useTabTitle(
 	effectiveChannelId,
 	toRef(channelsStore, 'channels'),
 	currentDynamicTitle,
-	{ index: toRef(channelsStore, 'channelIndex') },
+	{
+		index: toRef(channelsStore, 'channelIndex'),
+		// A settings change renames the pane at once (#1110); the ref is what
+		// makes the new Max Title Length reach a pane already on screen.
+		titleConfig: computed(() => configStore.uiConfig.title),
+	},
 );
 
 // ---------------------------------------------------------------------------

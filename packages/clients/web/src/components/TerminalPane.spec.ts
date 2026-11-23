@@ -5822,3 +5822,54 @@ describe("TerminalPane recording (#80)", () => {
 		expect(button("Start recording")).toBeUndefined();
 	});
 });
+
+// The pane's name is the same title the tab shows, so Max Title Length has to
+// reach it too (#1110). It used to stop at the tab bar: the pane above a title
+// setting cut at 50 whatever the setting said.
+describe("TerminalPane pane title length (#1110)", () => {
+	const LONG_TITLE = "a very long pane title that runs past the limit";
+
+	/** Open a pane over T, which the list names LONG_TITLE. */
+	async function openTitled(): Promise<void> {
+		const channel = ref(T);
+		mountPane(channel, "live", {
+			setUp: () => {
+				useChannelsStore().channels = [listed(T, "live", { displayTitle: LONG_TITLE })];
+			},
+		});
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "LIVE", { dynamicTitle: LONG_TITLE });
+		await settle();
+	}
+
+	it("cuts the pane title at the configured Max Title Length", async () => {
+		const channel = ref(T);
+		mountPane(channel, "live", {
+			setUp: () => {
+				useChannelsStore().channels = [listed(T, "live", { displayTitle: LONG_TITLE })];
+			},
+		});
+		useConfigStore().uiConfig = {
+			...useConfigStore().uiConfig,
+			title: { ...useConfigStore().uiConfig.title, maxLength: 12 },
+		};
+		await vi.waitFor(() => expect(attaches()).toHaveLength(1));
+		attachOk(T, "LIVE", { dynamicTitle: LONG_TITLE });
+		await settle();
+
+		expect(paneTitleText()).toBe("a very long…");
+	});
+
+	it("renames the pane at once when Max Title Length changes", async () => {
+		await openTitled();
+		expect(paneTitleText()).toBe(LONG_TITLE);
+
+		useConfigStore().uiConfig = {
+			...useConfigStore().uiConfig,
+			title: { ...useConfigStore().uiConfig.title, maxLength: 12 },
+		};
+		await settle();
+
+		expect(paneTitleText()).toBe("a very long…");
+	});
+});

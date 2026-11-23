@@ -2949,6 +2949,17 @@ describe("a request during a reconnect's adoption of the daemon's list (#1169)",
 		expect(h.window.attachedChannels.has(id)).toBe(false);
 	});
 
+	it("answers a daemon-only Connect busy, not connected, during a reconnect's adoption", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		const { adoption } = await reconnectAdopting(h);
+
+		expect(keepAndConnect(h).kind).toBe("connecting-already");
+
+		h.remote.releaseList();
+		await adoption;
+		expect(keepAndConnect(h).kind).toBe("connected");
+	});
+
 	it("sends nothing to a client that left while its ATTACH waited for the adoption", async () => {
 		const h = await hubWith({ daemon: true, os: "linux" });
 		const { adoption } = await reconnectAdopting(h);

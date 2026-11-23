@@ -3492,7 +3492,13 @@ export class SessionManager {
 			if (host.os === null || host.os === undefined) return { kind: "daemon-not-possible" };
 			// An agent published while its acquisition is open is still being taken up
 			// (#1165): another connection is under way, whatever the agent says.
-			if (this.ctx.acquisitions.has(hostId)) return { kind: "connecting-already" };
+			// So is one a reconnect published, whose daemon's list is being taken up (#1169).
+			if (
+				this.ctx.acquisitions.has(hostId) ||
+				this.lifecycle.adoptionSettled(hostId) !== undefined
+			) {
+				return { kind: "connecting-already" };
+			}
 			const agent = this.ctx.agents.get(hostId);
 			if (agent?.connected === true) {
 				if (!(agent instanceof SshAgent) || !agent.usedRemoteDaemon) {

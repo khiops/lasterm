@@ -15,7 +15,7 @@
 				<div v-if="form.label.trim()" class="host-preview">
 					<div
 						class="preview-badge"
-						:style="{ background: hostColor }"
+						:style="{ background: hostColor, color: readableForeground(hostColor) }"
 					>
 						<img
 							v-if="form.iconType === 'image' && form.iconValue"
@@ -653,6 +653,7 @@ import { type Host, isPlainObject, parseJumpSpec, type VisualProfile } from "@la
 import { useHostForm } from "../composables/useHostForm.js";
 import { getHostColor } from "../composables/useHostIcon.js";
 import { useHostsStore } from "../stores/hosts.js";
+import { readableForeground } from "../stores/theme.js";
 import { DEFAULT_VISUAL_PROFILE } from "../utils/visual-presets.js";
 import { useAuthStore } from "../stores/auth.js";
 import { hubFetch } from "../utils/hub-fetch.js";

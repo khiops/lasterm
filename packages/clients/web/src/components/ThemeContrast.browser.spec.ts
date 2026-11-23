@@ -39,9 +39,11 @@ vi.mock("../utils/asset-holder.js", async (importOriginal) => ({
 	acquireAsset: async () => ({ url: whiteWallpaper, release() {} }),
 }));
 
-import { type App, createApp, h, nextTick } from "vue";
+import { type App, createApp, h, nextTick, ref } from "vue";
 import { mountWindow, unmountWindow } from "../App.fixture.js";
+import { getColorFromLabel } from "../composables/useHostIcon.js";
 import "../styles/base.css";
+import { useAgentVerifyStore } from "../stores/agent-verify.js";
 import { useAuthStore } from "../stores/auth.js";
 import { useChannelsStore } from "../stores/channels.js";
 import { useConfigStore } from "../stores/config.js";
@@ -51,14 +53,22 @@ import { useNotificationStore } from "../stores/notifications.js";
 import { contrastRatio, TEXT_CONTRAST_AA, useThemeStore } from "../stores/theme.js";
 import { useWriteLockStore } from "../stores/writelock.js";
 import { setAssetTokenForTests } from "../utils/hub-url.js";
+import AgentBinaryVerify from "./AgentBinaryVerify.vue";
+import AgentDeployFailed from "./AgentDeployFailed.vue";
+import BatchImportModal from "./BatchImportModal.vue";
 import ChannelItem from "./ChannelItem.vue";
 import ChannelSidebar from "./ChannelSidebar.vue";
+import CloseModal from "./CloseModal.vue";
 import ConfigureCommandDialog from "./ConfigureCommandDialog.vue";
+import ConfirmDialog from "./ConfirmDialog.vue";
+import DeleteHostModal from "./DeleteHostModal.vue";
 import GroupActionDialog from "./GroupActionDialog.vue";
 import HostBadge from "./HostBadge.vue";
 import HostKeyWarning from "./HostKeyWarning.vue";
+import HostModal from "./HostModal.vue";
 import HostRail from "./HostRail.vue";
 import HubExitedModal from "./HubExitedModal.vue";
+import PairingCodeGenerator from "./PairingCodeGenerator.vue";
 import WallpaperCategory from "./settings/categories/WallpaperCategory.vue";
 import TabBar from "./TabBar.vue";
 import TitleBar from "./TitleBar.vue";
@@ -180,6 +190,21 @@ function mount(
 	app.mount(root);
 }
 
+async function mountBatchImport(): Promise<void> {
+	app?.unmount();
+	document.body.replaceChildren();
+	const pinia = createPinia();
+	setActivePinia(pinia);
+	const show = ref(false);
+	const root = document.createElement("div");
+	document.body.appendChild(root);
+	app = createApp({ render: () => h(BatchImportModal, { show: show.value }) });
+	app.use(pinia);
+	app.mount(root);
+	show.value = true;
+	await nextTick();
+}
+
 async function expectHoverContrast(el: Element, what: string): Promise<void> {
 	await userEvent.hover(el);
 	expect(el.matches(":hover")).toBe(true);
@@ -188,6 +213,16 @@ async function expectHoverContrast(el: Element, what: string): Promise<void> {
 	const ratio = textOnGround(el, `hovered ${what}`);
 	expect(ratio, `hovered ${what}: ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(TEXT_CONTRAST_AA);
 	await userEvent.unhover(document.body);
+}
+
+async function expectFilledButton(selector: string, what: string, text: string): Promise<void> {
+	const button = document.querySelector<HTMLButtonElement>(selector);
+	if (button === null) throw new Error(`no ${what}`);
+	expect(button.disabled, `${what} is enabled`).toBe(false);
+	expect(button.textContent?.trim()).toBe(text);
+	const ratio = textOnFill(button, what);
+	expect(ratio, `${what}: ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(TEXT_CONTRAST_AA);
+	await expectHoverContrast(button, what);
 }
 
 describe("filled controls' contrast (#1173)", () => {
@@ -407,6 +442,139 @@ describe("filled controls' contrast (#1173)", () => {
 			);
 		});
 
+		it(`reads the Add Host preview against its own colour in ${name}`, async () => {
+			mount(HostModal, { visible: true, editHost: null });
+			useThemeStore().applyTheme(theme);
+			const label = document.querySelector('input[placeholder="prod-server"]');
+			if (label === null) throw new Error("no host label field");
+			await userEvent.fill(label, "prod");
+			await nextTick();
+			const preview = document.querySelector(".preview-badge");
+			if (preview === null) throw new Error("no Add Host preview badge");
+			expect(preview.textContent?.trim()).toBe("PR");
+			expect(getComputedStyle(preview).backgroundColor).toBe("rgb(53, 53, 212)");
+			const ratio = textOnFill(preview, "Add Host preview badge");
+			expect(ratio, `Add Host preview: ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(
+				TEXT_CONTRAST_AA,
+			);
+			await expectFilledButton(".source-tab.active", "Add Host active source tab", "Manual");
+		});
+
+		it(`reads every remaining changed dialog control in ${name}`, async () => {
+			const apply = async () => {
+				useThemeStore().applyTheme(theme);
+				await nextTick();
+			};
+			const host: Host = {
+				id: "local",
+				type: "local",
+				label: "local",
+				iconType: "auto",
+				trustRemoteHints: "apply",
+				sortOrder: 0,
+				os: "linux",
+				arch: "x64",
+				createdAt: "2026-11-23T00:00:00.000Z",
+				updatedAt: "2026-11-23T00:00:00.000Z",
+			};
+
+			mount(ConfirmDialog, {
+				visible: true,
+				title: "Delete",
+				message: "Delete this item",
+				confirmLabel: "Delete",
+			});
+			await apply();
+			await expectFilledButton(".confirm-actions .btn-danger", "ConfirmDialog danger", "Delete");
+
+			mount(CloseModal, { visible: true, busy: false });
+			await apply();
+			await expectFilledButton(
+				".close-actions .btn-danger",
+				"CloseModal danger",
+				"Quit completely",
+			);
+
+			mount(DeleteHostModal, { visible: true, hostId: host.id }, () => {
+				useHostsStore().hosts = [host];
+			});
+			await apply();
+			await expectFilledButton(
+				".delete-host-modal .btn-danger",
+				"DeleteHostModal danger",
+				"Delete",
+			);
+
+			mount(HostModal, { visible: true, editHost: host }, () => {
+				useHostsStore().hosts = [host];
+			});
+			await apply();
+			await expectFilledButton(".host-modal .btn-primary", "HostModal save", "Save");
+
+			vi.spyOn(globalThis, "fetch").mockResolvedValue(
+				Response.json({
+					entries: [
+						{
+							name: "app",
+							hostname: "10.0.0.8",
+							port: 22,
+							user: null,
+							identity_file: null,
+							proxy_jump: null,
+							is_git_host: false,
+						},
+					],
+					has_include: false,
+				}),
+			);
+			await mountBatchImport();
+			await apply();
+			await vi.waitFor(() => {
+				const button = document.querySelector<HTMLButtonElement>(
+					".batch-import-modal .btn-primary",
+				);
+				if (button === null || button.disabled) throw new Error("batch import is not ready");
+			});
+			await expectFilledButton(
+				".batch-import-modal .btn-primary",
+				"BatchImportModal import",
+				"Import 1 host",
+			);
+
+			mount(PairingCodeGenerator);
+			await apply();
+			await expectFilledButton(
+				".gen-btn",
+				"PairingCodeGenerator generate",
+				"Generate Pairing Code",
+			);
+
+			mount(AgentBinaryVerify, undefined, () => {
+				useAgentVerifyStore().handleAgentVerify({
+					type: "AGENT_BINARY_VERIFY",
+					promptId: "prompt-1",
+					hostId: "host-1",
+					hostname: "build.example",
+					remotePath: "/usr/bin/lasterm-agent",
+					remoteSha256: "abc123",
+					os: "linux",
+					arch: "x64",
+					mismatch: false,
+				});
+			});
+			await apply();
+			await expectFilledButton(".abv-accept", "AgentBinaryVerify accept", "Trust Permanently");
+
+			mount(AgentDeployFailed, undefined, () => {
+				useAgentVerifyStore().handleDeployError(
+					"Agent binary not found in cache: /tmp/lasterm-agent-linux-x64. Download it.",
+					"host-1",
+				);
+			});
+			await apply();
+			await expectFilledButton(".adf-retry", "AgentDeployFailed retry", "Try Again");
+		});
+
 		it(`reads the host rail's filled badges in ${name}`, async () => {
 			mount(HostRail, { recordingCount: 3 }, () => {
 				const hostsStore = useHostsStore();
@@ -472,6 +640,91 @@ describe("filled controls' contrast (#1173)", () => {
 			expect(sharedRatio, `shared host initials: ${sharedRatio.toFixed(2)}`).toBeGreaterThanOrEqual(
 				TEXT_CONTRAST_AA,
 			);
+		});
+
+		it(`reads light and fallback host initials in ${name}`, async () => {
+			for (const [variant, color] of [
+				["light", "#ffe066"],
+				["fallback", undefined],
+			] as const) {
+				const host: Host = {
+					id: "build",
+					type: "ssh",
+					label: "Build",
+					iconType: "auto",
+					...(color === undefined ? {} : { color }),
+					trustRemoteHints: "ask",
+					sortOrder: 0,
+					os: null,
+					arch: null,
+					createdAt: "2026-11-23T00:00:00.000Z",
+					updatedAt: "2026-11-23T00:00:00.000Z",
+				};
+				const expectedGround = color ?? getColorFromLabel(host.label);
+				const groundProbe = document.createElement("span");
+				groundProbe.style.backgroundColor = expectedGround;
+				const expectedCssGround = groundProbe.style.backgroundColor;
+
+				mount(HostRail, { recordingCount: 0 }, () => {
+					const hostsStore = useHostsStore();
+					hostsStore.hosts = [host];
+					vi.spyOn(hostsStore, "fetchHosts").mockResolvedValue();
+				});
+				useThemeStore().applyTheme(theme);
+				await nextTick();
+				const railInitials = document.querySelector(".badge-initials");
+				if (railInitials === null) throw new Error(`no ${variant} host-rail initials`);
+				expect(railInitials.parentElement?.style.backgroundColor).toBe(expectedCssGround);
+				const railRatio = textOnParentFill(railInitials, `${variant} host-rail initials`);
+				expect(railRatio, `${variant} host-rail: ${railRatio.toFixed(2)}`).toBeGreaterThanOrEqual(
+					TEXT_CONTRAST_AA,
+				);
+
+				mount(HostBadge, { host });
+				useThemeStore().applyTheme(theme);
+				await nextTick();
+				const sharedInitials = document.querySelector(".host-badge__text");
+				if (sharedInitials === null) throw new Error(`no ${variant} shared-host initials`);
+				expect(sharedInitials.parentElement?.style.backgroundColor).toBe(expectedCssGround);
+				const sharedRatio = textOnParentFill(sharedInitials, `${variant} shared-host initials`);
+				expect(
+					sharedRatio,
+					`${variant} shared-host: ${sharedRatio.toFixed(2)}`,
+				).toBeGreaterThanOrEqual(TEXT_CONTRAST_AA);
+
+				mount(
+					TabBar,
+					{
+						tabs: [{ id: "tab-1" }],
+						activeTabIndex: 0,
+						getTabLabel: () => "Build terminal",
+						getActiveChannelId: () => "channel-1",
+						getTabChannelIds: () => ["channel-1"],
+						visibleTabIds: null,
+					},
+					() => {
+						useHostsStore().hosts = [host];
+						const channelsStore = useChannelsStore();
+						channelsStore.activeHostId = "local";
+						channelsStore.registerChannelHost("channel-1", host.id);
+						const configStore = useConfigStore();
+						configStore.uiConfig = {
+							...configStore.uiConfig,
+							tabs: { ...configStore.uiConfig.tabs, hostMarker: "initials" },
+						};
+					},
+				);
+				useThemeStore().applyTheme(theme);
+				await nextTick();
+				const tabInitials = document.querySelector(".tab__host-initials");
+				if (tabInitials === null) throw new Error(`no ${variant} tab-host initials`);
+				const tab = tabInitials.closest<HTMLElement>(".tab");
+				expect(tab?.style.getPropertyValue("--tab-host-color")).toBe(expectedGround);
+				const tabRatio = textOnFill(tabInitials, `${variant} tab-host initials`);
+				expect(tabRatio, `${variant} tab-host: ${tabRatio.toFixed(2)}`).toBeGreaterThanOrEqual(
+					TEXT_CONTRAST_AA,
+				);
+			}
 		});
 
 		it(`reads the sidebar's empty state in ${name}`, async () => {

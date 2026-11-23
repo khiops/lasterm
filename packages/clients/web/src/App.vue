@@ -86,6 +86,7 @@
 			@disconnect="onDisconnectHost"
 			@stop-agent="onStopAgent"
 			@keep-agent="onKeepAgent"
+			@replace-agent="onReplaceAgent"
 			@new-group="onNewGroupForHost"
 		/>
 
@@ -506,6 +507,7 @@ import { hubUnreachable, whyRefused } from './utils/hub-answer.js';
 import { hubBaseUrl, initAssetAccess, initHubPort } from './utils/hub-url.js';
 import { WALLPAPER_FADE_MS } from './composables/useWallpaper.js';
 import { hubFetch } from './utils/hub-fetch.js';
+import { type ReplaceAgentResponse, replaceAgentQuestion, replaceAgentWithConsent } from './utils/replace-agent.js';
 import {
 	type AppActionId,
 	movesKeyboard,
@@ -2061,6 +2063,41 @@ async function onStopAgent(hostId: string): Promise<void> {
 				toastStore.show('error', result.outcome.message);
 			}
 		}
+	} catch (err) {
+		toastStore.show('error', hubUnreachable(err));
+	}
+}
+
+/**
+ * Update the agent serving a host (#1185): asked first, since the agent's
+ * terminals end with it; the hub's own wider questions follow its answer.
+ */
+async function onReplaceAgent(hostId: string): Promise<void> {
+	const host = hostsStore.hosts.find((h) => h.id === hostId);
+	const outdated = hostsStore.getOutdatedAgent(hostId);
+	if (!host || outdated === null) return;
+	try {
+		if (!(await askToConfirm(replaceAgentQuestion(host.label, outdated)))) return;
+		const message = await replaceAgentWithConsent({
+			post: async (consent) => {
+				const response = await hubFetch(`${hubBaseUrl()}/api/hosts/${hostId}/agent/replace`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						Authorization: `Bearer ${authStore.token ?? ''}`,
+					},
+					body: JSON.stringify(consent),
+				});
+				return {
+					ok: response.ok,
+					status: response.status,
+					body: (await response.json()) as ReplaceAgentResponse['body'],
+				};
+			},
+			confirm: (question) =>
+				askToConfirm({ title: `Update the agent on ${host.label}?`, message: question, confirmLabel: 'Replace' }),
+		});
+		toastStore.show('info', message);
 	} catch (err) {
 		toastStore.show('error', hubUnreachable(err));
 	}

@@ -291,7 +291,7 @@ describe("the status line", () => {
 	it("says why it cannot follow, and where it opened instead", () => {
 		// No agent ever said a directory: one that does not report it.
 		expect(texts({ start: "fallback" })).toEqual([
-			"Update the agent on raspberrypi to follow this terminal's directory",
+			"Update the agent on raspberrypi (host menu › Update agent) to follow this terminal's directory",
 			"Showing the folder set for unknown directories",
 		]);
 		const unknown = { cwd: null, source: "process" as const };

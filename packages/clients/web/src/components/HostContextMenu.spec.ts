@@ -63,6 +63,7 @@ async function openMenu(hostId: string): Promise<void> {
 				onDisconnect: record("disconnect"),
 				onStopAgent: record("stop-agent"),
 				onKeepAgent: record("keep-agent"),
+				onReplaceAgent: record("replace-agent"),
 				onClose: () => emitted.push(["close", hostId]),
 			}),
 	});
@@ -343,4 +344,42 @@ describe("Keep the agent left here and connect on a host the hub lost (#701)", (
 			expect(offered()).toContain("keep-agent");
 		},
 	);
+});
+
+describe("the host menu's Update agent entry (#1185)", () => {
+	const OLDER = { running: "0.15.2", expected: "0.22.1" };
+
+	it("offers it to an SSH host served by an older agent, after the connection items", async () => {
+		sessionIs("active");
+		useHostsStore().rememberOutdatedAgent("pi", OLDER);
+		await openMenu("pi");
+		expect(offered()).toEqual(["reconnect", "disconnect", "replace-agent"]);
+		expect(document.body.querySelector('[data-action="replace-agent"]')?.textContent?.trim()).toBe(
+			"Update agent…",
+		);
+	});
+
+	it("offers it to none served by a current agent", async () => {
+		sessionIs("active");
+		await openMenu("pi");
+		expect(offered()).toEqual(["reconnect", "disconnect"]);
+	});
+
+	it("does not offer it on the local host, where it would end nothing", async () => {
+		useHostsStore().rememberOutdatedAgent("local", OLDER);
+		await openMenu("local");
+		expect(offered()).toEqual([]);
+	});
+
+	it("sends it for its host and closes", async () => {
+		useHostsStore().rememberOutdatedAgent("pi", OLDER);
+		await openMenu("pi");
+
+		document.body.querySelector<HTMLElement>('[data-action="replace-agent"]')?.click();
+
+		expect(emitted).toEqual([
+			["replace-agent", "pi"],
+			["close", "pi"],
+		]);
+	});
 });

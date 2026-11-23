@@ -174,7 +174,7 @@ describe("where the panel opens", () => {
 		expect(lastListed()).toEqual([A, undefined, false]);
 		expect(rows()).toEqual(["in.txt"]);
 		expect(status()).toContain(
-			"Update the agent on raspberrypi to follow this terminal's directory",
+			"Update the agent on raspberrypi (host menu › Update agent) to follow this terminal's directory",
 		);
 		expect(status()).toContain("Showing the folder set for unknown directories");
 		expect(followToggle().getAttribute("aria-pressed")).toBe("true");

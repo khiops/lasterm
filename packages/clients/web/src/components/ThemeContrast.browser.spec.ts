@@ -895,3 +895,46 @@ describe("filled controls' contrast (#1173)", () => {
 		});
 	}
 });
+
+/** WCAG 1.4.11: the least contrast of a graphic that carries meaning. */
+const GRAPHIC_CONTRAST = 3;
+
+describe("the older-agent mark's contrast (#1184)", () => {
+	for (const [name, theme] of Object.entries(BUNDLED_THEMES)) {
+		it(`reads the ring around a host's dot in ${name}`, async () => {
+			mount(HostRail, { recordingCount: 0 }, () => {
+				const hostsStore = useHostsStore();
+				const host: Host = {
+					id: "pi",
+					type: "ssh",
+					label: "Pi",
+					iconType: "auto",
+					trustRemoteHints: "ask",
+					sortOrder: 0,
+					os: null,
+					arch: null,
+					createdAt: "2026-11-24T00:00:00.000Z",
+					updatedAt: "2026-11-24T00:00:00.000Z",
+				};
+				hostsStore.hosts = [host];
+				vi.spyOn(hostsStore, "fetchHosts").mockResolvedValue();
+				hostsStore.rememberOutdatedAgent("pi", { running: "0.15.2", expected: "0.22.1" });
+			});
+			useThemeStore().applyTheme(theme);
+			await nextTick();
+
+			const dot = document.querySelector(".status-dot--older-agent");
+			if (dot === null) throw new Error("no older-agent dot");
+			const ring = getComputedStyle(dot, "::after");
+			expect([ring.borderTopWidth, ring.outlineWidth]).toEqual(["2px", "1px"]);
+			// The ring's edge: the warning colour inside it need not read on every rail.
+			const ratio = contrastRatio(
+				solid(ring.outlineColor, "ring edge"),
+				solid(getComputedStyle(dot).borderTopColor, "rail ground"),
+			);
+			expect(ratio, `ring on the rail: ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(
+				GRAPHIC_CONTRAST,
+			);
+		});
+	}
+});

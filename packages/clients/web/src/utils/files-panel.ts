@@ -392,7 +392,7 @@ export function statusLines(facts: StatusFacts): StatusLine[] {
 		if (live === undefined) {
 			lines.push({
 				id: "unknown",
-				text: `Update the agent on ${facts.hostLabel} to follow this terminal's directory`,
+				text: `Update the agent on ${facts.hostLabel} (host menu › Update agent) to follow this terminal's directory`,
 				tone: "info",
 			});
 		} else if (facts.shell !== undefined && POWERSHELL.test(facts.shell.trim())) {

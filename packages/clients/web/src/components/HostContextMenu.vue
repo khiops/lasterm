@@ -51,6 +51,15 @@
 				>
 					Keep the agent left here and connect
 				</button>
+				<!-- An agent from before an update, kept because it holds terminals (#1185). -->
+				<button
+					v-if="canReplaceAgent"
+					class="ctx-item"
+					data-action="replace-agent"
+					@click="onReplaceAgent"
+				>
+					Update agent…
+				</button>
 
 				<div class="ctx-sep" />
 
@@ -123,6 +132,7 @@ const emit = defineEmits<{
 	(e: "disconnect", hostId: string): void;
 	(e: "stop-agent", hostId: string): void;
 	(e: "keep-agent", hostId: string): void;
+	(e: "replace-agent", hostId: string): void;
 	(e: "new-group", hostId: string): void;
 }>();
 
@@ -159,6 +169,11 @@ const canKeepAgent = computed(
 		host.value.os !== undefined &&
 		host.value.sshRemoteDaemon !== true &&
 		!hostsStore.isHostConnected(props.hostId),
+);
+
+/** An SSH host served by an agent older than the hub's (#1185). */
+const canReplaceAgent = computed(
+	() => host.value?.type === "ssh" && hostsStore.getOutdatedAgent(props.hostId) !== null,
 );
 
 const groups = computed(() => hostsStore.getHostGroups());
@@ -216,6 +231,11 @@ function onStopAgent(): void {
 
 function onKeepAgent(): void {
 	if (host.value) emit("keep-agent", host.value.id);
+	emit("close");
+}
+
+function onReplaceAgent(): void {
+	if (host.value) emit("replace-agent", host.value.id);
 	emit("close");
 }
 

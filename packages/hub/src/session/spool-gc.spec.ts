@@ -53,7 +53,7 @@ describe("SpoolGarbageCollector (#726)", () => {
 		gc = new SpoolGarbageCollector(
 			spoolDal,
 			metaDal,
-			{ maxSizePerChannelMb: 10, deadRetentionHours: 24, ...config },
+			{ maxSizePerChannelMb: 10, deadRetentionHours: 24, recordingMaxTotalMb: 1024, ...config },
 			options,
 		);
 		return gc;
@@ -262,6 +262,7 @@ describe("SpoolGarbageCollector (#726)", () => {
 		gc = new SpoolGarbageCollector(spoolDal, meta, {
 			maxSizePerChannelMb: 10,
 			deadRetentionHours: 24,
+			recordingMaxTotalMb: 1024,
 		});
 		const stats = await gc.collect();
 

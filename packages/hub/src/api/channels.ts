@@ -33,6 +33,7 @@ export function registerChannelRoutes(
 				const row = toSnakeCase(listedChannel(ch)) as Record<string, unknown>;
 				row.display_title = sessionManager.resolveDisplayTitle(ch.id);
 				row.host_id = host_id ?? hostOf?.get(ch.id) ?? null;
+				row.recording_id = sessionManager.recordingIdOf(ch.id);
 				return row;
 			});
 		},

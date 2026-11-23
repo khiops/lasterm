@@ -614,11 +614,26 @@ export async function registerWsRoutes(
 			}
 		});
 
-		socket.on("close", release);
+		// A socket's end releases what it held, the hub's stop included, whose
+		// shutdown ends the recordings after it. A release step failing on
+		// meta.db (a detach's status write) is logged by its code, and thrown
+		// out of no listener (#80).
+		const releaseEnded = () => {
+			try {
+				release();
+			} catch (err) {
+				server.log.error(
+					{ clientId, code: (err as { code?: unknown } | null)?.code ?? "unknown" },
+					"ws: releasing an ended socket failed",
+				);
+			}
+		};
+
+		socket.on("close", releaseEnded);
 
 		socket.on("error", (err: Error) => {
 			server.log.error({ err }, "WebSocket error");
-			release();
+			releaseEnded();
 		});
 	});
 

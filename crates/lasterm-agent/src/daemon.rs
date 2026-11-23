@@ -5036,6 +5036,10 @@ mod tests {
                 }
                 let answered = spawned(&mut a, restart).await;
                 assert!(
+                    output_of(&answered, "stale-output").contains("OLDMARK1121"),
+                    "what the replaced shell printed before its DESTROY comes before the SPAWN_OK"
+                );
+                assert!(
                     !answered
                         .iter()
                         .any(|frame| is_about(frame, "CWD_CHANGE", "stale-output")

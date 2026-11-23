@@ -326,6 +326,10 @@ export class MetaDAL {
 		return this.channels.updateChannelTitle(id, title);
 	}
 
+	clearRunTitles(channelId: string): void {
+		this.channels.clearRunTitles(channelId);
+	}
+
 	updateDynamicTitle(channelId: string, title: string): void {
 		this.channels.updateDynamicTitle(channelId, title);
 	}

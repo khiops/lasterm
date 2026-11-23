@@ -893,7 +893,7 @@ onMounted(() => {
 .status-dot--older-agent::after {
 	content: "";
 	position: absolute;
-	inset: -5px;
+	inset: -4px;
 	border-radius: 50%;
 	/* The warning colour, edged in the text colour: one of the two reads on any rail. */
 	border: 2px solid var(--nt-badge-warning, #f9e2af);

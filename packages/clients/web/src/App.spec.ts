@@ -55,6 +55,7 @@ import {
 	type WindowSetup,
 } from "./App.fixture.js";
 import { WALLPAPER_FADE_MS } from "./composables/useWallpaper.js";
+import { useHostsStore } from "./stores/hosts.js";
 import { APP_SHORTCUTS, type AppActionId } from "./utils/app-shortcuts.js";
 import { CONFIRMATIONS } from "./utils/confirmations.js";
 
@@ -2510,6 +2511,67 @@ describe("keeping the agent left on a host, from its menu (#701)", () => {
 		expect(
 			hub.rest.filter((c) => c.method === "POST" && c.path === `/api/hosts/${LEFT.id}/connect`),
 		).toEqual([expect.objectContaining({ body: { daemon_only: true, client_id: CLIENT_HERE } })]);
+	});
+});
+
+describe("updating an older agent, from the host's menu (#1185)", () => {
+	const PI: HostRow = {
+		id: "01HZZZZZZZZZZZZZZZZZZZZP01",
+		label: "pi",
+		type: "ssh",
+		os: "linux",
+		ssh_remote_daemon: true,
+	};
+	const REPLACE = `POST /api/hosts/${PI.id}/agent/replace`;
+	const replaces = (hub: FakeHub) =>
+		hub.rest.filter((c) => c.method === "POST" && c.path === `/api/hosts/${PI.id}/agent/replace`);
+	const toasts = () =>
+		[...document.querySelectorAll(".toast-item")].map((el) => [
+			[...el.classList].find((name) => name.startsWith("toast-item--")),
+			el.querySelector(".toast-text")?.textContent?.trim(),
+		]);
+
+	async function openUpdateAgent(): Promise<FakeHub> {
+		const { hub } = await mountWindow({ hosts: [ALPHA, PI] });
+		useHostsStore().rememberOutdatedAgent(PI.id, { running: "0.15.2", expected: "0.22.1" });
+		await rightClick(document.querySelector(`.badge-wrapper[data-host-id="${PI.id}"]`));
+		await click("Update agent…");
+		return hub;
+	}
+
+	it("asks first, naming the host and its terminals, and sends nothing on Cancel", async () => {
+		const hub = await openUpdateAgent();
+		expect(document.querySelector(".confirm-title")?.textContent).toBe("Update the agent on pi?");
+		expect(document.querySelector(".confirm-message")?.textContent).toBe(
+			"pi is served by agent 0.15.2; this Lasterm carries 0.22.1. Updating stops that agent and ends every terminal it is holding.",
+		);
+
+		await click("Cancel");
+
+		expect(replaces(hub)).toEqual([]);
+	});
+
+	it("posts the replacement once confirmed, and says what the hub answered", async () => {
+		const hub = await openUpdateAgent();
+		hub.answers.set(REPLACE, () => json({ replaced: true, message: "The agent was replaced." }));
+
+		await click("Update agent");
+
+		expect(replaces(hub)).toEqual([
+			expect.objectContaining({ body: { force: false, stop_transfers: false } }),
+		]);
+		expect(toasts()).toEqual([["toast-item--info", "The agent was replaced."]]);
+	});
+
+	it("shows a refusal of the hub as an error", async () => {
+		const hub = await openUpdateAgent();
+		hub.answers.set(REPLACE, () =>
+			json({ error: { code: "AGENT_NOT_REPLACED", message: "The agent is busy." } }, 409),
+		);
+
+		await click("Update agent");
+
+		expect(toasts()).toEqual([["toast-item--error", "The agent is busy."]]);
 	});
 });
 

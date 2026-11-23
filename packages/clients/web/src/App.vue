@@ -2078,6 +2078,8 @@ async function onReplaceAgent(hostId: string): Promise<void> {
 	if (!host || outdated === null) return;
 	try {
 		if (!(await askToConfirm(replaceAgentQuestion(host.label, outdated)))) return;
+		let refused = false;
+		let declined = false;
 		const message = await replaceAgentWithConsent({
 			post: async (consent) => {
 				const response = await hubFetch(`${hubBaseUrl()}/api/hosts/${hostId}/agent/replace`, {
@@ -2088,16 +2090,25 @@ async function onReplaceAgent(hostId: string): Promise<void> {
 					},
 					body: JSON.stringify(consent),
 				});
+				refused = !response.ok;
 				return {
 					ok: response.ok,
 					status: response.status,
 					body: (await response.json()) as ReplaceAgentResponse['body'],
 				};
 			},
-			confirm: (question) =>
-				askToConfirm({ title: `Update the agent on ${host.label}?`, message: question, confirmLabel: 'Replace' }),
+			confirm: async (question) => {
+				const yes = await askToConfirm({
+					title: `Update the agent on ${host.label}?`,
+					message: question,
+					confirmLabel: 'Replace',
+				});
+				declined = !yes;
+				return yes;
+			},
 		});
-		toastStore.show('info', message);
+		// A refusal of the hub is an error; a no to its question is only said.
+		toastStore.show(refused && !declined ? 'error' : 'info', message);
 	} catch (err) {
 		toastStore.show('error', hubUnreachable(err));
 	}

@@ -6,6 +6,7 @@
  */
 /// <reference types="@vitest/browser-playwright" />
 import type { Host } from "@lasterm/shared";
+import { HOST_RAIL_PADDING } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cdp } from "vitest/browser";
@@ -74,5 +75,19 @@ describe("HostRail older-agent mark's motion (#1184)", () => {
 		expect(ringAnimations(dot)).toEqual([]);
 		const ring = getComputedStyle(dot, "::after");
 		expect([ring.borderTopWidth, ring.display]).toEqual(["2px", "block"]);
+	});
+
+	// The rail hides what overflows it sideways: the ring must fit in its padding.
+	it("lies within the rail's padding around the badge", async () => {
+		const dot = await markedDot();
+		const badge = dot.closest(".badge-wrapper");
+		if (badge === null) throw new Error("no badge around the dot");
+		const ring = getComputedStyle(dot, "::after");
+		const reach =
+			dot.getBoundingClientRect().right -
+			badge.getBoundingClientRect().right +
+			-Number.parseFloat(ring.right) +
+			Number.parseFloat(ring.outlineWidth);
+		expect(reach).toBeLessThanOrEqual(HOST_RAIL_PADDING);
 	});
 });

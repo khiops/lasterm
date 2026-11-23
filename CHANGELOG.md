@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.22.0](https://github.com/khiops/lasterm/compare/v0.21.1...v0.22.0) (2026-11-23)
+
+
+### Features
+
+* record a terminal, save it as an asciinema .cast and replay it ([#80](https://github.com/khiops/lasterm/issues/80)) ([#1139](https://github.com/khiops/lasterm/issues/1139)) ([1980add](https://github.com/khiops/lasterm/commit/1980add2dd881fb4bc934aac5a92ad3eb7cf66b2))
+
+
+### Bug Fixes
+
+* **agent:** keep a replaced shell's last frames before a restart's SPAWN_OK ([#1174](https://github.com/khiops/lasterm/issues/1174)) ([acc8427](https://github.com/khiops/lasterm/commit/acc84276f3dd28ba7290ab0bcce489a8a293b04b)), closes [#1121](https://github.com/khiops/lasterm/issues/1121)
+
+
+### Documentation
+
+* **root:** Store news for session recording ([#80](https://github.com/khiops/lasterm/issues/80)) ([#1164](https://github.com/khiops/lasterm/issues/1164)) ([1e79f43](https://github.com/khiops/lasterm/commit/1e79f43d384871726d39046bbd453fbc1e0db3b5))
+* **store:** news for a restart showing the replaced shell's output ([#1175](https://github.com/khiops/lasterm/issues/1175)) ([26eb6e8](https://github.com/khiops/lasterm/commit/26eb6e87f72a810e9fdf3509eb513385d830b25b))
+
 ## [0.21.1](https://github.com/khiops/lasterm/compare/v0.21.0...v0.21.1) (2026-11-22)
 
 

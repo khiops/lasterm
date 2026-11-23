@@ -55,6 +55,8 @@
 	--nt-accent: #89b4fa;
 	--nt-accent-fg: #11111b;
 	--nt-badge: #f38ba8;
+	--nt-badge-fg: #11111b;
+	--nt-green-fg: #11111b;
 	--nt-scrollbar-thumb: #585b70;
 	--nt-scrollbar-track: #00000000;
 	--nt-search-highlight: #f9e2af40;
@@ -83,6 +85,10 @@
 	/* --nt-fg where it reads at 4.5:1 on --nt-bg, and the least change of it
 	   that does where it does not (set by applyTheme at runtime) */
 	--nt-text-strong: var(--nt-fg);
+	/* Text on the pane lock's dimmed ground and on a border-filled control. */
+	--nt-lock-fg: var(--nt-fg);
+	--nt-border-fg: var(--nt-fg);
+	--nt-tab-hover-fg: var(--nt-fg);
 	/* An error's, a warning's and a note's colour, each where it reads at 4.5:1
 	   on --nt-bg, and the least change of it that does where it does not (set by
 	   applyTheme at runtime, #830) */

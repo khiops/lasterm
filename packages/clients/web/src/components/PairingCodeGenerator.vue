@@ -133,18 +133,18 @@ async function copyCode(): Promise<void> {
 	background: var(--nt-accent);
 	border: 1px solid var(--nt-accent);
 	border-radius: 6px;
-	color: #fff;
+	color: var(--nt-accent-fg);
 	font-size: 13px;
 	font-weight: 500;
 	cursor: pointer;
-	transition: background 0.15s, opacity 0.15s;
+	transition: box-shadow 0.15s;
 	display: inline-flex;
 	align-items: center;
 	gap: 8px;
 }
 
 .gen-btn:hover:not(:disabled) {
-	opacity: 0.85;
+	box-shadow: inset 0 0 0 1px currentColor;
 }
 
 .gen-btn:disabled {

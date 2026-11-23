@@ -522,7 +522,7 @@ function onAddGroup(): void {
 .sidebar-state {
 	padding: 8px 12px;
 	font-size: 12px;
-	color: var(--nt-tab-hover);
+	color: var(--nt-sidebar-text);
 	font-style: italic;
 }
 

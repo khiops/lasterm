@@ -122,7 +122,7 @@ async function quit(): Promise<void> {
 
 .btn-primary {
 	background: var(--nt-accent);
-	color: #fff;
+	color: var(--nt-accent-fg);
 }
 
 .btn-secondary {

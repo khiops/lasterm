@@ -2782,7 +2782,7 @@ body,
 	font-family: inherit;
 	font-style: normal;
 	font-weight: 600;
-	color: #fff;
+	color: var(--nt-accent-fg);
 	background: var(--nt-accent);
 	border: none;
 	border-radius: 6px;

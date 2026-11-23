@@ -181,7 +181,7 @@ watch(
 }
 
 .btn-danger {
-	background: var(--nt-red, #e06c75);
-	color: #fff;
+	background: var(--nt-danger);
+	color: var(--nt-danger-fg);
 }
 </style>

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.22.1](https://github.com/khiops/lasterm/compare/v0.22.0...v0.22.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **hub:** restart of a deleted terminal stays ended; restart resets stored titles ([#1178](https://github.com/khiops/lasterm/issues/1178)) ([bc68ba7](https://github.com/khiops/lasterm/commit/bc68ba7047b6a08be2e768693c1ce22ebbfda4a6)), closes [#1168](https://github.com/khiops/lasterm/issues/1168) [#1171](https://github.com/khiops/lasterm/issues/1171)
+* **hub:** wait for a reconnect's daemon adoption before spawning, attaching or reconnecting ([#1179](https://github.com/khiops/lasterm/issues/1179)) ([0ddff06](https://github.com/khiops/lasterm/commit/0ddff06dcbff9e8062382a27aca3d20c637079a4)), closes [#1169](https://github.com/khiops/lasterm/issues/1169)
+* **web:** cut tab and pane titles at the configured Max Title Length ([#1131](https://github.com/khiops/lasterm/issues/1131)) ([e3abf4c](https://github.com/khiops/lasterm/commit/e3abf4cca671342472c9bcf4e0ee8a2362a4719d)), closes [#1110](https://github.com/khiops/lasterm/issues/1110)
+* **web:** make filled control text readable in every theme ([#1177](https://github.com/khiops/lasterm/issues/1177)) ([07876d5](https://github.com/khiops/lasterm/commit/07876d52ab687649c40ab6967469416e6de9db02)), closes [#1173](https://github.com/khiops/lasterm/issues/1173)
+
+
+### Documentation
+
+* **root:** add Store news for readable filled controls ([#1183](https://github.com/khiops/lasterm/issues/1183)) ([79d1541](https://github.com/khiops/lasterm/commit/79d15416b9bcd4667f0e3449d0d4044ea923f941))
+* **store:** news for a terminal deleted during its restart and restart titles ([#1178](https://github.com/khiops/lasterm/issues/1178)) ([#1181](https://github.com/khiops/lasterm/issues/1181)) ([f5b4dfe](https://github.com/khiops/lasterm/commit/f5b4dfe3bfa0f2a64dffc0b9d5418e1e94021eee))
+* **store:** news for Max Title Length cutting tab and terminal titles ([#1131](https://github.com/khiops/lasterm/issues/1131)) ([#1182](https://github.com/khiops/lasterm/issues/1182)) ([2959573](https://github.com/khiops/lasterm/commit/2959573a85d0369dadcb425fad91ff3be45d057f))
+
 ## [0.22.0](https://github.com/khiops/lasterm/compare/v0.21.1...v0.22.0) (2026-11-23)
 
 

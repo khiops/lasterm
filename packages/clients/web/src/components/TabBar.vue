@@ -53,7 +53,7 @@
 				@blur="commitRename"
 				@click.stop
 			/>
-			<span v-else class="tab__label" @dblclick="startRename(tab.id)">{{ getTabLabel(tab.id) }}</span>
+			<span v-else class="tab__label" @dblclick="startRename(tab.id)">{{ tabLabel(tab.id) }}</span>
 			<span
 				v-if="tabRecords(tab.id)"
 				class="tab__rec-dot"
@@ -134,6 +134,7 @@
 <script setup lang="ts">
 import { type ComponentPublicInstance, computed, nextTick, reactive, ref, watch } from "vue";
 import type { Host } from "@lasterm/shared";
+import { truncateTitle } from "@lasterm/shared";
 import type { Tab } from "../composables/useLayout.js";
 import { getColorFromLabel, getInitials } from "../composables/useHostIcon.js";
 import { useRename } from "../composables/useRename.js";
@@ -310,6 +311,19 @@ function tabTooltip(tabId: string): string {
 	const name = host ? `${label} — on ${host.label}` : label;
 	const chord = tabChords.value.get(tabId);
 	return [chord === undefined ? name : `${name} — ${chord}`, SWITCH_TOOLTIP].join("\n");
+}
+
+/**
+ * A tab's label as the bar shows it, cut at the configured Max Title Length
+ * (#1110). The ellipsis is the one `truncateTitle` uses everywhere else, so the
+ * bar and a pane name a long title the same way. Unset, the label is whole — the
+ * setting is the only thing that shortens it.
+ */
+function tabLabel(tabId: string): string {
+	const label = props.getTabLabel(tabId);
+	const maxLength = configStore.uiConfig.title?.maxLength;
+	if (maxLength === undefined) return label;
+	return truncateTitle(label, maxLength, configStore.uiConfig.title?.truncation ?? "end");
 }
 
 // -------------------------------------------------------------------------

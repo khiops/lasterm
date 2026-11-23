@@ -1546,6 +1546,102 @@ describe("SessionManager", () => {
 				expect(ctxOf().channels.get(channelId)?.status).not.toBe("dead");
 			},
 		);
+
+		// A deleted terminal stays ended, and the shell that answered is
+		// destroyed (#1168).
+		it("a terminal deleted during its restart stays ended, and the shell that answers is destroyed", async () => {
+			const { channelId, heard, agent, emit } = await liveTerminal();
+			nextLocalSpawnUnanswered = true;
+			const restarting = sm.restartChannel(channelId);
+			await vi.waitFor(() => expect(spawnsNaming(agent, channelId)).toHaveLength(1));
+
+			expect(sm.destroyChannel(channelId)).toBe(true);
+			const [spawn] = spawnsNaming(agent, channelId);
+			agent.send.mockClear();
+			emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
+
+			expect(await restarting).toBe(false);
+			expect(agent.send).toHaveBeenCalledWith({ type: "DESTROY", channelId });
+			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
+			expect(ctxOf().channels.has(channelId)).toBe(false);
+			expect(statesOf(heard, channelId).map((s) => s.status)).toEqual(["dead"]);
+		});
+
+		it("a session closed during a terminal's restart leaves it ended, and the shell that answers is destroyed", async () => {
+			const { channelId, heard, agent, emit } = await liveTerminal();
+			nextLocalSpawnUnanswered = true;
+			const restarting = sm.restartChannel(channelId);
+			await vi.waitFor(() => expect(spawnsNaming(agent, channelId)).toHaveLength(1));
+
+			const sessionId = ctxOf().channels.get(channelId)?.sessionId;
+			if (sessionId === undefined) throw new Error("expected the terminal's session");
+			await sm.closeSession(sessionId);
+			const [spawn] = spawnsNaming(agent, channelId);
+			agent.send.mockClear();
+			emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
+
+			expect(await restarting).toBe(false);
+			expect(agent.send).toHaveBeenCalledWith({ type: "DESTROY", channelId });
+			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
+			expect(ctxOf().channels.has(channelId)).toBe(false);
+			expect(statesOf(heard, channelId).some((s) => s.status === "live")).toBe(false);
+		});
+
+		it.each([
+			["its host's agent stopped on request", "stop"],
+			["its host's session ended under the hub", "loss"],
+		] as const)(
+			"a terminal whose restart waits while %s stays ended, and the shell that answers is destroyed",
+			async (_, how) => {
+				const { channelId, heard, agent, emit } = await liveTerminal();
+				nextLocalSpawnUnanswered = true;
+				const restarting = sm.restartChannel(channelId);
+				await vi.waitFor(() => expect(spawnsNaming(agent, channelId)).toHaveLength(1));
+
+				const lifecycle = sm as unknown as {
+					lifecycle: { endChannelsOfStoppedAgent: (hostId: string) => void };
+					endHostSession: (hostId: string, reason: string) => void;
+				};
+				const hostId = ctxOf().channels.get(channelId)?.hostId ?? "";
+				if (how === "stop") lifecycle.lifecycle.endChannelsOfStoppedAgent(hostId);
+				else lifecycle.endHostSession(hostId, "stopped");
+				const [spawn] = spawnsNaming(agent, channelId);
+				agent.send.mockClear();
+				emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
+
+				expect(await restarting).toBe(false);
+				expect(agent.send).toHaveBeenCalledWith({ type: "DESTROY", channelId });
+				expect(ctxOf().channels.has(channelId)).toBe(false);
+				expect(statesOf(heard, channelId).some((s) => s.status === "live")).toBe(false);
+			},
+		);
+
+		// What the replaced shell titled is not the new shell's (#1171).
+		it("a restarted terminal keeps none of the replaced shell's titles, stored or about to be", async () => {
+			const { channelId, agent, emit } = await liveTerminal();
+			emit({ type: "TITLE_CHANGE", channelId, title: "old dynamic" });
+			emit({ type: "PROCESS_TITLE", channelId, title: "old process" });
+			await vi.waitFor(() => {
+				const stored = new MetaDAL(dbManager.meta).getChannel(channelId);
+				expect(stored?.dynamicTitle).toBe("old dynamic");
+				expect(stored?.processTitle).toBe("old process");
+			});
+			nextLocalSpawnUnanswered = true;
+			const restarting = sm.restartChannel(channelId);
+			await vi.waitFor(() => expect(spawnsNaming(agent, channelId)).toHaveLength(1));
+			// Heard just before the answer: its stored write is 100 ms away.
+			emit({ type: "TITLE_CHANGE", channelId, title: "late dynamic" });
+			emit({ type: "PROCESS_TITLE", channelId, title: "late process" });
+			const [spawn] = spawnsNaming(agent, channelId);
+			emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
+			expect(await restarting).toBe(true);
+			await new Promise((r) => setTimeout(r, 250));
+
+			const stored = new MetaDAL(dbManager.meta).getChannel(channelId);
+			expect(stored?.dynamicTitle).toBeUndefined();
+			expect(stored?.processTitle).toBeUndefined();
+			expect(sm.resolveDisplayTitle(channelId)).toBe("Terminal");
+		});
 	});
 
 	// ─── DB persistence ─────────────────────────────────────────────────────
@@ -11653,9 +11749,11 @@ describe("SessionManager — an answer about a terminal started again since (#59
 		// soon as it answers, before its list of what it holds is read...
 		const reachingAttach = sm.handleAttach("c-window", reaching);
 		await vi.waitFor(() => expect(sm.agents.get(hostId)?.connected).toBe(true));
-		// ...so another pane's attach asks it at once.
+		// ...but another pane's attach waits for that list, which may end its
+		// terminal (#1169), and asks the agent nothing meanwhile.
 		const askedAttach = sm.handleAttach("c-window", asked);
-		await vi.waitFor(() => expect(daemon.sent("ATTACH")).toHaveLength(1));
+		await flushImmediate();
+		expect(daemon.sent("ATTACH")).toEqual([]);
 
 		// The list is read: neither is there, and both are judged ended.
 		daemon.deliver(1);
@@ -11674,10 +11772,14 @@ describe("SessionManager — an answer about a terminal started again since (#59
 		await flushImmediate();
 
 		expectRunning(window, asked);
-		// The attach that asked is answered about the shell running there now.
+		// The attach that waited was answered as ended (the list judged it so)...
 		expect(window).toContainEqual(
-			expect.objectContaining({ type: "ATTACH_OK", channelId: asked, cached: false }),
+			expect.objectContaining({ type: "ERROR", code: "CHANNEL_DEAD", channelId: asked }),
 		);
+		// ...and asked the daemon nothing.
+		expect(
+			daemon.sent("ATTACH").filter((m) => (m as { channelId?: string }).channelId === asked),
+		).toEqual([]);
 	});
 
 	it("the daemon's list read after a terminal started meanwhile does not end it", async () => {
@@ -11694,15 +11796,16 @@ describe("SessionManager — an answer about a terminal started again since (#59
 		const attach = sm.handleAttach("c-window", held);
 		await vi.waitFor(() => expect(sm.agents.get(hostId)?.connected).toBe(true));
 		// Found stopped, the other follows its setting (#592) while the list
-		// is on its way, and the daemon starts it.
+		// is on its way: it waits for the list (#1169), then the daemon starts it.
 		const respawn = sm.handleSpawn("c-window", {
 			type: "SPAWN",
 			hostId,
 			reuseChannelId: stopped,
 		});
-		await vi.waitFor(() => expect(daemon.sent("SPAWN")).toHaveLength(1));
-		// The list, written before the SPAWN was read, and the SPAWN_OK arrive together.
+		await flushImmediate();
+		expect(daemon.sent("SPAWN")).toEqual([]);
 		daemon.deliver();
+		await vi.waitFor(() => expect(daemon.sent("SPAWN")).toHaveLength(1));
 
 		expect(await respawn).toBe(stopped);
 		await attach;
@@ -11729,10 +11832,12 @@ describe("SessionManager — an answer about a terminal started again since (#59
 
 		const attach = sm.handleAttach("c-window", held);
 		await vi.waitFor(() => expect(sm.agents.get(hostId)?.connected).toBe(true));
-		// A new tab on that host, while the list is on its way.
+		// A new tab on that host, while the list is on its way: it waits for it (#1169).
 		const opened = sm.handleSpawn("c-window", { type: "SPAWN", hostId });
-		await vi.waitFor(() => expect(daemon.sent("SPAWN")).toHaveLength(1));
+		await flushImmediate();
+		expect(daemon.sent("SPAWN")).toEqual([]);
 		daemon.deliver();
+		await vi.waitFor(() => expect(daemon.sent("SPAWN")).toHaveLength(1));
 
 		const channelId = await opened;
 		await attach;

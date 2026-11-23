@@ -1,6 +1,6 @@
 import type { Channel, TitleConfig, TruncationPosition } from "@lasterm/shared";
 import { DEFAULT_CHANNEL_NAME, truncateTitle } from "@lasterm/shared";
-import { type ComputedRef, computed, type Ref } from "vue";
+import { type ComputedRef, computed, type Ref, unref } from "vue";
 
 const DEFAULT_MAX_TITLE_LENGTH = 50;
 const DEFAULT_TRUNCATION_POSITION: TruncationPosition = "end";
@@ -20,9 +20,10 @@ export interface TabTitleOptions {
 	/**
 	 * Title settings from TitleConfig (loaded from config store).
 	 * When provided, overrides maxLength, truncationPosition, and controls
-	 * whether liveDynamicTitle applies (source=dynamic only).
+	 * whether liveDynamicTitle applies (source=dynamic only). Pass a ref to let
+	 * a settings change take effect without remounting the pane (#1110).
 	 */
-	titleConfig?: TitleConfig;
+	titleConfig?: TitleConfig | Ref<TitleConfig | undefined>;
 	/**
 	 * Names of channels the loaded host does not list. A pane is global like its
 	 * tab, and its terminal may run on another host, where `channels` says
@@ -43,11 +44,14 @@ export interface TabTitleOptions {
  * onTitleChange) provides an optimistic override for the active terminal pane
  * when source=dynamic, before the hub round-trip completes.
  *
- * The resolved title is truncated to `options.maxLength` (default 50) using
+ * The resolved title is truncated to `maxLength` (default 50) using
  * `truncateTitle` with a single ellipsis (U+2026) at the configured position.
  *
- * Options (maxLength, truncationPosition, titleConfig) are read at setup time
- * and are NOT reactive. Use `prefix` (a Ref) for reactive per-host prefix changes.
+ * `titleConfig` may be a ref: a settings change then takes effect without the
+ * pane remounting (#1110). Plain `options` are read when the title is first
+ * computed, so a plain object changed after the call is seen only if the title
+ * has not been read yet; pass a ref for settings that change. Use `prefix` (a
+ * Ref) for reactive per-host prefix changes.
  *
  * @param channelId - Reactive channel ID (null when no channel is selected)
  * @param channels - Reactive channel list (from channels store)
@@ -67,13 +71,17 @@ export function useTabTitle(
 	isCustom: ComputedRef<boolean>;
 	isDynamic: ComputedRef<boolean>;
 } {
-	const cfg = options?.titleConfig;
-	const maxLength = cfg?.maxLength ?? options?.maxLength ?? DEFAULT_MAX_TITLE_LENGTH;
-	const position =
-		(cfg?.truncation as TruncationPosition | undefined) ??
-		options?.truncationPosition ??
-		DEFAULT_TRUNCATION_POSITION;
-	const source = cfg?.source ?? "dynamic";
+	const cfg = computed(() => unref(options?.titleConfig));
+	const maxLength = computed(
+		() => cfg.value?.maxLength ?? options?.maxLength ?? DEFAULT_MAX_TITLE_LENGTH,
+	);
+	const position = computed(
+		() =>
+			(cfg.value?.truncation as TruncationPosition | undefined) ??
+			options?.truncationPosition ??
+			DEFAULT_TRUNCATION_POSITION,
+	);
+	const source = computed(() => cfg.value?.source ?? "dynamic");
 
 	const channel = computed(() => {
 		const id = channelId.value;
@@ -88,8 +96,8 @@ export function useTabTitle(
 
 	const isDynamic = computed(() => {
 		if (isCustom.value) return false;
-		if (source === "static") return false;
-		if (source === "process") {
+		if (source.value === "static") return false;
+		if (source.value === "process") {
 			const ch = channel.value;
 			return ch?.processTitle != null && ch.processTitle !== "";
 		}
@@ -111,7 +119,7 @@ export function useTabTitle(
 		// liveDynamicTitle: optimistic override for the active terminal pane.
 		// Only applies when source=dynamic — other sources ignore it — and never
 		// over a custom title: a rename wins, as it does in the hub's resolution.
-		if (source === "dynamic" && !isCustom.value) {
+		if (source.value === "dynamic" && !isCustom.value) {
 			const live = liveDynamicTitle?.value;
 			if (live != null && live !== "") return live;
 		}
@@ -123,7 +131,7 @@ export function useTabTitle(
 	const tabTitle = computed(() => {
 		const prefix = options?.prefix?.value ?? "";
 		const prefixed = prefix + resolvedTitle.value;
-		return truncateTitle(prefixed, maxLength, position);
+		return truncateTitle(prefixed, maxLength.value, position.value);
 	});
 
 	return { tabTitle, resolvedTitle, isCustom, isDynamic };

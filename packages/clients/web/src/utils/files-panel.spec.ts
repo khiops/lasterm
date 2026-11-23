@@ -272,6 +272,7 @@ describe("the status line", () => {
 		hostLabel: "raspberrypi",
 		shell: undefined,
 		sftpUnavailable: false,
+		agentUpdatable: true,
 	};
 	const texts = (facts: Partial<StatusFacts>) =>
 		statusLines({ ...base, ...facts }).map((l) => l.text);
@@ -286,6 +287,10 @@ describe("the status line", () => {
 		const live = { cwd: "/home/pi/src", source: "process" as const };
 		const [line] = statusLines({ ...base, following: false, live, shown: "/var/log" });
 		expect(line).toMatchObject({ text: "Terminal is in", path: "/home/pi/src", goThere: true });
+	});
+
+	it("names no menu entry where the host's menu has no Update agent", () => {
+		expect(texts({ agentUpdatable: false })).toEqual(["This terminal's directory is not known"]);
 	});
 
 	it("says why it cannot follow, and where it opened instead", () => {

@@ -1335,6 +1335,9 @@ export class SessionManager {
 				} satisfies ErrorMessage);
 				return null;
 			}
+			// A replacement of an outdated agent that the list started: this
+			// start goes on the agent that replaces it, as one asked earlier does.
+			if (this.retirement.isUnderWay(hostId)) await this.retirement.settled(hostId);
 		}
 
 		// Its user disconnected it (#648). A start nobody asked for waits for
@@ -2069,25 +2072,6 @@ export class SessionManager {
 	}
 
 	async handleAttach(clientId: string, channelId: string): Promise<boolean> {
-		// A reconnect's agent is published before its daemon's list is taken up
-		// (#1169), and that list may end this terminal: wait for it, within what
-		// the pane gives an attach, and read the terminal after.
-		const adopting = this.ctx.channels.get(channelId);
-		const adoption =
-			adopting === undefined ? undefined : this.lifecycle.adoptionSettled(adopting.hostId);
-		if (adoption !== undefined) {
-			let budget: ReturnType<typeof setTimeout> | undefined;
-			try {
-				await Promise.race([
-					adoption.catch(() => undefined),
-					new Promise((resolve) => {
-						budget = setTimeout(resolve, SessionManager.ATTACH_RECONNECT_BUDGET);
-					}),
-				]);
-			} finally {
-				clearTimeout(budget);
-			}
-		}
 		const client = this.ctx.clients.get(clientId);
 		if (!client) return false;
 		if (this.isQuitting()) {
@@ -2155,6 +2139,32 @@ export class SessionManager {
 		if (wasOrphan) {
 			this.broadcaster.updateChannelStatus(channelId, channel.sessionId, "live");
 			this.broadcaster.reactivateDetachedSession(channel.hostId);
+		}
+
+		// A reconnect's agent is published before its daemon's list is taken up
+		// (#1169), and that list may end this terminal: wait for it, within what
+		// the pane gives an attach. This client is subscribed meanwhile, so a
+		// DETACH during the wait takes effect, and the terminal is read again
+		// after it, as after a reconnect below.
+		const adoption = this.lifecycle.adoptionSettled(channel.hostId);
+		if (adoption !== undefined) {
+			let budget: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await Promise.race([
+					adoption.catch(() => undefined),
+					new Promise((resolve) => {
+						budget = setTimeout(resolve, SessionManager.ATTACH_RECONNECT_BUDGET);
+					}),
+				]);
+			} finally {
+				clearTimeout(budget);
+			}
+			const current = this.ctx.channels.get(channelId);
+			if (current !== channel || current.status === "dead") {
+				this.letGoOfStaleAttach(client, channel, channelId);
+				return this.handleAttach(clientId, channelId);
+			}
+			if (!this.ctx.clients.has(clientId)) return false;
 		}
 
 		let agent = this.ctx.agents.get(channel.hostId);

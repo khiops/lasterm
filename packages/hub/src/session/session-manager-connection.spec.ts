@@ -2828,6 +2828,26 @@ describe("a request during a reconnect's adoption of the daemon's list (#1169)",
 		return settled;
 	}
 
+	/** The agent answers the ATTACH it was sent, so the attach ends before the hub does. */
+	async function answered(
+		h: Harness,
+		attaching: Promise<boolean>,
+		sent: { mock: { calls: Array<[unknown]> } },
+	): Promise<void> {
+		const frame = sent.mock.calls
+			.map(([f]) => f as { type: string; channelId: string; requestId: string })
+			.find((f) => f.type === "ATTACH");
+		if (frame === undefined) throw new Error("no ATTACH was sent");
+		h.ctx.pendingRequests.get(frame.requestId)?.({
+			type: "ATTACH_OK",
+			channelId: frame.channelId,
+			requestId: frame.requestId,
+			snapshot: { serialized: "", cols: 80, rows: 24, cursorX: 0, cursorY: 0 },
+			lastSeq: 0,
+		} as unknown as ProtocolMessage);
+		await attaching;
+	}
+
 	it("holds a SPAWN until the adoption is over, then spawns", async () => {
 		const h = await hubWith({ daemon: true, os: "linux" });
 		const { adoption } = await reconnectAdopting(h);
@@ -2900,7 +2920,7 @@ describe("a request during a reconnect's adoption of the daemon's list (#1169)",
 		if (id === undefined) throw new Error("no terminal");
 		const sent = vi.spyOn(agent, "send");
 
-		void h.sm.handleAttach(h.window.id, id);
+		const attaching = h.sm.handleAttach(h.window.id, id);
 		await new Promise((resolve) => setTimeout(resolve, 300));
 		expect(sent.mock.calls.filter(([frame]) => frame.type === "ATTACH")).toEqual([]);
 
@@ -2909,6 +2929,61 @@ describe("a request during a reconnect's adoption of the daemon's list (#1169)",
 		await until("the ATTACH reaches the agent", () =>
 			sent.mock.calls.some(([frame]) => frame.type === "ATTACH"),
 		);
+		await answered(h, attaching, sent);
+	});
+
+	it("keeps a DETACH sent while its ATTACH waits for the adoption", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		const { adoption } = await reconnectAdopting(h);
+		const [id] = [...h.ctx.channels.keys()];
+		if (id === undefined) throw new Error("no terminal");
+
+		void h.sm.handleAttach(h.window.id, id);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		h.sm.handleDetach(h.window.id, id);
+		h.remote.releaseList();
+		await adoption;
+		await new Promise((resolve) => setTimeout(resolve, 300));
+
+		expect(h.ctx.channels.get(id)?.clients.has(h.window.id)).toBe(false);
+		expect(h.window.attachedChannels.has(id)).toBe(false);
+	});
+
+	it("starts a SPAWN on the agent a replacement the adoption started puts in place", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		const { adoption } = await reconnectAdopting(h);
+		let replaced: () => void = () => undefined;
+		const retirement = (
+			h.sm as unknown as {
+				retirement: { isUnderWay(id: string): boolean; settled(id: string): Promise<void> };
+			}
+		).retirement;
+		// The list, once taken up, starts the replacement of an outdated agent.
+		vi.spyOn(retirement, "isUnderWay").mockImplementation(() => adoptionOver);
+		vi.spyOn(retirement, "settled").mockReturnValue(
+			new Promise<void>((resolve) => {
+				replaced = resolve;
+			}),
+		);
+		let adoptionOver = false;
+		void adoption.then(() => {
+			adoptionOver = true;
+		});
+		const spawnsBefore = h.remote.spawns;
+
+		const spawning = h.sm.handleSpawn(h.window.id, {
+			type: "SPAWN",
+			hostId: h.host.id,
+			requestId: "spawn-during-replacement",
+		});
+		h.remote.releaseList();
+		await adoption;
+		expect(await settledSoon(spawning)).toBe(false);
+		replaced();
+
+		expect(await spawning).not.toBeNull();
+		expect(h.remote.spawns).toBe(spawnsBefore + 1);
+		expect(errorsHeard(h).filter((e) => e.requestId === "spawn-during-replacement")).toEqual([]);
 	});
 
 	it("answers a SPAWN and ends a reconnect when the daemon refuses the hub in the adoption", async () => {
@@ -2984,11 +3059,12 @@ describe("a request during a reconnect's adoption of the daemon's list (#1169)",
 		);
 		const sent = vi.spyOn(agent, "send");
 
-		void h.sm.handleAttach(h.window.id, id);
+		const attaching = h.sm.handleAttach(h.window.id, id);
 
 		await until("the ATTACH reaches the agent", () =>
 			sent.mock.calls.some(([frame]) => frame.type === "ATTACH"),
 		);
+		await answered(h, attaching, sent);
 	});
 
 	it("goes on with an ATTACH once the budget is spent when the adoption never settles", async () => {
@@ -3002,10 +3078,11 @@ describe("a request during a reconnect's adoption of the daemon's list (#1169)",
 		const budget = manager.ATTACH_RECONNECT_BUDGET;
 		manager.ATTACH_RECONNECT_BUDGET = 100;
 		try {
-			void h.sm.handleAttach(h.window.id, id);
+			const attaching = h.sm.handleAttach(h.window.id, id);
 			await until("the ATTACH reaches the agent", () =>
 				sent.mock.calls.some(([frame]) => frame.type === "ATTACH"),
 			);
+			await answered(h, attaching, sent);
 		} finally {
 			manager.ATTACH_RECONNECT_BUDGET = budget;
 		}

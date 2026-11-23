@@ -40,6 +40,7 @@
 			<span
 				v-else-if="hostMarkerStyle === 'initials' && hostMarkers.has(tab.id)"
 				class="tab__host-initials"
+				:style="{ color: hostMarkers.get(tab.id)?.foreground }"
 				:aria-label="`On ${hostMarkers.get(tab.id)?.label}`"
 			>{{ hostMarkers.get(tab.id)?.initials }}</span>
 			<input
@@ -141,6 +142,7 @@ import { useConfigStore } from "../stores/config.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
 import { useRecordingsStore } from "../stores/recordings.js";
+import { readableForeground } from "../stores/theme.js";
 import { shortcutLabel, TAB_NUMBERS } from "../utils/app-shortcuts.js";
 import { listMove } from "../utils/focus-zones.js";
 import { tabToSwitchTo } from "../utils/tab-switch.js";
@@ -259,13 +261,15 @@ const marksHosts = computed(() => {
 
 /** The marker each tab carries, by tab id — resolved once per render. */
 const hostMarkers = computed(() => {
-	const markers = new Map<string, { color: string; initials: string; label: string }>();
+	const markers = new Map<string, { color: string; foreground: string; initials: string; label: string }>();
 	if (!marksHosts.value) return markers;
 	for (const { tab } of visibleTabs.value) {
 		const host = hostOfTab(tab.id);
 		if (host === null) continue;
+		const color = host.color || getColorFromLabel(host.label);
 		markers.set(tab.id, {
-			color: host.color || getColorFromLabel(host.label),
+			color,
+			foreground: readableForeground(color),
 			initials: getInitials(host.label),
 			label: host.label,
 		});
@@ -753,7 +757,7 @@ function onTabDragEnd(): void {
 	padding: 0 4px;
 	border-radius: 8px;
 	background: var(--nt-badge);
-	color: var(--nt-bright-white, #fff);
+	color: var(--nt-badge-fg, #11111b);
 	font-size: 10px;
 	font-weight: 700;
 	line-height: 16px;

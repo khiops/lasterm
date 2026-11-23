@@ -69,10 +69,11 @@ const displayCount = computed(() => {
 .unread-lines-btn--jump {
 	background: var(--nt-accent, #6495ed);
 	border-color: var(--nt-accent, #6495ed);
-	color: var(--nt-bright-white, #fff);
+	color: var(--nt-accent-fg, #11111b);
 }
 
 .unread-lines-btn--jump:hover {
-	opacity: 0.85;
+	background: var(--nt-accent, #6495ed);
+	box-shadow: inset 0 0 0 1px currentColor;
 }
 </style>

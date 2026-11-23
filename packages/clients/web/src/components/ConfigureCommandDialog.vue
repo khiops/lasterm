@@ -280,6 +280,6 @@ async function onApplyRestart(): Promise<void> {
 
 .btn-accent {
 	background: var(--nt-green);
-	color: #fff;
+	color: var(--nt-green-fg, #11111b);
 }
 </style>

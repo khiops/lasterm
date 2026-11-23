@@ -148,6 +148,8 @@ export const useThemeStore = defineStore("theme", () => {
 		// in BOTH light and dark themes. Setting them to brightBlack/brightWhite assumed a
 		// dark background (brightWhite muted text is invisible on a light theme's light bg).
 		root.setProperty("--nt-accent-fg", readableForeground(theme.ui.accent));
+		root.setProperty("--nt-badge-fg", readableForeground(theme.ui.badge));
+		root.setProperty("--nt-green-fg", readableForeground(theme.colors.green));
 		root.setProperty("--nt-danger-fg", readableForeground(badgeDanger));
 		// The theme's text, as readable as text has to be on the theme's own
 		// background: most themes' pair already is, Solarized Light's is 4.1:1.

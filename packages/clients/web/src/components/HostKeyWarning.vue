@@ -356,10 +356,10 @@ function handleReject(event: MouseEvent): void {
 
 .hkw-accept {
 	background: #e5534b;
-	color: #fff;
+	color: #000;
 }
 
 .hkw-accept:hover {
-	opacity: 0.85;
+	box-shadow: inset 0 0 0 1px currentColor;
 }
 </style>

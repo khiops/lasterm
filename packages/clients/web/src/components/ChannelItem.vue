@@ -322,7 +322,7 @@ onUnmounted(() => {
 	padding: 0 4px;
 	border-radius: 8px;
 	background: var(--nt-badge);
-	color: var(--nt-bright-white, #fff);
+	color: var(--nt-badge-fg, #11111b);
 	font-size: 10px;
 	font-weight: 700;
 	line-height: 16px;

@@ -24,6 +24,8 @@ export interface TerminalProfile {
 	bellSound?: BellSound;
 	bellCustomFile?: string;
 	bellBadge?: boolean;
+	/** Record the terminal each time it starts (#80); off unless set. */
+	recordTerminals?: boolean;
 	/** Show search match markers in the scrollbar overview ruler (default: true). */
 	scrollbarMarkers?: boolean;
 	wallpaper?: string;

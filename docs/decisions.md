@@ -1355,6 +1355,16 @@ replaced it (e65e3fa), and the config store fetches it in `loadProfile()`, after
 
 ---
 
+## issue-80 — Session recording, export-first (2026-11-22)
+
+- A recording is kept by the hub only until it is saved or discarded: Stop saves the asciicast v3 file through the save dialog, then deletes the hub's copy. A recording ended any other way waits in Recordings, never deleted silently (the user's choice). Where the browser has no save dialog, the download keeps the copy until Discard.
+- Recordings live in their own spool tables (STORAGE.md § 4.3), fed where the hub receives OUTPUT, not derived from `chunks`, whose one-second timestamps and GC rules do not fit a recording.
+- One total cap (1 GB by default) refuses and ends; a recording also ends at 512 MiB so the player can always reopen it. A recording outlives its terminal's purge.
+- Output only, never input; default off; a REC mark while it lasts. A manual start draws the agent's screen first, from a correlated ATTACH.
+- The player is the app's own, on xterm.js: no second renderer. It reads v3 and v2.
+
+---
+
 ## issue-183 — TLS endpoint identity and startup authority (2026-08-10)
 
 - The hub transport carries endpoint identity: browser, CLI, development proxy, and probes use HTTPS/WSS and validate the peer against the SPKI recorded in `runtime.json`.

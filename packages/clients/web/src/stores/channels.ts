@@ -15,6 +15,7 @@ import type { AskedSecret } from "../utils/pane-cover.js";
 import { useAuthStore } from "./auth.js";
 import { useConfigStore } from "./config.js";
 import { useHostsStore } from "./hosts.js";
+import { listedRecordings, useRecordingsStore } from "./recordings.js";
 import { useSessionStore } from "./session.js";
 
 const COLLAPSED_KEY = "lasterm:collapsed-groups";
@@ -648,6 +649,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		if (authStore.token === null) return;
 		const myIndexGeneration = ++indexGeneration;
 		const myHeard: IndexHeard = { startedAt: ++requestSeq, titles: new Map(), listed: new Map() };
+		const recordingsAt = useRecordingsStore().listFetchStarted();
 		indexTitlesDuringFetch.add(myHeard);
 		try {
 			const res = await hubFetch(`${hubBaseUrl()}/api/channels`, {
@@ -695,6 +697,8 @@ export const useChannelsStore = defineStore("channels", () => {
 			indexCommittedGeneration = myIndexGeneration;
 			channelIndex.value = nextIndex;
 			channelHostMap.value = nextHostMap;
+			// Which terminals record, every host's, by the newer-news rule (#80).
+			useRecordingsStore().mergeListed(recordingsAt, listedRecordings(rows));
 		} catch {
 			// An index that could not be read is an index that says nothing; the
 			// tab bar falls back to what it showed before.
@@ -734,6 +738,7 @@ export const useChannelsStore = defineStore("channels", () => {
 		statusesDuringFetch.clear();
 		const myHeard = new Map<string, Heard | "deleted">();
 		statusesDuringFetch.set(myGeneration, myHeard);
+		const recordingsAt = useRecordingsStore().listFetchStarted();
 
 		try {
 			// ── 2. ALL I/O — no state commits in this section ────────────────
@@ -756,6 +761,9 @@ export const useChannelsStore = defineStore("channels", () => {
 			if (fetchGeneration.value !== myGeneration) return;
 
 			// ── 4. Commit block — all state mutations happen here ─────────────
+
+			// Which of this host's terminals record, by the newer-news rule (#80).
+			useRecordingsStore().mergeListed(recordingsAt, listedRecordings(rows));
 
 			// Commit group state for the winning generation.
 			groups.value = fetchedGroups.groups;

@@ -26,11 +26,12 @@ import type {
 } from "@lasterm/shared";
 import {
 	DEFAULT_CHANNEL_NAME,
+	ErrorCode,
 	FINAL_SCREEN_REDRAW_PREFIX,
 	generateId,
 	validateCustomCommand,
 } from "@lasterm/shared";
-import type { AgentConnection } from "./agent-connection.js";
+import { type AgentConnection, AgentRefusedHub } from "./agent-connection.js";
 import { daemonAuthFrame } from "./daemon-auth.js";
 import { hostDefaultProfile } from "./host-profile-menu.js";
 import { HostUnreachableError, hostAwayDuringSpawn } from "./host-reachability.js";
@@ -191,6 +192,8 @@ export class ChannelLifecycleManager {
 		if (exitMsg.screen !== undefined) {
 			this.takeFinalScreen(exitMsg.channelId, exitMsg.screen);
 		}
+		// The recording follows the hub's view of the channel (#80).
+		this.ctx.recorder?.endChannel(exitMsg.channelId, "exited", exitMsg.exitCode);
 		const channel = this.ctx.channels.get(exitMsg.channelId);
 		if (channel) {
 			// An ended terminal has no directory any more (#834).
@@ -549,6 +552,8 @@ export class ChannelLifecycleManager {
 					this.ctx.metaDal.updateChannelStatus(channelId, "live");
 					this.ctx.scheduler.trackChannel(channelId);
 					this.ctx.chunker.trackChannel(channelId);
+					// A new workload: recorded from its first output when its profile says so (#80).
+					this.startRecordingIfAsked(channelId, hostId, cols, rows);
 					client.attachedChannels.add(channelId);
 					this.broadcaster.reactivateDetachedSession(hostId);
 
@@ -642,6 +647,8 @@ export class ChannelLifecycleManager {
 			agent.send({ type: "DESTROY", channelId } as DestroyMessage);
 		}
 
+		// The recording ends first: the status write below can throw (#80).
+		this.ctx.recorder?.endChannel(channelId, "killed");
 		this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead", undefined, "killed");
 
 		this.ctx.scheduler.untrackChannel(channelId);
@@ -655,6 +662,7 @@ export class ChannelLifecycleManager {
 	retireChannel(channelId: string, sessionId: string): void {
 		const hostId = this.ctx.channels.get(channelId)?.hostId;
 		this.clearElevationForChannel(channelId);
+		this.ctx.recorder?.endChannel(channelId, "gone");
 		this.broadcaster.updateChannelStatus(channelId, sessionId, "dead");
 		this.forgetChannel(channelId);
 		if (hostId !== undefined) this.agentMayBeIdle(hostId);
@@ -675,6 +683,7 @@ export class ChannelLifecycleManager {
 	 * One whose end did arrive, `stopped` already, is only forgotten.
 	 */
 	endChannelsOfStoppedAgent(hostId: string): void {
+		this.endRecordingsOfHost(hostId);
 		for (const [channelId, ch] of this.ctx.channels.entries()) {
 			if (ch.hostId !== hostId) continue;
 			if (ch.status !== "dead") {
@@ -731,7 +740,18 @@ export class ChannelLifecycleManager {
 	 * still running — its snapshot timer keeps asking an agent that has never
 	 * heard of it, and a SPAWN that names it to bring it back is refused.
 	 */
+	/**
+	 * End the recordings of every terminal of a host about to be forgotten,
+	 * before the status writes that can throw and stop the loop over them (#80).
+	 */
+	private endRecordingsOfHost(hostId: string): void {
+		for (const [channelId, ch] of this.ctx.channels) {
+			if (ch.hostId === hostId) this.ctx.recorder?.endChannel(channelId, "gone");
+		}
+	}
+
 	forgetChannel(channelId: string): void {
+		this.ctx.recorder?.endChannel(channelId, "gone");
 		const ch = this.ctx.channels.get(channelId);
 		if (ch) {
 			for (const clientId of ch.clients) {
@@ -767,6 +787,8 @@ export class ChannelLifecycleManager {
 			return await this.startAgain(channelId, channel, hostId, ch, requestingClientId);
 		}
 		live.send({ type: "DESTROY", channelId } as DestroyMessage);
+		// The run being replaced: its recording ends now, before its exit (#80).
+		this.ctx.recorder?.endChannel(channelId, "restarted");
 		// From this DESTROY until the restart settles, the exit of the run it
 		// ends is held (#1113): it is that run's end only if nothing replaces
 		// it. Every way out of the restart ends the hold.
@@ -1183,6 +1205,8 @@ export class ChannelLifecycleManager {
 		const channelIdChanged = channelId !== previousChannelId;
 
 		if (channelIdChanged) {
+			// Ended as a restart before the retire would end it as gone (#80).
+			this.ctx.recorder?.endChannel(previousChannelId, "restarted");
 			this.retireChannel(previousChannelId, sessionEntry.id);
 			for (const clientId of clients) {
 				const client = this.ctx.clients.get(clientId);
@@ -1213,6 +1237,9 @@ export class ChannelLifecycleManager {
 			}
 		}
 
+		// A new workload under the same id: the previous run's recording ends
+		// here, before its entry is replaced, so its title is that run's (#80).
+		this.ctx.recorder?.endChannel(channelId, "restarted");
 		this.ctx.metaDal.updateChannelStatus(channelId, "live");
 		this.ctx.channels.set(channelId, {
 			sessionId: sessionEntry.id,
@@ -1232,6 +1259,7 @@ export class ChannelLifecycleManager {
 		});
 		this.ctx.scheduler.trackChannel(channelId);
 		this.ctx.chunker.trackChannel(channelId);
+		this.startRecordingIfAsked(channelId, hostId, cols, rows);
 
 		if (channelIdChanged) {
 			const dbChannel = this.ctx.metaDal.getChannel(channelId);
@@ -1295,6 +1323,7 @@ export class ChannelLifecycleManager {
 		// for as long as the hub lives, and a spawn that names it to bring it back
 		// is refused because "it is still running". One already marked dead is the
 		// one most likely to be in both traps, so it is the last thing to skip.
+		this.endRecordingsOfHost(hostId);
 		for (const [channelId, ch] of this.ctx.channels.entries()) {
 			if (ch.hostId !== hostId) continue;
 			if (ch.status !== "dead") {
@@ -1550,9 +1579,43 @@ export class ChannelLifecycleManager {
 		this.storeSnapshot(channelId, screen);
 	}
 
+	/**
+	 * Open a recording for a new workload when the terminal's resolved profile
+	 * says `recordTerminals` (#80), in the code that tracks it, so the first
+	 * output read with its SPAWN_OK is recorded.
+	 */
+	private startRecordingIfAsked(
+		channelId: string,
+		hostId: string,
+		cols: number,
+		rows: number,
+	): void {
+		const recorder = this.ctx.recorder;
+		if (!recorder) return;
+		// Read in the SPAWN_OK handler: a failing read refuses the recording and
+		// leaves the terminal's own start to finish.
+		let hostLabel: string;
+		try {
+			const profile = this.ctx.configResolver?.resolve(hostId, channelId) ?? null;
+			if (profile?.recordTerminals !== true) return;
+			hostLabel = this.ctx.metaDal.getHost(hostId)?.label ?? hostId;
+		} catch (err) {
+			recorder.refuseStorage(channelId, err);
+			return;
+		}
+		recorder.startAutomatic({ channelId, hostId, hostLabel, cols, rows });
+	}
+
 	// ─── Re-attach channels ───────────────────────────────────────────────────
 
 	reAttachChannels(hostId: string, sessionId: string, agent: AgentConnection): void {
+		// Each live terminal is spawned again: a new workload, so its recording
+		// ends before the SPAWN, whatever the answer (#80).
+		for (const [channelId, ch] of this.ctx.channels.entries()) {
+			if (ch.hostId === hostId && ch.status !== "dead") {
+				this.ctx.recorder?.endChannel(channelId, "restarted");
+			}
+		}
 		this.spawnChannelsForHost(
 			hostId,
 			agent,
@@ -1562,6 +1625,7 @@ export class ChannelLifecycleManager {
 				}
 				this.ctx.scheduler.trackChannel(channelId);
 				this.ctx.chunker.trackChannel(channelId);
+				this.startRecordingIfAsked(channelId, hostId, ch.cols, ch.rows);
 			},
 			(channelId, ch) => {
 				this.broadcaster.updateChannelStatus(channelId, ch.sessionId, "dead");
@@ -1713,7 +1777,12 @@ export class ChannelLifecycleManager {
 		return this.adoptions.get(hostId);
 	}
 
-	/** Ask a daemon what it holds of this hub's, and take that up. Never rejects. */
+	/**
+	 * Ask a daemon what it holds of this hub's, and take that up. An AUTH refusal
+	 * is not a lost link: it stops automatic reconnects until someone acts on the
+	 * host, tells every window why, and rejects the connection attempt. Other
+	 * listing failures are logged without rejecting.
+	 */
 	private async takeUpWhatTheDaemonLists(hostId: string, agent: AgentConnection): Promise<void> {
 		try {
 			const listed = await this.listDaemonChannels(agent);
@@ -1727,6 +1796,16 @@ export class ChannelLifecycleManager {
 					stateErr instanceof Error ? stateErr.message : String(stateErr)
 				}`,
 			);
+			if (stateErr instanceof AgentRefusedHub) {
+				this.ctx.userDisconnectedHosts.add(hostId);
+				this.broadcaster.broadcastToAllClients({
+					type: "ERROR",
+					code: ErrorCode.AGENT_REFUSED_HUB,
+					message: stateErr.message,
+					hostId,
+				} satisfies ErrorMessage);
+				throw stateErr;
+			}
 		}
 	}
 
@@ -1798,6 +1877,10 @@ export class ChannelLifecycleManager {
 		agent: AgentConnection,
 		askedAt?: number,
 	): ReadonlySet<string> {
+		// Every terminal judged gone below ends its recording first, before any
+		// meta.db access here can throw: the orphans' reads, and the status writes
+		// that would stop the loop (#80).
+		this.endRecordingsOfUnlisted(hostId, states, askedAt);
 		const destroyed = this.destroyOrphans(hostId, states, agent);
 		const reportedIds = new Set(states.filter((s) => s.alive).map((s) => s.channelId));
 
@@ -1847,6 +1930,26 @@ export class ChannelLifecycleManager {
 			}
 		}
 		return destroyed;
+	}
+
+	/**
+	 * End the recordings of the terminals `reconcileChannelState` judges gone
+	 * from this list (#80): this host's, left out of it, and still spoken of by
+	 * it (`askedAt`), while the host has a session. Run before any meta.db
+	 * access that comes between the list and that judgement, which can throw.
+	 */
+	endRecordingsOfUnlisted(
+		hostId: string,
+		states: readonly AgentChannelStateMessage[],
+		askedAt?: number,
+	): void {
+		if (!this.ctx.sessions.has(hostId)) return;
+		const reportedIds = new Set(states.filter((s) => s.alive).map((s) => s.channelId));
+		for (const [channelId, channelState] of this.ctx.channels) {
+			if (channelState.hostId !== hostId || reportedIds.has(channelId)) continue;
+			if (askedAt !== undefined && !this.answerStillApplies(channelId, askedAt)) continue;
+			this.ctx.recorder?.endChannel(channelId, "gone");
+		}
 	}
 
 	/**

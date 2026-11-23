@@ -8,6 +8,7 @@ import { useChannelsStore } from "./channels.js";
 import { useConfigStore } from "./config.js";
 import { useFilesPanelStore } from "./files-panel.js";
 import { HOSTS_CHANGED_READ_DELAY_MS, useHostsStore } from "./hosts.js";
+import { useRecordingsStore } from "./recordings.js";
 import { useSessionStore } from "./session.js";
 import { useThemeStore } from "./theme.js";
 import { useToastStore } from "./toast.js";
@@ -1164,5 +1165,61 @@ describe("a Windows host that keeps no daemon (#755)", () => {
 		});
 		expect(hosts.remoteDaemonUnavailable("pc")).toBeNull();
 		expect(hosts.remoteDaemonUnavailable("box")).toBe("no breakaway");
+	});
+});
+
+// AC-UI-STATE-ORDER / other-host-resync, missed-end (#80): every authentication reads the list again.
+describe("useSessionStore — recordings", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		localStorageMap.clear();
+		localStorageMap.set("lasterm_token", "test-token");
+		wsHarness.instances.length = 0;
+		wsHarness.deferAuth = false;
+		setActivePinia(createPinia());
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	// Mutation caught: no refresh at AUTH_OK (a start or end missed while away stays wrong).
+	// Mutation caught: list reads still tried after the session is let go.
+	it("stops the recordings' list reads when it disconnects", async () => {
+		const stop = vi.spyOn(useRecordingsStore(), "stopRetrying");
+		const sessionStore = useSessionStore();
+		const connected = sessionStore.connect();
+		await vi.advanceTimersByTimeAsync(0);
+		wsHarness.instances[0]?.emit({ type: "AUTH_OK", clientId: "client-1" });
+		await connected;
+		sessionStore.disconnect();
+		expect(stop).toHaveBeenCalled();
+	});
+
+	it("reads the recordings again at each AUTH_OK, and routes RECORDING_STATE", async () => {
+		const recordings = useRecordingsStore();
+		const refresh = vi.spyOn(recordings, "refresh").mockResolvedValue();
+		const sessionStore = useSessionStore();
+		const connected = sessionStore.connect();
+		await vi.advanceTimersByTimeAsync(0);
+		const ws = wsHarness.instances[0];
+		ws?.emit({ type: "AUTH_OK", clientId: "client-1" });
+		await connected;
+		const afterFirst = refresh.mock.calls.length;
+		expect(afterFirst).toBeGreaterThan(0);
+		ws?.emitReconnect();
+		await vi.advanceTimersByTimeAsync(0);
+		ws?.emit({ type: "AUTH_OK", clientId: "client-2" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(refresh.mock.calls.length).toBeGreaterThan(afterFirst);
+		ws?.emit({
+			type: "RECORDING_STATE",
+			channelId: "ch-9",
+			recordingId: "01REC",
+			title: "t",
+			hostLabel: "h",
+			startedAt: "2026-11-22T10:00:00.000Z",
+		} as never);
+		expect(recordings.open.get("ch-9")?.recordingId).toBe("01REC");
 	});
 });

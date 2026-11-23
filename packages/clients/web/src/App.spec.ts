@@ -2868,3 +2868,84 @@ describe("the settings the window reads", () => {
 		});
 	});
 });
+
+// The rail's Recordings button and a tab's REC dot, as the window binds them from the hub's list
+// (#80). What the rail and the tab bar draw from their props is tested in HostRail.spec.ts and
+// TabBar.spec.ts; here, which of the window's values reach those props.
+describe("the recordings the window shows (#80)", () => {
+	const GiB = 1024 * 1024 * 1024;
+
+	function recording(id: string, channelId: string, endedAt: string | null) {
+		return {
+			id,
+			channel_id: channelId,
+			host_label: "alpha",
+			title: channelId,
+			started_at: "2026-11-01T00:00:00.000Z",
+			ended_at: endedAt,
+			end_reason: endedAt === null ? null : "exited",
+			cols: 80,
+			rows: 24,
+			duration_ms: 0,
+			bytes: 10,
+		};
+	}
+
+	/** The hub's list: T2 recording now, and one waiting from a terminal that has ended. */
+	const listing = (usedBytes: number) => () =>
+		json({
+			recordings: [recording("R2", "T2", null), recording("R9", "T9", "2026-11-01T00:01:00.000Z")],
+			used_bytes: usedBytes,
+			cap_bytes: GiB,
+		});
+
+	const recordingsButton = () => document.querySelector<HTMLElement>(".host-rail .rail-rec-btn");
+	const badge = () => recordingsButton()?.querySelector(".rail-rec-badge")?.textContent?.trim();
+	const tab = (tabId: string) => document.querySelector(`.tab-bar [data-tab-id="${tabId}"]`);
+
+	// Mutation caught: the badge bound to the open recordings (1) instead of the rows listed (2).
+	it("counts every recording listed on the rail's Recordings button", async () => {
+		await mountWindow({
+			channels: [live("T1")],
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+			answers: { "GET /api/recordings": listing(1000) },
+		});
+
+		await vi.waitFor(() => expect(badge()).toBe("2"));
+		expect(recordingsButton()?.getAttribute("aria-label")).toBe("Recordings, 2 waiting");
+	});
+
+	// Mutation caught: "full" never bound, or only past the cap (used_bytes > cap_bytes).
+	it("reads full once the recordings take all the space allowed", async () => {
+		await mountWindow({
+			channels: [live("T1")],
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+			answers: { "GET /api/recordings": listing(GiB) },
+		});
+
+		await vi.waitFor(() => expect(badge()).toBe("full"));
+		expect(recordingsButton()?.getAttribute("aria-label")).toBe("Recordings, full");
+	});
+
+	// Mutation caught: the tab's terminals taken as its focused pane's alone.
+	it("dots a tab whose recorded terminal is in a pane out of focus, in a tab not shown", async () => {
+		await mountWindow({
+			channels: [live("T1"), live("T2"), live("T3")],
+			layout: {
+				tabs: [
+					{ id: "TAB1", root: term("T1", "P1") },
+					{
+						id: "TAB2",
+						root: split("vertical", term("T3", "P3"), term("T2", "P2")),
+						activePane: "P3",
+					},
+				],
+			},
+			answers: { "GET /api/recordings": listing(1000) },
+		});
+
+		await vi.waitFor(() => expect(tab("TAB2")?.querySelector(".tab__rec-dot")).not.toBeNull());
+		expect(tab("TAB1")?.querySelector(".tab__rec-dot")).toBeNull();
+		expect(tabs().map((t) => t.selected)).toEqual([true, false]);
+	});
+});

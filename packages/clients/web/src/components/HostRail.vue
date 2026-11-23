@@ -87,11 +87,15 @@
 								:src="host.iconValue"
 								class="host-icon-img"
 							/>
-							<span v-else class="badge-initials">{{
-								host.iconType === 'emoji' && host.iconValue
-									? host.iconValue
-									: getInitials(host.label)
-							}}</span>
+							<span
+								v-else
+								class="badge-initials"
+								:style="{ color: readableForeground(host.color || getColorFromLabel(host.label)) }"
+								>{{
+									host.iconType === 'emoji' && host.iconValue
+										? host.iconValue
+										: getInitials(host.label)
+								}}</span>
 							<span
 								class="status-dot"
 								:class="[`status-dot--${hostsStore.getHostStatus(host.id)}`, { 'status-dot--older-agent': agentIsOlder(host.id) }]"
@@ -276,6 +280,7 @@ import { toastRefusal } from "../utils/hub-answer.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { useNotificationStore } from "../stores/notifications.js";
 import { useChannelsStore } from "../stores/channels.js";
+import { readableForeground } from "../stores/theme.js";
 import {
 	useHostGroups,
 	type HostGroupSection,
@@ -858,7 +863,6 @@ onMounted(() => {
 .badge-initials {
 	font-size: var(--rail-initials);
 	font-weight: 700;
-	color: var(--nt-bright-white);
 	text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
 	line-height: 1;
 }
@@ -928,8 +932,8 @@ onMounted(() => {
 	height: 16px;
 	padding: 0 4px;
 	border-radius: 8px;
-	background: var(--nt-badge);
-	color: var(--nt-bright-white, #fff);
+	background: var(--nt-danger);
+	color: var(--nt-danger-fg);
 	font-size: 10px;
 	font-weight: 700;
 	line-height: 16px;

@@ -291,10 +291,10 @@ async function handleRetry(): Promise<void> {
 
 .adf-retry {
 	background: var(--nt-accent);
-	color: #fff;
+	color: var(--nt-accent-fg);
 }
 
 .adf-retry:hover:not(:disabled) {
-	opacity: 0.85;
+	box-shadow: inset 0 0 0 1px currentColor;
 }
 </style>

@@ -366,10 +366,10 @@ function handleReject(event: MouseEvent): void {
 
 .abv-accept {
 	background: var(--nt-accent);
-	color: #fff;
+	color: var(--nt-accent-fg);
 }
 
 .abv-accept:hover {
-	opacity: 0.85;
+	box-shadow: inset 0 0 0 1px currentColor;
 }
 </style>

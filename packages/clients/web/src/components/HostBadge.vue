@@ -11,7 +11,11 @@
 				alt=""
 				class="host-badge__img"
 			/>
-			<span v-else class="host-badge__text" :style="{ fontSize: `${fontSize}px` }">{{ text }}</span>
+			<span
+				v-else
+				class="host-badge__text"
+				:style="{ fontSize: `${fontSize}px`, color: readableForeground(color) }"
+				>{{ text }}</span>
 		</span>
 		<span
 			v-if="status"
@@ -27,6 +31,7 @@ import type { Host } from "@lasterm/shared";
 import { computed } from "vue";
 import { getColorFromLabel, getInitials } from "../composables/useHostIcon.js";
 import type { HostStatus } from "../stores/hosts.js";
+import { readableForeground } from "../stores/theme.js";
 import { isDisplayableIconImage } from "../utils/host-icon.js";
 
 /**
@@ -80,7 +85,6 @@ const dotSize = computed(() => Math.max(8, Math.round(props.size * 0.375)));
 .host-badge__text {
 	font-weight: 700;
 	line-height: 1;
-	color: var(--nt-bright-white);
 	text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
 }
 

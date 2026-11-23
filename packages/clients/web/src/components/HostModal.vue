@@ -1219,7 +1219,7 @@ function profileChange(): { profile_json?: string } {
 
 .source-tab.active {
 	background: var(--nt-accent);
-	color: #fff;
+	color: var(--nt-accent-fg);
 }
 
 .group-selector {
@@ -1262,13 +1262,11 @@ function profileChange(): { profile_json?: string } {
 	border: none;
 	border-radius: 4px;
 	cursor: pointer;
-	transition:
-		background 0.12s,
-		opacity 0.12s;
+	transition: box-shadow 0.12s;
 }
 
 .btn:hover {
-	opacity: 0.85;
+	box-shadow: inset 0 0 0 1px currentColor;
 }
 
 .btn:disabled {
@@ -1283,7 +1281,7 @@ function profileChange(): { profile_json?: string } {
 
 .btn-primary {
 	background: var(--nt-accent);
-	color: #fff;
+	color: var(--nt-accent-fg);
 }
 
 .btn-test {
@@ -1446,7 +1444,7 @@ function profileChange(): { profile_json?: string } {
 	height: 32px;
 	border-radius: 6px;
 	background: var(--nt-accent);
-	color: #fff;
+	color: var(--nt-accent-fg);
 	display: flex;
 	align-items: center;
 	justify-content: center;

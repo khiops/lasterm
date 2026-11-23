@@ -130,7 +130,7 @@ function handleRelease(): void {
 }
 
 .state-writer .wl-label {
-	color: var(--nt-green);
+	color: var(--nt-lock-fg);
 }
 
 .state-reader .wl-dot {
@@ -138,7 +138,7 @@ function handleRelease(): void {
 }
 
 .state-reader .wl-label {
-	color: var(--nt-text-muted);
+	color: var(--nt-lock-fg);
 }
 
 .state-free .wl-dot {
@@ -146,7 +146,7 @@ function handleRelease(): void {
 }
 
 .state-free .wl-label {
-	color: var(--nt-text-secondary);
+	color: var(--nt-lock-fg);
 }
 
 .state-reserved .wl-dot {
@@ -154,7 +154,7 @@ function handleRelease(): void {
 }
 
 .state-reserved .wl-label {
-	color: var(--nt-text-secondary);
+	color: var(--nt-lock-fg);
 }
 
 .wl-action-btn {
@@ -163,7 +163,7 @@ function handleRelease(): void {
 	background: var(--nt-border);
 	border: 1px solid var(--nt-tab-hover);
 	border-radius: 3px;
-	color: var(--nt-text-muted);
+	color: var(--nt-border-fg);
 	font-size: 10px;
 	cursor: pointer;
 	transition: background 0.12s, color 0.12s;
@@ -173,26 +173,16 @@ function handleRelease(): void {
 
 .wl-action-btn:hover {
 	background: var(--nt-tab-hover);
-	color: var(--nt-fg);
+	color: var(--nt-tab-hover-fg);
 }
 
 .wl-force {
 	border-color: var(--nt-badge);
-	color: var(--nt-badge);
-}
-
-.wl-force:hover {
-	background: rgba(var(--nt-badge-rgb), 0.15);
-	color: var(--nt-badge);
+	color: var(--nt-border-fg);
 }
 
 .wl-release {
 	border-color: var(--nt-yellow);
-	color: var(--nt-yellow);
-}
-
-.wl-release:hover {
-	background: rgba(var(--nt-yellow-rgb), 0.15);
-	color: var(--nt-yellow);
+	color: var(--nt-border-fg);
 }
 </style>

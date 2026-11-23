@@ -83,6 +83,10 @@
 	/* --nt-fg where it reads at 4.5:1 on --nt-bg, and the least change of it
 	   that does where it does not (set by applyTheme at runtime) */
 	--nt-text-strong: var(--nt-fg);
+	/* Text on the pane lock's dimmed ground and on a border-filled control. */
+	--nt-lock-fg: var(--nt-fg);
+	--nt-border-fg: var(--nt-fg);
+	--nt-tab-hover-fg: var(--nt-fg);
 	/* An error's, a warning's and a note's colour, each where it reads at 4.5:1
 	   on --nt-bg, and the least change of it that does where it does not (set by
 	   applyTheme at runtime, #830) */

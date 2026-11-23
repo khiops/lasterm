@@ -139,13 +139,11 @@ watch(
 	border: none;
 	border-radius: 4px;
 	cursor: pointer;
-	transition:
-		background 0.12s,
-		opacity 0.12s;
+	transition: box-shadow 0.12s;
 }
 
 .btn:hover {
-	opacity: 0.85;
+	box-shadow: inset 0 0 0 1px currentColor;
 }
 
 .btn-secondary {
@@ -154,7 +152,7 @@ watch(
 }
 
 .btn-danger {
-	background: var(--nt-red, #e06c75);
-	color: #fff;
+	background: var(--nt-danger);
+	color: var(--nt-danger-fg);
 }
 </style>

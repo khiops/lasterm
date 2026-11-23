@@ -125,7 +125,7 @@ export const useThemeStore = defineStore("theme", () => {
 		root.setProperty("--nt-tab-inactive", theme.ui.tabInactive);
 		root.setProperty("--nt-tab-hover", theme.ui.tabHover);
 		root.setProperty("--nt-sidebar", theme.ui.sidebar);
-		root.setProperty("--nt-sidebar-text", theme.ui.sidebarText);
+		root.setProperty("--nt-sidebar-text", readableText(theme.ui.sidebarText, theme.ui.sidebar));
 		root.setProperty("--nt-sidebar-active", theme.ui.sidebarActive);
 		root.setProperty("--nt-host-rail", theme.ui.hostRail);
 		root.setProperty("--nt-border", theme.ui.border);
@@ -155,6 +155,14 @@ export const useThemeStore = defineStore("theme", () => {
 			"--nt-text-strong",
 			readableText(theme.colors.foreground, theme.colors.background),
 		);
+		// The pane lock dims the pane header's tab-bar ground by 20%; its action
+		// buttons use the border as a solid fill. Both need fitted text.
+		root.setProperty(
+			"--nt-lock-fg",
+			readableText(theme.colors.foreground, dimHex(theme.ui.tabBar, 0.8)),
+		);
+		root.setProperty("--nt-border-fg", readableText(theme.colors.foreground, theme.ui.border));
+		root.setProperty("--nt-tab-hover-fg", readableText(theme.colors.foreground, theme.ui.tabHover));
 		// What an error, a warning or a note is marked with, made to read on the
 		// theme's background as text does (#830). Each comes from the theme's own
 		// palette unless it names one: the badge fallbacks above are Catppuccin
@@ -442,6 +450,19 @@ function parseHex(hex: string): [number, number, number] | null {
 		Number.parseInt(normalized.slice(3, 5), 16),
 		Number.parseInt(normalized.slice(5, 7), 16),
 	];
+}
+
+/** Black at `1 - factor` over a solid colour, as one hex colour. */
+function dimHex(hex: string, factor: number): string {
+	const rgb = parseHex(hex);
+	if (rgb === null) return hex;
+	return `#${rgb
+		.map((v) =>
+			Math.round(v * factor)
+				.toString(16)
+				.padStart(2, "0"),
+		)
+		.join("")}`;
 }
 
 /** The WCAG contrast ratio of two solid colours, from 1 to 21. */

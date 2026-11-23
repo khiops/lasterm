@@ -2774,3 +2774,131 @@ describe("a SPAWN while the connecting one takes up the daemon's list (#1165)", 
 		expect(keepAndConnect(h).kind).toBe("connected");
 	});
 });
+
+describe("a request during a reconnect's adoption of the daemon's list (#1169)", {
+	timeout: 20_000,
+}, () => {
+	type Lifecycle = {
+		onReconnectAgent: ((hostId: string) => Promise<boolean>) | undefined;
+		adoptionSettled(hostId: string): Promise<void> | undefined;
+	};
+	const lifecycleOf = (h: Harness): Lifecycle =>
+		(h.sm as unknown as { lifecycle: Lifecycle }).lifecycle;
+
+	/**
+	 * The link dropped, and the hub's own reconnect has published its agent: the
+	 * daemon's list is asked for and held, with no acquisition open. Resolves
+	 * with a promise for the end of that adoption, boxed so `await` leaves it.
+	 */
+	async function reconnectAdopting(h: Harness): Promise<{ adoption: Promise<void> }> {
+		await connected(h);
+		terminalsOn(h, 1);
+		h.remote.holdsList = true;
+		h.remote.listStream = null;
+		h.remote.dropLinks();
+		await until("the daemon is asked for its list", () => h.remote.listStream !== null);
+		expect(agentOf(h)).toBeDefined();
+		expect(h.ctx.acquisitions.has(h.host.id)).toBe(false);
+		const adoption = lifecycleOf(h).adoptionSettled(h.host.id);
+		if (adoption === undefined) throw new Error("no adoption under way");
+		return { adoption };
+	}
+
+	/** Whether `promise` has settled by the time the hub has had a few turns. */
+	async function settledSoon(promise: Promise<unknown>): Promise<boolean> {
+		let settled = false;
+		void promise.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		return settled;
+	}
+
+	it("holds a SPAWN until the adoption is over, then spawns", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		const { adoption } = await reconnectAdopting(h);
+		const spawnsBefore = h.remote.spawns;
+
+		const spawning = h.sm.handleSpawn(h.window.id, { type: "SPAWN", hostId: h.host.id });
+		expect(await settledSoon(spawning)).toBe(false);
+		expect(h.remote.spawns).toBe(spawnsBefore);
+
+		h.remote.releaseList();
+		await adoption;
+
+		expect(await spawning).not.toBeNull();
+		expect(h.remote.spawns).toBe(spawnsBefore + 1);
+	});
+
+	it("answers a SPAWN with AGENT_REFUSED_HUB when the adoption it waited for refuses", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		await connected(h);
+		let refuse: (err: Error) => void = () => undefined;
+		vi.spyOn(lifecycleOf(h), "adoptionSettled").mockReturnValue(
+			new Promise<void>((_resolve, reject) => {
+				refuse = reject;
+			}),
+		);
+		const spawnsBefore = h.remote.spawns;
+
+		const spawning = h.sm.handleSpawn(h.window.id, {
+			type: "SPAWN",
+			hostId: h.host.id,
+			requestId: "spawn-during-refusal",
+		});
+		expect(await settledSoon(spawning)).toBe(false);
+		refuse(new AgentRefusedHub("not this hub"));
+
+		expect(await spawning).toBeNull();
+		expect(h.remote.spawns).toBe(spawnsBefore);
+		expect(
+			errorsHeard(h).filter(
+				(error) => error.code === "AGENT_REFUSED_HUB" && error.requestId === "spawn-during-refusal",
+			),
+		).toEqual([
+			expect.objectContaining({
+				hostId: h.host.id,
+				message: expect.stringMatching(/^The agent on this host refused this hub\./),
+			}),
+		]);
+	});
+
+	it("holds another reconnect until the adoption is over", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		const { adoption } = await reconnectAdopting(h);
+		const reconnect = lifecycleOf(h).onReconnectAgent;
+		if (reconnect === undefined) throw new Error("no reconnect");
+
+		const another = reconnect(h.host.id);
+		expect(await settledSoon(another)).toBe(false);
+
+		h.remote.releaseList();
+		await adoption;
+		expect(await another).toBe(true);
+	});
+
+	it("holds an ATTACH until the adoption is over", async () => {
+		const h = await hubWith({ daemon: true, os: "linux" });
+		const { adoption } = await reconnectAdopting(h);
+		const agent = agentOf(h);
+		if (agent === undefined) throw new Error("no agent");
+		const [id] = [...h.ctx.channels.keys()];
+		if (id === undefined) throw new Error("no terminal");
+		const sent = vi.spyOn(agent, "send");
+
+		void h.sm.handleAttach(h.window.id, id);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(sent.mock.calls.filter(([frame]) => frame.type === "ATTACH")).toEqual([]);
+
+		h.remote.releaseList();
+		await adoption;
+		await until("the ATTACH reaches the agent", () =>
+			sent.mock.calls.some(([frame]) => frame.type === "ATTACH"),
+		);
+	});
+});

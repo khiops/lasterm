@@ -11653,9 +11653,11 @@ describe("SessionManager — an answer about a terminal started again since (#59
 		// soon as it answers, before its list of what it holds is read...
 		const reachingAttach = sm.handleAttach("c-window", reaching);
 		await vi.waitFor(() => expect(sm.agents.get(hostId)?.connected).toBe(true));
-		// ...so another pane's attach asks it at once.
+		// ...but another pane's attach waits for that list, which may end its
+		// terminal (#1169), and asks the agent nothing meanwhile.
 		const askedAttach = sm.handleAttach("c-window", asked);
-		await vi.waitFor(() => expect(daemon.sent("ATTACH")).toHaveLength(1));
+		await flushImmediate();
+		expect(daemon.sent("ATTACH")).toEqual([]);
 
 		// The list is read: neither is there, and both are judged ended.
 		daemon.deliver(1);
@@ -11674,10 +11676,10 @@ describe("SessionManager — an answer about a terminal started again since (#59
 		await flushImmediate();
 
 		expectRunning(window, asked);
-		// The attach that asked is answered about the shell running there now.
-		expect(window).toContainEqual(
-			expect.objectContaining({ type: "ATTACH_OK", channelId: asked, cached: false }),
-		);
+		// The attach that waited was answered as ended, and asked the daemon nothing.
+		expect(
+			daemon.sent("ATTACH").filter((m) => (m as { channelId?: string }).channelId === asked),
+		).toEqual([]);
 	});
 
 	it("the daemon's list read after a terminal started meanwhile does not end it", async () => {
@@ -11694,15 +11696,16 @@ describe("SessionManager — an answer about a terminal started again since (#59
 		const attach = sm.handleAttach("c-window", held);
 		await vi.waitFor(() => expect(sm.agents.get(hostId)?.connected).toBe(true));
 		// Found stopped, the other follows its setting (#592) while the list
-		// is on its way, and the daemon starts it.
+		// is on its way: it waits for the list (#1169), then the daemon starts it.
 		const respawn = sm.handleSpawn("c-window", {
 			type: "SPAWN",
 			hostId,
 			reuseChannelId: stopped,
 		});
-		await vi.waitFor(() => expect(daemon.sent("SPAWN")).toHaveLength(1));
-		// The list, written before the SPAWN was read, and the SPAWN_OK arrive together.
+		await flushImmediate();
+		expect(daemon.sent("SPAWN")).toEqual([]);
 		daemon.deliver();
+		await vi.waitFor(() => expect(daemon.sent("SPAWN")).toHaveLength(1));
 
 		expect(await respawn).toBe(stopped);
 		await attach;
@@ -11729,10 +11732,12 @@ describe("SessionManager — an answer about a terminal started again since (#59
 
 		const attach = sm.handleAttach("c-window", held);
 		await vi.waitFor(() => expect(sm.agents.get(hostId)?.connected).toBe(true));
-		// A new tab on that host, while the list is on its way.
+		// A new tab on that host, while the list is on its way: it waits for it (#1169).
 		const opened = sm.handleSpawn("c-window", { type: "SPAWN", hostId });
-		await vi.waitFor(() => expect(daemon.sent("SPAWN")).toHaveLength(1));
+		await flushImmediate();
+		expect(daemon.sent("SPAWN")).toEqual([]);
 		daemon.deliver();
+		await vi.waitFor(() => expect(daemon.sent("SPAWN")).toHaveLength(1));
 
 		const channelId = await opened;
 		await attach;

@@ -502,6 +502,14 @@ export class SessionManager {
 			const host = ctx.metaDal.getHost(hostId);
 			if (host?.type !== "ssh") return false;
 
+			// A reconnect publishes its agent before the daemon's list is taken up
+			// (#1169): until then that agent is not the host's yet, so this waits
+			// for it, and judges what is there once it is over.
+			if (this.lifecycle.adoptionSettled(hostId) !== undefined) {
+				if ((await this.adoptionRefusal(hostId)) !== undefined) return false;
+				if (this.hostIsBeingStopped(hostId)) return false;
+			}
+
 			// A live agent is the connection to use, not a reason to open another.
 			// A remote daemon serves one connection at a time and quietly displaces
 			// the rest, so a second one leaves the hub writing into a socket
@@ -1306,6 +1314,39 @@ export class SessionManager {
 			label: host.label,
 		});
 
+		// A connected agent whose daemon's list is being taken up, with no
+		// acquisition open: a reconnect's (#1169). It is not the host's yet, so
+		// this waits for the adoption, and reads the agent after it. A daemon
+		// that refused this hub in it is answered as such.
+		// Nothing is awaited when none is under way: the acquisition below is
+		// claimed within the same turn as before.
+		if (
+			!this.ctx.acquisitions.has(hostId) &&
+			this.lifecycle.adoptionSettled(hostId) !== undefined
+		) {
+			const refusal = await this.adoptionRefusal(hostId);
+			if (refusal !== undefined) {
+				client.send({
+					type: "ERROR",
+					code: ErrorCode.AGENT_REFUSED_HUB,
+					message: refusal.message,
+					hostId,
+					...(reuseChannelId !== undefined && { channelId: reuseChannelId }),
+				} satisfies ErrorMessage);
+				return null;
+			}
+			if (this.hostIsBeingStopped(hostId)) {
+				client.send({
+					type: "ERROR",
+					code: ErrorCode.HOST_BUSY,
+					message: "This host's agent is being stopped.",
+					hostId,
+					...(reuseChannelId !== undefined && { channelId: reuseChannelId }),
+				});
+				return null;
+			}
+		}
+
 		// Its user disconnected it (#648). A start nobody asked for waits for
 		// them, as it would for a host that is away; any other is them acting
 		// on it, and reaches it again.
@@ -2038,6 +2079,18 @@ export class SessionManager {
 	}
 
 	async handleAttach(clientId: string, channelId: string): Promise<boolean> {
+		// A reconnect's agent is published before its daemon's list is taken up
+		// (#1169), and that list may end this terminal: wait for it, within what
+		// the pane gives an attach, and read the terminal after.
+		const adopting = this.ctx.channels.get(channelId);
+		const adoption =
+			adopting === undefined ? undefined : this.lifecycle.adoptionSettled(adopting.hostId);
+		if (adoption !== undefined) {
+			await Promise.race([
+				adoption.catch(() => undefined),
+				new Promise((resolve) => setTimeout(resolve, SessionManager.ATTACH_RECONNECT_BUDGET)),
+			]);
+		}
 		const client = this.ctx.clients.get(clientId);
 		if (!client) return false;
 		if (this.isQuitting()) {
@@ -4088,6 +4141,22 @@ export class SessionManager {
 		this.broadcaster.updateSessionStatus(hostId, session.id, "disconnected");
 	}
 
+	/**
+	 * Waits for the adoption of a daemon's list under way on `hostId`, if any.
+	 * Returns the refusal when the daemon refused this hub in it.
+	 */
+	private async adoptionRefusal(hostId: string): Promise<AgentRefusedHub | undefined> {
+		const adoption = this.lifecycle.adoptionSettled(hostId);
+		if (adoption === undefined) return undefined;
+		try {
+			await adoption;
+		} catch (err) {
+			if (err instanceof AgentRefusedHub) return err;
+			throw err;
+		}
+		return undefined;
+	}
+
 	private async reconnectForAttach(hostId: string): Promise<boolean> {
 		if (this.hostIsBeingStopped(hostId)) return false;
 		// Its user disconnected it: a pane attaching is a window opening, not
@@ -4102,6 +4171,12 @@ export class SessionManager {
 			this.ctx.configResolver?.sshConfig?.remoteDaemon === true,
 		);
 		if (!keepsDaemon) return false;
+
+		// An adoption under way is a connection already made (#1169).
+		if (this.lifecycle.adoptionSettled(hostId) !== undefined) {
+			if ((await this.adoptionRefusal(hostId)) !== undefined) return false;
+			if (this.hostIsBeingStopped(hostId)) return false;
+		}
 
 		const inFlight = this.reconnectForAttachInFlight.get(hostId);
 		if (inFlight !== undefined) return inFlight;

@@ -742,6 +742,13 @@ export class ChannelLifecycleManager {
 		return (current.startedAt ?? 0) <= askedAt;
 	}
 
+	/** A host's terminals end or are forgotten: the restarts waiting on it are over (#1168). */
+	private cancelRestartsOfHost(hostId: string): void {
+		for (const [channelId, pending] of this.pendingRestarts) {
+			if (pending.hostId === hostId) this.pendingRestarts.delete(channelId);
+		}
+	}
+
 	/**
 	 * Take a terminal out of everything that speaks to a running one: the clients
 	 * that hold it, the snapshot timer, the chunker, and the map of what this hub
@@ -754,12 +761,6 @@ export class ChannelLifecycleManager {
 	 * End the recordings of every terminal of a host about to be forgotten,
 	 * before the status writes that can throw and stop the loop over them (#80).
 	 */
-	private cancelRestartsOfHost(hostId: string): void {
-		for (const [channelId, pending] of this.pendingRestarts) {
-			if (pending.hostId === hostId) this.pendingRestarts.delete(channelId);
-		}
-	}
-
 	private endRecordingsOfHost(hostId: string): void {
 		for (const [channelId, ch] of this.ctx.channels) {
 			if (ch.hostId === hostId) this.ctx.recorder?.endChannel(channelId, "gone");
@@ -1028,6 +1029,9 @@ export class ChannelLifecycleManager {
 				"elevation",
 				`Enter password for elevated shell on ${hostname}`,
 			);
+			// Deleted or its session closed while the prompt was open (#1168): no
+			// shell is started for it, and the password is not kept.
+			if (!this.pendingRestarts.has(channelId)) return false;
 			if (secret === null) {
 				promptClient.send({
 					type: "ERROR",

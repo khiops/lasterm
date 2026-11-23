@@ -1581,10 +1581,40 @@ describe("SessionManager", () => {
 			emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
 
 			expect(await restarting).toBe(false);
+			expect(agent.send).toHaveBeenCalledWith({ type: "DESTROY", channelId });
 			expect(new MetaDAL(dbManager.meta).getChannel(channelId)?.status).toBe("dead");
 			expect(ctxOf().channels.has(channelId)).toBe(false);
 			expect(statesOf(heard, channelId).some((s) => s.status === "live")).toBe(false);
 		});
+
+		it.each([
+			["its host's agent stopped on request", "stop"],
+			["its host's session ended under the hub", "loss"],
+		] as const)(
+			"a terminal whose restart waits while %s stays ended, and the shell that answers is destroyed",
+			async (_, how) => {
+				const { channelId, heard, agent, emit } = await liveTerminal();
+				nextLocalSpawnUnanswered = true;
+				const restarting = sm.restartChannel(channelId);
+				await vi.waitFor(() => expect(spawnsNaming(agent, channelId)).toHaveLength(1));
+
+				const lifecycle = sm as unknown as {
+					lifecycle: { endChannelsOfStoppedAgent: (hostId: string) => void };
+					endHostSession: (hostId: string, reason: string) => void;
+				};
+				const hostId = ctxOf().channels.get(channelId)?.hostId ?? "";
+				if (how === "stop") lifecycle.lifecycle.endChannelsOfStoppedAgent(hostId);
+				else lifecycle.endHostSession(hostId, "stopped");
+				const [spawn] = spawnsNaming(agent, channelId);
+				agent.send.mockClear();
+				emit({ type: "SPAWN_OK", requestId: spawn?.requestId, channelId });
+
+				expect(await restarting).toBe(false);
+				expect(agent.send).toHaveBeenCalledWith({ type: "DESTROY", channelId });
+				expect(ctxOf().channels.has(channelId)).toBe(false);
+				expect(statesOf(heard, channelId).some((s) => s.status === "live")).toBe(false);
+			},
+		);
 
 		// What the replaced shell titled is not the new shell's (#1171).
 		it("a restarted terminal keeps none of the replaced shell's titles, stored or about to be", async () => {

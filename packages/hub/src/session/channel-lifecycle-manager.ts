@@ -1013,6 +1013,8 @@ export class ChannelLifecycleManager {
 			if (firstResult.errCode !== "ELEVATION_PASSWORD_REQUIRED") {
 				return false;
 			}
+			// Deleted or its session closed meanwhile (#1168): no password is asked.
+			if (!this.pendingRestarts.has(channelId)) return false;
 
 			// Prompt user
 			const promptFn = this._buildPromptAuth(promptClient, {
@@ -1201,7 +1203,13 @@ export class ChannelLifecycleManager {
 					// (#1168): the shell that answered has no terminal to live in.
 					// The agent keeps it running under its id until told otherwise.
 					if (spawnMsg.channelId !== undefined && !this.pendingRestarts.has(spawnMsg.channelId)) {
-						agent.send({ type: "DESTROY", channelId } as DestroyMessage);
+						try {
+							agent.send({ type: "DESTROY", channelId } as DestroyMessage);
+						} catch (err) {
+							// A connection already closed: the restart's caller gets it.
+							reject(err);
+							return;
+						}
 						resolve({ ok: false, channelId: null, errCode: "CHANNEL_GONE" });
 						return;
 					}

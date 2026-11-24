@@ -62,6 +62,8 @@ function entryOf(raw: Record<string, unknown>): FileEntryView | null {
 		kind,
 		size: typeof size === "number" ? size : null,
 		mtime: typeof mtime === "string" ? mtime : null,
+		// A hub without permissions sends no mode: none is known.
+		mode: typeof raw.mode === "number" ? raw.mode : null,
 		...(typeof raw.link_target === "string" ? { linkTarget: raw.link_target } : {}),
 		...(linkKind === "file" ||
 		linkKind === "directory" ||

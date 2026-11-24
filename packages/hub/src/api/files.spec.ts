@@ -1,6 +1,6 @@
-import { mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { get as httpsGet } from "node:https";
-import type { AddressInfo } from "node:net";
+import { type AddressInfo, createServer as createNetServer } from "node:net";
 import { join } from "node:path";
 import { decodeMessage, encodeMessage, type ProtocolMessage } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
@@ -147,6 +147,8 @@ describe("the files of a terminal's host, over REST (#832)", () => {
 		mkdirSync(join(root, "sub"));
 		writeFileSync(join(root, "f.txt"), "abc");
 		writeFileSync(join(root, ".hidden"), "");
+		chmodSync(join(root, "sub"), 0o750);
+		chmodSync(join(root, "f.txt"), 0o640);
 		if (process.platform !== "win32") symlinkSync("sub", join(root, "link"));
 
 		const res = await list(root);
@@ -159,11 +161,16 @@ describe("the files of a terminal's host, over REST (#832)", () => {
 		}>();
 		expect(body.truncated).toBe(0);
 		const named = (name: string) => body.entries.find((entry) => entry.name === name);
+		// A Windows hub gives no mode: Node's is made up from the read-only attribute alone.
 		expect(named("sub")).toEqual({
 			name: "sub",
 			kind: "directory",
 			size: null,
 			mtime: expect.any(String),
+			mode: process.platform === "win32" ? null : 16872,
+		});
+		expect(named("f.txt")).toMatchObject({
+			mode: process.platform === "win32" ? null : 33184,
 		});
 		expect(body.entries.map((entry) => entry.name)).toEqual(
 			process.platform === "win32" ? ["sub", "f.txt"] : ["link", "sub", "f.txt"],
@@ -180,6 +187,25 @@ describe("the files of a terminal's host, over REST (#832)", () => {
 			process.platform === "win32" ? 3 : 4,
 		);
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"sends each entry's mode whole, special bits and special files included",
+		async () => {
+			mkdirSync(join(root, "shared"));
+			chmodSync(join(root, "shared"), 0o2750);
+			const socketServer = createNetServer();
+			await new Promise<void>((resolve) => socketServer.listen(join(root, "s.sock"), resolve));
+			try {
+				chmodSync(join(root, "s.sock"), 0o750);
+				const entries = (await list(root)).json<{ entries: Record<string, unknown>[] }>().entries;
+				const named = (name: string) => entries.find((entry) => entry.name === name);
+				expect(named("shared")).toMatchObject({ kind: "directory", mode: 17896 });
+				expect(named("s.sock")).toMatchObject({ kind: "other", mode: 49640 });
+			} finally {
+				await new Promise<void>((resolve) => socketServer.close(() => resolve()));
+			}
+		},
+	);
 
 	it("opens without a path at the fallback folder its host's settings name, else at the home (#836)", async () => {
 		const dal = new MetaDAL(dbs.meta);
@@ -229,13 +255,19 @@ describe("the files of a terminal's host, over REST (#832)", () => {
 
 	it("says what a path is, and the free space where it is", async () => {
 		writeFileSync(join(root, "f.txt"), "abc");
+		chmodSync(join(root, "f.txt"), 0o640);
 		const stat = await server.inject({
 			method: "GET",
 			url: `/api/channels/${channelId}/files/stat?path=${encodeURIComponent(join(root, "f.txt"))}`,
 			headers: bearer(),
 		});
 		expect(stat.statusCode).toBe(200);
-		expect(stat.json()).toMatchObject({ name: "f.txt", kind: "file", size: 3 });
+		expect(stat.json()).toMatchObject({
+			name: "f.txt",
+			kind: "file",
+			size: 3,
+			mode: process.platform === "win32" ? null : 33184,
+		});
 		const space = await server.inject({
 			method: "GET",
 			url: `/api/channels/${channelId}/files/free-space?path=${encodeURIComponent(root)}`,

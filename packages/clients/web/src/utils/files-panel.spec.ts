@@ -5,6 +5,7 @@ import {
 	clampTransfersShare,
 	entryLabel,
 	filesPanelForm,
+	formatMode,
 	formatSize,
 	joinPath,
 	optionSource,
@@ -233,20 +234,47 @@ describe("a listing's rows", () => {
 	});
 
 	it("reads each row to a screen reader as what it is, its size and when it changed", () => {
-		expect(entryLabel({ name: "src", kind: "directory", size: null, mtime: null }, now)).toBe(
-			"folder src",
-		);
+		expect(
+			entryLabel({ name: "src", kind: "directory", size: null, mtime: null, mode: null }, now),
+		).toBe("folder src");
 		expect(
 			entryLabel(
-				{ name: "docs", kind: "symlink", size: 4, mtime: null, linkKind: "directory" },
+				{ name: "docs", kind: "symlink", size: 4, mtime: null, mode: null, linkKind: "directory" },
 				now,
 			),
 		).toBe("folder docs");
 		const file = entryLabel(
-			{ name: "notes.md", kind: "file", size: 4096, mtime: "2026-10-30T10:00:00Z" },
+			{ name: "notes.md", kind: "file", size: 4096, mtime: "2026-10-30T10:00:00Z", mode: null },
 			now,
 		);
-		expect(file).toMatch(/^file notes\.md, 4 KB, modified .+/);
+		expect(file).toMatch(/^file notes\.md, 4 KB, modified [^,]+$/);
+		const known = entryLabel(
+			{ name: "notes.md", kind: "file", size: 4096, mtime: "2026-10-30T10:00:00Z", mode: 0o100644 },
+			now,
+		);
+		expect(known).toBe(`${file}, permissions -rw-r--r--`);
+	});
+
+	it("spells a mode as ls -l does", () => {
+		const spelt: [number | null, string][] = [
+			[0o40755, "drwxr-xr-x"],
+			[0o104755, "-rwsr-xr-x"],
+			[0o102640, "-rw-r-S---"],
+			[0o120777, "lrwxrwxrwx"],
+			[0o10644, "prw-r--r--"],
+			[0o41777, "drwxrwxrwt"],
+			[0o41776, "drwxrwxrwT"],
+			[0o104644, "-rwSr--r--"],
+			[0o42755, "drwxr-sr-x"],
+			[0o20620, "crw--w----"],
+			[0o60660, "brw-rw----"],
+			[0o140755, "srwxr-xr-x"],
+			[0o644, "?rw-r--r--"],
+			[0o100444, "-r--r--r--"],
+			[0o100000, "----------"],
+			[null, ""],
+		];
+		for (const [mode, text] of spelt) expect([mode, formatMode(mode)]).toEqual([mode, text]);
 	});
 
 	it("jumps to the next row whose name starts with what is typed", () => {

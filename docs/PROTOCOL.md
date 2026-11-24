@@ -2575,8 +2575,8 @@ A dead terminal's host is browsed as a live one's. Uploads are in § 4.19 and be
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/channels/:id/files` | ● | `?path=&hidden=` → `{ path, entries: [{ name, kind, size, mtime, link_target?, link_kind? }], truncated, start?, fallback_problem? }`. Without `path` (or with an empty one), the folder a panel opens at when the terminal's own folder is unknown or not followed (below), with `start`. `hidden=1` or `true` lists the entries whose name starts with `.`; `0`, `false` or nothing leaves them out. Folders first, links to folders among them, then by name; at most 5,000 entries, `truncated` counting the rest (0 for a whole listing) |
-| GET | `/api/channels/:id/files/stat` | ● | `?path=` (required) → `{ path, name, kind, size, mtime, link_target?, link_kind? }` |
+| GET | `/api/channels/:id/files` | ● | `?path=&hidden=` → `{ path, entries: [{ name, kind, size, mtime, mode, link_target?, link_kind? }], truncated, start?, fallback_problem? }`. Without `path` (or with an empty one), the folder a panel opens at when the terminal's own folder is unknown or not followed (below), with `start`. `hidden=1` or `true` lists the entries whose name starts with `.`; `0`, `false` or nothing leaves them out. Folders first, links to folders among them, then by name; at most 5,000 entries, `truncated` counting the rest (0 for a whole listing) |
+| GET | `/api/channels/:id/files/stat` | ● | `?path=` (required) → `{ path, name, kind, size, mtime, mode, link_target?, link_kind? }` |
 | GET | `/api/channels/:id/files/free-space` | ● | `?path=` → `{ path, available, total }`: the bytes the account may still write on that folder's file system, and its size; `null` when the host does not say (a Windows share over SSH commands). Without `path`, the home |
 | POST | `/api/channels/:id/folders` | ● | `{ path }`, header `X-Lasterm-Client-Id` → 201 `{ path }`. Creates that folder, and only it: its parent must exist and it must not. Refused with 403 `WRITE_LOCK_DENIED` unless the header names a window that holds the terminal's write lock (§ 4.5) |
 
@@ -2588,6 +2588,7 @@ Every answer carries `Cache-Control: no-store`. An entry is:
 | `kind` | `"file"`, `"directory"`, `"symlink"` or `"other"`, as `lstat` says: a link is not followed |
 | `size` | Bytes; `null` for a folder, or when the host does not say |
 | `mtime` | Last modified, ISO 8601; `null` when the host does not say |
+| `mode` | The POSIX `st_mode` as the host gives it, file type and permission bits (`0o170000` and `0o7777`) unmasked, which a client spells as `ls -l` does. A Windows host over SFTP gives the bits its server makes up, which do not reflect its ACLs. `null` when the host gives none: the local host of a hub running on Windows, a Windows host over SSH commands, a drive at a Windows root, an SFTP server that sends no permissions |
 | `link_target` | On a link: what it holds, as the host reads it; absent when it does not say (a Windows host over SSH commands) |
 | `link_kind` | On a link: what it leads to, followed: `"file"`, `"directory"`, `"other"`, or `"missing"` |
 

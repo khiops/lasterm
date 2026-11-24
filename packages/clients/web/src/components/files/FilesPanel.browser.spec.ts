@@ -24,6 +24,8 @@ import { useConfigStore } from "../../stores/config.js";
 import { useFilesPanelStore } from "../../stores/files-panel.js";
 import { useHostsStore } from "../../stores/hosts.js";
 import { contrastRatio, TEXT_CONTRAST_AA, useThemeStore } from "../../stores/theme.js";
+import type { FileEntryView } from "../../utils/files-panel.js";
+import FilesBrowser from "./FilesBrowser.vue";
 import FilesPanel from "./FilesPanel.vue";
 
 const NAS = "01ARZ3NDEKTSV4RRFFQ69G5FN1";
@@ -85,6 +87,43 @@ afterEach(() => {
 	document.body.replaceChildren();
 	document.documentElement.removeAttribute("style");
 });
+
+/** Two frames: a `ResizeObserver` reports a size before the frame that paints it. */
+async function frames(): Promise<void> {
+	for (let i = 0; i < 2; i++) await new Promise((resolve) => requestAnimationFrame(resolve));
+	await settle();
+}
+
+/** The files browser alone in a box `width` px wide, listing `entries`. */
+async function mountBrowserIn(width: number, entries: FileEntryView[]): Promise<HTMLElement> {
+	mocks.listHostFiles.mockResolvedValue({
+		ok: true,
+		value: { path: "/srv/drop", entries, truncated: 0 },
+	});
+	useFilesPanelStore().browse(ON_NAS, "/srv/drop");
+	const root = document.createElement("div");
+	root.style.cssText = `display: flex; flex-direction: column; width: ${width}px; height: 400px`;
+	document.body.appendChild(root);
+	app = createApp({
+		render: () =>
+			h(FilesBrowser, {
+				channelId: ON_NAS,
+				hostId: NAS,
+				hostLabel: "nas",
+				hostOs: "linux",
+				writer: true,
+				followByDefault: false,
+				showHidden: false,
+				sftpUnavailable: false,
+				agentUpdatable: false,
+				shell: "bash",
+				tint: null,
+			}),
+	});
+	app.mount(root);
+	await frames();
+	return root;
+}
 
 /** The panel, drawn under `theme` at 80 % opacity, with both its cards up. */
 async function mountWithCards(theme: (typeof BUNDLED_THEMES)[string]): Promise<HTMLElement> {
@@ -177,4 +216,71 @@ describe("the panel's cards (#836)", () => {
 			}
 		});
 	}
+});
+
+describe("the permissions column, by the panel's width (#1195)", () => {
+	const entry = (
+		name: string,
+		kind: FileEntryView["kind"],
+		mode: number | null,
+	): FileEntryView => ({
+		name,
+		kind,
+		size: kind === "directory" ? null : 10,
+		mtime: "2026-10-30T10:00:00Z",
+		mode,
+	});
+	const row = (root: HTMLElement, name: string): HTMLElement =>
+		[...root.querySelectorAll<HTMLElement>(".files-row")].find(
+			(el) => el.querySelector(".files-row__name")?.textContent === name,
+		) as HTMLElement;
+	const shown = (el: Element | null): boolean =>
+		el !== null && getComputedStyle(el).display !== "none";
+
+	it("shows the column from 400 px on, and the permissions on hover below", async () => {
+		const root = await mountBrowserIn(400, [
+			entry("bin", "directory", 0o40755),
+			entry("notes.md", "file", 0o100644),
+		]);
+		const browser = root.querySelector(".files-browser") as HTMLElement;
+		expect(browser.getBoundingClientRect().width).toBe(400);
+		const notes = row(root, "notes.md");
+		expect(shown(notes.querySelector(".files-row__mode"))).toBe(true);
+		expect(notes.querySelector(".files-row__mode")?.textContent).toBe("-rw-r--r--");
+		expect(
+			(notes.querySelector(".files-row__name") as HTMLElement).getBoundingClientRect().width,
+		).toBeGreaterThanOrEqual(140);
+		expect(root.querySelectorAll(".files-row[title]")).toHaveLength(0);
+
+		// Narrower: the column goes, the date stays, and the row says its permissions on hover.
+		root.style.width = "399px";
+		await frames();
+		expect(shown(notes.querySelector(".files-row__mode"))).toBe(false);
+		expect(shown(notes.querySelector(".files-row__modified"))).toBe(true);
+		expect(notes.getAttribute("title")).toBe("Permissions -rw-r--r--");
+
+		// Wide again, and narrow again: the width now decides, not what it was.
+		root.style.width = "400px";
+		await frames();
+		expect(shown(notes.querySelector(".files-row__mode"))).toBe(true);
+		expect(notes.hasAttribute("title")).toBe(false);
+		root.style.width = "399px";
+		await frames();
+		expect(shown(notes.querySelector(".files-row__mode"))).toBe(false);
+		expect(notes.getAttribute("title")).toBe("Permissions -rw-r--r--");
+	});
+
+	it("keeps the column, empty, for a host that gives no permissions", async () => {
+		const root = await mountBrowserIn(400, [
+			entry("Users", "directory", null),
+			entry("pagefile.sys", "file", null),
+		]);
+		for (const cell of root.querySelectorAll(".files-row__mode")) {
+			expect(shown(cell)).toBe(true);
+			expect(cell.textContent).toBe("");
+			expect(cell.getBoundingClientRect().width).toBeGreaterThanOrEqual(50);
+		}
+		expect(root.querySelectorAll(".files-row__mode")).toHaveLength(2);
+		expect(root.querySelectorAll(".files-row[title]")).toHaveLength(0);
+	});
 });

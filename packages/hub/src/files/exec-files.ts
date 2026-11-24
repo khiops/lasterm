@@ -444,6 +444,7 @@ export function parseWindowsEntries(lines: readonly string[], name?: string): Fi
 				kind: "symlink",
 				size: null,
 				mtime: time,
+				mode: null,
 				linkKind: "directory",
 			});
 		} else {
@@ -452,6 +453,7 @@ export function parseWindowsEntries(lines: readonly string[], name?: string): Fi
 				kind: kind === "d" ? "directory" : "file",
 				size: kind === "d" || size === "-" ? null : Number(size),
 				mtime: time,
+				mode: null,
 			});
 		}
 	}
@@ -509,7 +511,7 @@ export class ExecFileBackend implements FileBackend {
 		const what = "The path could not be read";
 		const name = baseNameOf(path, this.style);
 		if (this.style === "windows") {
-			if (path === "/") return { name, kind: "directory", size: null, mtime: null };
+			if (path === "/") return { name, kind: "directory", size: null, mtime: null, mode: null };
 			const [entry] = parseWindowsEntries(await this.windows(windowsStatScript(path), what), name);
 			if (entry) return entry;
 		} else {

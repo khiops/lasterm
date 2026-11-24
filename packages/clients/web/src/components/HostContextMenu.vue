@@ -4,7 +4,7 @@
 			v-if="visible"
 			ref="menuEl"
 			class="ctx-menu"
-			:style="{ left: `${x}px`, top: `${y}px` }"
+			:style="placement.style.value"
 			@click.stop
 		>
 			<template v-if="host?.type === 'local'">
@@ -113,6 +113,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import { useMenuPlacement } from "../composables/useMenuPlacement.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { toastRefusal } from "../utils/hub-answer.js";
 
@@ -139,6 +140,12 @@ const emit = defineEmits<{
 const hostsStore = useHostsStore();
 const menuEl = ref<HTMLElement | null>(null);
 const showGroupSubmenu = ref(false);
+const placement = useMenuPlacement({
+	open: () => props.visible,
+	menu: menuEl,
+	x: () => props.x,
+	y: () => props.y,
+});
 
 const host = computed(() =>
 	hostsStore.hosts.find((h) => h.id === props.hostId) ?? null,

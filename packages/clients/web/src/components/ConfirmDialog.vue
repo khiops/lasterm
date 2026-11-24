@@ -1,9 +1,17 @@
 <template>
 	<Teleport to="body">
 		<div v-if="visible" class="confirm-overlay" @click.self="$emit('cancel')">
-			<div class="confirm-dialog">
-				<h3 class="confirm-title">{{ title }}</h3>
-				<p class="confirm-message">{{ message }}</p>
+			<div
+				ref="dialogEl"
+				class="confirm-dialog"
+				role="alertdialog"
+				aria-modal="true"
+				aria-labelledby="confirm-dialog-title"
+				aria-describedby="confirm-dialog-message"
+				@keydown="onKeydown"
+			>
+				<h3 id="confirm-dialog-title" class="confirm-title">{{ title }}</h3>
+				<p id="confirm-dialog-message" class="confirm-message">{{ message }}</p>
 
 				<div v-if="showRemember" class="confirm-remember">
 					<label class="confirm-remember-label">
@@ -17,10 +25,10 @@
 				</div>
 
 				<div class="confirm-actions">
-					<button class="btn btn-secondary" @click="$emit('cancel')">
+					<button class="btn btn-secondary confirm-cancel" type="button" @click="$emit('cancel')">
 						{{ cancelLabel }}
 					</button>
-					<button class="btn btn-danger" @click="onConfirm">
+					<button class="btn btn-danger" type="button" @click="onConfirm">
 						{{ confirmLabel }}
 					</button>
 				</div>
@@ -31,6 +39,7 @@
 
 <script setup lang="ts">
 import { ref, watch } from "vue";
+import { useModalFocus } from "../composables/useModalFocus.js";
 
 const props = withDefaults(
 	defineProps<{
@@ -52,6 +61,17 @@ const emit = defineEmits<{
 	confirm: [remember: { host: boolean; global: boolean }];
 	cancel: [];
 }>();
+
+// A modal alertdialog (#1189): the keyboard goes onto Cancel, the harmless answer; Esc cancels;
+// Tab stays inside; and the keyboard goes back to where it was. The window runs none of its own
+// keys behind a modal dialog.
+const dialogEl = ref<HTMLElement | null>(null);
+const { onKeydown } = useModalFocus({
+	open: () => props.visible,
+	root: dialogEl,
+	close: () => emit("cancel"),
+	initial: () => dialogEl.value?.querySelector<HTMLElement>(".confirm-cancel") ?? null,
+});
 
 const rememberHost = ref(false);
 const rememberGlobal = ref(false);

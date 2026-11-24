@@ -337,6 +337,8 @@ export interface StatusFacts {
 	readonly shell: string | undefined;
 	/** The host's SSH server offers no SFTP: its files go over SSH commands. */
 	readonly sftpUnavailable: boolean;
+	/** The host's menu offers Update agent: an SSH host served by an older agent. */
+	readonly agentUpdatable: boolean;
 }
 
 export interface StatusLine {
@@ -392,7 +394,9 @@ export function statusLines(facts: StatusFacts): StatusLine[] {
 		if (live === undefined) {
 			lines.push({
 				id: "unknown",
-				text: `Update the agent on ${facts.hostLabel} to follow this terminal's directory`,
+				text: facts.agentUpdatable
+					? `Update the agent on ${facts.hostLabel} (host menu › Update agent) to follow this terminal's directory`
+					: "This terminal's directory is not known",
 				tone: "info",
 			});
 		} else if (facts.shell !== undefined && POWERSHELL.test(facts.shell.trim())) {

@@ -341,22 +341,6 @@
 									({{ remoteDaemonUnavailable }}); its terminals run over the connection
 									and end with it.
 								</p>
-								<div v-if="outdatedAgent" class="outdated-agent">
-									<p class="outdated-agent__text">
-										This host is served by agent {{ outdatedAgent.running }}; this
-										Lasterm carries {{ outdatedAgent.expected }}. It is replaced as
-										soon as none of this Lasterm's terminals runs on it, unless other
-										hubs hold terminals there. Replacing it now ends every terminal it
-										is holding.
-									</p>
-									<button
-										type="button"
-										class="outdated-agent__btn"
-										:disabled="replacingAgent"
-										@click="onReplaceAgent"
-									>{{ replacingAgent ? "Stopping…" : "Replace it now, ending its terminals" }}</button>
-									<p v-if="replaceMessage" class="field-hint">{{ replaceMessage }}</p>
-								</div>
 							</div>
 
 							<div class="field">
@@ -655,12 +639,7 @@ import { getHostColor } from "../composables/useHostIcon.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { readableForeground } from "../stores/theme.js";
 import { DEFAULT_VISUAL_PROFILE } from "../utils/visual-presets.js";
-import { useAuthStore } from "../stores/auth.js";
-import { hubFetch } from "../utils/hub-fetch.js";
-import { hubUnreachable } from "../utils/hub-answer.js";
-import { hubBaseUrl } from "../utils/hub-url.js";
 import { EXTERNAL_LINKS } from "../utils/external-links.js";
-import { type ReplaceAgentResponse, replaceAgentWithConsent } from "../utils/replace-agent.js";
 import { resolveEmojiShortcode } from "../utils/emoji-shortcodes.js";
 import { iconImageFromFile, isDisplayableIconImage } from "../utils/host-icon.js";
 import { describeTestPlatform } from "../utils/test-connect-platform.js";
@@ -680,17 +659,6 @@ const emit = defineEmits<{
 }>();
 
 const hostsStore = useHostsStore();
-
-/**
- * The disagreement between the agent serving this host and the one this
- * Lasterm carries, when there is one (#456).
- */
-const outdatedAgent = computed(() =>
-	props.editHost === null ? null : hostsStore.getOutdatedAgent(props.editHost.id),
-);
-
-const replacingAgent = ref(false);
-const replaceMessage = ref<string | null>(null);
 
 /**
  * How many terminals other Lasterm hubs hold on the agent serving this host,
@@ -722,44 +690,6 @@ const socketForwardingRefused = computed(
 const remoteDaemonUnavailable = computed(() =>
 	props.editHost === null ? null : hostsStore.remoteDaemonUnavailable(props.editHost.id),
 );
-
-/**
- * Stop the agent serving this host, so the next connection starts the current
- * one. Everything it is holding ends with it, which is why, while it holds
- * terminals, this is only ever a button someone presses — and why ending
- * terminals other hubs opened there takes a second yes. One that holds none of
- * this hub's the hub replaces by itself (#805).
- */
-async function onReplaceAgent(): Promise<void> {
-	const host = props.editHost;
-	if (host === null) return;
-	replacingAgent.value = true;
-	replaceMessage.value = null;
-	try {
-		replaceMessage.value = await replaceAgentWithConsent({
-			post: async (consent) => {
-				const response = await hubFetch(`${hubBaseUrl()}/api/hosts/${host.id}/agent/replace`, {
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-						Authorization: `Bearer ${useAuthStore().token ?? ""}`,
-					},
-					body: JSON.stringify(consent),
-				});
-				return {
-					ok: response.ok,
-					status: response.status,
-					body: (await response.json()) as ReplaceAgentResponse["body"],
-				};
-			},
-			confirm: (question) => window.confirm(question),
-		});
-	} catch (error) {
-		replaceMessage.value = hubUnreachable(error);
-	} finally {
-		replacingAgent.value = false;
-	}
-}
 
 /** The hosts this one could be reached through: any SSH host but itself. */
 const proxyCandidates = computed(() =>
@@ -1125,35 +1055,6 @@ function profileChange(): { profile_json?: string } {
 
 .icon-file-input {
 	display: none;
-}
-
-.outdated-agent {
-	margin-top: 8px;
-	padding: 8px;
-	border: 1px solid var(--nt-badge-warning, #f9e2af);
-	border-radius: 4px;
-}
-
-.outdated-agent__text {
-	margin: 0 0 8px;
-	font-size: 12px;
-	color: var(--nt-text-secondary);
-}
-
-.outdated-agent__btn {
-	padding: 4px 10px;
-	border: 1px solid var(--nt-border);
-	border-radius: 3px;
-	background: transparent;
-	color: var(--nt-fg);
-	font: inherit;
-	font-size: 12px;
-	cursor: pointer;
-}
-
-.outdated-agent__btn:disabled {
-	opacity: 0.6;
-	cursor: default;
 }
 
 .auth-note {

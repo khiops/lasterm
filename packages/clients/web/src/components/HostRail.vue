@@ -885,9 +885,37 @@ onMounted(() => {
 	border: 2px solid var(--nt-tab-bar);
 }
 
-/* The same dot, marked — not a second thing to read beside it. */
-.status-dot--older-agent {
-	box-shadow: 0 0 0 2px var(--nt-badge-warning, #f9e2af);
+/*
+ * The same dot, marked (#1184): a ring one dot-width out, fading in and out,
+ * which the dot's own status colour never does but the reconnecting dot (the
+ * dot itself, not a ring). Under reduced motion the ring stays, still.
+ */
+.status-dot--older-agent::after {
+	content: "";
+	position: absolute;
+	inset: -4px;
+	border-radius: 50%;
+	/* The warning colour, edged in the text colour: one of the two reads on any rail. */
+	border: 2px solid var(--nt-badge-warning, #f9e2af);
+	outline: 1px solid var(--nt-fg);
+	pointer-events: none;
+	animation: older-agent-ring 2s ease-in-out infinite;
+}
+
+@keyframes older-agent-ring {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.25;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.status-dot--older-agent::after {
+		animation: none;
+	}
 }
 
 .status-dot--live {

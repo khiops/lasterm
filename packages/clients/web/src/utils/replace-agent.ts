@@ -7,7 +7,7 @@
  * yes sends the request again with `force`.
  */
 
-import { transfersText } from "./host-connection.js";
+import { type HostConnectionQuestion, transfersText } from "./host-connection.js";
 
 /** What the hub answered, reduced to what this flow reads. */
 export interface ReplaceAgentResponse {
@@ -37,6 +37,18 @@ export interface ReplaceAgentDeps {
 	readonly post: (consent: ReplaceAgentConsent) => Promise<ReplaceAgentResponse>;
 	/** Ask the person; true only on an explicit yes. */
 	readonly confirm: (question: string) => boolean | Promise<boolean>;
+}
+
+/** The question asked first, from the host menu: updating ends what the agent holds (#1185). */
+export function replaceAgentQuestion(
+	hostLabel: string,
+	agent: { readonly running: string; readonly expected: string },
+): HostConnectionQuestion {
+	return {
+		title: `Update the agent on ${hostLabel}?`,
+		message: `${hostLabel} is served by agent ${agent.running}; this Lasterm carries ${agent.expected}. Updating stops that agent and ends every terminal it is holding.`,
+		confirmLabel: "Update agent",
+	};
 }
 
 /** The question asked before ending terminals that other hubs opened. */

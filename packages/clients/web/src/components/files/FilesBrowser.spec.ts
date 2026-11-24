@@ -107,6 +107,7 @@ function mountBrowser(overrides: Record<string, unknown> = {}): Mounted {
 		followByDefault: true,
 		showHidden: false,
 		sftpUnavailable: false,
+		agentUpdatable: true,
 		shell: "bash",
 		tint: null,
 		...overrides,
@@ -174,10 +175,17 @@ describe("where the panel opens", () => {
 		expect(lastListed()).toEqual([A, undefined, false]);
 		expect(rows()).toEqual(["in.txt"]);
 		expect(status()).toContain(
-			"Update the agent on raspberrypi to follow this terminal's directory",
+			"Update the agent on raspberrypi (host menu › Update agent) to follow this terminal's directory",
 		);
 		expect(status()).toContain("Showing the folder set for unknown directories");
 		expect(followToggle().getAttribute("aria-pressed")).toBe("true");
+	});
+
+	it("does not point to Update agent where the host's menu offers none", async () => {
+		mountBrowser({ agentUpdatable: false });
+		await settle();
+		expect(status()).toContain("This terminal's directory is not known");
+		expect(status()).not.toContain("Update agent");
 	});
 
 	it("says why a fallback folder the hub could not open was not used", async () => {

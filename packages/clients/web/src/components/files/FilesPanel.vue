@@ -89,6 +89,7 @@
 					:follow-by-default="resolvedProfile.transferFollowCwd !== false"
 					:show-hidden="showHidden"
 					:sftp-unavailable="sftpUnavailable"
+					:agent-updatable="agentUpdatable"
 					:shell="shell"
 					:tint="tintStyle"
 					@announce="announce"
@@ -208,6 +209,12 @@ const showHidden = computed(() => configStore.uiConfig.transfer?.showHidden === 
 const sftpUnavailable = computed(
 	() =>
 		hostId.value !== null && host.value?.type !== "local" && hostsStore.isSftpUnavailable(hostId.value),
+);
+const agentUpdatable = computed(
+	() =>
+		hostId.value !== null &&
+		host.value?.type === "ssh" &&
+		hostsStore.getOutdatedAgent(hostId.value) !== null,
 );
 const verifyReason = computed(() =>
 	host.value?.type === "local"

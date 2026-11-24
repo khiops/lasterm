@@ -3,6 +3,7 @@ import {
 	otherHubsQuestion,
 	type ReplaceAgentConsent,
 	type ReplaceAgentResponse,
+	replaceAgentQuestion,
 	replaceAgentWithConsent,
 	transfersQuestion,
 } from "./replace-agent.js";
@@ -217,4 +218,15 @@ describe("what a daemon's own list refuses a Replace (#701)", () => {
 			expect(post).toHaveBeenCalledOnce();
 		},
 	);
+});
+
+describe("replaceAgentQuestion (#1185)", () => {
+	it("names the host and both versions, and says the agent's terminals end", () => {
+		expect(replaceAgentQuestion("Pi", { running: "0.15.2", expected: "0.22.1" })).toEqual({
+			title: "Update the agent on Pi?",
+			message:
+				"Pi is served by agent 0.15.2; this Lasterm carries 0.22.1. Updating stops that agent and ends every terminal it is holding.",
+			confirmLabel: "Update agent",
+		});
+	});
 });

@@ -287,6 +287,8 @@ const props = defineProps<{
 	/** `[transfer] show_hidden`. */
 	showHidden: boolean;
 	sftpUnavailable: boolean;
+	/** The host's menu offers Update agent (an SSH host served by an older agent). */
+	agentUpdatable: boolean;
 	/** The terminal's shell or foreground program, for what the status line can say of it. */
 	shell: string | undefined;
 	/** The host's tint, over the list only. */
@@ -349,6 +351,7 @@ const lines = computed(() =>
 		hostLabel: props.hostLabel,
 		shell: props.shell,
 		sftpUnavailable: props.sftpUnavailable,
+		agentUpdatable: props.agentUpdatable,
 	}),
 );
 

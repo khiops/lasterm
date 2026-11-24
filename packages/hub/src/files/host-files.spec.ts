@@ -12,11 +12,29 @@ import {
 } from "./host-files.js";
 
 function file(name: string): FileEntry {
-	return { name, kind: "file", size: 1, mtime: null, mode: null };
+	return {
+		name,
+		kind: "file",
+		size: 1,
+		mtime: null,
+		mode: null,
+		attributes: null,
+		owner: null,
+		group: null,
+	};
 }
 
 function folder(name: string): FileEntry {
-	return { name, kind: "directory", size: null, mtime: null, mode: null };
+	return {
+		name,
+		kind: "directory",
+		size: null,
+		mtime: null,
+		mode: null,
+		attributes: null,
+		owner: null,
+		group: null,
+	};
 }
 
 describe("finishListing", () => {
@@ -77,6 +95,9 @@ describe("entries from a POSIX mode", () => {
 			size: null,
 			mtime: "1970-01-01T00:00:00.000Z",
 			mode: 0o040755,
+			attributes: null,
+			owner: null,
+			group: null,
 		});
 		expect(entryFromMode("f", 0o100644, 12, null)).toMatchObject({ size: 12, mtime: null });
 	});
@@ -88,6 +109,9 @@ describe("entries from a POSIX mode", () => {
 			size: null,
 			mtime: null,
 			mode: 0o047750,
+			attributes: null,
+			owner: null,
+			group: null,
 		});
 	});
 
@@ -98,6 +122,9 @@ describe("entries from a POSIX mode", () => {
 			size: 1,
 			mtime: null,
 			mode: null,
+			attributes: null,
+			owner: null,
+			group: null,
 		});
 	});
 });

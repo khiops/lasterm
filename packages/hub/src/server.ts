@@ -543,6 +543,8 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
 			channelHost: (channelId) => metaDal.getChannelWithHost(channelId),
 			hostOs: (hostId) => metaDal.getHost(hostId)?.os ?? null,
 			sshHost: (hostId) => activeSessionManager.connectedSshAgent(hostId),
+			// Listings and stats ask the host's agent first (#1201).
+			agent: (hostId) => activeSessionManager.connectedAgent(hostId),
 			// The folder a panel opens at when the terminal's own is unknown (#836).
 			startFolder: (channelId) => startFolderSettings(channelId, metaDal, configResolver),
 			hostType: (hostId) => metaDal.getHost(hostId)?.type ?? null,

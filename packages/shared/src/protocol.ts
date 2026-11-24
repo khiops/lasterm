@@ -120,6 +120,58 @@ export interface AgentEnvMessage {
 	os: string;
 }
 
+/**
+ * Hub → Agent: list the folder `path`, names starting with `.` too when
+ * `hidden` (#1201). Answered with FILES_ENTRIES, or FILES_ERR.
+ */
+export interface AgentFilesListMessage {
+	type: "FILES_LIST";
+	requestId: string;
+	path: string;
+	hidden: boolean;
+}
+
+/** Hub → Agent: what `path` is, a link not followed (#1201). */
+export interface AgentFilesStatMessage {
+	type: "FILES_STAT";
+	requestId: string;
+	path: string;
+}
+
+/** One entry of FILES_ENTRIES, as the wire carries it (camelCase once decoded). */
+export interface AgentFileEntry {
+	name: string;
+	kind: "file" | "directory" | "symlink" | "other";
+	size: number | null;
+	mtimeMs: number | null;
+	mode: number | null;
+	attributes: number | null;
+	owner: string | null;
+	group: string | null;
+	linkTarget?: string;
+	linkKind?: "file" | "directory" | "other" | "missing";
+}
+
+/**
+ * Agent → Hub: entries answering FILES_LIST, a batch at a time, the last with
+ * `done`; or the one entry answering FILES_STAT. Names, owners and groups are
+ * the user's: never logged.
+ */
+export interface AgentFilesEntriesMessage {
+	type: "FILES_ENTRIES";
+	requestId: string;
+	entries: AgentFileEntry[];
+	done: boolean;
+}
+
+/** Agent → Hub: why FILES_LIST or FILES_STAT failed. */
+export interface AgentFilesErrMessage {
+	type: "FILES_ERR";
+	requestId: string;
+	code: string;
+	message: string;
+}
+
 /** Agent → Hub: PTY spawned successfully */
 export interface AgentSpawnOkMessage {
 	type: "SPAWN_OK";
@@ -1240,6 +1292,8 @@ export type AgentMessage =
 	| AgentNotificationMessage
 	| AgentLogMessage
 	| AgentEnvMessage
+	| AgentFilesEntriesMessage
+	| AgentFilesErrMessage
 	| ErrorMessage
 	| PasteAckMessage
 	| PasteClosedMessage;
@@ -1250,6 +1304,8 @@ export type HubToAgentMessage =
 	| AgentStopMessage
 	| AgentSpawnMessage
 	| AgentEnvQueryMessage
+	| AgentFilesListMessage
+	| AgentFilesStatMessage
 	| InputMessage
 	| PasteMessage
 	| PasteCancelMessage
@@ -1360,6 +1416,10 @@ export type ProtocolMessage =
 	| AgentStopMessage
 	| AgentEnvQueryMessage
 	| AgentEnvMessage
+	| AgentFilesListMessage
+	| AgentFilesStatMessage
+	| AgentFilesEntriesMessage
+	| AgentFilesErrMessage
 	| AgentCwdQueryMessage
 	| CwdChangeMessage
 	| AuthMessage

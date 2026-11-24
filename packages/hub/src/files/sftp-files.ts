@@ -16,6 +16,7 @@ import {
 	linkKindOfMode,
 	mapLimited,
 	REASONS,
+	rootEntry,
 } from "./host-files.js";
 import {
 	baseNameOf,
@@ -226,13 +227,7 @@ export class SftpFileBackend implements FileBackend {
 
 	stat(path: string): Promise<FileEntry> {
 		if (this.style === "windows" && path === WINDOWS_ROOT) {
-			return Promise.resolve({
-				name: WINDOWS_ROOT,
-				kind: "directory",
-				size: null,
-				mtime: null,
-				mode: null,
-			});
+			return Promise.resolve({ name: WINDOWS_ROOT, ...rootEntry() });
 		}
 		return this.run(async (session) => {
 			let attrs: Stats;
@@ -406,11 +401,5 @@ function drivesOf(found: readonly FileEntryWithStats[]): FileEntry[] {
 		const letter = /^([A-Za-z]):?[\\/]?$/.exec(filename)?.[1];
 		if (letter !== undefined) drives.add(`${letter.toUpperCase()}:`);
 	}
-	return [...drives].map((name) => ({
-		name,
-		kind: "directory",
-		size: null,
-		mtime: null,
-		mode: null,
-	}));
+	return [...drives].map((name) => ({ name, ...rootEntry() }));
 }

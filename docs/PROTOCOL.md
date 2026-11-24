@@ -125,7 +125,8 @@ First message, sent immediately on start.
   type: "HELLO",
   version: 1,
   agent_version: "0.12.0",
-  capabilities: ["multiplex", "resize", "snapshot", "launch-profiles", "env-modes", "cwd"],
+  capabilities: ["multiplex", "resize", "snapshot", "launch-profiles", "env-modes", "cwd",
+                 "input-modes", "paste-stream", "files"],
                             // a daemon adds "hub-identity"
   available_shells?: string[],  // the shells the agent found on its host
   default_shell?: string,       // the shell it starts when a SPAWN names none (below)
@@ -162,7 +163,7 @@ agent's default. A default profile the user set (`PUT /api/hosts/:id/profiles/:p
 replaced, and a profile the user hid is never marked (#800). The host's default profile is what a
 new terminal starts there, the local host's as an SSH host's (§ 4.4, #802).
 
-**Capabilities.** The hub logs the list, and gates on it `adapts_input`, which follows `"input-modes"` (§ 4.2), `streams_paste` and its PASTE relay, which follow `"paste-stream"` (§ 3.21, § 4.21), and how it reads the end of a STOP, which follows `"stop-accepted"` (§ 3.17): every agent it can meet has the others but `"hub-identity"` and `"stop-accepted"`, which only daemons say, and `"stop-accepted"` only daemons released with it. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"input-modes"` means an agent that sends the terminal's input modes and alternate screen with each snapshot (§ 3.3) and writes paste markers and cursor keys in its program's form (§ 3.4); the hub tells the UI so with `adapts_input` (§ 4.2, § 4.4). `"paste-stream"` means an agent that takes a paste as PASTE chunks, acknowledges each once its terminal took it, and writes and closes its markers itself (§ 3.21); the hub tells the UI so with `streams_paste`. `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17). `"stop-accepted"`, said by a daemon only, means it answers a STOP it takes with STOP_ACCEPTED before its connection ends (§ 3.17, #700): the hub reads a close after STOP as the stop only after it.
+**Capabilities.** The hub logs the list, and gates on it `adapts_input`, which follows `"input-modes"` (§ 4.2), `streams_paste` and its PASTE relay, which follow `"paste-stream"` (§ 3.21, § 4.21), and how it reads the end of a STOP, which follows `"stop-accepted"` (§ 3.17): every agent it can meet has the others but `"hub-identity"` and `"stop-accepted"`, which only daemons say, and `"stop-accepted"` only daemons released with it. `"multiplex"` means agent supports multiple channels per process; `"snapshot"`, that it answers SNAPSHOT_REQ; `"resize"`, that it takes RESIZE. `"launch-profiles"` means an agent that takes SPAWN's elevation fields. `"env-modes"` means an agent that builds each terminal's environment itself from SPAWN's `env_mode`, `env_unset` and `login_shell` (§ 3.2), and answers ENV_QUERY (§ 3.18). `"cwd"` means an agent that sends CWD_CHANGE and answers CWD_QUERY (§ 3.20). `"files"` means an agent that answers FILES_LIST and FILES_STAT (§ 3.22): the hub lists and stats a host's files through it, and through its own ways only without it (§ 6, Host Files). `"input-modes"` means an agent that sends the terminal's input modes and alternate screen with each snapshot (§ 3.3) and writes paste markers and cursor keys in its program's form (§ 3.4); the hub tells the UI so with `adapts_input` (§ 4.2, § 4.4). `"paste-stream"` means an agent that takes a paste as PASTE chunks, acknowledges each once its terminal took it, and writes and closes its markers itself (§ 3.21); the hub tells the UI so with `streams_paste`. `"hub-identity"` means a daemon that serves several hubs at once, each owning its own channels, requires AUTH (§ 3.1b) and understands STOP (§ 3.17). `"stop-accepted"`, said by a daemon only, means it answers a STOP it takes with STOP_ACCEPTED before its connection ends (§ 3.17, #700): the hub reads a close after STOP as the stop only after it.
 
 ### 3.1b AUTH (Hub → Agent, daemon mode)
 
@@ -906,6 +907,67 @@ A paste (#1014) is its text, without markers, in chunks `seq` 0, 1, …, the las
 
 PASTE and PASTE_CANCEL from a displaced connection are dropped and change no paste. The hub keeps at
 most `PASTE_WINDOW_BYTES` (256 KiB) of a paste unacknowledged, through the pane (§ 4.21).
+
+### 3.22 FILES_LIST / FILES_STAT / FILES_ENTRIES / FILES_ERR (`files`)
+
+```typescript
+// Hub → Agent
+{ type: "FILES_LIST", request_id: string, path: string, hidden: boolean }
+{ type: "FILES_STAT", request_id: string, path: string }
+// Agent → Hub
+{ type: "FILES_ENTRIES", request_id: string, entries: AgentFileEntry[], done: boolean }
+{ type: "FILES_ERR", request_id: string, code: string, message: string }
+
+type AgentFileEntry = {
+  name: string,
+  kind: "file" | "directory" | "symlink" | "other",   // as lstat says: a link is not followed
+  size: number | null,       // bytes; null for a folder
+  mtime_ms: number | null,   // last write, milliseconds since the epoch
+  mode: number | null,       // Unix: st_mode whole (type bits and 0o7777); null on Windows
+  attributes: number | null, // Windows: dwFileAttributes whole; null on Unix
+  owner: string | null,
+  group: string | null,
+  link_target?: string,      // on a link, what it holds, when it can be read
+  link_kind?: "file" | "directory" | "other" | "missing"  // on a link, what it leads to, followed
+}
+```
+
+The host's files as its agent reads them (#1201), for the hub's files panel (§ 6, Host Files).
+Agent-wide, not scoped to the connection's owner (§ 3.1b), as ENV_QUERY: any hub authenticated on
+the agent may read what the account reads, as it could over SFTP. Stdio and daemon agents both
+answer.
+
+- **`path`** is absolute, as the hub normalises it (`C:\x`, `\\server\share\x`, `/x`). On a Windows
+  agent `/` is the drives: FILES_LIST lists each letter `GetLogicalDrives` names whose root answers,
+  as an entry `X:` (a folder, with its root's attributes, owner and group); FILES_STAT gives
+  `{ name: "/", kind: "directory" }`, every other field `null`.
+- **FILES_LIST** leaves out names starting with `.` unless `hidden`, and an entry whose own
+  metadata cannot be read (gone meanwhile, or in a Unix folder readable without `x`). It is answered
+  by one or more FILES_ENTRIES, the last one `done: true` (an empty folder: one frame,
+  `entries: []`). A frame holds at most 1,000 entries and ends as soon as its entries' text (names,
+  link targets, owners, groups) reaches 1 MiB. Or by one FILES_ERR before any FILES_ENTRIES; or,
+  when the folder's read fails after some FILES_ENTRIES (the directory's iterator itself failing, a
+  share dropping), by one FILES_ERR `FILE_ACCESS_FAILED` in place of `done: true`.
+- **FILES_STAT** is answered by one FILES_ENTRIES of one entry, `done: true`, or by one FILES_ERR.
+- **FILES_ERR `code`**, from the failure of opening the folder (list) or of `lstat` (stat):
+  `NOT_FOUND`, `NOT_A_DIRECTORY`, `PERMISSION_DENIED`, else `FILE_ACCESS_FAILED`. `message` is the
+  system's text, which names no path.
+- **Owner and group.** Unix: the names of `st_uid` and `st_gid` (`getpwuid_r`, `getgrgid_r`, through
+  NSS: files, sssd, LDAP), the decimal id when the system has no name, as `ls -l` prints it.
+  Windows: the owner and primary group of the entry's own security descriptor (a link's own, not
+  its target's), as `Get-Acl` reads them, named `DOMAIN\name`, the `S-1-…` string when the system
+  has no name; both `null` when the descriptor cannot be read (access denied, a file system without
+  security). Names, and their absence, are cached agent-wide for 5 minutes (at most 4,096; the
+  cache is emptied when full): a name may be up to 5 minutes old.
+- **Names** are converted to UTF-8, U+FFFD standing for what is not, as the hub's other ways read
+  them.
+- **Off the dispatch loop.** The agent answers on a blocking thread, at most 4 file requests at a
+  time agent-wide; the others wait without holding up the connection. A request keeps at most 2
+  frames waiting for the connection's writer, and its permit until its last frame is written: the
+  file requests leave at most 8 frames queued. Nothing cancels a request: one the hub gave up on
+  runs to its end, and the hub ignores its frames.
+- **Logs.** A path, a name, an owner or a group is the user's: the agent logs a request by its type
+  alone, at `debug`.
 
 ## 4. Message Types — Hub ↔ UI (WS)
 
@@ -2567,16 +2629,27 @@ that leaves `~/.ssh` answers 400 `INVALID_PATH`.
 #### Host Files
 
 The files of the host a terminal runs on (#832), for any authenticated client, a reader of the
-terminal included; a new folder only from the window holding its write lock. The local host is reached
-through the hub's own file system, as the hub's OS user, which is the one the local agent runs
-terminals as; a remote host over SFTP on the hub's own SSH connection to it, or over SSH commands
-where the server offers no SFTP (`sftp_unavailable`, § 4.7) or where SFTP failed without a verdict.
-A dead terminal's host is browsed as a live one's. Uploads are in § 4.19 and below (Transfers).
+terminal included; a new folder only from the window holding its write lock.
+
+A listing and a stat go to the host's agent first when it is connected and says `files` (§ 3.22,
+#1201): it gives each entry its mode or Windows attributes, its owner and its group. Its
+`NOT_FOUND`, `NOT_A_DIRECTORY` and `PERMISSION_DENIED` settle the request. Anything else (no such
+agent, an older one, a failure without a verdict, a closed connection, an answer that does not
+read, or no whole answer within 15 s, all the agent requests of one listing or stat together)
+leaves the request to the hub's own ways, below, which also serve the home, the free space, a new
+folder, the environment, uploads and downloads. Once the agent has failed one request of a listing
+without a verdict, that listing's other requests (the home after a fallback folder) skip it.
+
+The hub's own ways: the local host through the hub's own file system, as the hub's OS user, which
+is the one the local agent runs terminals as; a remote host over SFTP on the hub's own SSH
+connection to it, or over SSH commands where the server offers no SFTP (`sftp_unavailable`, § 4.7)
+or where SFTP failed without a verdict. They read no owner, group or Windows attributes. A dead
+terminal's host is browsed as a live one's: through its agent while that is still connected. Uploads are in § 4.19 and below (Transfers).
 
 | Method | Path | Auth | Body / Notes |
 |--------|------|------|--------------|
-| GET | `/api/channels/:id/files` | ● | `?path=&hidden=` → `{ path, entries: [{ name, kind, size, mtime, mode, link_target?, link_kind? }], truncated, start?, fallback_problem? }`. Without `path` (or with an empty one), the folder a panel opens at when the terminal's own folder is unknown or not followed (below), with `start`. `hidden=1` or `true` lists the entries whose name starts with `.`; `0`, `false` or nothing leaves them out. Folders first, links to folders among them, then by name; at most 5,000 entries, `truncated` counting the rest (0 for a whole listing) |
-| GET | `/api/channels/:id/files/stat` | ● | `?path=` (required) → `{ path, name, kind, size, mtime, mode, link_target?, link_kind? }` |
+| GET | `/api/channels/:id/files` | ● | `?path=&hidden=` → `{ path, entries: [{ name, kind, size, mtime, mode, attributes, owner, group, link_target?, link_kind? }], truncated, start?, fallback_problem? }`. Without `path` (or with an empty one), the folder a panel opens at when the terminal's own folder is unknown or not followed (below), with `start`. `hidden=1` or `true` lists the entries whose name starts with `.`; `0`, `false` or nothing leaves them out. Folders first, links to folders among them, then by name; at most 5,000 entries, `truncated` counting the rest (0 for a whole listing) |
+| GET | `/api/channels/:id/files/stat` | ● | `?path=` (required) → `{ path, name, kind, size, mtime, mode, attributes, owner, group, link_target?, link_kind? }` |
 | GET | `/api/channels/:id/files/free-space` | ● | `?path=` → `{ path, available, total }`: the bytes the account may still write on that folder's file system, and its size; `null` when the host does not say (a Windows share over SSH commands). Without `path`, the home |
 | POST | `/api/channels/:id/folders` | ● | `{ path }`, header `X-Lasterm-Client-Id` → 201 `{ path }`. Creates that folder, and only it: its parent must exist and it must not. Refused with 403 `WRITE_LOCK_DENIED` unless the header names a window that holds the terminal's write lock (§ 4.5) |
 
@@ -2588,7 +2661,10 @@ Every answer carries `Cache-Control: no-store`. An entry is:
 | `kind` | `"file"`, `"directory"`, `"symlink"` or `"other"`, as `lstat` says: a link is not followed |
 | `size` | Bytes; `null` for a folder, or when the host does not say |
 | `mtime` | Last modified, ISO 8601; `null` when the host does not say |
-| `mode` | The POSIX `st_mode` as the host gives it, file type and permission bits (`0o170000` and `0o7777`) unmasked, which a client spells as `ls -l` does. A Windows host over SFTP gives the bits its server makes up, which do not reflect its ACLs. `null` when the host gives none: the local host of a hub running on Windows, a Windows host over SSH commands, a drive at a Windows root, an SFTP server that sends no permissions |
+| `mode` | The POSIX `st_mode` as the host gives it, file type and permission bits (`0o170000` and `0o7777`) unmasked, which a client spells as `ls -l` does. Through a Unix host's agent, its `lstat` mode. A Windows host over SFTP gives the bits its server makes up, which do not reflect its ACLs. `null` when the host gives none: a Windows host through its agent (which gives `attributes` instead), the local host of a hub running on Windows, a Windows host over SSH commands, a drive at a Windows root, an SFTP server that sends no permissions |
+| `attributes` | A Windows entry's attributes (`dwFileAttributes`), whole, which a client spells as Windows PowerShell's `Mode` does (`d a r h s l`). Through a Windows host's agent only; `null` otherwise |
+| `owner` | Who owns it, by name, through the host's agent only: the uid's name on Unix, `DOMAIN\name` on Windows (the entry's own descriptor's owner), the id itself (decimal, or `S-1-…`) when the system has no name, a name up to 5 minutes old. `null` when the agent cannot read it (a Windows descriptor it may not read), and on the hub's own ways |
+| `group` | Its group, as `owner`: on Windows the descriptor's primary group, as `Get-Acl` reads it |
 | `link_target` | On a link: what it holds, as the host reads it; absent when it does not say (a Windows host over SSH commands) |
 | `link_kind` | On a link: what it leads to, followed: `"file"`, `"directory"`, `"other"`, or `"missing"` |
 

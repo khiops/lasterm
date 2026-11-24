@@ -22,6 +22,7 @@ import {
 	type LinkKind,
 	linkKindOfMode,
 	REASONS,
+	rootEntry,
 } from "./host-files.js";
 import { baseNameOf, normaliseHostPath, type PathStyle, parentOf } from "./host-paths.js";
 
@@ -445,6 +446,9 @@ export function parseWindowsEntries(lines: readonly string[], name?: string): Fi
 				size: null,
 				mtime: time,
 				mode: null,
+				attributes: null,
+				owner: null,
+				group: null,
 				linkKind: "directory",
 			});
 		} else {
@@ -454,6 +458,9 @@ export function parseWindowsEntries(lines: readonly string[], name?: string): Fi
 				size: kind === "d" || size === "-" ? null : Number(size),
 				mtime: time,
 				mode: null,
+				attributes: null,
+				owner: null,
+				group: null,
 			});
 		}
 	}
@@ -511,7 +518,7 @@ export class ExecFileBackend implements FileBackend {
 		const what = "The path could not be read";
 		const name = baseNameOf(path, this.style);
 		if (this.style === "windows") {
-			if (path === "/") return { name, kind: "directory", size: null, mtime: null, mode: null };
+			if (path === "/") return { name, ...rootEntry() };
 			const [entry] = parseWindowsEntries(await this.windows(windowsStatScript(path), what), name);
 			if (entry) return entry;
 		} else {

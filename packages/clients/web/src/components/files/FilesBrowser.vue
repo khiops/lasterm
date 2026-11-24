@@ -1,8 +1,7 @@
 <template>
 	<div
-		ref="browserEl"
 		class="files-browser"
-		:class="{ 'files-browser--mode': modeShown }"
+		:class="{ 'files-browser--mode': modeShown, 'files-browser--owner': ownerShown }"
 		@keydown="onBrowserKeydown"
 	>
 		<!-- The path bar: Up, the folders down to this one (F2 or Ctrl+L edits it as text),
@@ -144,7 +143,7 @@
 						:aria-setsize="listing.entries.length"
 						:aria-posinset="row.index + 1"
 						:aria-label="entryLabel(row.entry, now)"
-						:title="modeTitle(row.entry)"
+						:title="rowTitle(row.entry)"
 						:tabindex="row.index === current ? 0 : -1"
 						:data-index="row.index"
 						data-zone-item
@@ -159,7 +158,12 @@
 						<span class="files-row__name">{{ row.entry.name }}</span>
 						<span class="files-row__size">{{ isFolderEntry(row.entry) ? "" : formatSize(row.entry.size) }}</span>
 						<span class="files-row__modified">{{ formatModified(row.entry.mtime, now) }}</span>
-						<span class="files-row__mode">{{ formatMode(row.entry.mode) }}</span>
+						<span class="files-row__mode">{{ formatPermissions(row.entry) || "—" }}</span>
+						<span
+							class="files-row__owner"
+							:title="row.entry.owner !== null ? `Owner ${row.entry.owner}` : undefined"
+							>{{ row.entry.owner ?? "—" }}</span
+						>
 					</div>
 				</div>
 			</div>
@@ -260,12 +264,15 @@ import {
 	breadcrumbOf,
 	entryLabel,
 	type FileEntryView,
+	formatAttributes,
 	formatMode,
 	formatModified,
+	formatPermissions,
 	formatSize,
 	isFolderEntry,
 	joinPath,
 	MODE_COLUMN_MIN_WIDTH,
+	OWNER_COLUMN_MIN_WIDTH,
 	parentPath,
 	pathStyleOf,
 	statusLines,
@@ -510,33 +517,53 @@ const visibleRows = computed(() => {
 	return rows;
 });
 
-// ─── The permissions column, by the browser's width ──────────────────────────
+// ─── The Mode and owner columns, by the width the rows get ───────────────────
 
-const browserEl = ref<HTMLElement | null>(null);
-/** The browser's width as last measured; null before any measurement, or with nothing to measure. */
-const browserWidth = ref<number | null>(null);
+/**
+ * The list's client width as last measured: what its rows get, a vertical scrollbar left out.
+ * Null before any measurement, and while no list shows (an empty folder, an error).
+ */
+const listWidth = ref<number | null>(null);
 let widthObserver: ResizeObserver | null = null;
 
-onMounted(() => {
-	const el = browserEl.value;
-	if (el === null || typeof ResizeObserver === "undefined") return;
-	widthObserver = new ResizeObserver(() => {
-		browserWidth.value = el.getBoundingClientRect().width;
-	});
-	widthObserver.observe(el);
-});
+// The list comes and goes with the listing: the observer follows it.
+watch(
+	listEl,
+	(el) => {
+		widthObserver?.disconnect();
+		widthObserver = null;
+		listWidth.value = null;
+		if (el === null || typeof ResizeObserver === "undefined") return;
+		widthObserver = new ResizeObserver(() => {
+			listWidth.value = el.clientWidth;
+		});
+		widthObserver.observe(el);
+	},
+	{ flush: "post" },
+);
 
 onUnmounted(() => widthObserver?.disconnect());
 
-/** The column shows from `MODE_COLUMN_MIN_WIDTH` on; unmeasured, it counts as hidden. */
+/** The Mode column shows from `MODE_COLUMN_MIN_WIDTH` on; unmeasured, it counts as hidden. */
 const modeShown = computed(
-	() => browserWidth.value !== null && browserWidth.value >= MODE_COLUMN_MIN_WIDTH,
+	() => listWidth.value !== null && listWidth.value >= MODE_COLUMN_MIN_WIDTH,
 );
 
-/** A row's tooltip: its permissions, while the column that shows them is hidden. */
-function modeTitle(entry: FileEntryView): string | undefined {
-	if (modeShown.value || entry.mode === null) return undefined;
-	return `Permissions ${formatMode(entry.mode)}`;
+/** The owner column shows from `OWNER_COLUMN_MIN_WIDTH` on; unmeasured, it counts as hidden. */
+const ownerShown = computed(
+	() => listWidth.value !== null && listWidth.value >= OWNER_COLUMN_MIN_WIDTH,
+);
+
+/** A row's tooltip: what the width hides of it, the group always; none when there is nothing. */
+function rowTitle(entry: FileEntryView): string | undefined {
+	const lines: string[] = [];
+	if (!modeShown.value) {
+		if (entry.mode !== null) lines.push(`Permissions ${formatMode(entry.mode)}`);
+		else if (entry.attributes !== null) lines.push(`Attributes ${formatAttributes(entry.attributes)}`);
+	}
+	if (!ownerShown.value && entry.owner !== null) lines.push(`Owner ${entry.owner}`);
+	if (entry.group !== null) lines.push(`Group ${entry.group}`);
+	return lines.length > 0 ? lines.join("\n") : undefined;
 }
 
 function onScroll(): void {
@@ -1042,7 +1069,7 @@ defineExpose({ reload });
 	width: 58px;
 }
 
-/* As `ls -l` spells them: ten characters, in a column of their own from 400 px on. */
+/* As `ls -l` spells them, ten characters, or PowerShell's Mode, six: a column of their own from 400 px on. */
 .files-row__mode {
 	display: none;
 	flex-shrink: 0;
@@ -1054,6 +1081,22 @@ defineExpose({ reload });
 }
 
 .files-browser--mode .files-row__mode {
+	display: block;
+}
+
+/* The owner, cut with an ellipsis, whole in its cell's tooltip: a column of its own from 480 px on. */
+.files-row__owner {
+	display: none;
+	flex-shrink: 0;
+	width: 80px;
+	overflow: hidden;
+	color: var(--nt-text-secondary);
+	font-size: 11px;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.files-browser--owner .files-row__owner {
 	display: block;
 }
 

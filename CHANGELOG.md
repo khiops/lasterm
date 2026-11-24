@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.23.0](https://github.com/khiops/lasterm/compare/v0.22.3...v0.23.0) (2026-11-24)
+
+
+### Features
+
+* **agent:** list a host's files with mode, owner and group ([#1203](https://github.com/khiops/lasterm/issues/1203)) ([91f47bb](https://github.com/khiops/lasterm/commit/91f47bb16db6ad2d174d6248a3919c4664a69640))
+* **web:** show each entry's permissions in the files panel ([#1198](https://github.com/khiops/lasterm/issues/1198)) ([aec2b07](https://github.com/khiops/lasterm/commit/aec2b0734aa1f67eb596fa6847f32a87f61b4ad1)), closes [#1195](https://github.com/khiops/lasterm/issues/1195)
+* **web:** show how many tabs are hidden beyond each edge of the tab bar ([#1202](https://github.com/khiops/lasterm/issues/1202)) ([628bfa7](https://github.com/khiops/lasterm/commit/628bfa765880d6801e51ccf407996c56fdbf8866))
+
+
+### Bug Fixes
+
+* **web:** shrink tabs to share the bar and hide its scrollbar ([#1197](https://github.com/khiops/lasterm/issues/1197)) ([1816dd2](https://github.com/khiops/lasterm/commit/1816dd267e2f33353c6847069776c493141f51d6)), closes [#1194](https://github.com/khiops/lasterm/issues/1194)
+
 ## [0.22.3](https://github.com/khiops/lasterm/compare/v0.22.2...v0.22.3) (2026-11-24)
 
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.3](https://github.com/khiops/lasterm/compare/v0.22.2...v0.22.3) (2026-11-24)
+
+
+### Bug Fixes
+
+* **web:** give the confirmation dialog its keyboard and keep the host menu inside the window ([#1192](https://github.com/khiops/lasterm/issues/1192)) ([6e249ef](https://github.com/khiops/lasterm/commit/6e249efb4c65c39627682c0502a629a164395bb3))
+
 ## [0.22.2](https://github.com/khiops/lasterm/compare/v0.22.1...v0.22.2) (2026-11-24)
 
 

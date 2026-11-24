@@ -996,7 +996,7 @@ function onTabDragEnd(): void {
 	padding: 0 8px;
 	border: none;
 	background: transparent;
-	color: var(--nt-fg);
+	color: var(--nt-host-rail-text);
 	font: inherit;
 	font-size: 11px;
 	font-variant-numeric: tabular-nums;

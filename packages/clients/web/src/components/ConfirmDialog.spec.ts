@@ -13,7 +13,7 @@ afterEach(() => {
 	document.body.innerHTML = "";
 });
 
-async function mountAsking(showRemember = false) {
+async function mountAsking(showRemember = false, fallbackFocus?: () => HTMLElement | null) {
 	const visible = ref(false);
 	const events: string[] = [];
 	const root = document.createElement("div");
@@ -30,6 +30,7 @@ async function mountAsking(showRemember = false) {
 				message: "It ends terminals.",
 				confirmLabel: "Update agent",
 				showRemember,
+				...(fallbackFocus === undefined ? {} : { fallbackFocus }),
 				onCancel: () => {
 					events.push("cancel");
 					visible.value = false;
@@ -86,6 +87,22 @@ describe("the confirmation dialog's keyboard (#1189)", () => {
 
 		expect(events).toEqual(["cancel"]);
 		expect(document.activeElement).toBe(opener);
+	});
+
+	it("gives the keyboard to the fallback when what had it is gone", async () => {
+		const stay = document.createElement("button");
+		document.body.appendChild(stay);
+		const { visible, opener } = await mountAsking(false, () => stay);
+		visible.value = true;
+		await nextTick();
+		await nextTick();
+		opener.remove();
+
+		keydown("Escape");
+		await nextTick();
+		await nextTick();
+
+		expect(document.activeElement).toBe(stay);
 	});
 
 	it("keeps Tab inside: from the confirming button it goes round to Cancel", async () => {

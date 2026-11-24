@@ -77,7 +77,11 @@
 				>
 					Move to Group
 					<span class="submenu-arrow">&#x25B8;</span>
-					<div v-if="showGroupSubmenu" class="ctx-submenu">
+					<div
+						v-if="showGroupSubmenu"
+						class="ctx-submenu"
+						:class="{ 'ctx-submenu--inline': placement.scrolls.value }"
+					>
 						<button
 							class="ctx-item"
 							:class="{ active: !host.hostGroupId }"
@@ -351,5 +355,15 @@ function onNewGroup(): void {
 	padding: 4px 0;
 	min-width: 160px;
 	box-shadow: var(--nt-shadow);
+}
+
+/* In a menu that scrolls, the groups are listed in its flow: beside it they would be cut off. */
+.ctx-submenu--inline {
+	position: static;
+	min-width: 0;
+	border: none;
+	border-radius: 0;
+	box-shadow: none;
+	padding: 0 0 0 12px;
 }
 </style>

@@ -434,4 +434,35 @@ describe("where the host menu is drawn (#1190)", () => {
 		expect(menu()?.style.maxHeight).toBe("192px");
 		expect(menu()?.style.overflowY).toBe("auto");
 	});
+
+	it("moves again when the window gets shorter while it is open", async () => {
+		windowIs(1000, 600);
+		await openMenu("pi", { x: 100, y: 500 });
+		expect(drawn()).toEqual(["100px", "296px"]);
+
+		window.innerHeight = 400;
+		window.dispatchEvent(new Event("resize"));
+		await nextTick();
+
+		expect(drawn()).toEqual(["100px", "96px"]);
+	});
+
+	it("lists the groups in its own flow only where it scrolls", async () => {
+		const submenu = async () => {
+			document.body
+				.querySelector(".has-submenu")
+				?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+			await nextTick();
+			return document.body.querySelector(".ctx-submenu")?.classList.contains("ctx-submenu--inline");
+		};
+		windowIs(1000, 600);
+		await openMenu("pi", { x: 100, y: 50 });
+		expect(await submenu()).toBe(false);
+		app?.unmount();
+		document.body.innerHTML = "";
+
+		windowIs(1000, 200);
+		await openMenu("pi", { x: 100, y: 50 });
+		expect(await submenu()).toBe(true);
+	});
 });

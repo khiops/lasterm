@@ -58,6 +58,7 @@
 			:message="confirmDialog.message"
 			:confirm-label="confirmDialog.confirmLabel"
 			:show-remember="confirmDialog.showRemember"
+			:fallback-focus="activePaneTarget"
 			@confirm="onConfirmAction"
 			@cancel="onCancelConfirm"
 		/>

@@ -967,7 +967,7 @@ answer.
   file requests leave at most 8 frames queued. Nothing cancels a request: one the hub gave up on
   runs to its end, and the hub ignores its frames.
 - **Logs.** A path, a name, an owner or a group is the user's: the agent logs a request by its type
-  alone, at `debug`.
+  alone, and its answer by counts (frames, entries), at `debug`.
 
 ## 4. Message Types — Hub ↔ UI (WS)
 

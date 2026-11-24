@@ -116,6 +116,8 @@ pub(crate) struct Sender {
     request: Option<OwnedSemaphorePermit>,
     frames: Arc<Semaphore>,
     handle: tokio::runtime::Handle,
+    /// Frames and entries queued so far: counts only, for the log.
+    sent: (usize, usize),
 }
 
 impl Sender {
@@ -129,6 +131,7 @@ impl Sender {
             request,
             frames: Arc::new(Semaphore::new(FRAMES_IN_FLIGHT)),
             handle,
+            sent: (0, 0),
         }
     }
 
@@ -150,6 +153,10 @@ impl Sender {
         let mut permits = vec![slot];
         if last {
             permits.extend(self.request.take());
+        }
+        self.sent.0 += 1;
+        if let AgentToHub::FilesEntries { entries, .. } = message {
+            self.sent.1 += entries.len();
         }
         self.tx.send(Outgoing::holding(frame, permits)).is_ok()
     }
@@ -185,6 +192,12 @@ fn answer(request: Request, out: &mut Sender, dispatch: &tracing::Dispatch) {
             }
         },
     }
+    // Counts only: a path, a name, an owner or a group is the user's.
+    tracing::debug!(
+        frames = out.sent.0,
+        entries = out.sent.1,
+        "file request answered"
+    );
 }
 
 /// The FILES_ERR for `error`, by its kind. Its text names no path.
@@ -492,6 +505,7 @@ fn drives(dispatch: &tracing::Dispatch) -> Vec<Raw> {
             .map(|letter| {
                 scope.spawn(move || {
                     tracing::dispatcher::with_default(dispatch, || {
+                        tracing::trace!("drive root probed");
                         let root = format!("{letter}:\\");
                         std::fs::symlink_metadata(&root).ok().map(|metadata| {
                             raw_entry(Path::new(&root), format!("{letter}:"), &metadata)
@@ -520,13 +534,15 @@ fn resolve(
     names: &mut ListingNames,
     _dispatch: &tracing::Dispatch,
 ) -> Vec<FileEntry> {
-    let now = Instant::now();
+    // Each name is judged at the time it is asked: a batch may take a while.
     batch
         .into_iter()
         .map(|Raw { mut entry, ids }| {
             if let Ids::Unix { uid, gid } = ids {
-                entry.owner = Some(names.name(NameKey::User(uid), now, &SHARED_NAMES, &lookup));
-                entry.group = Some(names.name(NameKey::Group(gid), now, &SHARED_NAMES, &lookup));
+                let user = NameKey::User(uid);
+                entry.owner = Some(names.name(user, Instant::now(), &SHARED_NAMES, &lookup));
+                let group = NameKey::Group(gid);
+                entry.group = Some(names.name(group, Instant::now(), &SHARED_NAMES, &lookup));
             }
             entry
         })
@@ -541,16 +557,15 @@ fn resolve(
     dispatch: &tracing::Dispatch,
 ) -> Vec<FileEntry> {
     let sids = descriptor_sids(&batch, dispatch);
-    let now = Instant::now();
+    // Each name is judged at the time it is asked: a batch may take a while.
+    let mut name = |sid| names.name(NameKey::Sid(sid), Instant::now(), &SHARED_NAMES, &lookup);
     batch
         .into_iter()
         .zip(sids)
         .map(|(Raw { mut entry, .. }, sids)| {
             if let Some((owner, group)) = sids {
-                entry.owner =
-                    owner.map(|sid| names.name(NameKey::Sid(sid), now, &SHARED_NAMES, &lookup));
-                entry.group =
-                    group.map(|sid| names.name(NameKey::Sid(sid), now, &SHARED_NAMES, &lookup));
+                entry.owner = owner.map(&mut name);
+                entry.group = group.map(&mut name);
             }
             entry
         })
@@ -581,6 +596,7 @@ fn descriptor_sids(
             .map(|part| {
                 let reader = scope.spawn(move || {
                     tracing::dispatcher::with_default(dispatch, || {
+                        tracing::trace!(entries = part.len(), "descriptors read");
                         part.iter()
                             .map(|path| path.and_then(windows::owner_and_group))
                             .collect::<Vec<_>>()
@@ -793,10 +809,31 @@ mod windows {
         text.encode_wide().chain(Some(0)).collect()
     }
 
+    /// `path` as a verbatim path, NUL-terminated: `\\?\C:\…`, `\\?\UNC\server\share\…`.
+    /// Win32 would otherwise refuse a path past `MAX_PATH`, and drop a last
+    /// name's trailing dots and spaces (`report.` read as `report`), as std's
+    /// own calls avoid by the same prefix.
+    pub(super) fn verbatim(path: &Path) -> Vec<u16> {
+        let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+        let slash = u16::from(b'\\');
+        let prefix: Vec<u16> = if units.starts_with(&[slash, slash, u16::from(b'?'), slash]) {
+            Vec::new()
+        } else if units.starts_with(&[slash, slash]) {
+            let mut unc: Vec<u16> = "\\\\?\\UNC".encode_utf16().collect();
+            unc.extend_from_slice(&units[1..]);
+            return unc.into_iter().chain(Some(0)).collect();
+        } else if units.get(1) == Some(&u16::from(b':')) {
+            "\\\\?\\".encode_utf16().collect()
+        } else {
+            Vec::new()
+        };
+        prefix.into_iter().chain(units).chain(Some(0)).collect()
+    }
+
     /// The owner and group SIDs of `path`'s own descriptor (a link's own, as
     /// `lstat`); `None` when it cannot be read.
     pub(super) fn owner_and_group(path: &Path) -> Option<(Option<String>, Option<String>)> {
-        let name = wide(path.as_os_str());
+        let name = verbatim(path);
         // SAFETY: `name` is NUL-terminated; the handle is closed below.
         let handle = unsafe {
             CreateFileW(
@@ -990,8 +1027,8 @@ mod tests {
 
     #[cfg(windows)]
     fn set_attributes(path: &Path, attributes: u32) {
-        use std::os::windows::ffi::OsStrExt;
-        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // Verbatim: a long path, or a name with a trailing dot, as the tests make.
+        let name = super::windows::verbatim(path);
         // SAFETY: `name` is NUL-terminated.
         let done = unsafe {
             windows_sys::Win32::Storage::FileSystem::SetFileAttributesW(name.as_ptr(), attributes)
@@ -1160,10 +1197,12 @@ mod tests {
         );
     }
 
+    /// The owner and group `Get-Acl` reads (the group's SID when it prints no
+    /// name), each line marked: a descriptor may have no group at all.
     #[cfg(windows)]
-    fn get_acl(path: &Path) -> (String, String) {
+    fn get_acl(path: &Path) -> (String, Option<String>) {
         let script = format!(
-            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $a = Get-Acl -LiteralPath '{}'; $a.Owner; $g = $a.Group; if (-not $g) {{ $g = $a.GetGroup([Security.Principal.SecurityIdentifier]).Value }}; $g",
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $a = Get-Acl -LiteralPath '{}'; 'OWNER=' + $a.Owner; $g = $a.Group; if (-not $g) {{ $s = $a.GetGroup([Security.Principal.SecurityIdentifier]); if ($s) {{ $g = $s.Value }} }}; 'GROUP=' + $g",
             path.display()
         );
         let output = std::process::Command::new("powershell")
@@ -1172,11 +1211,13 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "Get-Acl");
         let text = String::from_utf8(output.stdout).unwrap();
-        let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
-        (
-            lines.next().unwrap().to_string(),
-            lines.next().unwrap().to_string(),
-        )
+        let field = |key: &str| {
+            text.lines()
+                .find_map(|line| line.trim().strip_prefix(key).map(str::to_string))
+                .unwrap_or_else(|| panic!("{key} in {text:?}"))
+        };
+        let group = field("GROUP=");
+        (field("OWNER="), (!group.is_empty()).then_some(group))
     }
 
     #[cfg(windows)]
@@ -1225,8 +1266,40 @@ mod tests {
             assert_ne!(entry["owner"], "NT SERVICE\\TrustedInstaller", "{entry}");
         }
         let file = named(&listed, "f.txt");
-        assert_eq!(file["group"], group.as_str());
-        assert_ne!(file["group"], file["owner"]);
+        match &group {
+            Some(group) => {
+                assert_eq!(file["group"], group.as_str());
+                assert_ne!(file["group"], file["owner"]);
+            }
+            None => assert_eq!(file["group"], Value::Null),
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn reads_each_entry_own_descriptor() {
+        let _serial = SERIAL.lock().await;
+        let folder = Folder::new("long");
+        std::fs::write(folder.join("short.txt"), "x").unwrap();
+        // A name Win32 would read without its trailing dot, as `report`, which
+        // does not exist: only a verbatim path reaches its descriptor.
+        let odd = format!(r"\\?\{}", folder.join("report.").display());
+        std::fs::write(&odd, "x").unwrap();
+        let mut deep = folder.0.clone();
+        for index in 0..5 {
+            deep.push(format!("{index}-{}", "d".repeat(60)));
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("far.txt"), "x").unwrap();
+        assert!(deep.join("far.txt").as_os_str().len() > 260);
+        let (owner, _) = get_acl(&folder.join("short.txt"));
+        let beside = entries(&answer_of(list(&folder.path(), false)).await);
+        assert_eq!(named(&beside, "report.")["owner"], owner.as_str());
+
+        let listed = entries(&answer_of(list(&deep.to_string_lossy(), false)).await);
+        assert_eq!(named(&listed, "far.txt")["owner"], owner.as_str());
+        let stated = entries(&answer_of(stat(&deep.join("far.txt").to_string_lossy())).await);
+        assert_eq!(stated[0]["owner"], owner.as_str());
     }
 
     #[tokio::test]
@@ -1744,7 +1817,25 @@ mod tests {
 
         let listed = entries(&answer_of(list(&folder.path(), false)).await);
         let stated = entries(&answer_of(stat(&folder.join(&name_marker).to_string_lossy())).await);
+        #[cfg(windows)]
+        answer_of(list("/", false)).await;
         let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        // The task's own line, and on Windows its threads': the capture reaches them.
+        assert!(
+            logs.contains("file request answered"),
+            "the task's line captured: {logs}"
+        );
+        #[cfg(windows)]
+        {
+            assert!(
+                logs.contains("descriptors read"),
+                "a descriptor thread's line captured"
+            );
+            assert!(
+                logs.contains("drive root probed"),
+                "a drive probe's line captured"
+            );
+        }
         assert!(
             logs.contains("FILES_LIST"),
             "the listing's summary captured: {logs}"

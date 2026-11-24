@@ -559,7 +559,9 @@ again, which is now roughly every two and a quarter years rather than every rest
   a terminal on that host. Only the changes a person types are stored, in the profile.
 - A host's files (#1201): listed and stat'ed by its agent over the hub's authenticated connection
   (`FILES_LIST`, `FILES_STAT`, PROTOCOL.md § 3.22), agent-wide as `ENV_QUERY`: what the same
-  account reads, as over SFTP. At most 4 such requests run at a time on an agent, each keeping at
+  account reads, as over SFTP. The agent reads with its own token: the hub's account, but not
+  always its elevation, since a local daemon may serve a hub started at another one (#127); its
+  `PERMISSION_DENIED` settles a listing all the same. At most 4 such requests run at a time on an agent, each keeping at
   most 2 answer frames waiting for the connection's writer and its permit until its last frame is
   written: at most 8 frames, each about 1 MiB of names at most, wait in an agent's queues. Owner
   and group names are cached agent-wide for 5 minutes, at most 4,096, the cache emptied when full.

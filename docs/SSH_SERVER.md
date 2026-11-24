@@ -105,3 +105,20 @@ What does not work:
   source shows that with `DefaultShellEscapeArguments` set to 0, sshd inserts the option as it is for
   a shell it does not recognise as Windows PowerShell, so `-NoProfile -Command` could work there.
   That is unverified.
+
+## Windows Server 2022: background colours after a resize (#1187)
+
+On Windows Server 2022 (build 20348), the host's console pads each line it reflows on a resize
+with the attributes of the line's last visible character (microsoft/terminal#32, fixed in
+microsoft/terminal#12637, which Server 2022 predates). A line ending in text on a coloured
+background then shows that colour to the end of the line after the terminal is resized, for
+example by opening or closing the files panel. Lasterm only passes the new size on; `ssh` from
+Windows Terminal to the same host shows the same thing, and a Windows 11 build 26100 host does not.
+
+PowerShell 7 triggers it with its default directory colour, `$PSStyle.FileInfo.Directory`, which is a
+blue background, since `ls` puts the name last on its line. A foreground-only colour in the
+account's PowerShell profile on the host avoids it:
+
+```powershell
+$PSStyle.FileInfo.Directory = "`e[34;1m"
+```

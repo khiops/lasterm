@@ -1,11 +1,13 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: test data holds literal ${VAR} text, which the hub expands as the agent does
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { HostOs } from "@lasterm/shared";
+import type { HostOs, ProtocolMessage } from "@lasterm/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SftpSupport } from "../session/agent-deployer.js";
 import type { SftpServerOptions } from "../session/sftp-server.fixture.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
+import { answering, FakeFilesAgent, idOf, pathOf, sent } from "./agent-files.fixture.js";
+import type { AgentFilesPort } from "./agent-files.js";
 import { failsWith } from "./file-names.fixture.js";
 import { FileAccessError, type FileBackend } from "./host-files.js";
 import {
@@ -61,14 +63,50 @@ function recordingBackend(
 			const refused = host.refused?.[dir];
 			if (refused) throw refused;
 			return [
-				{ name: ".dot", kind: "file", size: 1, mtime: null, mode: null },
-				{ name: "b", kind: "file", size: 1, mtime: null, mode: null },
-				{ name: "a", kind: "directory", size: null, mtime: null, mode: null },
+				{
+					name: ".dot",
+					kind: "file",
+					size: 1,
+					mtime: null,
+					mode: null,
+					attributes: null,
+					owner: null,
+					group: null,
+				},
+				{
+					name: "b",
+					kind: "file",
+					size: 1,
+					mtime: null,
+					mode: null,
+					attributes: null,
+					owner: null,
+					group: null,
+				},
+				{
+					name: "a",
+					kind: "directory",
+					size: null,
+					mtime: null,
+					mode: null,
+					attributes: null,
+					owner: null,
+					group: null,
+				},
 			];
 		},
 		stat: async (path) => {
 			calls.push(["stat", path]);
-			return { name: "x", kind: "file", size: 3, mtime: null, mode: null };
+			return {
+				name: "x",
+				kind: "file",
+				size: 3,
+				mtime: null,
+				mode: null,
+				attributes: null,
+				owner: null,
+				group: null,
+			};
 		},
 		freeSpace: async (dir) => {
 			calls.push(["freeSpace", dir]);
@@ -100,8 +138,26 @@ describe("the files of a terminal on the local host", () => {
 		expect(listing).toEqual({
 			path: "/home/me",
 			entries: [
-				{ name: "a", kind: "directory", size: null, mtime: null, mode: null },
-				{ name: "b", kind: "file", size: 1, mtime: null, mode: null },
+				{
+					name: "a",
+					kind: "directory",
+					size: null,
+					mtime: null,
+					mode: null,
+					attributes: null,
+					owner: null,
+					group: null,
+				},
+				{
+					name: "b",
+					kind: "file",
+					size: 1,
+					mtime: null,
+					mode: null,
+					attributes: null,
+					owner: null,
+					group: null,
+				},
 			],
 			truncated: 0,
 			start: "home",
@@ -287,6 +343,8 @@ function useRemote(
 		os?: HostOs | null;
 		/** The terminal's start folder settings, given the folder the spec works in. */
 		startFolder?: (root: string) => StartFolderSettings;
+		/** The host's agent, when the spec gives it one (#1201). */
+		agent?: () => AgentFilesPort | null;
 	} = {},
 ) {
 	const state = {} as {
@@ -310,6 +368,7 @@ function useRemote(
 				id === REMOTE_CHANNEL ? { hostId: REMOTE_HOST, hostType: "ssh" } : null,
 			hostOs: () => (options.os === undefined ? machine.os : options.os),
 			sshHost: () => ssh,
+			...(options.agent !== undefined ? { agent: options.agent } : {}),
 			...(options.startFolder !== undefined
 				? { startFolder: () => options.startFolder?.(state.root) ?? { fallbackDir: "", env: {} } }
 				: {}),
@@ -479,7 +538,18 @@ describe("a Windows host over SFTP, as Win32-OpenSSH serves it", () => {
 		const root = await windowsHost.list(REMOTE_CHANNEL, WINDOWS_ROOT, false);
 		expect(root).toEqual({
 			path: WINDOWS_ROOT,
-			entries: [{ name: "C:", kind: "directory", size: null, mtime: null, mode: null }],
+			entries: [
+				{
+					name: "C:",
+					kind: "directory",
+					size: null,
+					mtime: null,
+					mode: null,
+					attributes: null,
+					owner: null,
+					group: null,
+				},
+			],
 			truncated: 0,
 		});
 		const drive = await windowsHost.list(REMOTE_CHANNEL, `${WINDOWS_ROOT}C:`, false);
@@ -515,5 +585,304 @@ describe("a Windows host over SFTP, as Win32-OpenSSH serves it", () => {
 			windowsHost.mkdir(REMOTE_CHANNEL, "C:\\Users\\test\\New folder"),
 			"ALREADY_EXISTS",
 		);
+	});
+});
+
+describe("a host listed through its agent (#1201)", () => {
+	function throughAgent(
+		agent: FakeFilesAgent | null,
+		options: { budgetMs?: number; settings?: StartFolderSettings; host?: RecordedHost } = {},
+	) {
+		const backend = recordingBackend("/home/me", options.host);
+		const settings = options.settings;
+		const service = new HostFilesService({
+			channelHost: () => ({ hostId: "local", hostType: "local" }),
+			hostOs: () => null,
+			sshHost: () => null,
+			local: { backend, os: "linux" },
+			agent: () => agent,
+			agentBudgetMs: options.budgetMs ?? 2_000,
+			...(settings !== undefined ? { startFolder: () => settings } : {}),
+		});
+		return { backend, service };
+	}
+
+	it("answers many listings at once on one listener", async () => {
+		const agent = new FakeFilesAgent((message, a) => {
+			setTimeout(
+				() =>
+					a.reply({
+						type: "FILES_ENTRIES",
+						requestId: idOf(message),
+						entries: [sent(`in${pathOf(message).replace(/\//g, "-")}`)],
+						done: true,
+					}),
+				50,
+			);
+		});
+		const { service } = throughAgent(agent);
+		const messages = agent.listenerCount("message");
+		const closes = agent.listenerCount("close");
+		const listings = Array.from({ length: 20 }, (_, index) =>
+			service.list(LOCAL_CHANNEL, `/d${index}`, false),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(agent.asked).toHaveLength(20);
+		expect(agent.listenerCount("message")).toBeLessThanOrEqual(messages + 1);
+		expect(agent.listenerCount("close")).toBeLessThanOrEqual(closes + 1);
+		const answered = await Promise.all(listings);
+		expect(answered.map((listing) => listing.entries.map((entry) => entry.name))).toEqual(
+			Array.from({ length: 20 }, (_, index) => [`in-d${index}`]),
+		);
+		expect(agent.listenerCount("message")).toBe(messages);
+		expect(agent.listenerCount("close")).toBe(closes);
+	});
+
+	it("gathers an agent's frames before sorting and capping", async () => {
+		const names = Array.from({ length: 5_002 }, (_, index) => `f${String(index).padStart(5, "0")}`);
+		const shuffled = [...names].reverse();
+		const agent = new FakeFilesAgent((message, a) => {
+			const id = idOf(message);
+			a.reply({
+				type: "FILES_ENTRIES",
+				requestId: id,
+				entries: shuffled.slice(0, 2_000).map((n) => sent(n)),
+				done: false,
+			});
+			a.reply({
+				type: "FILES_ENTRIES",
+				requestId: "another",
+				entries: [sent("foreign")],
+				done: true,
+			});
+			a.reply({
+				type: "FILES_ENTRIES",
+				requestId: id,
+				entries: shuffled.slice(2_000, 4_000).map((n) => sent(n)),
+				done: false,
+			});
+			a.reply({
+				type: "FILES_ENTRIES",
+				requestId: id,
+				entries: shuffled.slice(4_000).map((n) => sent(n)),
+				done: true,
+			});
+		});
+		const { service } = throughAgent(agent);
+		const listing = await service.list(LOCAL_CHANNEL, "/big", false);
+		expect(listing.truncated).toBe(2);
+		expect(listing.entries.map((entry) => entry.name)).toEqual(names.slice(0, 5_000));
+	});
+
+	it("lists as before through an agent without files", async () => {
+		const agent = new FakeFilesAgent(() => {}, ["multiplex", "cwd"]);
+		const { backend, service } = throughAgent(agent);
+		const listing = await service.list(LOCAL_CHANNEL, "/srv", false);
+		expect(listing.entries).toEqual([
+			{
+				name: "a",
+				kind: "directory",
+				size: null,
+				mtime: null,
+				mode: null,
+				attributes: null,
+				owner: null,
+				group: null,
+			},
+			{
+				name: "b",
+				kind: "file",
+				size: 1,
+				mtime: null,
+				mode: null,
+				attributes: null,
+				owner: null,
+				group: null,
+			},
+		]);
+		expect(await service.stat(LOCAL_CHANNEL, "/srv/b")).toMatchObject({ name: "x", owner: null });
+		expect(agent.asked).toEqual([]);
+		expect(backend.calls).toEqual([
+			["list", "/srv", false],
+			["stat", "/srv/b"],
+		]);
+	});
+
+	it("takes the agent's verdict", async () => {
+		const reasons = {
+			NOT_FOUND: "The folder could not be listed: it does not exist",
+			NOT_A_DIRECTORY: "The folder could not be listed: it is not a folder",
+			PERMISSION_DENIED: "The folder could not be listed: permission denied",
+		} as const;
+		for (const [code, reason] of Object.entries(reasons)) {
+			const agent = new FakeFilesAgent(
+				answering({ type: "FILES_ERR", code, message: "os says no" }),
+			);
+			const { backend, service } = throughAgent(agent);
+			const message = await failsWith(service.list(LOCAL_CHANNEL, "/x", false), code as never);
+			expect(message).toBe(reason);
+			expect(backend.calls).toEqual([]);
+		}
+	});
+
+	it("falls back to the hub's own way when the agent fails without a verdict", async () => {
+		const cases: [string, (message: ProtocolMessage, agent: FakeFilesAgent) => void][] = [
+			["failed", answering({ type: "FILES_ERR", code: "FILE_ACCESS_FAILED", message: "io" })],
+			[
+				"closed",
+				(message, agent) => {
+					agent.reply({
+						type: "FILES_ENTRIES",
+						requestId: idOf(message),
+						entries: [sent("partial")],
+						done: false,
+					});
+					agent.emit("close");
+				},
+			],
+			["silent", () => {}],
+			[
+				"slow",
+				(message, agent) => {
+					const timer = setInterval(
+						() =>
+							agent.reply({
+								type: "FILES_ENTRIES",
+								requestId: idOf(message),
+								entries: [sent("slow")],
+								done: false,
+							}),
+						30,
+					);
+					setTimeout(() => clearInterval(timer), 1_000);
+				},
+			],
+			[
+				"midway",
+				answering(
+					{ type: "FILES_ENTRIES", entries: [sent("p1"), sent("p2"), sent("p3")], done: false },
+					{ type: "FILES_ERR", code: "FILE_ACCESS_FAILED", message: "share gone" },
+				),
+			],
+		];
+		for (const [label, answer] of cases) {
+			const agent = new FakeFilesAgent(answer);
+			const { backend, service } = throughAgent(agent, { budgetMs: 100 });
+			const started = Date.now();
+			const listing = await service.list(LOCAL_CHANNEL, "/x", false);
+			expect(
+				listing.entries.map((entry) => entry.name),
+				label,
+			).toEqual(["a", "b"]);
+			expect(backend.calls, label).toEqual([["list", "/x", false]]);
+			expect(Date.now() - started, label).toBeLessThan(1_000);
+		}
+	});
+
+	it("reads what an agent sends, leaving out what does not read", async () => {
+		const agent = new FakeFilesAgent(
+			answering({
+				type: "FILES_ENTRIES",
+				entries: [
+					{ kind: "file", size: 1 },
+					sent("fifo", { kind: "fifo" }),
+					sent("odd", { owner: 7, mtimeMs: "x" }),
+					sent("far", { mtimeMs: 1e20 }),
+				],
+				done: true,
+			}),
+		);
+		const { service } = throughAgent(agent);
+		const listing = await service.list(LOCAL_CHANNEL, "/x", false);
+		expect(listing.entries).toEqual([
+			{
+				name: "far",
+				kind: "file",
+				size: 1,
+				mtime: null,
+				mode: 0o100644,
+				attributes: null,
+				owner: "alice",
+				group: "staff",
+			},
+			{
+				name: "odd",
+				kind: "file",
+				size: 1,
+				mtime: null,
+				mode: 0o100644,
+				attributes: null,
+				owner: null,
+				group: "staff",
+			},
+		]);
+	});
+
+	it("falls back on an answer that does not read", async () => {
+		const lists: Record<string, unknown>[] = [
+			{ type: "FILES_ENTRIES", entries: "nope", done: true },
+			{ type: "FILES_ENTRIES", entries: [sent("x")] },
+		];
+		for (const frame of lists) {
+			const { backend, service } = throughAgent(new FakeFilesAgent(answering(frame)));
+			expect((await service.list(LOCAL_CHANNEL, "/x", false)).entries.map((e) => e.name)).toEqual([
+				"a",
+				"b",
+			]);
+			expect(backend.calls).toEqual([["list", "/x", false]]);
+		}
+		const stats: Record<string, unknown>[] = [
+			{ type: "FILES_ENTRIES", entries: [], done: true },
+			{ type: "FILES_ENTRIES", entries: [sent("one"), sent("two")], done: true },
+		];
+		for (const frame of stats) {
+			const { backend, service } = throughAgent(new FakeFilesAgent(answering(frame)));
+			expect(await service.stat(LOCAL_CHANNEL, "/x/y")).toMatchObject({ name: "x", owner: null });
+			expect(backend.calls).toEqual([["stat", "/x/y"]]);
+		}
+	});
+
+	it("spends one agent budget per request", async () => {
+		const agent = new FakeFilesAgent(() => {});
+		const { service } = throughAgent(agent, {
+			budgetMs: 100,
+			settings: { fallbackDir: "/srv/missing", env: {} },
+			host: {
+				refused: {
+					"/srv/missing": new FileAccessError(
+						"NOT_FOUND",
+						"The folder could not be listed: it does not exist",
+					),
+				},
+			},
+		});
+		const started = Date.now();
+		const listing = await service.list(LOCAL_CHANNEL, undefined, false);
+		expect(listing).toMatchObject({
+			path: "/home/me",
+			start: "home",
+			fallbackProblem: "The fallback folder /srv/missing cannot be opened: it does not exist",
+		});
+		expect(agent.asked.map((message) => [message.type, pathOf(message)])).toEqual([
+			["FILES_LIST", "/srv/missing"],
+		]);
+		expect(Date.now() - started).toBeLessThan(1_000);
+	});
+});
+
+describe("a remote host listed through its agent (#1201)", () => {
+	const agent = new FakeFilesAgent(
+		answering({ type: "FILES_ENTRIES", entries: [sent("from-agent")], done: true }),
+	);
+	// Any SFTP OPENDIR closes the connection: a listing that reached SFTP fails.
+	const state = useRemote({
+		closeOnRequest: { type: "OPENDIR", connection: true },
+		agent: () => agent,
+	});
+
+	it("lists a remote host through its agent, not over SFTP", async () => {
+		const listing = await state.service.list(REMOTE_CHANNEL, state.root, false);
+		expect(listing.entries.map((entry) => entry.name)).toEqual(["from-agent"]);
+		expect(agent.asked.map((message) => message.type)).toEqual(["FILES_LIST"]);
 	});
 });

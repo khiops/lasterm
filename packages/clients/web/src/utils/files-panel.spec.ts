@@ -5,6 +5,7 @@ import {
 	clampTransfersShare,
 	entryLabel,
 	filesPanelForm,
+	formatAttributes,
 	formatMode,
 	formatSize,
 	joinPath,
@@ -235,24 +236,111 @@ describe("a listing's rows", () => {
 
 	it("reads each row to a screen reader as what it is, its size and when it changed", () => {
 		expect(
-			entryLabel({ name: "src", kind: "directory", size: null, mtime: null, mode: null }, now),
+			entryLabel(
+				{
+					name: "src",
+					kind: "directory",
+					size: null,
+					mtime: null,
+					mode: null,
+					attributes: null,
+					owner: null,
+					group: null,
+				},
+				now,
+			),
 		).toBe("folder src");
 		expect(
 			entryLabel(
-				{ name: "docs", kind: "symlink", size: 4, mtime: null, mode: null, linkKind: "directory" },
+				{
+					name: "docs",
+					kind: "symlink",
+					size: 4,
+					mtime: null,
+					mode: null,
+					attributes: null,
+					owner: null,
+					group: null,
+					linkKind: "directory",
+				},
 				now,
 			),
 		).toBe("folder docs");
 		const file = entryLabel(
-			{ name: "notes.md", kind: "file", size: 4096, mtime: "2026-10-30T10:00:00Z", mode: null },
+			{
+				name: "notes.md",
+				kind: "file",
+				size: 4096,
+				mtime: "2026-10-30T10:00:00Z",
+				mode: null,
+				attributes: null,
+				owner: null,
+				group: null,
+			},
 			now,
 		);
 		expect(file).toMatch(/^file notes\.md, 4 KB, modified [^,]+$/);
 		const known = entryLabel(
-			{ name: "notes.md", kind: "file", size: 4096, mtime: "2026-10-30T10:00:00Z", mode: 0o100644 },
+			{
+				name: "notes.md",
+				kind: "file",
+				size: 4096,
+				mtime: "2026-10-30T10:00:00Z",
+				mode: 0o100644,
+				attributes: null,
+				owner: null,
+				group: null,
+			},
 			now,
 		);
 		expect(known).toBe(`${file}, permissions -rw-r--r--`);
+		const unix = entryLabel(
+			{
+				name: "notes.md",
+				kind: "file",
+				size: 4096,
+				mtime: "2026-10-30T10:00:00Z",
+				mode: 0o100644,
+				attributes: null,
+				owner: "o",
+				group: "g",
+			},
+			now,
+		);
+		expect(unix).toBe(`${file}, permissions -rw-r--r--, owner o, group g`);
+		const windows = entryLabel(
+			{
+				name: "notes.md",
+				kind: "file",
+				size: 4096,
+				mtime: "2026-10-30T10:00:00Z",
+				mode: null,
+				attributes: 0x20,
+				owner: "D\\o",
+				group: null,
+			},
+			now,
+		);
+		expect(windows).toBe(`${file}, attributes -a----, owner D\\o`);
+	});
+
+	it("spells Windows attributes as PowerShell's Mode", () => {
+		const spelt: [number | null, string][] = [
+			[0x10, "d-----"],
+			[0x20, "-a----"],
+			[0x21, "-ar---"],
+			[0x22, "-a-h--"],
+			[0x24, "-a--s-"],
+			[0x80, "------"],
+			[0x410, "d----l"],
+			[0x420, "-a---l"],
+			[0x37, "darhs-"],
+			[0x180020, "-a----"],
+			[null, ""],
+		];
+		for (const [attributes, letters] of spelt) {
+			expect(formatAttributes(attributes), String(attributes)).toBe(letters);
+		}
 	});
 
 	it("spells a mode as ls -l does", () => {

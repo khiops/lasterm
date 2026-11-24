@@ -25,6 +25,19 @@ export interface FileEntry {
 	 * server makes up, which do not reflect its ACLs.
 	 */
 	readonly mode: number | null;
+	/**
+	 * A Windows entry's attributes (`dwFileAttributes`), whole, as its agent reads them (#1201);
+	 * null elsewhere, and on every way to the files but the agent.
+	 */
+	readonly attributes: number | null;
+	/**
+	 * Who owns it, by name, as its agent reads it (#1201): the uid's name on Unix, `DOMAIN\name`
+	 * on Windows, the id itself (decimal, or the SID) when the system has no name. Null when the
+	 * agent cannot read it, and on every way to the files but the agent.
+	 */
+	readonly owner: string | null;
+	/** Its group, as `owner` (on Windows, the descriptor's primary group). */
+	readonly group: string | null;
 	/** What a link holds, as the host reads it; absent when it does not say. */
 	readonly linkTarget?: string;
 	/** What a link leads to, followed. Only on a link. */
@@ -236,6 +249,22 @@ export function entryFromMode(
 		size: kind === "directory" ? null : size,
 		mtime: isoFromSeconds(mtimeSeconds),
 		mode: mode ?? null,
+		attributes: null,
+		owner: null,
+		group: null,
+	};
+}
+
+/** What a Windows root, or one of its drives, says of itself on a way to the files but the agent: a folder. */
+export function rootEntry(): Omit<FileEntry, "name"> {
+	return {
+		kind: "directory",
+		size: null,
+		mtime: null,
+		mode: null,
+		attributes: null,
+		owner: null,
+		group: null,
 	};
 }
 

@@ -240,12 +240,48 @@ export interface FileEntryView {
 	readonly mtime: string | null;
 	/** The POSIX `st_mode`, type and permission bits; null when the host gives none. */
 	readonly mode: number | null;
+	/** A Windows entry's attributes (`dwFileAttributes`); null when the host gives none (#1201). */
+	readonly attributes: number | null;
+	/** Who owns it, by name (or by id when the host has no name for it); null when unknown. */
+	readonly owner: string | null;
+	/** Its group, as `owner`. */
+	readonly group: string | null;
 	readonly linkTarget?: string;
 	readonly linkKind?: "file" | "directory" | "other" | "missing";
 }
 
-/** The narrowest files browser, in pixels, that shows the permissions column; below, a tooltip. */
+/** The narrowest list, in pixels, that shows the Mode column; below, a tooltip. */
 export const MODE_COLUMN_MIN_WIDTH = 400;
+
+/** The narrowest list, in pixels, that shows the owner column; below, a tooltip (#1201). */
+export const OWNER_COLUMN_MIN_WIDTH = 480;
+
+/** The Windows attributes PowerShell's `Mode` spells, in its order: `darhsl`. */
+const ATTRIBUTE_LETTERS: readonly (readonly [number, string])[] = [
+	[0x10, "d"],
+	[0x20, "a"],
+	[0x1, "r"],
+	[0x2, "h"],
+	[0x4, "s"],
+	[0x400, "l"],
+];
+
+/**
+ * Windows attributes as Windows PowerShell's `Mode` spells them, six letters: "d-----", "-a----",
+ * "-ar---", "d----l"; "" when the host gave none. Other attributes are not spelled.
+ */
+export function formatAttributes(attributes: number | null): string {
+	if (attributes === null) return "";
+	return ATTRIBUTE_LETTERS.map(([bit, letter]) => ((attributes & bit) !== 0 ? letter : "-")).join(
+		"",
+	);
+}
+
+/** What the Mode column shows: the POSIX mode, else the Windows attributes, else "". */
+export function formatPermissions(entry: FileEntryView): string {
+	if (entry.mode !== null) return formatMode(entry.mode);
+	return formatAttributes(entry.attributes);
+}
 
 /** The letter `ls -l` gives each file type, by the type bits of a mode. */
 const TYPE_LETTERS: ReadonlyMap<number, string> = new Map([
@@ -331,11 +367,18 @@ export function entryLabel(entry: FileEntryView, now: Date): string {
 	const size = isFolderEntry(entry) ? "" : formatSize(entry.size);
 	const modified = formatModified(entry.mtime, now);
 	const mode = formatMode(entry.mode);
+	const attributes = formatAttributes(entry.attributes);
 	return [
 		`${what} ${entry.name}`,
 		...(size !== "" ? [size] : []),
 		...(modified !== "" ? [`modified ${modified}`] : []),
-		...(mode !== "" ? [`permissions ${mode}`] : []),
+		...(mode !== ""
+			? [`permissions ${mode}`]
+			: attributes !== ""
+				? [`attributes ${attributes}`]
+				: []),
+		...(entry.owner !== null ? [`owner ${entry.owner}`] : []),
+		...(entry.group !== null ? [`group ${entry.group}`] : []),
 	].join(", ");
 }
 

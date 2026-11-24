@@ -72,6 +72,9 @@ describe("a POSIX host's files over SFTP", () => {
 			mtime: "2023-11-14T22:13:20.000Z",
 			// The mock server sends this machine's mode: Node's made-up one on Windows.
 			mode: windowsMachine ? 0o100666 : 0o100644,
+			attributes: null,
+			owner: null,
+			group: null,
 		});
 		expect(shown.find((entry) => entry.name === "sub")).toMatchObject({ kind: "directory" });
 		const all = (await state.files.list("/home/test", true)).map((entry) => entry.name);
@@ -90,6 +93,9 @@ describe("a POSIX host's files over SFTP", () => {
 		expect(shown.find((entry) => entry.name === "to-sub")).toMatchObject({
 			kind: "symlink",
 			mode: 0o120777,
+			attributes: null,
+			owner: null,
+			group: null,
 		});
 	});
 
@@ -183,10 +189,34 @@ describe("a Windows host's files over SFTP, as Win32-OpenSSH serves them", () =>
 
 	it("lists the drives at the root", async () => {
 		expect(await state.files.list(WINDOWS_ROOT, false)).toEqual([
-			{ name: "C:", kind: "directory", size: null, mtime: null, mode: null },
-			{ name: "D:", kind: "directory", size: null, mtime: null, mode: null },
+			{
+				name: "C:",
+				kind: "directory",
+				size: null,
+				mtime: null,
+				mode: null,
+				attributes: null,
+				owner: null,
+				group: null,
+			},
+			{
+				name: "D:",
+				kind: "directory",
+				size: null,
+				mtime: null,
+				mode: null,
+				attributes: null,
+				owner: null,
+				group: null,
+			},
 		]);
-		expect(await state.files.stat(WINDOWS_ROOT)).toMatchObject({ kind: "directory", mode: null });
+		expect(await state.files.stat(WINDOWS_ROOT)).toMatchObject({
+			kind: "directory",
+			mode: null,
+			attributes: null,
+			owner: null,
+			group: null,
+		});
 	});
 
 	it("lists a drive-absolute folder, sent as it is", async () => {
@@ -198,6 +228,9 @@ describe("a Windows host's files over SFTP, as Win32-OpenSSH serves them", () =>
 		// The bits the server sends, as it sends them: this machine's mode, Node's on Windows.
 		expect(listed.find((entry) => entry.name === "file.txt")).toMatchObject({
 			mode: windowsMachine ? 0o100666 : 0o100640,
+			attributes: null,
+			owner: null,
+			group: null,
 		});
 		expect(await state.files.stat("C:\\Users\\test\\notes.txt")).toMatchObject({
 			name: "notes.txt",

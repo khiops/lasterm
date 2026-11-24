@@ -1201,23 +1201,35 @@ mod tests {
     /// name), each line marked: a descriptor may have no group at all.
     #[cfg(windows)]
     fn get_acl(path: &Path) -> (String, Option<String>) {
+        // .NET's own reading of the descriptor, as Get-Acl does it, without the
+        // module Get-Acl lives in: a runner's environment may not load it.
         let script = format!(
-            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $a = Get-Acl -LiteralPath '{}'; 'OWNER=' + $a.Owner; $g = $a.Group; if (-not $g) {{ $s = $a.GetGroup([Security.Principal.SecurityIdentifier]); if ($s) {{ $g = $s.Value }} }}; 'GROUP=' + $g",
+            "$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [Text.Encoding]::UTF8; \
+             $a = (New-Object System.IO.FileInfo '{}').GetAccessControl(); \
+             function Name($sid) {{ if (-not $sid) {{ return '' }}; try {{ $sid.Translate([Security.Principal.NTAccount]).Value }} catch {{ $sid.Value }} }}; \
+             'OWNER=' + (Name $a.GetOwner([Security.Principal.SecurityIdentifier])); \
+             'GROUP=' + (Name $a.GetGroup([Security.Principal.SecurityIdentifier]))",
             path.display()
         );
         let output = std::process::Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()
             .unwrap();
-        assert!(output.status.success(), "Get-Acl");
+        assert!(
+            output.status.success(),
+            "the descriptor read: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let text = String::from_utf8(output.stdout).unwrap();
         let field = |key: &str| {
             text.lines()
                 .find_map(|line| line.trim().strip_prefix(key).map(str::to_string))
                 .unwrap_or_else(|| panic!("{key} in {text:?}"))
         };
+        let owner = field("OWNER=");
+        assert!(!owner.is_empty(), "an owner read in {text:?}");
         let group = field("GROUP=");
-        (field("OWNER="), (!group.is_empty()).then_some(group))
+        (owner, (!group.is_empty()).then_some(group))
     }
 
     #[cfg(windows)]

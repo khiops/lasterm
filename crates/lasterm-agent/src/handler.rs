@@ -72,10 +72,12 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 /// A frame on its way to a connection's writer. A terminal's output and
 /// events carry their charge against their hub's connection, released once
 /// the writer has written them, or when they are dropped (#553). Replies carry
-/// none: nothing ever holds them back.
+/// none: nothing ever holds them back. A file request's frames hold its
+/// permits the same way, which bounds what it leaves queued (#1201).
 pub(crate) struct Outgoing {
     pub(crate) frame: Vec<u8>,
     _charge: Option<Queued>,
+    _permits: Vec<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl Outgoing {
@@ -84,6 +86,16 @@ impl Outgoing {
         Self {
             frame,
             _charge: None,
+            _permits: Vec::new(),
+        }
+    }
+
+    /// A reply that holds `permits` until it is written, or dropped.
+    pub(crate) fn holding(frame: Vec<u8>, permits: Vec<tokio::sync::OwnedSemaphorePermit>) -> Self {
+        Self {
+            frame,
+            _charge: None,
+            _permits: permits,
         }
     }
 
@@ -93,6 +105,7 @@ impl Outgoing {
         Self {
             _charge: charge.map(|charge| charge.queue_for(connection, len)),
             frame,
+            _permits: Vec::new(),
         }
     }
 
@@ -101,6 +114,7 @@ impl Outgoing {
         Self {
             frame,
             _charge: Some(charge),
+            _permits: Vec::new(),
         }
     }
 
@@ -334,6 +348,8 @@ pub(crate) fn build_hello(daemon: bool) -> AgentToHub {
         // Takes a paste as PASTE chunks, acknowledged once the terminal took
         // each, and writes and closes its markers itself (#1014).
         "paste-stream".into(),
+        // Answers FILES_LIST and FILES_STAT (#1201).
+        "files".into(),
     ];
     if daemon {
         capabilities.push("hub-identity".into());
@@ -452,6 +468,9 @@ pub(crate) async fn handle_message(
         }
         HubToAgent::Auth { .. } => "AUTH".to_string(),
         HubToAgent::EnvQuery { mode, .. } => format!("ENV_QUERY mode={mode:?}"),
+        // The path is the user's: never in a log line (#1201).
+        HubToAgent::FilesList { .. } => "FILES_LIST".to_string(),
+        HubToAgent::FilesStat { .. } => "FILES_STAT".to_string(),
         HubToAgent::Stop { force } => format!("STOP force={force}"),
         HubToAgent::Error { code, .. } => format!("ERROR {}", code),
         HubToAgent::Paste {
@@ -544,6 +563,28 @@ pub(crate) async fn handle_message(
                     os: environment::os_name().to_owned(),
                 },
             )?;
+        }
+
+        HubToAgent::FilesList {
+            request_id,
+            path,
+            hidden,
+        } => {
+            // Agent-wide, as ENV_QUERY: what the account reads, asked over
+            // the hub's own authenticated connection. Off the dispatch loop:
+            // a folder may take long to read (#1201).
+            crate::files::start(
+                crate::files::Request::List {
+                    request_id,
+                    path,
+                    hidden,
+                },
+                frame_tx,
+            );
+        }
+
+        HubToAgent::FilesStat { request_id, path } => {
+            crate::files::start(crate::files::Request::Stat { request_id, path }, frame_tx);
         }
 
         HubToAgent::Input { channel_id, data } => {
@@ -1998,7 +2039,7 @@ mod restart_identity_tests {
 }
 
 #[cfg(test)]
-mod stdio_tests {
+pub(crate) mod stdio_tests {
     use super::*;
     use crate::batch::Voice;
 
@@ -3140,6 +3181,20 @@ mod stdio_tests {
         }
     }
 
+    /// Both kinds of agent answer FILES_LIST and FILES_STAT, and say so: the
+    /// hub asks nothing of an agent that does not (#1201).
+    #[test]
+    fn hello_says_files() {
+        for daemon in [false, true] {
+            match build_hello(daemon) {
+                AgentToHub::Hello { capabilities, .. } => {
+                    assert!(capabilities.contains(&"files".to_string()), "{daemon}");
+                }
+                _ => unreachable!("build_hello builds HELLO"),
+            }
+        }
+    }
+
     /// Only a daemon says it tells hubs apart.
     #[test]
     fn only_a_daemon_says_hub_identity() {
@@ -3367,8 +3422,9 @@ mod stdio_tests {
         }
     }
 
+    /// What a test's subscriber writes, kept for the test to read.
     #[derive(Clone)]
-    struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+    pub(crate) struct LogCapture(pub(crate) Arc<std::sync::Mutex<Vec<u8>>>);
 
     impl std::io::Write for LogCapture {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {

@@ -55,6 +55,9 @@ const folder = (name: string): FileEntryView => ({
 	size: null,
 	mtime: null,
 	mode: null,
+	attributes: null,
+	owner: null,
+	group: null,
 });
 const file = (name: string): FileEntryView => ({
 	name,
@@ -62,6 +65,9 @@ const file = (name: string): FileEntryView => ({
 	size: 10,
 	mtime: null,
 	mode: null,
+	attributes: null,
+	owner: null,
+	group: null,
 });
 
 /** The host's folders, as the hub would list them. */
@@ -329,7 +335,7 @@ describe("the list and the path bar", () => {
 		expect(lastListed()).toEqual([A, "/home", false]);
 	});
 
-	it("shows each entry's permissions, an empty cell where the host gives none", async () => {
+	it("shows each entry's Mode and owner, — where the host gives none", async () => {
 		const shown = (entries: FileEntryView[]) => {
 			mocks.listHostFiles.mockImplementation(async () => ({
 				ok: true,
@@ -337,28 +343,39 @@ describe("the list and the path bar", () => {
 			}));
 		};
 		shown([
-			{ ...folder("bin"), mode: 0o40755 },
-			{ ...file("notes.md"), mode: 0o100644 },
+			{ ...folder("bin"), mode: 0o40755, owner: "o", group: "g" },
+			{ ...file("notes.md"), mode: 0o100644, owner: "o", group: "g" },
+			{ ...file("boot.ini"), attributes: 0x20, owner: "o" },
 			file("unknown"),
 		]);
 		useFilesPanelStore().browse(A, "/srv/drop");
 		mountBrowser();
 		await settle();
-		const cells = () =>
+		const cells = (cell: string) =>
 			[...root.querySelectorAll(".files-row")].map(
-				(row) => row.querySelector(".files-row__mode")?.textContent ?? "no cell",
+				(row) => row.querySelector(cell)?.textContent ?? "no cell",
 			);
-		expect(cells()).toEqual(["drwxr-xr-x", "-rw-r--r--", ""]);
-		// happy-dom measures no width: the column counts as hidden, so a row with a mode has it on hover.
-		expect(rowEl("notes.md").getAttribute("title")).toBe("Permissions -rw-r--r--");
+		const titles = () =>
+			[...root.querySelectorAll(".files-row")].map(
+				(row) => row.querySelector(".files-row__owner")?.getAttribute("title") ?? null,
+			);
+		expect(cells(".files-row__mode")).toEqual(["drwxr-xr-x", "-rw-r--r--", "-a----", "—"]);
+		expect(cells(".files-row__owner")).toEqual(["o", "o", "o", "—"]);
+		expect(titles()).toEqual(["Owner o", "Owner o", "Owner o", null]);
+		// happy-dom measures no width: both columns count as hidden, so a row has them on hover.
+		expect(rowEl("notes.md").getAttribute("title")).toBe(
+			"Permissions -rw-r--r--\nOwner o\nGroup g",
+		);
+		expect(rowEl("boot.ini").getAttribute("title")).toBe("Attributes -a----\nOwner o");
 		expect(rowEl("unknown").hasAttribute("title")).toBe(false);
 
-		// A host that gives none: every row keeps its cell, empty.
+		// A host that gives none: every row keeps its cells, with —.
 		shown([folder("Users"), file("pagefile.sys")]);
 		useFilesPanelStore().browse(A, "/srv/other");
 		await settle();
 		expect(rows()).toEqual(["Users", "pagefile.sys"]);
-		expect(cells()).toEqual(["", ""]);
+		expect(cells(".files-row__mode")).toEqual(["—", "—"]);
+		expect(cells(".files-row__owner")).toEqual(["—", "—"]);
 	});
 
 	it("edits the path as text on F2, and goes there on Enter", async () => {
@@ -690,6 +707,9 @@ describe("Download… (#840)", () => {
 				size: null,
 				mtime: null,
 				mode: null,
+				attributes: null,
+				owner: null,
+				group: null,
 				linkTarget: "/x",
 				linkKind: "file",
 			},

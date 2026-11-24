@@ -209,6 +209,12 @@ Local daemon, single process, binds to 127.0.0.1.
 **Host Files** (`packages/hub/src/files/`, #832):
 - Lists, stats and creates folders on the host a terminal runs on, for the files panel (#836) and
   the uploads (#833); routes and errors in PROTOCOL.md § 6, Host Files
+- Listings and stats go to the host's agent first (`FILES_LIST`, `FILES_STAT`, PROTOCOL.md § 3.22,
+  `agent-files.ts`, #1201) when it is connected and says `files`: it gives each entry its mode or
+  Windows attributes, its owner and its group. Its verdicts (missing, not a folder, refused) settle
+  the request; anything else, or no whole answer within 15 s for all of one listing's agent
+  requests, falls back to the three ways below, which also serve the home, the free space, a new
+  folder, the environment, uploads and downloads, and read no owner, group or attributes
 - One interface (`FileBackend`), three ways to the files, chosen per host: the hub's own file system
   for the local host, as the hub's OS user, which runs the local agent's terminals; SFTP over the
   hub's SSH connection to a remote host that offers it; SSH commands over exec channels (a `sh`

@@ -1,13 +1,16 @@
 import { chmodSync, mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { get as httpsGet } from "node:https";
 import { type AddressInfo, createServer as createNetServer } from "node:net";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { decodeMessage, encodeMessage, type ProtocolMessage } from "@lasterm/shared";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createToken } from "../auth.js";
+import { type Answer, answering, FakeFilesAgent, sent } from "../files/agent-files.fixture.js";
 import { normaliseHostPath } from "../files/host-paths.js";
 import { createServer } from "../server.fixture.js";
+import type { AgentConnection } from "../session/agent-connection.js";
 import { SessionManager } from "../session/session-manager.js";
 import { type DatabaseManager, openTestDatabases } from "../storage/db.js";
 import { MetaDAL } from "../storage/meta.js";
@@ -168,9 +171,15 @@ describe("the files of a terminal's host, over REST (#832)", () => {
 			size: null,
 			mtime: expect.any(String),
 			mode: process.platform === "win32" ? null : 16872,
+			attributes: null,
+			owner: null,
+			group: null,
 		});
 		expect(named("f.txt")).toMatchObject({
 			mode: process.platform === "win32" ? null : 33184,
+			attributes: null,
+			owner: null,
+			group: null,
 		});
 		expect(body.entries.map((entry) => entry.name)).toEqual(
 			process.platform === "win32" ? ["sub", "f.txt"] : ["link", "sub", "f.txt"],
@@ -267,6 +276,9 @@ describe("the files of a terminal's host, over REST (#832)", () => {
 			kind: "file",
 			size: 3,
 			mode: process.platform === "win32" ? null : 33184,
+			attributes: null,
+			owner: null,
+			group: null,
 		});
 		const space = await server.inject({
 			method: "GET",
@@ -275,6 +287,161 @@ describe("the files of a terminal's host, over REST (#832)", () => {
 		});
 		expect(space.statusCode).toBe(200);
 		expect(space.json<{ total: number }>().total).toBeGreaterThan(0);
+	});
+
+	/** The local host's agent, saying `files` and answering with `answer` (#1201). */
+	function localAgent(answer: Answer): { agent: FakeFilesAgent; hostId: string } {
+		const [local] = new MetaDAL(dbs.meta).listLocalHosts();
+		if (!local) throw new Error("the hub made no local host");
+		const agent = new FakeFilesAgent(answer);
+		vi.spyOn(SessionManager.prototype, "connectedAgent").mockImplementation((hostId) =>
+			hostId === local.id ? (agent as unknown as AgentConnection) : null,
+		);
+		return { agent, hostId: local.id };
+	}
+
+	const hostSpelt = (path: string) => {
+		const normalised = normaliseHostPath(path, process.platform === "win32" ? "windows" : "posix");
+		if (!normalised.ok) throw new Error(normalised.reason);
+		return normalised.path;
+	};
+
+	it("lists a folder through the host's agent, with owner, group and attributes", async () => {
+		const { agent } = localAgent(
+			answering({
+				type: "FILES_ENTRIES",
+				entries: [
+					sent("f.txt", {
+						size: 3,
+						mode: null,
+						attributes: 33,
+						owner: "O2CSI\\olivier",
+						group: null,
+					}),
+					sent("zl", {
+						kind: "symlink",
+						size: 3,
+						mode: 0o120777,
+						linkTarget: "sub",
+						linkKind: "directory",
+					}),
+					sent("sub", {
+						kind: "directory",
+						size: null,
+						mode: 16872,
+						owner: "olivier",
+						group: "staff",
+						mtimeMs: 1_700_000_000_000,
+					}),
+				],
+				done: true,
+			}),
+		);
+		try {
+			const res = await list(root);
+			expect(res.statusCode).toBe(200);
+			const body = res.json<{ entries: Record<string, unknown>[] }>();
+			expect(body.entries.map((entry) => entry.name)).toEqual(["sub", "zl", "f.txt"]);
+			expect(body.entries[0]).toEqual({
+				name: "sub",
+				kind: "directory",
+				size: null,
+				mtime: "2023-11-14T22:13:20.000Z",
+				mode: 16872,
+				attributes: null,
+				owner: "olivier",
+				group: "staff",
+			});
+			expect(body.entries[1]).toMatchObject({ link_target: "sub", link_kind: "directory" });
+			expect(body.entries[2]).toMatchObject({
+				attributes: 33,
+				mode: null,
+				owner: "O2CSI\\olivier",
+				group: null,
+			});
+			expect(agent.asked).toEqual([
+				{ type: "FILES_LIST", path: hostSpelt(root), hidden: false, requestId: expect.any(String) },
+			]);
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("opens at the home through the host's agent", async () => {
+		const { agent } = localAgent(
+			answering({ type: "FILES_ENTRIES", entries: [sent("at-home")], done: true }),
+		);
+		try {
+			const res = await server.inject({
+				method: "GET",
+				url: `/api/channels/${channelId}/files`,
+				headers: bearer(),
+			});
+			expect(res.statusCode).toBe(200);
+			expect(res.json()).toMatchObject({
+				path: hostSpelt(homedir()),
+				start: "home",
+				entries: [{ name: "at-home", owner: "alice", group: "staff" }],
+			});
+			expect(agent.asked.map((message) => (message as { path?: string }).path)).toEqual([
+				hostSpelt(homedir()),
+			]);
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("opens at the fallback folder through the host's agent", async () => {
+		const { agent, hostId } = localAgent(
+			answering({ type: "FILES_ENTRIES", entries: [sent("in-fallback")], done: true }),
+		);
+		new MetaDAL(dbs.meta).updateHostProfile(hostId, JSON.stringify({ transferFallbackDir: root }));
+		try {
+			const res = await server.inject({
+				method: "GET",
+				url: `/api/channels/${channelId}/files`,
+				headers: bearer(),
+			});
+			expect(res.json()).toMatchObject({
+				path: hostSpelt(root),
+				start: "fallback",
+				entries: [{ name: "in-fallback" }],
+			});
+			expect(agent.asked.map((message) => (message as { path?: string }).path)).toEqual([
+				hostSpelt(root),
+			]);
+		} finally {
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("says what a path is through the host's agent", async () => {
+		const { agent } = localAgent(
+			answering({
+				type: "FILES_ENTRIES",
+				entries: [sent("named-by-agent", { owner: "o", group: "g", attributes: 32, mode: null })],
+				done: true,
+			}),
+		);
+		try {
+			const path = join(root, "f.txt");
+			const res = await server.inject({
+				method: "GET",
+				url: `/api/channels/${channelId}/files/stat?path=${encodeURIComponent(path)}`,
+				headers: bearer(),
+			});
+			expect(res.statusCode).toBe(200);
+			expect(res.json()).toMatchObject({
+				path: hostSpelt(path),
+				name: "f.txt",
+				owner: "o",
+				group: "g",
+				attributes: 32,
+			});
+			expect(agent.asked.map((message) => message.type)).toEqual(["FILES_STAT"]);
+		} finally {
+			vi.restoreAllMocks();
+		}
 	});
 
 	it("answers each error by its code", async () => {

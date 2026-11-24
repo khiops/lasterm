@@ -1,6 +1,13 @@
 import type { HostOs } from "@lasterm/shared";
 import type { Client as SshClient } from "ssh2";
 import { readRemoteSystem, type SftpSupport } from "../session/agent-deployer.js";
+import {
+	AGENT_FILES_BUDGET_MS,
+	AgentBudget,
+	type AgentFilesPort,
+	AgentFirstFiles,
+	speaksFiles,
+} from "./agent-files.js";
 import { ExecFileBackend } from "./exec-files.js";
 import { ExecReadBackend } from "./exec-read.js";
 import { ExecUploadBackend } from "./exec-upload.js";
@@ -43,6 +50,13 @@ export interface HostFilesDeps {
 	hostOs(hostId: string): HostOs | null;
 	/** The connected SSH agent of a remote host, or null when none is connected to this hub. */
 	sshHost(hostId: string): SshFileHost | null;
+	/**
+	 * The connected agent of a host, local or remote, or null (#1201): listings and stats ask it
+	 * first when it says `files`.
+	 */
+	agent?(hostId: string): AgentFilesPort | null;
+	/** How long one listing or stat waits for the agent; `AGENT_FILES_BUDGET_MS` by default. */
+	agentBudgetMs?: number;
 	/**
 	 * What decides the folder a panel opens at for a terminal (#836): its
 	 * host's `transferFallbackDir` as the cascade resolves it for that
@@ -267,7 +281,7 @@ export class HostFilesService {
 	 * terminal's live directory (#834) is the client's to ask for by its path.
 	 */
 	async list(channelId: string, path: string | undefined, hidden: boolean): Promise<FileListing> {
-		const { backend, style } = await this.reach(channelId);
+		const { backend, style } = await this.reachFiles(channelId);
 		if (path !== undefined) {
 			const dir = normalised(path, style);
 			return finishListing(dir, await backend.list(dir, hidden), hidden);
@@ -283,7 +297,7 @@ export class HostFilesService {
 	}
 
 	async stat(channelId: string, path: string): Promise<FileStat> {
-		const { backend, style } = await this.reach(channelId);
+		const { backend, style } = await this.reachFiles(channelId);
 		const target = normalised(path, style);
 		return { ...(await backend.stat(target)), path: target };
 	}
@@ -416,13 +430,32 @@ export class HostFilesService {
 		return (await this.remote(hostId)).upload();
 	}
 
-	private async reach(channelId: string): Promise<{ backend: FileBackend; style: PathStyle }> {
+	private async reach(
+		channelId: string,
+	): Promise<{ backend: FileBackend; style: PathStyle; hostId: string }> {
 		const channel = this.channelHost(channelId);
 		if (channel.hostType === "local") {
-			return { backend: this.local.backend, style: pathStyleOf(this.local.os) };
+			return {
+				backend: this.local.backend,
+				style: pathStyleOf(this.local.os),
+				hostId: channel.hostId,
+			};
 		}
 		const remote = await this.remote(channel.hostId);
-		return { backend: remote, style: remote.style };
+		return { backend: remote, style: remote.style, hostId: channel.hostId };
+	}
+
+	/**
+	 * The way to a host's files for one listing or stat (#1201): through its agent first when it
+	 * says `files`, the hub's own way behind it, all of the request's agent requests sharing one
+	 * budget.
+	 */
+	private async reachFiles(channelId: string): Promise<{ backend: FileBackend; style: PathStyle }> {
+		const { backend, style, hostId } = await this.reach(channelId);
+		const agent = this.deps.agent?.(hostId) ?? null;
+		if (agent === null || !speaksFiles(agent)) return { backend, style };
+		const budget = new AgentBudget(this.deps.agentBudgetMs ?? AGENT_FILES_BUDGET_MS);
+		return { backend: new AgentFirstFiles(agent, backend, style, budget), style };
 	}
 
 	private async remote(hostId: string): Promise<RemoteFiles> {

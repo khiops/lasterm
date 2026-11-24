@@ -165,6 +165,23 @@ pub enum AgentToHub {
         /// The OS the agent runs on, so a reader knows how its names compare.
         os: String,
     },
+    /// Entries answering FILES_LIST, a batch at a time, or the one entry
+    /// answering FILES_STAT (#1201). The last frame says `done`. Names,
+    /// owners and groups are user content: never logged, on either side.
+    #[serde(rename = "FILES_ENTRIES")]
+    FilesEntries {
+        request_id: String,
+        entries: Vec<crate::files::FileEntry>,
+        done: bool,
+    },
+    /// Why FILES_LIST or FILES_STAT failed: before any FILES_ENTRIES, or in
+    /// place of the last one when the folder's read failed midway.
+    #[serde(rename = "FILES_ERR")]
+    FilesErr {
+        request_id: String,
+        code: String,
+        message: String,
+    },
 }
 
 /// All messages sent FROM the hub TO the agent.
@@ -275,6 +292,19 @@ pub enum HubToAgent {
     },
     #[serde(rename = "DESTROY")]
     Destroy { channel_id: String },
+    /// List the folder `path`, hidden names too when `hidden` (#1201).
+    /// Answered with FILES_ENTRIES, or FILES_ERR.
+    #[serde(rename = "FILES_LIST")]
+    FilesList {
+        request_id: String,
+        path: String,
+        #[serde(default)]
+        hidden: bool,
+    },
+    /// What `path` is, without following a link (#1201). Answered with one
+    /// FILES_ENTRIES of one entry, or FILES_ERR.
+    #[serde(rename = "FILES_STAT")]
+    FilesStat { request_id: String, path: String },
     /// Ask for a terminal's working directory, read afresh (`cwd`, #834).
     /// Answered with CWD_CHANGE, or with ERROR `CHANNEL_NOT_FOUND`.
     #[serde(rename = "CWD_QUERY")]

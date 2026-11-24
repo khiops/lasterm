@@ -62,6 +62,9 @@ describe("the local host's files, through the hub's own file system", () => {
 			mtime: "2023-11-14T22:13:20.000Z",
 			// Node's Windows mode is made up from the read-only attribute: none is given.
 			mode: windows ? null : 0o100644,
+			attributes: null,
+			owner: null,
+			group: null,
 		});
 		expect(shown.find((entry) => entry.name === "sub")).toMatchObject({
 			kind: "directory",
@@ -139,7 +142,16 @@ describe("the local host's files, through the hub's own file system", () => {
 			size: null,
 			mtime: null,
 			mode: null,
+			attributes: null,
+			owner: null,
+			group: null,
 		});
-		expect(await files.stat(WINDOWS_ROOT)).toMatchObject({ kind: "directory", mode: null });
+		expect(await files.stat(WINDOWS_ROOT)).toMatchObject({
+			kind: "directory",
+			mode: null,
+			attributes: null,
+			owner: null,
+			group: null,
+		});
 	});
 });

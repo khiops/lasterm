@@ -48,11 +48,74 @@ describe("listHostFiles", () => {
 			value: {
 				path: "/home/pi",
 				entries: [
-					{ name: "src", kind: "directory", size: null, mtime: null, mode: 16877 },
-					{ name: "notes.md", kind: "file", size: 10, mtime: null, mode: null },
+					{
+						name: "src",
+						kind: "directory",
+						size: null,
+						mtime: null,
+						mode: 16877,
+						attributes: null,
+						owner: null,
+						group: null,
+					},
+					{
+						name: "notes.md",
+						kind: "file",
+						size: 10,
+						mtime: null,
+						mode: null,
+						attributes: null,
+						owner: null,
+						group: null,
+					},
 				],
 				truncated: 0,
 			},
 		});
+	});
+
+	it("reads each entry's owner, group and attributes, null when the hub sends none", async () => {
+		answers({
+			path: "C:\\x",
+			entries: [
+				{
+					name: "boot.ini",
+					kind: "file",
+					size: 1,
+					mtime: null,
+					mode: null,
+					attributes: 33,
+					owner: "o",
+					group: "g",
+				},
+				// What a hub that lists without the agent answers: none of the three.
+				{ name: "old.txt", kind: "file", size: 1, mtime: null, mode: null },
+				{
+					name: "odd.txt",
+					kind: "file",
+					size: 1,
+					mtime: null,
+					mode: null,
+					attributes: "33",
+					owner: 7,
+					group: false,
+				},
+			],
+			truncated: 0,
+		});
+		const answer = await listHostFiles(CHANNEL, "C:\\x", false);
+		if (!answer.ok) throw new Error(answer.message);
+		expect(
+			answer.value.entries.map(({ name, attributes, owner, group }) => ({
+				name,
+				attributes,
+				owner,
+				group,
+			})),
+		).toEqual([
+			{ name: "boot.ini", attributes: 33, owner: "o", group: "g" },
+			{ name: "old.txt", attributes: null, owner: null, group: null },
+			{ name: "odd.txt", attributes: null, owner: null, group: null },
+		]);
 	});
 });

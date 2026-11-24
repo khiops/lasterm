@@ -8,6 +8,7 @@ mod detach;
 mod elevation;
 mod environment;
 mod expand;
+mod files;
 mod flow;
 mod framing;
 mod handler;

@@ -64,6 +64,10 @@ function entryOf(raw: Record<string, unknown>): FileEntryView | null {
 		mtime: typeof mtime === "string" ? mtime : null,
 		// A hub without permissions sends no mode: none is known.
 		mode: typeof raw.mode === "number" ? raw.mode : null,
+		// A hub that lists without the agent sends none of these (#1201).
+		attributes: typeof raw.attributes === "number" ? raw.attributes : null,
+		owner: typeof raw.owner === "string" ? raw.owner : null,
+		group: typeof raw.group === "string" ? raw.group : null,
 		...(typeof raw.link_target === "string" ? { linkTarget: raw.link_target } : {}),
 		...(linkKind === "file" ||
 		linkKind === "directory" ||

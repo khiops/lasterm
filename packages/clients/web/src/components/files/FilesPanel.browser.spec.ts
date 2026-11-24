@@ -223,12 +223,17 @@ describe("the permissions column, by the panel's width (#1195)", () => {
 		name: string,
 		kind: FileEntryView["kind"],
 		mode: number | null,
+		more: Partial<FileEntryView> = {},
 	): FileEntryView => ({
 		name,
 		kind,
 		size: kind === "directory" ? null : 10,
 		mtime: "2026-10-30T10:00:00Z",
 		mode,
+		attributes: null,
+		owner: null,
+		group: null,
+		...more,
 	});
 	const row = (root: HTMLElement, name: string): HTMLElement =>
 		[...root.querySelectorAll<HTMLElement>(".files-row")].find(
@@ -236,51 +241,113 @@ describe("the permissions column, by the panel's width (#1195)", () => {
 		) as HTMLElement;
 	const shown = (el: Element | null): boolean =>
 		el !== null && getComputedStyle(el).display !== "none";
+	/** Enough rows of one owner for the list to scroll, so its scrollbar takes from the rows. */
+	const fillers = Array.from({ length: 40 }, (_, index) =>
+		entry(`z${String(index).padStart(2, "0")}.txt`, "file", 0o100644, { owner: "o", group: "g" }),
+	);
+	/** The box's width for the list's rows to get `width`, beside the list's scrollbar. */
+	const boxFor = (root: HTMLElement, width: number): string => {
+		const list = root.querySelector(".files-list") as HTMLElement;
+		return `${width + list.offsetWidth - list.clientWidth}px`;
+	};
 
 	it("shows the column from 400 px on, and the permissions on hover below", async () => {
-		const root = await mountBrowserIn(400, [
-			entry("bin", "directory", 0o40755),
-			entry("notes.md", "file", 0o100644),
+		const root = await mountBrowserIn(600, [
+			entry("bin", "directory", 0o40755, { owner: "o", group: "g" }),
+			entry("notes.md", "file", 0o100644, { owner: "o", group: "g" }),
+			entry("boot.ini", "file", null, { attributes: 0x21, owner: "D\\o", group: "D\\g" }),
+			entry("unknown", "file", null),
+			...fillers,
 		]);
-		const browser = root.querySelector(".files-browser") as HTMLElement;
-		expect(browser.getBoundingClientRect().width).toBe(400);
+		const list = root.querySelector(".files-list") as HTMLElement;
+		expect(list.scrollHeight).toBeGreaterThan(list.clientHeight);
 		const notes = row(root, "notes.md");
-		expect(shown(notes.querySelector(".files-row__mode"))).toBe(true);
-		expect(notes.querySelector(".files-row__mode")?.textContent).toBe("-rw-r--r--");
+
+		// Below 400 px: no Mode or owner column; the row says them, and its group, on hover.
+		root.style.width = boxFor(root, 399);
+		await frames();
+		expect(list.clientWidth).toBe(399);
+		expect(shown(notes.querySelector(".files-row__mode"))).toBe(false);
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(false);
+		expect(shown(notes.querySelector(".files-row__modified"))).toBe(true);
+		expect(notes.getAttribute("title")).toBe("Permissions -rw-r--r--\nOwner o\nGroup g");
+		expect(row(root, "boot.ini").getAttribute("title")).toBe(
+			"Attributes -ar---\nOwner D\\o\nGroup D\\g",
+		);
+		expect(row(root, "unknown").hasAttribute("title")).toBe(false);
+
+		// From 400 to 479 px: the Mode column, the owner still on hover.
+		for (const width of [400, 479]) {
+			root.style.width = boxFor(root, width);
+			await frames();
+			expect(shown(notes.querySelector(".files-row__mode")), `${width}`).toBe(true);
+			expect(notes.querySelector(".files-row__mode")?.textContent).toBe("-rw-r--r--");
+			expect(shown(notes.querySelector(".files-row__owner")), `${width}`).toBe(false);
+			expect(notes.getAttribute("title"), `${width}`).toBe("Owner o\nGroup g");
+		}
+
+		// From 480 px: the owner column too, its cell saying it whole on hover; the group on hover.
+		root.style.width = boxFor(root, 480);
+		await frames();
+		expect(list.clientWidth).toBe(480);
+		const owner = notes.querySelector(".files-row__owner") as HTMLElement;
+		expect(shown(owner)).toBe(true);
+		expect(owner.textContent).toBe("o");
+		expect(owner.getAttribute("title")).toBe("Owner o");
+		expect(owner.getBoundingClientRect().width).toBe(80);
 		expect(
 			(notes.querySelector(".files-row__name") as HTMLElement).getBoundingClientRect().width,
 		).toBeGreaterThanOrEqual(140);
-		expect(root.querySelectorAll(".files-row[title]")).toHaveLength(0);
+		expect(notes.getAttribute("title")).toBe("Group g");
 
-		// Narrower: the column goes, the date stays, and the row says its permissions on hover.
-		root.style.width = "399px";
+		// Back to 479 px: the owner column goes and the row says the owner again.
+		root.style.width = boxFor(root, 479);
 		await frames();
-		expect(shown(notes.querySelector(".files-row__mode"))).toBe(false);
-		expect(shown(notes.querySelector(".files-row__modified"))).toBe(true);
-		expect(notes.getAttribute("title")).toBe("Permissions -rw-r--r--");
-
-		// Wide again, and narrow again: the width now decides, not what it was.
-		root.style.width = "400px";
-		await frames();
-		expect(shown(notes.querySelector(".files-row__mode"))).toBe(true);
-		expect(notes.hasAttribute("title")).toBe(false);
-		root.style.width = "399px";
-		await frames();
-		expect(shown(notes.querySelector(".files-row__mode"))).toBe(false);
-		expect(notes.getAttribute("title")).toBe("Permissions -rw-r--r--");
+		expect(shown(owner)).toBe(false);
+		expect(notes.getAttribute("title")).toBe("Owner o\nGroup g");
 	});
 
-	it("keeps the column, empty, for a host that gives no permissions", async () => {
+	it("keeps the column, with —, for a host that gives no permissions", async () => {
 		const root = await mountBrowserIn(400, [
 			entry("Users", "directory", null),
 			entry("pagefile.sys", "file", null),
 		]);
 		for (const cell of root.querySelectorAll(".files-row__mode")) {
 			expect(shown(cell)).toBe(true);
-			expect(cell.textContent).toBe("");
+			expect(cell.textContent).toBe("—");
 			expect(cell.getBoundingClientRect().width).toBeGreaterThanOrEqual(50);
 		}
 		expect(root.querySelectorAll(".files-row__mode")).toHaveLength(2);
 		expect(root.querySelectorAll(".files-row[title]")).toHaveLength(0);
+	});
+
+	it("measures the list that comes after an empty folder", async () => {
+		const listed = [entry("notes.md", "file", 0o100644, { owner: "o", group: "g" })];
+		const root = await mountBrowserIn(480, listed);
+		expect(shown(row(root, "notes.md").querySelector(".files-row__owner"))).toBe(true);
+		mocks.listHostFiles.mockResolvedValue({
+			ok: true,
+			value: { path: "/srv/drop", entries: [], truncated: 0 },
+		});
+		(root.querySelector('button[aria-label="Refresh"]') as HTMLButtonElement).click();
+		await frames();
+		expect(root.querySelector(".files-list")).toBeNull();
+		root.style.width = "399px";
+		await frames();
+		mocks.listHostFiles.mockResolvedValue({
+			ok: true,
+			value: { path: "/srv/drop", entries: listed, truncated: 0 },
+		});
+		(root.querySelector('button[aria-label="Refresh"]') as HTMLButtonElement).click();
+		await frames();
+		const notes = row(root, "notes.md");
+		expect(shown(notes.querySelector(".files-row__mode"))).toBe(false);
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(false);
+		expect(notes.getAttribute("title")).toBe("Permissions -rw-r--r--\nOwner o\nGroup g");
+		// The new list is the one measured: widening it brings both columns back.
+		root.style.width = "480px";
+		await frames();
+		expect(shown(notes.querySelector(".files-row__mode"))).toBe(true);
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(true);
 	});
 });

@@ -451,19 +451,34 @@ watch(
 const hiddenLeft = ref(0);
 const hiddenRight = ref(0);
 
-function updateHidden(): void {
+/** Room an edge's fade and counter take over the bar's end, in px. */
+const EDGE_RESERVE = 56;
+
+/**
+ * The tabs hidden beyond each edge: those not wholly in the bar, and, on a side that hides any,
+ * those under its counter and fade — a tab there is on screen and out of reach.
+ */
+function hiddenTabs(): { left: HTMLElement[]; right: HTMLElement[] } {
 	const el = tabBarEl.value;
-	if (!el) return;
+	const none = { left: [], right: [] };
+	if (!el) return none;
 	const box = el.getBoundingClientRect();
-	let left = 0;
-	let right = 0;
-	for (const tab of tabButtons()) {
-		const rect = tab.getBoundingClientRect();
-		if (rect.left < box.left - 1) left++;
-		else if (rect.right > box.right + 1) right++;
-	}
-	hiddenLeft.value = left;
-	hiddenRight.value = right;
+	const tabs = tabButtons().map((tab) => ({ tab, rect: tab.getBoundingClientRect() }));
+	const anyLeft = tabs.some(({ rect }) => rect.left < box.left - 1);
+	const anyRight = tabs.some(({ rect }) => rect.right > box.right + 1);
+	const left = tabs.filter(({ rect }) => rect.left < box.left - 1 || (anyLeft && rect.left < box.left + EDGE_RESERVE));
+	const right = tabs.filter(
+		({ rect, tab }) =>
+			!left.some((l) => l.tab === tab) &&
+			(rect.right > box.right + 1 || (anyRight && rect.right > box.right - EDGE_RESERVE)),
+	);
+	return { left: left.map(({ tab }) => tab), right: right.map(({ tab }) => tab) };
+}
+
+function updateHidden(): void {
+	const { left, right } = hiddenTabs();
+	hiddenLeft.value = left.length;
+	hiddenRight.value = right.length;
 }
 
 function moreLabel(count: number, side: "left" | "right"): string {
@@ -472,21 +487,16 @@ function moreLabel(count: number, side: "left" | "right"): string {
 
 /** Scroll the nearest hidden tab on a side into view, and keep the keyboard where the counter was. */
 function revealHidden(side: "left" | "right"): void {
-	const el = tabBarEl.value;
-	if (!el) return;
-	const box = el.getBoundingClientRect();
-	const tabs = tabButtons().map((tab) => ({ tab, rect: tab.getBoundingClientRect() }));
-	const hidden =
-		side === "left"
-			? tabs.filter(({ rect }) => rect.left < box.left - 1).pop()
-			: tabs.find(({ rect }) => rect.right > box.right + 1);
+	const { left, right } = hiddenTabs();
+	const hidden = side === "left" ? left[left.length - 1] : right[0];
 	if (hidden === undefined) return;
-	const last = (side === "left" ? hiddenLeft.value : hiddenRight.value) === 1;
-	hidden.tab.scrollIntoView({ block: "nearest", inline: side === "left" ? "start" : "end", behavior: "smooth" });
+	const last = (side === "left" ? left : right).length === 1;
+	// scroll-padding keeps the tab clear of the counter that may remain.
+	hidden.scrollIntoView({ block: "nearest", inline: side === "left" ? "start" : "end", behavior: "smooth" });
 	// The counter goes with the last hidden tab; its focus goes to that tab rather than to nothing.
 	if (last) {
-		keyboardTabId.value = hidden.tab.dataset.tabId ?? null;
-		hidden.tab.focus({ preventScroll: true });
+		keyboardTabId.value = hidden.dataset.tabId ?? null;
+		hidden.focus({ preventScroll: true });
 	}
 }
 
@@ -720,6 +730,8 @@ function onTabDragEnd(): void {
 	overflow-y: hidden;
 	flex-shrink: 0;
 	min-height: 32px;
+	/* Room for the edge counters: a tab scrolled or focused into view stops short of them. */
+	scroll-padding-inline: 56px;
 	/* No scrollbar, ever (#1194): tabs shrink first, and what still does not fit
 	   scrolls by wheel, keyboard focus and scrolling the active tab into view. */
 	scrollbar-width: none;

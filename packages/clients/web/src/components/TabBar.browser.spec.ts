@@ -100,7 +100,7 @@ describe("TabBar hidden-tab counters (#1200)", () => {
 		const bar = await mountBar(20, 600);
 		await settle();
 		const hidden = tabs(bar).filter(
-			(t) => t.getBoundingClientRect().right > bar.getBoundingClientRect().right + 1,
+			(t) => t.getBoundingClientRect().right > bar.getBoundingClientRect().right - 56,
 		);
 		expect(counter(bar, "left")).toBeNull();
 		expect(counter(bar, "right")?.textContent?.trim()).toBe(String(hidden.length));
@@ -121,8 +121,13 @@ describe("TabBar hidden-tab counters (#1200)", () => {
 		bar.scrollLeft = bar.scrollWidth;
 		await settle();
 		expect(counter(bar, "right")).toBeNull();
-		expect(counter(bar, "left")?.textContent?.trim()).toMatch(/^\d+$/);
-		expect(counter(bar, "left")?.getAttribute("aria-label")).toMatch(/^\d+ more tabs to the left$/);
+		const box = bar.getBoundingClientRect();
+		const hidden = tabs(bar).filter((t) => t.getBoundingClientRect().left < box.left + 56).length;
+		expect(hidden).toBeGreaterThan(1);
+		expect(counter(bar, "left")?.textContent?.trim()).toBe(String(hidden));
+		expect(counter(bar, "left")?.getAttribute("aria-label")).toBe(
+			`${hidden} more tabs to the left`,
+		);
 	});
 
 	it("costs the tabs no height", async () => {
@@ -138,13 +143,15 @@ describe("TabBar hidden-tab counters (#1200)", () => {
 	});
 
 	it("scrolls the next hidden tab into view when the right counter is clicked", async () => {
-		const bar = await mountBar(20, 600);
+		const bar = await mountBar(20, 380);
 		await settle();
 		const box = bar.getBoundingClientRect();
-		const next = tabs(bar).find((t) => t.getBoundingClientRect().right > box.right + 1);
+		const next = tabs(bar).find((t) => t.getBoundingClientRect().right > box.right - 56);
 		counter(bar, "right")?.click();
 		await settle();
-		expect(next?.getBoundingClientRect().right).toBeLessThanOrEqual(box.right + 1);
+		// Clear of the counter that remains over the bar's end, not just inside the bar.
+		const more = counter(bar, "right")?.getBoundingClientRect() as DOMRect;
+		expect(next?.getBoundingClientRect().right).toBeLessThanOrEqual(more.left + 1);
 		expect(counter(bar, "left")).not.toBeNull();
 	});
 
@@ -153,11 +160,44 @@ describe("TabBar hidden-tab counters (#1200)", () => {
 		bar.scrollLeft = 20; // one tab partly out on the left
 		await settle();
 		expect(counter(bar, "left")?.textContent?.trim()).toBe("1");
+		expect(counter(bar, "left")?.getAttribute("aria-label")).toBe("1 more tab to the left");
+		expect(counter(bar, "left")?.title).toBe("1 more tab to the left");
 		counter(bar, "left")?.click();
 		await settle();
 		expect(bar.scrollLeft).toBe(0);
 		expect(counter(bar, "left")).toBeNull();
 		expect(document.activeElement).toBe(tabs(bar)[0]);
+	});
+
+	it("hands the keyboard to the tab when the right counter was the last one, and only then", async () => {
+		const bar = await mountBar(20, 600);
+		await settle();
+		counter(bar, "right")?.click(); // many hidden: more remain
+		await settle();
+		expect(tabs(bar)).not.toContain(document.activeElement as HTMLElement);
+		const addGroup = bar.querySelector<HTMLElement>(".tab-bar__add-group") as HTMLElement;
+		// Leave the last tab 20 px out on the right: one tab hidden.
+		bar.scrollLeft =
+			bar.scrollWidth - bar.clientWidth - addGroup.getBoundingClientRect().width - 20;
+		await settle();
+		expect(counter(bar, "right")?.getAttribute("aria-label")).toBe("1 more tab to the right");
+		counter(bar, "right")?.click();
+		await settle();
+		expect(counter(bar, "right")).toBeNull();
+		expect(document.activeElement).toBe(tabs(bar)[19]);
+	});
+
+	it("brings the active tab fully into view while the left counter shows", async () => {
+		const bar = await mountBar(20, 600);
+		bar.scrollLeft = 300;
+		await settle();
+		expect(counter(bar, "left")).not.toBeNull();
+		active.value = 15;
+		await settle();
+		const tab = tabs(bar)[15]?.getBoundingClientRect() as DOMRect;
+		const box = bar.getBoundingClientRect();
+		expect(tab.right).toBeLessThanOrEqual(box.right + 1);
+		expect(tab.left).toBeGreaterThanOrEqual(box.left - 1);
 	});
 
 	it("updates when the bar is resized", async () => {

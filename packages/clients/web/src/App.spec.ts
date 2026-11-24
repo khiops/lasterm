@@ -2551,6 +2551,17 @@ describe("updating an older agent, from the host's menu (#1185)", () => {
 		expect(replaces(hub)).toEqual([]);
 	});
 
+	it("puts the keyboard on Cancel, and Escape cancels, sending nothing (#1189)", async () => {
+		const hub = await openUpdateAgent();
+		expect(document.activeElement?.textContent?.trim()).toBe("Cancel");
+		expect(document.querySelector(".confirm-dialog")?.getAttribute("aria-modal")).toBe("true");
+
+		await press("Escape");
+
+		expect(asking()).toBe(false);
+		expect(replaces(hub)).toEqual([]);
+	});
+
 	it("posts the replacement once confirmed, and says what the hub answered", async () => {
 		const hub = await openUpdateAgent();
 		hub.answers.set(REPLACE, () => json({ replaced: true, message: "The agent was replaced." }));

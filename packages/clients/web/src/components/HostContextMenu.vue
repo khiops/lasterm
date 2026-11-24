@@ -4,7 +4,7 @@
 			v-if="visible"
 			ref="menuEl"
 			class="ctx-menu"
-			:style="{ left: `${x}px`, top: `${y}px` }"
+			:style="placement.style.value"
 			@click.stop
 		>
 			<template v-if="host?.type === 'local'">
@@ -77,7 +77,11 @@
 				>
 					Move to Group
 					<span class="submenu-arrow">&#x25B8;</span>
-					<div v-if="showGroupSubmenu" class="ctx-submenu">
+					<div
+						v-if="showGroupSubmenu"
+						class="ctx-submenu"
+						:class="{ 'ctx-submenu--inline': placement.scrolls.value }"
+					>
 						<button
 							class="ctx-item"
 							:class="{ active: !host.hostGroupId }"
@@ -113,6 +117,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import { useMenuPlacement } from "../composables/useMenuPlacement.js";
 import { useHostsStore } from "../stores/hosts.js";
 import { toastRefusal } from "../utils/hub-answer.js";
 
@@ -139,6 +144,12 @@ const emit = defineEmits<{
 const hostsStore = useHostsStore();
 const menuEl = ref<HTMLElement | null>(null);
 const showGroupSubmenu = ref(false);
+const placement = useMenuPlacement({
+	open: () => props.visible,
+	menu: menuEl,
+	x: () => props.x,
+	y: () => props.y,
+});
 
 const host = computed(() =>
 	hostsStore.hosts.find((h) => h.id === props.hostId) ?? null,
@@ -344,5 +355,15 @@ function onNewGroup(): void {
 	padding: 4px 0;
 	min-width: 160px;
 	box-shadow: var(--nt-shadow);
+}
+
+/* In a menu that scrolls, the groups are listed in its flow: beside it they would be cut off. */
+.ctx-submenu--inline {
+	position: static;
+	min-width: 0;
+	border: none;
+	border-radius: 0;
+	box-shadow: none;
+	padding: 0 0 0 12px;
 }
 </style>

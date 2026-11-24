@@ -47,7 +47,10 @@ afterEach(() => {
 	document.body.innerHTML = "";
 });
 
-async function openMenu(hostId: string): Promise<void> {
+async function openMenu(
+	hostId: string,
+	at: { x: number; y: number } = { x: 0, y: 0 },
+): Promise<void> {
 	const root = document.createElement("div");
 	document.body.appendChild(root);
 	const record = (event: string) => (id: string) => emitted.push([event, id]);
@@ -56,8 +59,8 @@ async function openMenu(hostId: string): Promise<void> {
 			h(HostContextMenu, {
 				visible: true,
 				hostId,
-				x: 0,
-				y: 0,
+				x: at.x,
+				y: at.y,
 				onConnect: record("connect"),
 				onReconnect: record("reconnect"),
 				onDisconnect: record("disconnect"),
@@ -381,5 +384,85 @@ describe("the host menu's Update agent entry (#1185)", () => {
 			["replace-agent", "pi"],
 			["close", "pi"],
 		]);
+	});
+});
+
+// The menu opens where it was asked, moved inside the window when it would overflow (#1190). The
+// test window has no layout: the menu's size is what the spec says it measures, 200 x 300.
+describe("where the host menu is drawn (#1190)", () => {
+	const size = { width: window.innerWidth, height: window.innerHeight };
+	function windowIs(width: number, height: number): void {
+		window.innerWidth = width;
+		window.innerHeight = height;
+		vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+			width: 200,
+			height: 300,
+		} as DOMRect);
+	}
+	const menu = () => document.body.querySelector<HTMLElement>(".ctx-menu");
+	const drawn = () => [menu()?.style.left, menu()?.style.top];
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		window.innerWidth = size.width;
+		window.innerHeight = size.height;
+	});
+
+	it("keeps where it was asked when it fits", async () => {
+		windowIs(1000, 600);
+		await openMenu("pi", { x: 100, y: 50 });
+		expect(drawn()).toEqual(["100px", "50px"]);
+		expect(menu()?.style.overflowY).toBe("");
+	});
+
+	it("moves up to end 4px above the bottom edge", async () => {
+		windowIs(1000, 600);
+		await openMenu("pi", { x: 100, y: 500 });
+		expect(drawn()).toEqual(["100px", "296px"]);
+	});
+
+	it("moves left to end 4px before the right edge", async () => {
+		windowIs(1000, 600);
+		await openMenu("pi", { x: 950, y: 50 });
+		expect(drawn()).toEqual(["796px", "50px"]);
+	});
+
+	it("limits its height and scrolls in a window shorter than itself", async () => {
+		windowIs(1000, 200);
+		await openMenu("pi", { x: 100, y: 150 });
+		expect(drawn()).toEqual(["100px", "4px"]);
+		expect(menu()?.style.maxHeight).toBe("192px");
+		expect(menu()?.style.overflowY).toBe("auto");
+	});
+
+	it("moves again when the window gets shorter while it is open", async () => {
+		windowIs(1000, 600);
+		await openMenu("pi", { x: 100, y: 500 });
+		expect(drawn()).toEqual(["100px", "296px"]);
+
+		window.innerHeight = 400;
+		window.dispatchEvent(new Event("resize"));
+		await nextTick();
+
+		expect(drawn()).toEqual(["100px", "96px"]);
+	});
+
+	it("lists the groups in its own flow only where it scrolls", async () => {
+		const submenu = async () => {
+			document.body
+				.querySelector(".has-submenu")
+				?.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+			await nextTick();
+			return document.body.querySelector(".ctx-submenu")?.classList.contains("ctx-submenu--inline");
+		};
+		windowIs(1000, 600);
+		await openMenu("pi", { x: 100, y: 50 });
+		expect(await submenu()).toBe(false);
+		app?.unmount();
+		document.body.innerHTML = "";
+
+		windowIs(1000, 200);
+		await openMenu("pi", { x: 100, y: 50 });
+		expect(await submenu()).toBe(true);
 	});
 });

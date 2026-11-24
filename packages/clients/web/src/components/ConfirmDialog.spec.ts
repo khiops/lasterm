@@ -13,7 +13,7 @@ afterEach(() => {
 	document.body.innerHTML = "";
 });
 
-async function mountAsking() {
+async function mountAsking(showRemember = false) {
 	const visible = ref(false);
 	const events: string[] = [];
 	const root = document.createElement("div");
@@ -29,6 +29,7 @@ async function mountAsking() {
 				title: "Update the agent?",
 				message: "It ends terminals.",
 				confirmLabel: "Update agent",
+				showRemember,
 				onCancel: () => {
 					events.push("cancel");
 					visible.value = false;
@@ -61,6 +62,15 @@ describe("the confirmation dialog's keyboard (#1189)", () => {
 		visible.value = true;
 		await nextTick();
 		await nextTick();
+		expect(document.activeElement?.textContent?.trim()).toBe("Cancel");
+	});
+
+	it("puts the keyboard on Cancel even when the remember checkbox comes first", async () => {
+		const { visible } = await mountAsking(true);
+		visible.value = true;
+		await nextTick();
+		await nextTick();
+		expect(document.querySelector(".confirm-remember")).not.toBeNull();
 		expect(document.activeElement?.textContent?.trim()).toBe("Cancel");
 	});
 

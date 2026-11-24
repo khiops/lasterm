@@ -390,6 +390,7 @@ describe("the host menu's Update agent entry (#1185)", () => {
 // The menu opens where it was asked, moved inside the window when it would overflow (#1190). The
 // test window has no layout: the menu's size is what the spec says it measures, 200 x 300.
 describe("where the host menu is drawn (#1190)", () => {
+	const size = { width: window.innerWidth, height: window.innerHeight };
 	function windowIs(width: number, height: number): void {
 		window.innerWidth = width;
 		window.innerHeight = height;
@@ -401,7 +402,11 @@ describe("where the host menu is drawn (#1190)", () => {
 	const menu = () => document.body.querySelector<HTMLElement>(".ctx-menu");
 	const drawn = () => [menu()?.style.left, menu()?.style.top];
 
-	afterEach(() => vi.restoreAllMocks());
+	afterEach(() => {
+		vi.restoreAllMocks();
+		window.innerWidth = size.width;
+		window.innerHeight = size.height;
+	});
 
 	it("keeps where it was asked when it fits", async () => {
 		windowIs(1000, 600);

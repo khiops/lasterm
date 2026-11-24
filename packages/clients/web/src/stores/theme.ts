@@ -128,6 +128,12 @@ export const useThemeStore = defineStore("theme", () => {
 		root.setProperty("--nt-sidebar-text", readableText(theme.ui.sidebarText, theme.ui.sidebar));
 		root.setProperty("--nt-sidebar-active", theme.ui.sidebarActive);
 		root.setProperty("--nt-host-rail", theme.ui.hostRail);
+		// Text on the host rail, which the tab bar's tabs and its overflow counters use: the theme's
+		// foreground, darkened or lightened until it reads there.
+		root.setProperty(
+			"--nt-host-rail-text",
+			readableText(theme.colors.foreground, theme.ui.hostRail),
+		);
 		root.setProperty("--nt-border", theme.ui.border);
 		root.setProperty("--nt-accent", theme.ui.accent);
 		root.setProperty("--nt-badge", theme.ui.badge);

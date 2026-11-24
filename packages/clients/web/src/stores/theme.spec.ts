@@ -526,6 +526,22 @@ describe("readableText", () => {
 	});
 });
 
+// `--nt-host-rail-text`: the tab bar's overflow counters read on the host rail (#1200).
+describe("applyTheme host rail text", () => {
+	it("darkens Solarized Light's foreground until it reads on its rail", () => {
+		const theme = BUNDLED_THEMES["solarized-light"] as LastermTheme;
+		useThemeStore().applyTheme(theme);
+		// base00 #657b83 on the rail #e6dfcb is 3.35:1; this is the nearest shade of it that reaches 4.5:1.
+		expect(setPropertyMock).toHaveBeenCalledWith("--nt-host-rail-text", "#54666d");
+	});
+
+	it("keeps a foreground that already reads on the rail", () => {
+		const theme = BUNDLED_THEMES["github-light"] as LastermTheme;
+		useThemeStore().applyTheme(theme);
+		expect(setPropertyMock).toHaveBeenCalledWith("--nt-host-rail-text", "#24292e");
+	});
+});
+
 // `--nt-status-*`: a level's colour, readable on the theme's ground (#830).
 describe("applyTheme status colours", () => {
 	it("takes them from the theme's palette, made to read on its background", () => {

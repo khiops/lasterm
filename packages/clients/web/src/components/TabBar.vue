@@ -11,6 +11,19 @@
 		@dragleave="onTabBarDragLeave"
 		@drop="onTabBarDrop"
 	>
+		<!-- Zero-width, sticky anchors: the fades and counters overlay the bar's edges and cost no height or width. -->
+		<div v-if="hiddenLeft > 0" class="tab-bar__edge tab-bar__edge--left">
+			<button
+				type="button"
+				class="tab-bar__more tab-bar__more--left"
+				:aria-label="moreLabel(hiddenLeft, 'left')"
+				:title="moreLabel(hiddenLeft, 'left')"
+				@click="revealHidden('left')"
+			>
+				<svg class="tab-bar__more-arrow" viewBox="0 0 8 12" aria-hidden="true"><path d="M6 1 1.5 6 6 11" /></svg>
+				<span>{{ hiddenLeft }}</span>
+			</button>
+		</div>
 		<button
 			v-for="{ tab, index: idx } in visibleTabs"
 			:key="tab.id"
@@ -99,6 +112,19 @@
 			>▾</button>
 		</div>
 
+		<div v-if="hiddenRight > 0" class="tab-bar__edge tab-bar__edge--right">
+			<button
+				type="button"
+				class="tab-bar__more tab-bar__more--right"
+				:aria-label="moreLabel(hiddenRight, 'right')"
+				:title="moreLabel(hiddenRight, 'right')"
+				@click="revealHidden('right')"
+			>
+				<span>{{ hiddenRight }}</span>
+				<svg class="tab-bar__more-arrow" viewBox="0 0 8 12" aria-hidden="true"><path d="M2 1 6.5 6 2 11" /></svg>
+			</button>
+		</div>
+
 		<ProfileDropdown
 			:visible="profileDropdownVisible"
 			:anchor-el="chevronBtnEl"
@@ -132,7 +158,7 @@
 </template>
 
 <script setup lang="ts">
-import { type ComponentPublicInstance, computed, nextTick, reactive, ref, watch } from "vue";
+import { type ComponentPublicInstance, computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import type { Host } from "@lasterm/shared";
 import { truncateTitle } from "@lasterm/shared";
 import type { Tab } from "../composables/useLayout.js";
@@ -399,17 +425,111 @@ function onWheel(e: WheelEvent): void {
 	}
 }
 
+/** The tab buttons in bar order. */
+function tabButtons(): HTMLElement[] {
+	return [...(tabBarEl.value?.querySelectorAll<HTMLElement>("[data-tab-id]") ?? [])];
+}
+
 /** Scroll the active tab into view whenever it changes. */
 watch(
 	() => props.activeTabIndex,
 	async () => {
 		await nextTick();
-		const el = tabBarEl.value;
-		if (!el) return;
-		const onScreen = visibleTabs.value.findIndex((e) => e.index === props.activeTabIndex);
-		if (onScreen === -1) return;
-		const tab = el.children[onScreen] as HTMLElement | undefined;
+		const id = props.tabs[props.activeTabIndex]?.id;
+		const tab = tabButtons().find((el) => el.dataset.tabId === id);
 		tab?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+	},
+);
+
+// -------------------------------------------------------------------------
+// Tabs hidden beyond an edge (#1200)
+// -------------------------------------------------------------------------
+//
+// No scrollbar says how much is out of view, so each edge that hides tabs fades and counts them.
+// A tab not wholly inside the bar counts as hidden on its side.
+
+const hiddenLeft = ref(0);
+const hiddenRight = ref(0);
+
+/** Room an edge's fade and counter take over the bar's end, in px. */
+const EDGE_RESERVE = 56;
+
+/**
+ * The tabs hidden beyond each edge: those not wholly in the bar, and, on a side that hides any,
+ * those under its counter and fade — a tab there is on screen and out of reach.
+ */
+function hiddenTabs(): { left: HTMLElement[]; right: HTMLElement[] } {
+	const el = tabBarEl.value;
+	const none = { left: [], right: [] };
+	if (!el) return none;
+	const box = el.getBoundingClientRect();
+	const tabs = tabButtons().map((tab) => ({ tab, rect: tab.getBoundingClientRect() }));
+	const anyLeft = tabs.some(({ rect }) => rect.left < box.left - 1);
+	const anyRight = tabs.some(({ rect }) => rect.right > box.right + 1);
+	const left = tabs.filter(({ rect }) => rect.left < box.left - 1 || (anyLeft && rect.left < box.left + EDGE_RESERVE));
+	const right = tabs.filter(
+		({ rect, tab }) =>
+			!left.some((l) => l.tab === tab) &&
+			(rect.right > box.right + 1 || (anyRight && rect.right > box.right - EDGE_RESERVE)),
+	);
+	return { left: left.map(({ tab }) => tab), right: right.map(({ tab }) => tab) };
+}
+
+function updateHidden(): void {
+	const { left, right } = hiddenTabs();
+	hiddenLeft.value = left.length;
+	hiddenRight.value = right.length;
+}
+
+function moreLabel(count: number, side: "left" | "right"): string {
+	return `${count} more ${count === 1 ? "tab" : "tabs"} to the ${side}`;
+}
+
+/** Scroll the nearest hidden tab on a side into view, and keep the keyboard where the counter was. */
+function revealHidden(side: "left" | "right"): void {
+	const { left, right } = hiddenTabs();
+	const hidden = side === "left" ? left[left.length - 1] : right[0];
+	if (hidden === undefined) return;
+	const last = (side === "left" ? left : right).length === 1;
+	// scroll-padding keeps the tab clear of the counter that may remain.
+	hidden.scrollIntoView({ block: "nearest", inline: side === "left" ? "start" : "end", behavior: "smooth" });
+	// The counter goes with the last hidden tab; its focus goes to that tab rather than to nothing.
+	if (last) {
+		keyboardTabId.value = hidden.dataset.tabId ?? null;
+		hidden.focus({ preventScroll: true });
+	}
+}
+
+let resizeObserver: ResizeObserver | null = null;
+
+/** Observe the bar and each tab: a width changes with the window, a title and the tabs' count. */
+function observeBar(): void {
+	if (!resizeObserver || !tabBarEl.value) return;
+	resizeObserver.disconnect();
+	resizeObserver.observe(tabBarEl.value);
+	for (const tab of tabButtons()) resizeObserver.observe(tab);
+}
+
+onMounted(() => {
+	if (typeof ResizeObserver !== "undefined") {
+		resizeObserver = new ResizeObserver(updateHidden);
+		observeBar();
+	}
+	tabBarEl.value?.addEventListener("scroll", updateHidden, { passive: true });
+	updateHidden();
+});
+
+onBeforeUnmount(() => {
+	resizeObserver?.disconnect();
+	tabBarEl.value?.removeEventListener("scroll", updateHidden);
+});
+
+watch(
+	() => visibleTabs.value.map(({ tab }) => tab.id),
+	async () => {
+		await nextTick();
+		observeBar();
+		updateHidden();
 	},
 );
 
@@ -610,6 +730,8 @@ function onTabDragEnd(): void {
 	overflow-y: hidden;
 	flex-shrink: 0;
 	min-height: 32px;
+	/* Room for the edge counters: a tab scrolled or focused into view stops short of them. */
+	scroll-padding-inline: 56px;
 	/* No scrollbar, ever (#1194): tabs shrink first, and what still does not fit
 	   scrolls by wheel, keyboard focus and scrolling the active tab into view. */
 	scrollbar-width: none;
@@ -842,6 +964,79 @@ function onTabDragEnd(): void {
 	font-size: 11px;
 	border-left: 1px solid var(--nt-border);
 	padding: 0 2px;
+}
+
+/* Hidden tabs beyond an edge (#1200). Zero-width sticky anchors keep the cue out of the
+   layout: the bar keeps its height and its tabs their width. The counter is a text-and-arrow
+   button on a fade, not the profile menu's boxed ▾ beside the + button. */
+.tab-bar__edge {
+	position: sticky;
+	flex: none;
+	width: 0;
+	align-self: stretch;
+	z-index: 20;
+	pointer-events: none;
+}
+
+.tab-bar__edge--left {
+	left: 0;
+}
+
+.tab-bar__edge--right {
+	right: 0;
+}
+
+.tab-bar__more {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 0 8px;
+	border: none;
+	background: transparent;
+	color: var(--nt-host-rail-text);
+	font: inherit;
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+	cursor: pointer;
+	pointer-events: auto;
+}
+
+.tab-bar__more--left {
+	left: 0;
+	padding-right: 18px;
+	background: linear-gradient(to right, var(--nt-host-rail) 60%, transparent);
+}
+
+.tab-bar__more--right {
+	right: 0;
+	padding-left: 18px;
+	background: linear-gradient(to left, var(--nt-host-rail) 60%, transparent);
+}
+
+.tab-bar__more-arrow {
+	width: 6px;
+	height: 10px;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.5;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.tab-bar__more:hover {
+	color: var(--nt-accent);
+}
+
+.tab-bar__more:focus {
+	outline: none;
+}
+
+.tab-bar__more:focus-visible {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: -2px;
 }
 
 .tab-bar__add:hover {

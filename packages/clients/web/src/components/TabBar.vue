@@ -610,21 +610,13 @@ function onTabDragEnd(): void {
 	overflow-y: hidden;
 	flex-shrink: 0;
 	min-height: 32px;
-	scrollbar-width: thin;
-	scrollbar-color: var(--nt-border) transparent;
+	/* No scrollbar, ever (#1194): tabs shrink first, and what still does not fit
+	   scrolls by wheel, keyboard focus and scrolling the active tab into view. */
+	scrollbar-width: none;
 }
 
 .tab-bar::-webkit-scrollbar {
-	height: 3px;
-}
-
-.tab-bar::-webkit-scrollbar-track {
-	background: transparent;
-}
-
-.tab-bar::-webkit-scrollbar-thumb {
-	background: var(--nt-border);
-	border-radius: 2px;
+	display: none;
 }
 
 .tab {
@@ -648,7 +640,8 @@ function onTabDragEnd(): void {
 	overflow: hidden;
 	transition: background 0.1s, color 0.1s;
 	position: relative;
-	flex-shrink: 0;
+	/* Content width up to max-width, then shrinking with the others down to min-width. */
+	flex: 0 1 auto;
 }
 
 .tab:hover {

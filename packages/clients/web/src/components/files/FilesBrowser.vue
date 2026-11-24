@@ -1,5 +1,10 @@
 <template>
-	<div class="files-browser" @keydown="onBrowserKeydown">
+	<div
+		ref="browserEl"
+		class="files-browser"
+		:class="{ 'files-browser--mode': modeShown }"
+		@keydown="onBrowserKeydown"
+	>
 		<!-- The path bar: Up, the folders down to this one (F2 or Ctrl+L edits it as text),
 		     Refresh, and the Following toggle. -->
 		<div class="files-pathbar">
@@ -139,6 +144,7 @@
 						:aria-setsize="listing.entries.length"
 						:aria-posinset="row.index + 1"
 						:aria-label="entryLabel(row.entry, now)"
+						:title="modeTitle(row.entry)"
 						:tabindex="row.index === current ? 0 : -1"
 						:data-index="row.index"
 						data-zone-item
@@ -153,6 +159,7 @@
 						<span class="files-row__name">{{ row.entry.name }}</span>
 						<span class="files-row__size">{{ isFolderEntry(row.entry) ? "" : formatSize(row.entry.size) }}</span>
 						<span class="files-row__modified">{{ formatModified(row.entry.mtime, now) }}</span>
+						<span class="files-row__mode">{{ formatMode(row.entry.mode) }}</span>
 					</div>
 				</div>
 			</div>
@@ -245,17 +252,20 @@
 
 <script setup lang="ts">
 import type { HostOs } from "@lasterm/shared";
-import { computed, nextTick, onUnmounted, ref, useId, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue";
 import { useFilesPanelStore } from "../../stores/files-panel.js";
 import { useHostsStore } from "../../stores/hosts.js";
 import { useWriteLockStore } from "../../stores/writelock.js";
 import {
 	breadcrumbOf,
 	entryLabel,
+	type FileEntryView,
+	formatMode,
 	formatModified,
 	formatSize,
 	isFolderEntry,
 	joinPath,
+	MODE_COLUMN_MIN_WIDTH,
 	parentPath,
 	pathStyleOf,
 	statusLines,
@@ -499,6 +509,35 @@ const visibleRows = computed(() => {
 	}
 	return rows;
 });
+
+// ─── The permissions column, by the browser's width ──────────────────────────
+
+const browserEl = ref<HTMLElement | null>(null);
+/** The browser's width as last measured; null before any measurement, or with nothing to measure. */
+const browserWidth = ref<number | null>(null);
+let widthObserver: ResizeObserver | null = null;
+
+onMounted(() => {
+	const el = browserEl.value;
+	if (el === null || typeof ResizeObserver === "undefined") return;
+	widthObserver = new ResizeObserver(() => {
+		browserWidth.value = el.getBoundingClientRect().width;
+	});
+	widthObserver.observe(el);
+});
+
+onUnmounted(() => widthObserver?.disconnect());
+
+/** The column shows from `MODE_COLUMN_MIN_WIDTH` on; unmeasured, it counts as hidden. */
+const modeShown = computed(
+	() => browserWidth.value !== null && browserWidth.value >= MODE_COLUMN_MIN_WIDTH,
+);
+
+/** A row's tooltip: its permissions, while the column that shows them is hidden. */
+function modeTitle(entry: FileEntryView): string | undefined {
+	if (modeShown.value || entry.mode === null) return undefined;
+	return `Permissions ${formatMode(entry.mode)}`;
+}
 
 function onScroll(): void {
 	scrollTop.value = listEl.value?.scrollTop ?? 0;
@@ -1001,6 +1040,21 @@ defineExpose({ reload });
 
 .files-row__modified {
 	width: 58px;
+}
+
+/* As `ls -l` spells them: ten characters, in a column of their own from 400 px on. */
+.files-row__mode {
+	display: none;
+	flex-shrink: 0;
+	width: 10ch;
+	color: var(--nt-text-secondary);
+	font-family: ui-monospace, monospace;
+	font-size: 11px;
+	white-space: pre;
+}
+
+.files-browser--mode .files-row__mode {
+	display: block;
 }
 
 /* A narrow panel drops the date first, then the size. */

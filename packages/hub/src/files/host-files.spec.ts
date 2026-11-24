@@ -12,11 +12,11 @@ import {
 } from "./host-files.js";
 
 function file(name: string): FileEntry {
-	return { name, kind: "file", size: 1, mtime: null };
+	return { name, kind: "file", size: 1, mtime: null, mode: null };
 }
 
 function folder(name: string): FileEntry {
-	return { name, kind: "directory", size: null, mtime: null };
+	return { name, kind: "directory", size: null, mtime: null, mode: null };
 }
 
 describe("finishListing", () => {
@@ -76,8 +76,29 @@ describe("entries from a POSIX mode", () => {
 			kind: "directory",
 			size: null,
 			mtime: "1970-01-01T00:00:00.000Z",
+			mode: 0o040755,
 		});
 		expect(entryFromMode("f", 0o100644, 12, null)).toMatchObject({ size: 12, mtime: null });
+	});
+
+	it("keeps the mode as given, setuid, setgid and sticky included", () => {
+		expect(entryFromMode("shared", 0o047750, 4096, null)).toEqual({
+			name: "shared",
+			kind: "directory",
+			size: null,
+			mtime: null,
+			mode: 0o047750,
+		});
+	});
+
+	it("gives no mode, and no kind, for an SFTP server that sends no permissions", () => {
+		expect(entryFromMode("x", undefined, 1, null)).toEqual({
+			name: "x",
+			kind: "other",
+			size: 1,
+			mtime: null,
+			mode: null,
+		});
 	});
 });
 

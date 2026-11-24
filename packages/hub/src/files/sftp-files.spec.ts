@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Client, SFTPWrapper } from "ssh2";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -61,6 +61,7 @@ describe("a POSIX host's files over SFTP", () => {
 		writeFileSync(join(home(), "file.txt"), "12345");
 		writeFileSync(join(home(), ".hidden"), "");
 		utimesSync(join(home(), "file.txt"), 1_700_000_000, 1_700_000_000);
+		chmodSync(join(home(), "file.txt"), 0o644);
 
 		const shown = await state.files.list("/home/test", false);
 		expect(shown.map((entry) => entry.name).sort()).toEqual(["file.txt", "sub"]);
@@ -69,10 +70,27 @@ describe("a POSIX host's files over SFTP", () => {
 			kind: "file",
 			size: 5,
 			mtime: "2023-11-14T22:13:20.000Z",
+			// The mock server sends this machine's mode: Node's made-up one on Windows.
+			mode: windowsMachine ? 0o100666 : 0o100644,
 		});
 		expect(shown.find((entry) => entry.name === "sub")).toMatchObject({ kind: "directory" });
 		const all = (await state.files.list("/home/test", true)).map((entry) => entry.name);
 		expect(all.sort()).toEqual([".hidden", "file.txt", "sub"]);
+	});
+
+	// A Windows machine's chmod sets none of these bits.
+	it.skipIf(windowsMachine)("gives each entry's mode as the server sends it", async () => {
+		mkdirSync(join(home(), "sub"));
+		writeFileSync(join(home(), "file.txt"), "1");
+		chmodSync(join(home(), "file.txt"), 0o640);
+		symlinkSync("sub", join(home(), "to-sub"));
+
+		const shown = await state.files.list("/home/test", false);
+		expect(shown.find((entry) => entry.name === "file.txt")).toMatchObject({ mode: 0o100640 });
+		expect(shown.find((entry) => entry.name === "to-sub")).toMatchObject({
+			kind: "symlink",
+			mode: 0o120777,
+		});
 	});
 
 	it("reads a folder the server answers in several batches", async () => {
@@ -165,17 +183,22 @@ describe("a Windows host's files over SFTP, as Win32-OpenSSH serves them", () =>
 
 	it("lists the drives at the root", async () => {
 		expect(await state.files.list(WINDOWS_ROOT, false)).toEqual([
-			{ name: "C:", kind: "directory", size: null, mtime: null },
-			{ name: "D:", kind: "directory", size: null, mtime: null },
+			{ name: "C:", kind: "directory", size: null, mtime: null, mode: null },
+			{ name: "D:", kind: "directory", size: null, mtime: null, mode: null },
 		]);
-		expect(await state.files.stat(WINDOWS_ROOT)).toMatchObject({ kind: "directory" });
+		expect(await state.files.stat(WINDOWS_ROOT)).toMatchObject({ kind: "directory", mode: null });
 	});
 
 	it("lists a drive-absolute folder, sent as it is", async () => {
 		writeFileSync(join(home(), "notes.txt"), "1");
-		expect((await state.files.list("C:\\Users\\test", false)).map((entry) => entry.name)).toEqual([
-			"notes.txt",
-		]);
+		writeFileSync(join(home(), "file.txt"), "1");
+		chmodSync(join(home(), "file.txt"), 0o640);
+		const listed = await state.files.list("C:\\Users\\test", false);
+		expect(listed.map((entry) => entry.name).sort()).toEqual(["file.txt", "notes.txt"]);
+		// The bits the server sends, as it sends them: this machine's mode, Node's on Windows.
+		expect(listed.find((entry) => entry.name === "file.txt")).toMatchObject({
+			mode: windowsMachine ? 0o100666 : 0o100640,
+		});
 		expect(await state.files.stat("C:\\Users\\test\\notes.txt")).toMatchObject({
 			name: "notes.txt",
 			kind: "file",

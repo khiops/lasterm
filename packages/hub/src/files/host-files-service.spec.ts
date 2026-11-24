@@ -61,14 +61,14 @@ function recordingBackend(
 			const refused = host.refused?.[dir];
 			if (refused) throw refused;
 			return [
-				{ name: ".dot", kind: "file", size: 1, mtime: null },
-				{ name: "b", kind: "file", size: 1, mtime: null },
-				{ name: "a", kind: "directory", size: null, mtime: null },
+				{ name: ".dot", kind: "file", size: 1, mtime: null, mode: null },
+				{ name: "b", kind: "file", size: 1, mtime: null, mode: null },
+				{ name: "a", kind: "directory", size: null, mtime: null, mode: null },
 			];
 		},
 		stat: async (path) => {
 			calls.push(["stat", path]);
-			return { name: "x", kind: "file", size: 3, mtime: null };
+			return { name: "x", kind: "file", size: 3, mtime: null, mode: null };
 		},
 		freeSpace: async (dir) => {
 			calls.push(["freeSpace", dir]);
@@ -100,8 +100,8 @@ describe("the files of a terminal on the local host", () => {
 		expect(listing).toEqual({
 			path: "/home/me",
 			entries: [
-				{ name: "a", kind: "directory", size: null, mtime: null },
-				{ name: "b", kind: "file", size: 1, mtime: null },
+				{ name: "a", kind: "directory", size: null, mtime: null, mode: null },
+				{ name: "b", kind: "file", size: 1, mtime: null, mode: null },
 			],
 			truncated: 0,
 			start: "home",
@@ -479,7 +479,7 @@ describe("a Windows host over SFTP, as Win32-OpenSSH serves it", () => {
 		const root = await windowsHost.list(REMOTE_CHANNEL, WINDOWS_ROOT, false);
 		expect(root).toEqual({
 			path: WINDOWS_ROOT,
-			entries: [{ name: "C:", kind: "directory", size: null, mtime: null }],
+			entries: [{ name: "C:", kind: "directory", size: null, mtime: null, mode: null }],
 			truncated: 0,
 		});
 		const drive = await windowsHost.list(REMOTE_CHANNEL, `${WINDOWS_ROOT}C:`, false);

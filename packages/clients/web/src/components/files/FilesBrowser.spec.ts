@@ -54,8 +54,15 @@ const folder = (name: string): FileEntryView => ({
 	kind: "directory",
 	size: null,
 	mtime: null,
+	mode: null,
 });
-const file = (name: string): FileEntryView => ({ name, kind: "file", size: 10, mtime: null });
+const file = (name: string): FileEntryView => ({
+	name,
+	kind: "file",
+	size: 10,
+	mtime: null,
+	mode: null,
+});
 
 /** The host's folders, as the hub would list them. */
 const TREE: Record<string, FileEntryView[]> = {
@@ -320,6 +327,38 @@ describe("the list and the path bar", () => {
 		(root.querySelectorAll<HTMLButtonElement>(".files-crumb")[1] as HTMLButtonElement).click();
 		await settle();
 		expect(lastListed()).toEqual([A, "/home", false]);
+	});
+
+	it("shows each entry's permissions, an empty cell where the host gives none", async () => {
+		const shown = (entries: FileEntryView[]) => {
+			mocks.listHostFiles.mockImplementation(async () => ({
+				ok: true,
+				value: { path: "/srv/drop", entries, truncated: 0 },
+			}));
+		};
+		shown([
+			{ ...folder("bin"), mode: 0o40755 },
+			{ ...file("notes.md"), mode: 0o100644 },
+			file("unknown"),
+		]);
+		useFilesPanelStore().browse(A, "/srv/drop");
+		mountBrowser();
+		await settle();
+		const cells = () =>
+			[...root.querySelectorAll(".files-row")].map(
+				(row) => row.querySelector(".files-row__mode")?.textContent ?? "no cell",
+			);
+		expect(cells()).toEqual(["drwxr-xr-x", "-rw-r--r--", ""]);
+		// happy-dom measures no width: the column counts as hidden, so a row with a mode has it on hover.
+		expect(rowEl("notes.md").getAttribute("title")).toBe("Permissions -rw-r--r--");
+		expect(rowEl("unknown").hasAttribute("title")).toBe(false);
+
+		// A host that gives none: every row keeps its cell, empty.
+		shown([folder("Users"), file("pagefile.sys")]);
+		useFilesPanelStore().browse(A, "/srv/other");
+		await settle();
+		expect(rows()).toEqual(["Users", "pagefile.sys"]);
+		expect(cells()).toEqual(["", ""]);
 	});
 
 	it("edits the path as text on F2, and goes there on Enter", async () => {
@@ -650,6 +689,7 @@ describe("Download… (#840)", () => {
 				kind: "symlink",
 				size: null,
 				mtime: null,
+				mode: null,
 				linkTarget: "/x",
 				linkKind: "file",
 			},

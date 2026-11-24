@@ -80,13 +80,14 @@ export function readFolderBody(
 	return { path };
 }
 
-/** An entry as the wire carries it: snake_case, its link fields only on a link. */
+/** An entry as the wire carries it: snake_case, its mode always (null when unknown), its link fields only on a link. */
 function entryOnWire(entry: FileEntry): Record<string, unknown> {
 	return {
 		name: entry.name,
 		kind: entry.kind,
 		size: entry.size,
 		mtime: entry.mtime,
+		mode: entry.mode,
 		...(entry.linkTarget !== undefined ? { link_target: entry.linkTarget } : {}),
 		...(entry.linkKind !== undefined ? { link_kind: entry.linkKind } : {}),
 	};

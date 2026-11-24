@@ -44,13 +44,26 @@ describe("what the POSIX scripts print, read back", () => {
 			"E",
 		];
 		expect(parsePosixGroups(lines)).toEqual([
-			{ name: "a dir", kind: "directory", size: null, mtime: "2023-11-14T22:13:20.000Z" },
-			{ name: "new\nline", kind: "file", size: 12, mtime: "2023-11-14T22:13:21.000Z" },
+			{
+				name: "a dir",
+				kind: "directory",
+				size: null,
+				mtime: "2023-11-14T22:13:20.000Z",
+				mode: 0o40755,
+			},
+			{
+				name: "new\nline",
+				kind: "file",
+				size: 12,
+				mtime: "2023-11-14T22:13:21.000Z",
+				mode: 0o100644,
+			},
 			{
 				name: "link",
 				kind: "symlink",
 				size: 6,
 				mtime: "2023-11-14T22:13:22.000Z",
+				mode: 0o120777,
 				linkTarget: "a dir",
 				linkKind: "directory",
 			},
@@ -130,16 +143,29 @@ describe("what the Windows scripts print, read back", () => {
 				"garbage",
 			]),
 		).toEqual([
-			{ name: "Program Files", kind: "directory", size: null, mtime: "2023-11-14T22:13:20.000Z" },
-			{ name: "it's 100%.txt", kind: "file", size: 42, mtime: "2023-11-14T22:13:21.000Z" },
+			{
+				name: "Program Files",
+				kind: "directory",
+				size: null,
+				mtime: "2023-11-14T22:13:20.000Z",
+				mode: null,
+			},
+			{
+				name: "it's 100%.txt",
+				kind: "file",
+				size: 42,
+				mtime: "2023-11-14T22:13:21.000Z",
+				mode: null,
+			},
 			{
 				name: "Application Data",
 				kind: "symlink",
 				size: null,
 				mtime: "2023-11-14T22:13:22.000Z",
+				mode: null,
 				linkKind: "directory",
 			},
-			{ name: "C:", kind: "directory", size: null, mtime: null },
+			{ name: "C:", kind: "directory", size: null, mtime: null, mode: null },
 		]);
 	});
 });
@@ -196,6 +222,7 @@ describe.skipIf(windowsMachine)("a POSIX host's files over SSH commands", () => 
 		writeFileSync(join(state.root, "file.txt"), "12345");
 		writeFileSync(join(state.root, "..dots"), "");
 		utimesSync(join(state.root, "file.txt"), 1_700_000_000, 1_700_000_000);
+		chmodSync(join(state.root, "file.txt"), 0o640);
 
 		const shown = await state.files.list(state.root, false);
 		expect(shown.map((entry) => entry.name).sort()).toEqual(["file.txt", "sub"]);
@@ -204,6 +231,7 @@ describe.skipIf(windowsMachine)("a POSIX host's files over SSH commands", () => 
 			kind: "file",
 			size: 5,
 			mtime: "2023-11-14T22:13:20.000Z",
+			mode: 0o100640,
 		});
 		const all = (await state.files.list(state.root, true)).map((entry) => entry.name);
 		expect(all.sort()).toEqual(["..dots", ".config", "file.txt", "sub"]);
@@ -347,7 +375,9 @@ describe.runIf(windowsMachine)("a Windows host's files over SSH commands", () =>
 			kind: "directory",
 			size: null,
 			mtime: null,
+			mode: null,
 		});
+		expect(await state.files.stat(WINDOWS_ROOT)).toMatchObject({ kind: "directory", mode: null });
 	});
 
 	it("lists a folder's entries with their kind, size and time", async () => {
@@ -361,6 +391,7 @@ describe.runIf(windowsMachine)("a Windows host's files over SSH commands", () =>
 			kind: "file",
 			size: 5,
 			mtime: "2023-11-14T22:13:20.000Z",
+			mode: null,
 		});
 	});
 

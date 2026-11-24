@@ -238,8 +238,47 @@ export interface FileEntryView {
 	readonly kind: "file" | "directory" | "symlink" | "other";
 	readonly size: number | null;
 	readonly mtime: string | null;
+	/** The POSIX `st_mode`, type and permission bits; null when the host gives none. */
+	readonly mode: number | null;
 	readonly linkTarget?: string;
 	readonly linkKind?: "file" | "directory" | "other" | "missing";
+}
+
+/** The narrowest files browser, in pixels, that shows the permissions column; below, a tooltip. */
+export const MODE_COLUMN_MIN_WIDTH = 400;
+
+/** The letter `ls -l` gives each file type, by the type bits of a mode. */
+const TYPE_LETTERS: ReadonlyMap<number, string> = new Map([
+	[0o040000, "d"],
+	[0o120000, "l"],
+	[0o100000, "-"],
+	[0o020000, "c"],
+	[0o060000, "b"],
+	[0o010000, "p"],
+	[0o140000, "s"],
+]);
+
+/** One `rwx` triple; `special` replaces its `x` with `on` (`s`, `t`), or its capital without `x`. */
+function triple(mode: number, shift: number, special: boolean, on: string): string {
+	const bits = (mode >> shift) & 0o7;
+	const x = (bits & 0o1) !== 0;
+	const last = special ? (x ? on : on.toUpperCase()) : x ? "x" : "-";
+	return `${bits & 0o4 ? "r" : "-"}${bits & 0o2 ? "w" : "-"}${last}`;
+}
+
+/**
+ * A mode as `ls -l` spells its first ten characters: "drwxr-xr-x", "-rwsr-xr-x", "drwxrwxrwt";
+ * "" when the host gave none. A type `ls` has no letter for here is `?`.
+ */
+export function formatMode(mode: number | null): string {
+	if (mode === null) return "";
+	const type = TYPE_LETTERS.get(mode & 0o170000) ?? "?";
+	return (
+		type +
+		triple(mode, 6, (mode & 0o4000) !== 0, "s") +
+		triple(mode, 3, (mode & 0o2000) !== 0, "s") +
+		triple(mode, 0, (mode & 0o1000) !== 0, "t")
+	);
 }
 
 /** Whether a row opens as a folder: a folder, or a link to one. */
@@ -277,7 +316,10 @@ export function formatModified(iso: string | null, now: Date): string {
 	});
 }
 
-/** What a screen reader says of a row: "folder src", "file notes.md, 4 KB, modified Oct 30". */
+/**
+ * What a screen reader says of a row: "folder src", "file notes.md, 4 KB, modified Oct 30,
+ * permissions -rw-r--r--".
+ */
 export function entryLabel(entry: FileEntryView, now: Date): string {
 	const what = isFolderEntry(entry)
 		? "folder"
@@ -288,10 +330,12 @@ export function entryLabel(entry: FileEntryView, now: Date): string {
 				: "item";
 	const size = isFolderEntry(entry) ? "" : formatSize(entry.size);
 	const modified = formatModified(entry.mtime, now);
+	const mode = formatMode(entry.mode);
 	return [
 		`${what} ${entry.name}`,
 		...(size !== "" ? [size] : []),
 		...(modified !== "" ? [`modified ${modified}`] : []),
+		...(mode !== "" ? [`permissions ${mode}`] : []),
 	].join(", ");
 }
 

@@ -389,6 +389,8 @@ function existingOf(json: string | null, name: string): FileEntry | null {
 			kind: parsed.kind ?? "other",
 			size: typeof parsed.size === "number" ? parsed.size : null,
 			mtime: typeof parsed.mtime === "string" ? parsed.mtime : null,
+			// meta.db keeps no mode: a clash needs none.
+			mode: null,
 			...(parsed.linkKind !== undefined ? { linkKind: parsed.linkKind } : {}),
 		};
 	} catch {

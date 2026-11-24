@@ -118,7 +118,7 @@ export class LocalFileBackend implements FileBackend {
 
 	async stat(path: string): Promise<FileEntry> {
 		if (this.style === "windows" && path === WINDOWS_ROOT) {
-			return { name: WINDOWS_ROOT, kind: "directory", size: null, mtime: null };
+			return { name: WINDOWS_ROOT, kind: "directory", size: null, mtime: null, mode: null };
 		}
 		try {
 			return await this.entry(path, baseNameOf(path, this.style));
@@ -166,6 +166,8 @@ export class LocalFileBackend implements FileBackend {
 			kind,
 			size: kind === "directory" ? null : stats.size,
 			mtime: Number.isFinite(stats.mtimeMs) ? new Date(stats.mtimeMs).toISOString() : null,
+			// Node makes up a Windows mode from the read-only attribute alone: a folder without x.
+			mode: this.style === "windows" ? null : stats.mode,
 		};
 		if (kind !== "symlink") return entry;
 		const [target, followed] = await Promise.all([
@@ -185,7 +187,13 @@ export class LocalFileBackend implements FileBackend {
 		const found = await Promise.all(
 			letters.map((letter) =>
 				fs.stat(`${letter}:\\`).then(
-					(): FileEntry => ({ name: `${letter}:`, kind: "directory", size: null, mtime: null }),
+					(): FileEntry => ({
+						name: `${letter}:`,
+						kind: "directory",
+						size: null,
+						mtime: null,
+						mode: null,
+					}),
 					() => null,
 				),
 			),

@@ -18,6 +18,13 @@ export interface FileEntry {
 	readonly size: number | null;
 	/** Last modified, ISO 8601; null when the host does not say. */
 	readonly mtime: string | null;
+	/**
+	 * The POSIX `st_mode`, file type and permission bits, as the host gives it; null when it gives
+	 * none: the local host of a Windows hub, a Windows host over SSH commands, a drive at a Windows
+	 * root, an SFTP server that sends no permissions. A Windows host over SFTP gives the bits its
+	 * server makes up, which do not reflect its ACLs.
+	 */
+	readonly mode: number | null;
 	/** What a link holds, as the host reads it; absent when it does not say. */
 	readonly linkTarget?: string;
 	/** What a link leads to, followed. Only on a link. */
@@ -211,19 +218,24 @@ export function linkKindOfMode(mode: number): LinkKind {
 	return kind === "symlink" ? "other" : kind;
 }
 
-/** An entry from what a POSIX `stat` or SFTP says: its size only for what is not a folder. */
+/**
+ * An entry from what a POSIX `stat` or SFTP says: its size only for what is not a folder, its mode
+ * as given. An SFTP server may send no permissions: the mode is then undefined, and the entry has
+ * none, nor a kind.
+ */
 export function entryFromMode(
 	name: string,
-	mode: number,
+	mode: number | undefined,
 	size: number | null,
 	mtimeSeconds: number | null,
 ): FileEntry {
-	const kind = kindOfMode(mode);
+	const kind = mode === undefined ? "other" : kindOfMode(mode);
 	return {
 		name,
 		kind,
 		size: kind === "directory" ? null : size,
 		mtime: isoFromSeconds(mtimeSeconds),
+		mode: mode ?? null,
 	};
 }
 

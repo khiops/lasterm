@@ -220,8 +220,8 @@ export function linkKindOfMode(mode: number): LinkKind {
 
 /**
  * An entry from what a POSIX `stat` or SFTP says: its size only for what is not a folder, its mode
- * as given. An SFTP server may send no permissions: the mode is then undefined, and the entry has
- * none, nor a kind.
+ * as given. An SFTP server may send no permissions: the mode is then undefined, the entry's mode
+ * null and its kind "other".
  */
 export function entryFromMode(
 	name: string,

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.22.2](https://github.com/khiops/lasterm/compare/v0.22.1...v0.22.2) (2026-11-24)
+
+
+### Bug Fixes
+
+* **web:** make the older-agent mark visible and move Update agent to the host menu ([#1186](https://github.com/khiops/lasterm/issues/1186)) ([e61d3f0](https://github.com/khiops/lasterm/commit/e61d3f090a0de966342598f63d3d5a84a75d4672))
+
+
+### Documentation
+
+* **root:** document background colours after a resize on Windows Server 2022 ([#1188](https://github.com/khiops/lasterm/issues/1188)) ([045a286](https://github.com/khiops/lasterm/commit/045a286c3ddcf6735888ea10510d7ea79df016b5)), closes [#1187](https://github.com/khiops/lasterm/issues/1187)
+
 ## [0.22.1](https://github.com/khiops/lasterm/compare/v0.22.0...v0.22.1) (2026-11-23)
 
 

@@ -341,7 +341,7 @@ const live = computed(() => filesPanel.liveCwdFor(props.channelId));
  * browsed otherwise; none for where the hub opens it, the host's fallback folder or the home.
  */
 const wanted = computed<string | undefined>(() => {
-	if (files.value.following) return live.value?.cwd ?? undefined;
+	if (followShown.value) return live.value?.cwd ?? undefined;
 	return files.value.path ?? undefined;
 });
 
@@ -442,9 +442,10 @@ function reload(): void {
 
 /** Any move in the panel pauses following: the folder is remembered for the terminal. */
 function browseTo(path: string): void {
-	if (path === listing.value?.path && !files.value.following) return;
-	if (files.value.following) emit("announce", "Not following the terminal");
-	filesPanel.browse(props.channelId, path);
+	if (path === listing.value?.path && !followShown.value) return;
+	if (followShown.value) emit("announce", "Not following the terminal");
+	// Follow disabled for now: the preference stays, to follow with the first report.
+	filesPanel.browse(props.channelId, path, block.value !== null && files.value.following);
 }
 
 function goUp(): void {

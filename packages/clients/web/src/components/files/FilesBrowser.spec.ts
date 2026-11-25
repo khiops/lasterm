@@ -345,6 +345,21 @@ describe("Follow where the directory cannot be known (#1196)", () => {
 		expect(lastListed()).toEqual([A, "/home/pi/src", false]);
 	});
 
+	it("opening a folder in the list while disabled does not drop the preference", async () => {
+		const store = useFilesPanelStore();
+		store.takeCwd(unknown);
+		store.browse(A, "/home/pi", true);
+		mountBrowser({ agentUpdatable: false, hostOs: "linux", shell: "pwsh" });
+		await settle();
+		key(rowEl("src"), "Enter");
+		await settle();
+		expect(lastListed()).toEqual([A, "/home/pi/src", false]);
+		expect(store.terminalFiles(A, false).following).toBe(true);
+		store.takeCwd({ channelId: A, cwd: "/home/pi/logs", source: "shell" });
+		await settle();
+		expect(followToggle().textContent?.trim()).toBe("Following");
+	});
+
 	it("stays enabled for cmd on a Windows host whose directory is null for a moment", async () => {
 		useFilesPanelStore().takeCwd(unknown);
 		mountBrowser({ agentUpdatable: false, hostOs: "windows", shell: "cmd.exe" });

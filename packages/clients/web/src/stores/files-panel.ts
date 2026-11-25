@@ -390,9 +390,12 @@ export const useFilesPanelStore = defineStore("filesPanel", () => {
 		return terminals.value[channelId] ?? { following: followByDefault, path: null };
 	}
 
-	/** Browse a folder: following pauses, the folder is remembered for the terminal. */
-	function browse(channelId: string, path: string): void {
-		remember(channelId, { following: false, path });
+	/**
+	 * Browse a folder: following pauses, the folder is remembered for the terminal. With
+	 * `keepFollowing`, the preference stays on (Follow is disabled for the terminal for now, #1196).
+	 */
+	function browse(channelId: string, path: string, keepFollowing = false): void {
+		remember(channelId, { following: keepFollowing, path });
 	}
 
 	/** Follow the terminal's directory again: the toggle, or "Go there". */

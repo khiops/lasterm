@@ -386,6 +386,17 @@ over SSH, which runs before each of the hub's commands there (see
 [Configuring an SSH server](docs/SSH_SERVER.md#windows-the-default-shell)). On a host that Lasterm
 reaches, the switch works too.
 
+**WSL, on a Windows host.** The agent reads no process directory there (only `cmd` is read on
+Windows), so a `wsl.exe` terminal reports its directory too, as a Windows path that the files panel
+lists through `\\wsl.localhost\<distro>\…`. Add this to `~/.bashrc` in the distribution:
+
+```bash
+PROMPT_COMMAND=${PROMPT_COMMAND:+"$PROMPT_COMMAND; "}'printf "\e]9;9;%s\e\\" "$(wslpath -w "$PWD")"'
+```
+
+Until a terminal reports a directory, the files panel's **Follow** button is disabled, and its
+tooltip says what makes it work; it turns on, and follows, with the first report.
+
 **What it writes, and why OSC 7.** Before each prompt, the snippet writes
 `ESC ] 7 ; file://<host>/<path> ESC \`, with the path percent-encoded, for example
 `file://PC/C%3A/Users/me/My%20Files`. Lasterm also reads ConEmu's OSC 9;9, which Windows Terminal

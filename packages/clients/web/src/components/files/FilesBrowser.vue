@@ -57,14 +57,17 @@
 			<button
 				type="button"
 				class="files-follow"
-				:class="{ 'files-follow--on': files.following }"
-				:aria-pressed="files.following"
-				title="Follow the terminal's directory"
+				:class="{ 'files-follow--on': followShown }"
+				:aria-pressed="followShown"
+				:disabled="block !== null"
+				:aria-describedby="block !== null ? followHintId : undefined"
+				:title="followTitle"
 				@click="toggleFollowing"
 			>
 				<FilesIcon name="follow" />
-				<span>{{ files.following ? "Following" : "Follow" }}</span>
+				<span>{{ followShown ? "Following" : "Follow" }}</span>
 			</button>
+			<span v-if="block !== null" :id="followHintId" hidden>{{ followTitle }}</span>
 		</div>
 
 		<div v-if="lines.length > 0" class="files-status">
@@ -275,6 +278,8 @@ import {
 	OWNER_COLUMN_MIN_WIDTH,
 	parentPath,
 	pathStyleOf,
+	followBlock,
+	followBlockText,
 	statusLines,
 	typeAheadIndex,
 } from "../../utils/files-panel.js";
@@ -356,6 +361,24 @@ const crumbs = computed(() =>
 );
 const parent = computed(() =>
 	shownPath.value === null ? null : parentPath(shownPath.value, style.value),
+);
+
+/** Why Follow cannot work for this terminal for now, known before it reports a directory (#1196). */
+const block = computed(() =>
+	followBlock({
+		live: live.value,
+		program: props.shell,
+		hostOs: props.hostOs,
+		agentUpdatable: props.agentUpdatable,
+	}),
+);
+/** The toggle reads Following only while it can follow; the preference itself is kept. */
+const followShown = computed(() => files.value.following && block.value === null);
+const followHintId = `files-follow-hint-${props.channelId}`;
+const followTitle = computed(() =>
+	block.value === null
+		? "Follow the terminal's directory"
+		: followBlockText(block.value, props.hostLabel),
 );
 
 const lines = computed(() =>
@@ -845,11 +868,12 @@ defineExpose({ reload });
 }
 
 .files-tool:hover:not(:disabled),
-.files-follow:hover {
+.files-follow:hover:not(:disabled) {
 	border-color: var(--nt-border);
 }
 
-.files-tool:disabled {
+.files-tool:disabled,
+.files-follow:disabled {
 	opacity: 0.45;
 	cursor: default;
 }

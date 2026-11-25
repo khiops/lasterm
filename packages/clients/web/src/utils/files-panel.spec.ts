@@ -4,7 +4,10 @@ import {
 	breadcrumbOf,
 	clampTransfersShare,
 	entryLabel,
+	type FollowFacts,
 	filesPanelForm,
+	followBlock,
+	followBlockText,
 	formatAttributes,
 	formatMode,
 	formatSize,
@@ -199,6 +202,19 @@ describe("a host's paths in the path bar", () => {
 			{ label: "2026", path: "\\\\nas\\backup\\2026" },
 		]);
 		expect(breadcrumbOf("/", "windows")).toEqual([{ label: "Drives", path: "/" }]);
+	});
+
+	it("reads a WSL directory report as a share per distribution (#1196)", () => {
+		const path = "\\\\wsl.localhost\\Ubuntu\\home\\me";
+		expect(pathStyleOf("windows", path)).toBe("windows");
+		expect(breadcrumbOf(path, "windows")).toEqual([
+			{ label: "Drives", path: "/" },
+			{ label: "\\\\wsl.localhost\\Ubuntu", path: "\\\\wsl.localhost\\Ubuntu" },
+			{ label: "home", path: "\\\\wsl.localhost\\Ubuntu\\home" },
+			{ label: "me", path: "\\\\wsl.localhost\\Ubuntu\\home\\me" },
+		]);
+		expect(parentPath(path, "windows")).toBe("\\\\wsl.localhost\\Ubuntu\\home");
+		expect(joinPath(path, "src", "windows")).toBe("\\\\wsl.localhost\\Ubuntu\\home\\me\\src");
 	});
 
 	it("goes up to the folder above, and stops at the root or a share", () => {
@@ -425,6 +441,13 @@ describe("the status line", () => {
 		);
 	});
 
+	it("says WSL does not tell its directory", () => {
+		const unknown = { cwd: null, source: "process" as const };
+		expect(texts({ live: unknown, shell: "wsl.exe" })).toEqual([
+			"WSL does not tell other programs its directory",
+		]);
+	});
+
 	it("says what the hub said of a fallback folder it could not open", () => {
 		const lines = statusLines({
 			...base,
@@ -446,6 +469,62 @@ describe("the status line", () => {
 		expect(texts({ sftpUnavailable: true })).toContain(
 			"Over SSH commands: this server offers no SFTP",
 		);
+	});
+});
+
+// ─── Where Follow cannot work ────────────────────────────────────────────────
+
+describe("why Follow is disabled (#1196)", () => {
+	const none = { cwd: null, source: "process" as const };
+	const facts = (over: Partial<FollowFacts>): FollowFacts => ({
+		live: none,
+		program: "bash",
+		hostOs: "linux",
+		agentUpdatable: false,
+		...over,
+	});
+
+	it("blocks PowerShell on any host until it reports", () => {
+		expect(followBlock(facts({ program: "pwsh" }))).toBe("powershell");
+		expect(followBlock(facts({ program: "C:\\Windows\\powershell.exe", hostOs: "windows" }))).toBe(
+			"powershell",
+		);
+	});
+
+	it("blocks WSL and any other program the agent does not read on a Windows host, not cmd", () => {
+		expect(followBlock(facts({ program: "wsl.exe", hostOs: "windows" }))).toBe("wsl");
+		expect(followBlock(facts({ program: "bash.exe", hostOs: "windows" }))).toBe("unread");
+		expect(followBlock(facts({ program: "cmd.exe", hostOs: "windows" }))).toBeNull();
+		expect(followBlock(facts({ program: "zsh", hostOs: "linux" }))).toBeNull();
+	});
+
+	it("blocks an older agent that never said a directory", () => {
+		expect(followBlock(facts({ live: undefined, agentUpdatable: true }))).toBe("agent");
+		expect(followBlock(facts({ live: undefined, agentUpdatable: false }))).toBeNull();
+	});
+
+	it("never blocks a program the agent reads for a null directory", () => {
+		expect(followBlock(facts({ program: "bash", live: none }))).toBeNull();
+		expect(followBlock(facts({ program: "cmd.exe", hostOs: "windows", live: none }))).toBeNull();
+		expect(followBlock(facts({ program: undefined, hostOs: "windows" }))).toBeNull();
+	});
+
+	it("lifts as soon as a directory is reported or read, or a nested host is named", () => {
+		const reported = { cwd: "C:\\Users\\me", source: "shell" as const };
+		expect(followBlock(facts({ program: "pwsh", live: reported }))).toBeNull();
+		expect(
+			followBlock(facts({ program: "wsl.exe", hostOs: "windows", live: reported })),
+		).toBeNull();
+		const nested = { cwd: null, source: "shell" as const, otherHost: "db01" };
+		expect(followBlock(facts({ program: "pwsh", live: nested }))).toBeNull();
+	});
+
+	it("tells what makes each work", () => {
+		expect(followBlockText("agent", "pi")).toContain("host menu › Update agent");
+		expect(followBlockText("powershell", "pc")).toContain("Report its directory");
+		expect(followBlockText("powershell", "pc")).toContain("report-directory.ps1");
+		expect(followBlockText("wsl", "pc")).toContain("wslpath -w");
+		expect(followBlockText("unread", "pc")).toContain("OSC 9;9");
 	});
 });
 

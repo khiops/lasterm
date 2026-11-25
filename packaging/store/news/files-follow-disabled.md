@@ -1,0 +1,2 @@
+en: The files panel's Follow button is now disabled, with the reason and what makes it work, for a terminal whose directory cannot be known: PowerShell or WSL without a directory report, a program Lasterm does not read, or an agent too old to report it.
+fr: Le bouton Suivre du panneau de fichiers est désormais grisé, avec la raison et ce qui le fait fonctionner, pour un terminal dont le dossier est inconnaissable : PowerShell ou WSL sans rapport de dossier, un programme que Lasterm ne lit pas, ou un agent trop ancien pour le rapporter.

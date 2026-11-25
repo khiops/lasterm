@@ -191,7 +191,10 @@ describe("where the panel opens", () => {
 			"Update the agent on raspberrypi (host menu › Update agent) to follow this terminal's directory",
 		);
 		expect(status()).toContain("Showing the folder set for unknown directories");
-		expect(followToggle().getAttribute("aria-pressed")).toBe("true");
+		// An agent that never said a directory: Follow is disabled and does not read Following.
+		expect(followToggle().disabled).toBe(true);
+		expect(followToggle().getAttribute("aria-pressed")).toBe("false");
+		expect(followToggle().textContent?.trim()).toBe("Follow");
 	});
 
 	it("does not point to Update agent where the host's menu offers none", async () => {
@@ -288,6 +291,66 @@ describe("following the terminal's directory", () => {
 		expect(lastListed()).toEqual([A, undefined, false]);
 		expect(followToggle().getAttribute("aria-pressed")).toBe("false");
 		expect(status()).toContain("Terminal is in /home/pi/src");
+	});
+});
+
+describe("Follow where the directory cannot be known (#1196)", () => {
+	const hint = (): string => followToggle().getAttribute("title") ?? "";
+	const unknown = { channelId: A, cwd: null, source: "process" as const };
+
+	it("is disabled for PowerShell that reported nothing, with what makes it work", async () => {
+		useFilesPanelStore().takeCwd(unknown);
+		mountBrowser({ agentUpdatable: false, hostOs: "windows", shell: "pwsh.exe" });
+		await settle();
+		expect(followToggle().disabled).toBe(true);
+		expect(followToggle().getAttribute("aria-pressed")).toBe("false");
+		expect(followToggle().textContent?.trim()).toBe("Follow");
+		expect(hint()).toContain("Report its directory");
+		expect(hint()).toContain("report-directory.ps1");
+		followToggle().click();
+		await settle();
+		// The terminal's preference is kept.
+		expect(useFilesPanelStore().terminalFiles(A, true).following).toBe(true);
+	});
+
+	it("is disabled for a WSL terminal on a Windows host, with the WSL tooltip", async () => {
+		useFilesPanelStore().takeCwd(unknown);
+		mountBrowser({ agentUpdatable: false, hostOs: "windows", shell: "wsl.exe" });
+		await settle();
+		expect(followToggle().disabled).toBe(true);
+		expect(hint()).toContain("wslpath -w");
+		const described = root.querySelector(`#${followToggle().getAttribute("aria-describedby")}`);
+		expect(described?.textContent).toBe(hint());
+	});
+
+	it("is disabled for a program the agent does not read on a Windows host", async () => {
+		useFilesPanelStore().takeCwd(unknown);
+		mountBrowser({ agentUpdatable: false, hostOs: "windows", shell: "nu.exe" });
+		await settle();
+		expect(followToggle().disabled).toBe(true);
+		expect(hint()).toContain("OSC 9;9");
+	});
+
+	it("comes back and follows as soon as the terminal reports a directory", async () => {
+		const store = useFilesPanelStore();
+		store.takeCwd(unknown);
+		mountBrowser({ agentUpdatable: false, hostOs: "windows", shell: "wsl.exe" });
+		await settle();
+		expect(followToggle().disabled).toBe(true);
+		store.takeCwd({ channelId: A, cwd: "/home/pi/src", source: "shell" });
+		await settle();
+		expect(followToggle().disabled).toBe(false);
+		expect(followToggle().getAttribute("aria-pressed")).toBe("true");
+		expect(followToggle().textContent?.trim()).toBe("Following");
+		expect(lastListed()).toEqual([A, "/home/pi/src", false]);
+	});
+
+	it("stays enabled for a program the agent reads whose directory is null for a moment", async () => {
+		useFilesPanelStore().takeCwd(unknown);
+		mountBrowser({ agentUpdatable: false, hostOs: "linux", shell: "bash" });
+		await settle();
+		expect(followToggle().disabled).toBe(false);
+		expect(followToggle().getAttribute("aria-pressed")).toBe("true");
 	});
 });
 

@@ -843,6 +843,11 @@ agent keeps it and where it came from:
      process directory where it started, so the read would be wrong, not missing. Without a shell
      report it is `null`, never its start directory; its prompt can report it, with
      `report-directory.ps1` in `$PROFILE` or the launch profile's `report_directory` (§ 3.2, #839).
+   - On a Windows agent only `cmd.exe` is read, so a `wsl.exe` terminal is never read either: its
+     prompt reports the directory as a Windows path, `\\wsl.localhost\<distro>\…`, with OSC 9;9
+     (README, "Following PowerShell's directory"). The web client disables Follow for a program
+     the agent does not read until a shell report arrives, and for an agent without the `"cwd"`
+     capability; a `null` directory from a program the agent reads never disables it.
    - `null` when the process cannot tell: its directory deleted, a process the agent may not read
      (an elevated shell), a terminal that has ended.
 3. **`start`**: the directory the agent started the terminal in, before any read, for a program

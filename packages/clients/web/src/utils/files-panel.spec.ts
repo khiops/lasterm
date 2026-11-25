@@ -5,6 +5,7 @@ import {
 	clampTransfersShare,
 	entryLabel,
 	filesPanelForm,
+	followBlock,
 	formatAttributes,
 	formatMode,
 	formatSize,
@@ -539,5 +540,124 @@ describe("the split between Files and Transfers", () => {
 		expect(TRANSFERS_SHARE_MAX).toBe(0.7);
 		expect(clampTransfersShare(0.4)).toBe(0.4);
 		expect(clampTransfersShare(Number.NaN)).toBe(TRANSFERS_SHARE_DEFAULT);
+	});
+});
+
+// ─── Whether the Follow toggle can be offered ────────────────────────────────
+
+describe("the Follow toggle's availability", () => {
+	const base: StatusFacts = {
+		following: false,
+		live: undefined,
+		shown: null,
+		start: undefined,
+		fallbackProblem: undefined,
+		hostLabel: "raspberrypi",
+		shell: undefined,
+		sftpUnavailable: false,
+		// An agent that can report directories: the usual host, and what the other cases assume.
+		agentUpdatable: false,
+	};
+	// The host's OS is what decides which programs the agent reads: `cmd` only on Windows,
+	// everything but PowerShell elsewhere.
+	const on = (facts: Partial<StatusFacts>, hostOs: "linux" | "windows" | null) =>
+		followBlock({ ...base, ...facts }, hostOs);
+
+	it("offers following a shell the agent reads", () => {
+		const live = { cwd: "/home/pi/src", source: "process" as const, atPrompt: true };
+		expect(on({ live, shell: "/bin/bash" }, "linux")).toBeNull();
+	});
+
+	it("does not disable the toggle for a directory that is momentarily unknown", () => {
+		// A readable program whose directory is gone (a deleted folder, an elevated
+		// shell) is a moment, not a reason: the program does report directories.
+		const gone = { cwd: null, source: "process" as const, atPrompt: true };
+		expect(on({ live: gone, shell: "/bin/bash" }, "linux")).toBeNull();
+	});
+
+	it("does not disable it before the first report from a program it reads", () => {
+		const started = { cwd: null, source: "start" as const, atPrompt: true };
+		expect(on({ live: started, shell: "/bin/zsh" }, "linux")).toBeNull();
+		// The agent can report, it just has not yet: a moment, not a reason.
+		expect(on({ live: undefined, shell: "/bin/zsh" }, "linux")).toBeNull();
+	});
+
+	it("disables following a shell the agent does not read, and says why", () => {
+		const unknown = { cwd: null, source: "process" as const, atPrompt: true };
+		const block = on(
+			{ live: unknown, shell: "C:\\Program Files\\PowerShell\\7\\pwsh.exe" },
+			"windows",
+		);
+		expect(block?.reason).toBe("powerShell");
+		// The remedy names what makes it work, the way the status line does.
+		expect(block?.detail).toMatch(/Report its directory/);
+	});
+
+	it("treats every program but cmd as unread on Windows", () => {
+		const unknown = { cwd: null, source: "process" as const, atPrompt: true };
+		for (const shell of [
+			"wsl.exe",
+			"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+			"C:\\tools\\nu.exe",
+			"/bin/bash",
+		]) {
+			expect(on({ live: unknown, shell }, "windows")?.reason).not.toBeNull();
+		}
+		// cmd.exe is read there, so a null directory is only a moment.
+		expect(on({ live: unknown, shell: "C:\\Windows\\System32\\cmd.exe" }, "windows")).toBeNull();
+	});
+
+	it("treats PowerShell as unread off Windows too", () => {
+		const unknown = { cwd: null, source: "process" as const, atPrompt: true };
+		expect(on({ live: unknown, shell: "/usr/bin/pwsh" }, "linux")?.reason).toBe("powerShell");
+		expect(on({ live: unknown, shell: "/usr/bin/powershell" }, "linux")?.reason).toBe("powerShell");
+	});
+
+	it("offers following as soon as any directory is reported", () => {
+		// A shell that reports its directory leaves cwd non-null, so the reason is gone
+		// even for a program the agent does not read on its own.
+		const reported = { cwd: "/home/pi/src", source: "shell" as const, atPrompt: true };
+		expect(on({ live: reported, shell: "wsl.exe" }, "windows")).toBeNull();
+		expect(
+			on({ live: reported, shell: "C:\\Program Files\\PowerShell\\7\\pwsh.exe" }, "windows"),
+		).toBeNull();
+	});
+
+	it("disables following a terminal on another host", () => {
+		const nested = { cwd: null, source: "shell" as const, otherHost: "build-box" };
+		expect(on({ live: nested, shell: "/bin/bash" }, "linux")?.reason).toBe("otherHost");
+	});
+
+	it("leaves the toggle alone before any directory is heard of", () => {
+		// No CWD_CHANGE yet is a moment: the terminal reports one as soon as it has one. An agent
+		// that can report is not withheld over a reason the panel cannot verify.
+		expect(on({ live: undefined }, "linux")).toBeNull();
+	});
+
+	it("disables following a terminal whose agent cannot report directories", () => {
+		// The host knows its agent is older than the hub: no CWD_CHANGE will ever arrive, so
+		// following can never work, and Update agent is the remedy (#1196's second reason).
+		const block = on({ live: undefined, agentUpdatable: true }, "linux");
+		expect(block?.reason).toBe("outdatedAgent");
+		expect(block?.detail).toMatch(/Update agent/);
+	});
+
+	it("does not guess when the program or the host's OS is not known yet", () => {
+		// The panel withholds the toggle only for a reason it can name. With no program named, or a
+		// host whose OS has not loaded, it cannot, so it withholds nothing rather than flickering.
+		const unknown = { cwd: null, source: "process" as const, atPrompt: true };
+		expect(on({ live: unknown, shell: undefined }, null)).toBeNull();
+		expect(on({ live: unknown, shell: "/bin/bash" }, null)).toBeNull();
+		// PowerShell is the one program known on every host, so it is named without an OS.
+		expect(on({ live: unknown, shell: "/usr/bin/pwsh" }, null)?.reason).toBe("powerShell");
+	});
+
+	it("gates the control on the same facts the status line reads", () => {
+		const unknown = { cwd: null, source: "process" as const, atPrompt: true };
+		const facts = { ...base, following: true, live: unknown, shell: "/usr/bin/pwsh" };
+		expect(followBlock({ ...facts, following: false }, "linux")).not.toBeNull();
+		expect(statusLines(facts).some((l) => l.id === "powershell")).toBe(true);
+		const reported = { cwd: "/srv", source: "shell" as const, atPrompt: true };
+		expect(followBlock({ ...facts, live: reported }, "linux")).toBeNull();
 	});
 });

@@ -191,7 +191,10 @@ describe("where the panel opens", () => {
 			"Update the agent on raspberrypi (host menu › Update agent) to follow this terminal's directory",
 		);
 		expect(status()).toContain("Showing the folder set for unknown directories");
-		expect(followToggle().getAttribute("aria-pressed")).toBe("true");
+		// The host knows its agent is older than the hub, so no directory will ever be reported and
+		// following cannot work: the toggle is disabled and does not claim to be following (#1196).
+		expect(followToggle().disabled).toBe(true);
+		expect(followToggle().getAttribute("aria-pressed")).toBe("false");
 	});
 
 	it("does not point to Update agent where the host's menu offers none", async () => {
@@ -288,6 +291,48 @@ describe("following the terminal's directory", () => {
 		expect(lastListed()).toEqual([A, undefined, false]);
 		expect(followToggle().getAttribute("aria-pressed")).toBe("false");
 		expect(status()).toContain("Terminal is in /home/pi/src");
+	});
+
+	it("disables the toggle while the directory cannot be known, and hides Following", async () => {
+		// A PowerShell terminal: the agent reads no directory from it, and its prompt has not
+		// reported one, so following has nothing to follow (#1196).
+		useFilesPanelStore().takeCwd({
+			channelId: A,
+			cwd: null,
+			source: "process",
+			atPrompt: true,
+		});
+		mountBrowser({ shell: "pwsh", hostOs: "windows" });
+		await settle();
+		expect(followToggle().disabled).toBe(true);
+		// A control shown as available would read as broken: it does not claim to be following.
+		expect(followToggle().getAttribute("aria-pressed")).toBe("false");
+		expect(followToggle().textContent?.trim()).toBe("Follow");
+		// Its tooltip names what makes it work.
+		expect(followToggle().getAttribute("title")).toContain("Report its directory");
+	});
+
+	it("offers following again once the terminal reports a directory", async () => {
+		const store = useFilesPanelStore();
+		store.takeCwd({ channelId: A, cwd: null, source: "process", atPrompt: true });
+		mountBrowser({ shell: "pwsh", hostOs: "windows" });
+		await settle();
+		expect(followToggle().disabled).toBe(true);
+		// The prompt reports one (OSC 9;9): the toggle comes back and follows.
+		store.takeCwd({ channelId: A, cwd: "C:\\src", source: "shell", atPrompt: true });
+		await settle();
+		expect(followToggle().disabled).toBe(false);
+		expect(followToggle().getAttribute("aria-pressed")).toBe("true");
+		expect(lastListed()).toEqual([A, "C:\\src", false]);
+	});
+
+	it("keeps the toggle for a readable shell whose directory is momentarily gone", async () => {
+		// bash on Linux is read; a null directory there is a moment (a deleted folder), not a
+		// reason, so the toggle stays offered rather than flickering off.
+		useFilesPanelStore().takeCwd({ channelId: A, cwd: null, source: "process", atPrompt: true });
+		mountBrowser({ shell: "bash", hostOs: "linux" });
+		await settle();
+		expect(followToggle().disabled).toBe(false);
 	});
 });
 

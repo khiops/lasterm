@@ -57,13 +57,14 @@
 			<button
 				type="button"
 				class="files-follow"
-				:class="{ 'files-follow--on': files.following }"
-				:aria-pressed="files.following"
-				title="Follow the terminal's directory"
+				:class="{ 'files-follow--on': files.following && followOff === null }"
+				:aria-pressed="files.following && followOff === null"
+				:disabled="followOff !== null"
+				:title="followTitle"
 				@click="toggleFollowing"
 			>
 				<FilesIcon name="follow" />
-				<span>{{ files.following ? "Following" : "Follow" }}</span>
+				<span>{{ files.following && followOff === null ? "Following" : "Follow" }}</span>
 			</button>
 		</div>
 
@@ -275,6 +276,7 @@ import {
 	OWNER_COLUMN_MIN_WIDTH,
 	parentPath,
 	pathStyleOf,
+	followBlock,
 	statusLines,
 	typeAheadIndex,
 } from "../../utils/files-panel.js";
@@ -358,19 +360,30 @@ const parent = computed(() =>
 	shownPath.value === null ? null : parentPath(shownPath.value, style.value),
 );
 
-const lines = computed(() =>
-	statusLines({
-		following: files.value.following,
-		live: live.value,
-		shown: listing.value?.path ?? null,
-		start: listing.value?.start,
-		fallbackProblem: listing.value?.fallbackProblem,
-		hostLabel: props.hostLabel,
-		shell: props.shell,
-		sftpUnavailable: props.sftpUnavailable,
-		agentUpdatable: props.agentUpdatable,
-	}),
-);
+const statusFacts = computed(() => ({
+	following: files.value.following,
+	live: live.value,
+	shown: listing.value?.path ?? null,
+	start: listing.value?.start,
+	fallbackProblem: listing.value?.fallbackProblem,
+	hostLabel: props.hostLabel,
+	shell: props.shell,
+	sftpUnavailable: props.sftpUnavailable,
+	agentUpdatable: props.agentUpdatable,
+}));
+
+const lines = computed(() => statusLines(statusFacts.value));
+
+/**
+ * Why the Follow toggle cannot be offered here, or null when it can (#1196). A control shown as
+ * available has to work when used, so the toggle is disabled with the reason in its tooltip while
+ * the terminal's directory cannot be known, and comes back as soon as one is reported. The same
+ * facts the status line reads, so the two never disagree.
+ */
+const followOff = computed(() => followBlock(statusFacts.value, props.hostOs));
+
+/** What the toggle's tooltip says: the reason and its remedy, or what the control does. */
+const followTitle = computed(() => followOff.value?.detail ?? "Follow the terminal's directory");
 
 const failureText = computed(() => {
 	const failed = failure.value;

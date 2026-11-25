@@ -439,6 +439,101 @@ export interface StatusLine {
 
 const POWERSHELL = /(^|[\\/])(pwsh|powershell)(\.exe)?$/i;
 
+/** The programs the agent reads a directory from, as `directory_follows` decides in the agent. */
+const CMD = /^cmd$/i;
+
+/** The basename of a program, without `.exe`, the way the agent compares it. */
+function programStem(program: string): string {
+	const base = program.trim().split(/[\\/]/).pop() ?? "";
+	return base.toLowerCase().endsWith(".exe") ? base.slice(0, -4) : base;
+}
+
+/**
+ * Whether reading this program's process directory says where its shell is: true, false, or null
+ * when the host's OS is not known and the program cannot be classified without it.
+ *
+ * The agent's rule (`directory_follows` in `crates/lasterm-agent/src/cwd.rs`): on Windows only
+ * `cmd.exe` is read; elsewhere everything but PowerShell is. PowerShell's `Set-Location` leaves
+ * its process directory where it was, so the read would be wrong rather than missing—it reports
+ * through its prompt instead. PowerShell is unread on every host, so that answer needs no OS.
+ */
+function readsDirectory(program: string, hostOs: HostOs | null): boolean | null {
+	if (POWERSHELL.test(program)) return false;
+	const stem = programStem(program);
+	if (hostOs === "windows") return CMD.test(stem);
+	if (hostOs === "linux" || hostOs === "darwin") return true;
+	return null;
+}
+
+/** Why the Follow toggle cannot be offered, and what makes it work. */
+export type FollowBlockReason = "outdatedAgent" | "powerShell" | "unreadProgram" | "otherHost";
+
+export interface FollowBlock {
+	readonly reason: FollowBlockReason;
+	/** What the toggle's tooltip names: the reason and the remedy, as `statusLines` says them. */
+	readonly detail: string;
+}
+
+/**
+ * Why this terminal's Follow toggle cannot be offered, or `null` when it can.
+ *
+ * The toggle is a control, and one shown as available has to work when used (#1196). Following
+ * needs a directory the agent can know, so it is withheld only for a reason known up front: a
+ * program whose directory the agent does not read and that has not reported one. A `null`
+ * directory from a program the agent reads (a deleted folder, an elevated shell, before the first
+ * read) is a moment, not a reason, and leaves the toggle alone—the terminal reports a directory as
+ * soon as it has one, and the preference is kept either way.
+ *
+ * It reads the same facts `statusLines` does, so the two cannot disagree about whether following
+ * is possible.
+ */
+export function followBlock(facts: StatusFacts, hostOs: HostOs | null): FollowBlock | null {
+	const live = facts.live;
+	if (live?.otherHost !== undefined) {
+		return {
+			reason: "otherHost",
+			detail: `This terminal shows another host (${live.otherHost}); follow its directory there`,
+		};
+	}
+	// A directory the agent knows, whether it read it or the shell reported it, is all following
+	// needs—a PowerShell prompt that reports one brings the toggle back.
+	if (live?.cwd != null) return null;
+	// An agent this host knows to be older than the hub cannot send CWD_CHANGE at all, so no
+	// directory will ever arrive and following it can never work. Update agent is the remedy, the
+	// same one the status line names. This is a fact known up front, unlike an agent that can
+	// report and has not yet: for that one nothing arrives either, but a report is still coming.
+	if (live === undefined && facts.agentUpdatable) {
+		return {
+			reason: "outdatedAgent",
+			detail: `Update the agent on ${facts.hostLabel} (host menu › Update agent) to follow this terminal's directory`,
+		};
+	}
+	// Otherwise nothing heard from the hub is a moment, not a reason: the first CWD_CHANGE follows
+	// the terminal and before it the toggle is simply not yet following.
+	if (live === undefined) return null;
+	// PowerShell is the one program every host treats the same way, so it needs no OS to name: the
+	// agent reads no directory from it and the remedy is the prompt report.
+	const shell = facts.shell;
+	if (shell !== undefined && POWERSHELL.test(shell.trim())) {
+		return {
+			reason: "powerShell",
+			detail:
+				"PowerShell does not tell other programs its directory. Turn on Report its directory in this terminal's launch profile (or add report-directory.ps1 to $PROFILE)",
+		};
+	}
+	// Which other programs are read depends on the host's OS. With an OS known and the program
+	// read, a null directory is only a moment. With no program named, or an OS not yet known, the
+	// panel cannot say, so it withholds nothing rather than guessing the toggle is broken.
+	if (shell === undefined) return null;
+	const read = readsDirectory(shell, hostOs);
+	if (read !== false) return null;
+	return {
+		reason: "unreadProgram",
+		detail:
+			"This shell's directory cannot be read. A prompt that reports the directory lets the panel follow it",
+	};
+}
+
 /**
  * What the panel says under its path bar: where the terminal is when the panel does not show it
  * ("Terminal is in … · Go there"), why it cannot follow it and where it opened instead, a program

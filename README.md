@@ -391,8 +391,13 @@ Windows), so a `wsl.exe` terminal reports its directory too, as a Windows path t
 lists through `\\wsl.localhost\<distro>\…`. Add this to `~/.bashrc` in the distribution:
 
 ```bash
-PROMPT_COMMAND=${PROMPT_COMMAND:+"$PROMPT_COMMAND; "}'printf "\e]9;9;%s\e\\" "$(wslpath -w "$PWD")"'
+_lasterm_cwd() { printf '\e]9;9;%s\e\\' "$(wslpath -w "$PWD")"; }
+if [[ ${BLE_VERSION-} ]]; then blehook PRECMD+=_lasterm_cwd; else PROMPT_COMMAND=${PROMPT_COMMAND:+"$PROMPT_COMMAND; "}_lasterm_cwd; fi
+_lasterm_cwd
 ```
+
+With ble.sh loaded, a plain `PROMPT_COMMAND` reports only at the first prompt, so the snippet uses
+its `PRECMD` hook there.
 
 Until a terminal reports a directory, the files panel's **Follow** button is disabled, and its
 tooltip says what makes it work; it turns on, and follows, with the first report.

@@ -345,6 +345,13 @@ describe("Follow where the directory cannot be known (#1196)", () => {
 		expect(lastListed()).toEqual([A, "/home/pi/src", false]);
 	});
 
+	it("stays enabled for cmd on a Windows host whose directory is null for a moment", async () => {
+		useFilesPanelStore().takeCwd(unknown);
+		mountBrowser({ agentUpdatable: false, hostOs: "windows", shell: "cmd.exe" });
+		await settle();
+		expect(followToggle().disabled).toBe(false);
+	});
+
 	it("stays enabled for a program the agent reads whose directory is null for a moment", async () => {
 		useFilesPanelStore().takeCwd(unknown);
 		mountBrowser({ agentUpdatable: false, hostOs: "linux", shell: "bash" });

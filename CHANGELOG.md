@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.1](https://github.com/khiops/lasterm/compare/v0.23.0...v0.23.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **web:** disable Follow where the terminal's directory cannot be known ([#1204](https://github.com/khiops/lasterm/issues/1204)) ([8f786df](https://github.com/khiops/lasterm/commit/8f786dfed52dbfdab7c17d627bc459a167dafdb2)), closes [#1196](https://github.com/khiops/lasterm/issues/1196)
+
 ## [0.23.0](https://github.com/khiops/lasterm/compare/v0.22.3...v0.23.0) (2026-11-24)
 
 

@@ -438,6 +438,8 @@ export interface StatusLine {
 }
 
 const POWERSHELL = /(^|[\\/])(pwsh|powershell)(\.exe)?$/i;
+const WSL = /(^|[\\/])wsl(\.exe)?$/i;
+const CMD = /(^|[\\/])cmd(\.exe)?$/i;
 
 /**
  * What the panel says under its path bar: where the terminal is when the panel does not show it
@@ -492,6 +494,12 @@ export function statusLines(facts: StatusFacts): StatusLine[] {
 				text: "PowerShell does not tell other programs its directory",
 				tone: "info",
 			});
+		} else if (facts.shell !== undefined && WSL.test(facts.shell.trim())) {
+			lines.push({
+				id: "wsl",
+				text: "WSL does not tell other programs its directory",
+				tone: "info",
+			});
 		} else {
 			lines.push({ id: "cannot", text: "Can't follow this shell's directory", tone: "info" });
 		}
@@ -513,6 +521,60 @@ export function statusLines(facts: StatusFacts): StatusLine[] {
 		lines.push({ id: "sftp", text: "Over SSH commands: this server offers no SFTP", tone: "info" });
 	}
 	return lines;
+}
+
+// ─── Where Follow cannot work (#1196) ────────────────────────────────────────
+
+/**
+ * Why following cannot work for a terminal, known before it reports anything: `agent`, an agent
+ * too old to report directories; `powershell`, `wsl` and `unread`, a program whose directory the
+ * agent does not read, so that it must report it itself.
+ */
+export type FollowBlock = "agent" | "powershell" | "wsl" | "unread";
+
+export interface FollowFacts {
+	/** What the hub last said of the terminal's directory; undefined when nothing ever did. */
+	readonly live: LiveCwd | undefined;
+	/** The terminal's program, as its agent started it; undefined when not known. */
+	readonly program: string | undefined;
+	readonly hostOs: HostOs | null;
+	/** The host's menu offers Update agent: an SSH host served by an older agent. */
+	readonly agentUpdatable: boolean;
+}
+
+/**
+ * Why Follow is disabled, or null when it works or may work soon. Only a reason known up front
+ * disables it: an older agent that never said a directory, or a program the agent does not read
+ * (PowerShell anywhere; on a Windows host anything but cmd, WSL first) that has reported no
+ * directory yet. A terminal that has a directory, read or reported (OSC 7, 9;9, 633, 1337), or
+ * that a nested session moved to another host, is followed; a program the agent reads whose
+ * directory is null for the moment (before its first read, a deleted folder, an elevated shell)
+ * never disables it.
+ */
+export function followBlock(facts: FollowFacts): FollowBlock | null {
+	const live = facts.live;
+	if (live !== undefined && (live.cwd !== null || live.otherHost !== undefined)) return null;
+	if (live === undefined && facts.agentUpdatable) return "agent";
+	const program = facts.program?.trim();
+	if (program === undefined || program === "") return null;
+	if (POWERSHELL.test(program)) return "powershell";
+	if (WSL.test(program)) return "wsl";
+	if (facts.hostOs === "windows" && !CMD.test(program)) return "unread";
+	return null;
+}
+
+/** What the disabled Follow button says: why, and what makes it work. */
+export function followBlockText(block: FollowBlock, hostLabel: string): string {
+	switch (block) {
+		case "agent":
+			return `Update the agent on ${hostLabel} (host menu › Update agent) to follow this terminal's directory`;
+		case "powershell":
+			return "PowerShell does not tell other programs its directory. Turn on Report its directory in this terminal's launch profile, or add report-directory.ps1 to $PROFILE, to follow it";
+		case "wsl":
+			return "WSL does not tell other programs its directory. Have its prompt report it as a Windows path (OSC 9;9, with wslpath -w) to follow it: see the README, Following PowerShell's directory";
+		case "unread":
+			return "Lasterm does not read this program's directory. Follow works once the program reports it (OSC 7 or OSC 9;9)";
+	}
 }
 
 // ─── Options: the file transfer settings of the attached host ────────────────

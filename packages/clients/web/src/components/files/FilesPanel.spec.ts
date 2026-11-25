@@ -544,4 +544,28 @@ describe("the panel's settings", () => {
 		await mountFollowing(true);
 		expect(followPressed()).toBe("true");
 	});
+
+	// A terminal started without a shell of its own runs its host's default shell (#1196).
+	const followDisabled = (): boolean | undefined =>
+		root.querySelector<HTMLButtonElement>(".files-follow")?.disabled;
+
+	it("disables Follow for a Windows host whose default shell is PowerShell, until it reports", async () => {
+		useHostsStore().hosts = [
+			{ ...host(RPI, "raspberrypi"), os: "windows", discoveredDefaultShell: "pwsh.exe" } as Host,
+			host(AD, "AD"),
+		];
+		await mountFollowing(true);
+		expect(followDisabled()).toBe(true);
+		expect(followPressed()).toBe("false");
+	});
+
+	it("leaves Follow enabled for a Windows host whose default shell is cmd", async () => {
+		useHostsStore().hosts = [
+			{ ...host(RPI, "raspberrypi"), os: "windows", discoveredDefaultShell: "cmd.exe" } as Host,
+			host(AD, "AD"),
+		];
+		await mountFollowing(true);
+		expect(followDisabled()).toBe(false);
+		expect(followPressed()).toBe("true");
+	});
 });

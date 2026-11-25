@@ -203,7 +203,9 @@ const title = computed(() => {
 		DEFAULT_CHANNEL_NAME
 	);
 });
-const shell = computed(() => channel.value?.processTitle ?? channel.value?.shell);
+const shell = computed(
+	() => channel.value?.processTitle ?? channel.value?.shell ?? host.value?.discoveredDefaultShell,
+);
 const writer = computed(() => channelId.value !== null && writeLockStore.isWriter(channelId.value));
 const showHidden = computed(() => configStore.uiConfig.transfer?.showHidden === true);
 const sftpUnavailable = computed(

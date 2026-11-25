@@ -1658,6 +1658,26 @@ mod tests {
         assert_eq!(names.name(key.clone(), at(301), &shared, &counting), "bob");
     }
 
+    /// A terminal in WSL reports `\\wsl.localhost\<distro>\…`, a UNC path: a UNC path lists as
+    /// a drive's does. The machine's own admin share stands in for the distribution's.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn lists_a_folder_given_as_a_unc_path() {
+        let _serial = SERIAL.lock().await;
+        let folder = Folder::new("unc");
+        std::fs::write(folder.join("f.txt"), "x").unwrap();
+        let local = folder.path();
+        let unc = format!("\\\\localhost\\{}${}", &local[..1], &local[2..]);
+        if std::fs::read_dir(&unc).is_err() {
+            eprintln!("the admin share is not reachable here: skipped");
+            return;
+        }
+        let listed = entries(&answer_of(list(&unc, false)).await);
+        assert_eq!(named(&listed, "f.txt")["kind"], "file");
+        let stated = entries(&answer_of(stat(&unc)).await);
+        assert_eq!(stated[0]["kind"], "directory");
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn lists_the_drives_at_the_root() {

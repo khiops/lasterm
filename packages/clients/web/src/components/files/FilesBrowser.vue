@@ -57,14 +57,17 @@
 			<button
 				type="button"
 				class="files-follow"
-				:class="{ 'files-follow--on': files.following }"
-				:aria-pressed="files.following"
-				title="Follow the terminal's directory"
+				:class="{ 'files-follow--on': followShown }"
+				:aria-pressed="followShown"
+				:disabled="block !== null"
+				:aria-describedby="block !== null ? followHintId : undefined"
+				:title="followTitle"
 				@click="toggleFollowing"
 			>
 				<FilesIcon name="follow" />
-				<span>{{ files.following ? "Following" : "Follow" }}</span>
+				<span>{{ followShown ? "Following" : "Follow" }}</span>
 			</button>
+			<span v-if="block !== null" :id="followHintId" hidden>{{ followTitle }}</span>
 		</div>
 
 		<div v-if="lines.length > 0" class="files-status">
@@ -275,6 +278,8 @@ import {
 	OWNER_COLUMN_MIN_WIDTH,
 	parentPath,
 	pathStyleOf,
+	followBlock,
+	followBlockText,
 	statusLines,
 	typeAheadIndex,
 } from "../../utils/files-panel.js";
@@ -336,7 +341,7 @@ const live = computed(() => filesPanel.liveCwdFor(props.channelId));
  * browsed otherwise; none for where the hub opens it, the host's fallback folder or the home.
  */
 const wanted = computed<string | undefined>(() => {
-	if (files.value.following) return live.value?.cwd ?? undefined;
+	if (followShown.value) return live.value?.cwd ?? undefined;
 	return files.value.path ?? undefined;
 });
 
@@ -356,6 +361,24 @@ const crumbs = computed(() =>
 );
 const parent = computed(() =>
 	shownPath.value === null ? null : parentPath(shownPath.value, style.value),
+);
+
+/** Why Follow cannot work for this terminal for now, known before it reports a directory (#1196). */
+const block = computed(() =>
+	followBlock({
+		live: live.value,
+		program: props.shell,
+		hostOs: props.hostOs,
+		agentUpdatable: props.agentUpdatable,
+	}),
+);
+/** The toggle reads Following only while it can follow; the preference itself is kept. */
+const followShown = computed(() => files.value.following && block.value === null);
+const followHintId = `files-follow-hint-${props.channelId}`;
+const followTitle = computed(() =>
+	block.value === null
+		? "Follow the terminal's directory"
+		: followBlockText(block.value, props.hostLabel),
 );
 
 const lines = computed(() =>
@@ -419,9 +442,10 @@ function reload(): void {
 
 /** Any move in the panel pauses following: the folder is remembered for the terminal. */
 function browseTo(path: string): void {
-	if (path === listing.value?.path && !files.value.following) return;
-	if (files.value.following) emit("announce", "Not following the terminal");
-	filesPanel.browse(props.channelId, path);
+	if (path === listing.value?.path && !followShown.value) return;
+	if (followShown.value) emit("announce", "Not following the terminal");
+	// Follow disabled for now: the preference stays, to follow with the first report.
+	filesPanel.browse(props.channelId, path, block.value !== null && files.value.following);
 }
 
 function goUp(): void {
@@ -845,11 +869,12 @@ defineExpose({ reload });
 }
 
 .files-tool:hover:not(:disabled),
-.files-follow:hover {
+.files-follow:hover:not(:disabled) {
 	border-color: var(--nt-border);
 }
 
-.files-tool:disabled {
+.files-tool:disabled,
+.files-follow:disabled {
 	opacity: 0.45;
 	cursor: default;
 }

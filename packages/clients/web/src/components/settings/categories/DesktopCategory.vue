@@ -22,11 +22,11 @@
 		<template v-if="update?.eligible">
 			<SettingRow
 				label="Updates"
-				description="What Lasterm does when a newer version is in the Microsoft Store."
+				description="What Lasterm does when a newer version is in the Microsoft Store. The Microsoft Store installs Lasterm updates; it may also install them while Lasterm is closed, following its own settings."
 				scope="global"
 				:is-overridden="true"
 			>
-				<div>
+				<div class="update-control">
 					<SettingControl
 						:model-value="update.mode"
 						type="select"
@@ -34,10 +34,6 @@
 						:disabled="savingMode"
 						@update:model-value="onModeChange"
 					/>
-					<p class="update-note">
-						The Microsoft Store installs Lasterm updates. It may also install them while Lasterm is
-						closed, following its own settings.
-					</p>
 					<p v-if="update.loadError" class="update-error" role="alert">{{ update.loadError }}</p>
 					<p v-if="modeError" class="update-error" role="alert">{{ modeError }}</p>
 				</div>
@@ -209,7 +205,10 @@ function errorMessage(error: unknown): string {
 	font-size: 12px;
 }
 
-.update-note,
+.update-control {
+	max-width: 320px;
+}
+
 .update-status {
 	margin: 4px 0 0;
 	color: var(--nt-text-secondary);
@@ -222,6 +221,7 @@ function errorMessage(error: unknown): string {
 }
 
 .update-check {
+	max-width: 360px;
 	display: flex;
 	flex-direction: column;
 	align-items: flex-start;

@@ -92,7 +92,7 @@ describe("Settings › Desktop's update rows (AC-3)", () => {
 			"Don't check",
 		]);
 		expect(select().value).toBe("auto");
-		expect(text()).toContain("It may also install them while Lasterm is closed");
+		expect(text()).toContain("it may also install them while Lasterm is closed");
 		expect(text()).toContain("0.24.0");
 		expect(text()).not.toContain("0.24.0.0");
 		expect(text()).toContain("Not checked yet");

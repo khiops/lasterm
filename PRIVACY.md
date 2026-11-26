@@ -1,6 +1,6 @@
 # Privacy policy
 
-Effective 1 October 2026.
+Effective 26 November 2026.
 
 > **No account. No telemetry.**
 >
@@ -8,11 +8,13 @@ Effective 1 October 2026.
 > else. Beyond your computer, the app connects only to:
 >
 > - the hosts you add, over SSH;
-> - GitHub, to download the agent it installs on a host.
+> - GitHub, to download the agent it installs on a host;
+> - the Microsoft Store, through Windows, to check for updates, in the package the Store signs.
 
 This policy covers the Lasterm desktop application for Windows and what comes with it: the hub,
-the agent, and the web interface the hub serves. It applies however you install Lasterm: from a
-release on GitHub, from the Microsoft Store, or built from this repository.
+the agent, and the web interface the hub serves. It applies however you install Lasterm: from the
+Microsoft Store, with winget from the Store, or built from this repository; older versions installed
+from GitHub releases are covered too.
 
 ## No account, no telemetry
 
@@ -38,7 +40,7 @@ installs on your hosts ([below](#on-the-hosts-you-add)):
 
 | What | Where |
 |---|---|
-| Your settings | `config.toml` and `appearance.json` in the configuration folder, and `close-behavior.json` for the desktop app |
+| Your settings | `config.toml` and `appearance.json` in the configuration folder, and `close-behavior.json` and `desktop-updates.json` for the desktop app |
 | Themes, the bundled ones and those you add, and the fonts, wallpapers and bell sounds you add | `themes`, `fonts`, `wallpapers` and `sounds` in the configuration folder |
 | The access token the app and your browser use to reach the hub | `auth.json` in the configuration folder |
 | Your hosts: name, address, port, user name, how to sign in and the path of the key file you chose, the jump host, the fingerprint of each host key you accepted, the system and shells found there, colour, group and settings | `meta.db` in the state folder |
@@ -122,9 +124,16 @@ again. The same download happens when you ask for it in *Settings › Agents* or
 `lasterm agent fetch`. You can instead import an agent you downloaded yourself, in
 *Settings › Agents*.
 
-**No update checks.** The desktop app has no updater and never checks for updates. The Microsoft
-Store updates the version installed from it; a version installed from a GitHub release is updated
-by installing a newer release over it.
+**Update checks, through the Microsoft Store.** The desktop app signed by the Microsoft Store asks
+the Microsoft Store, through Windows, whether a newer Lasterm exists: a minute after its window first
+shows, once a day while it runs, and when you press *Check for updates*. Lasterm downloads and installs
+nothing itself: *Update now* opens the Microsoft Store's updates page, and the Store installs updates,
+also on its own while Lasterm is closed, following its settings. *Notify me* shows a dialog when an
+update is available. *Leave updates to the Microsoft Store* shows it only when the Store may not install
+the update by itself, and a notice for a required update or one waiting 7 days. *What's new* opens
+Lasterm's page in the Microsoft Store app. Lasterm contacts no server of its own for any of this.
+*Don't check* stops the scheduled checks; *Check for updates* still asks the Store when you press it.
+Builds made from this repository never check.
 
 **The installers, when WebView2 is missing.** The desktop app needs Microsoft Edge WebView2. If it
 is not installed, the `setup.exe` installer downloads Microsoft's installer for it from
@@ -136,7 +145,8 @@ a host set to sign in with your SSH agent, the hub asks that agent (`SSH_AUTH_SO
 agent's pipe on Windows) to sign. A second launch of the desktop app hands over to the first
 through a local pipe or socket. None of these leaves your computer. The hub listens on `127.0.0.1`
 only, so other computers cannot connect to it. Links you click in the
-app, such as those in *About*, open in your web browser. The programs you run in a terminal make
+app, such as those in *About*, open in your web browser; *What's new* and *Update now* open the
+Microsoft Store app. The programs you run in a terminal make
 their own connections; those are theirs, not Lasterm's.
 
 ## What others do on their side
@@ -144,7 +154,8 @@ their own connections; those are theirs, not Lasterm's.
 - **GitHub** receives the download requests above, with your IP address, as it does for any
   download. The [GitHub General Privacy Statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement)
   covers what it does with them.
-- **The Microsoft Store**, if you install Lasterm from it, installs and updates the app under the
+- **The Microsoft Store**, if you install Lasterm from it, installs and updates the app, and answers
+  the app's update checks, under the
   [Microsoft Privacy Statement](https://privacy.microsoft.com/privacystatement).
 - **Microsoft Edge WebView2** is the Microsoft runtime that draws the desktop app's window. What it
   does on its own is covered by the Microsoft Privacy Statement.

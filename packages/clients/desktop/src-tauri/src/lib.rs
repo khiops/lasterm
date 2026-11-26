@@ -6,6 +6,7 @@ mod build_channel;
 mod channel;
 mod downloads;
 pub mod hub_log;
+mod store_updates;
 pub mod tls_identity;
 mod uploads;
 pub mod window_material;
@@ -2483,27 +2484,42 @@ fn write_close_behavior_to_path_with_replace<F>(
 where
     F: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
 {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "close preference path has no parent directory".to_string())?;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "creates the non-protected close-behavior preference directory"
-    )]
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("failed to create close preference directory: {error}"))?;
     let contents = serde_json::to_string(&CloseBehaviorConfig {
         close_behavior: behavior,
     })
     .map_err(|error| format!("failed to serialize close preference: {error}"))?;
+    write_preference_file_with_replace(path, contents.as_bytes(), "close preference", replace)
+}
+
+/// Replace a desktop preference file (`close-behavior.json`,
+/// `desktop-updates.json`) atomically: written to a temporary file beside it,
+/// flushed, then renamed over it by `replace`. `what` names it in errors.
+pub(crate) fn write_preference_file_with_replace<F>(
+    path: &std::path::Path,
+    contents: &[u8],
+    what: &str,
+    replace: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+{
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{what} path has no parent directory"))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "creates the non-protected desktop preference directory"
+    )]
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {what} directory: {error}"))?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| "close preference path has no file name".to_string())?;
+        .ok_or_else(|| format!("{what} path has no file name"))?;
 
     #[expect(
         clippy::disallowed_methods,
-        reason = "creates a non-protected close-behavior temporary file"
+        reason = "creates a non-protected desktop preference temporary file"
     )]
     let (mut temp_file, temp_path) = (0..32)
         .find_map(|_| {
@@ -2521,34 +2537,33 @@ where
                 Ok(file) => Some(Ok((file, candidate))),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
                 Err(error) => Some(Err(format!(
-                    "failed to create close preference temporary file: {error}"
+                    "failed to create {what} temporary file: {error}"
                 ))),
             }
         })
-        .ok_or_else(|| "failed to allocate close preference temporary file".to_string())??;
+        .ok_or_else(|| format!("failed to allocate {what} temporary file"))??;
 
     let write_result = (|| -> Result<(), String> {
         temp_file
-            .write_all(contents.as_bytes())
-            .map_err(|error| format!("failed to write close preference: {error}"))?;
+            .write_all(contents)
+            .map_err(|error| format!("failed to write {what}: {error}"))?;
         #[cfg(unix)]
         temp_file
             .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("failed to set close preference permissions: {error}"))?;
+            .map_err(|error| format!("failed to set {what} permissions: {error}"))?;
         temp_file
             .sync_all()
-            .map_err(|error| format!("failed to flush close preference: {error}"))
+            .map_err(|error| format!("failed to flush {what}: {error}"))
     })();
     drop(temp_file);
 
     let result = write_result.and_then(|()| {
-        replace(&temp_path, path)
-            .map_err(|error| format!("failed to replace close preference: {error}"))
+        replace(&temp_path, path).map_err(|error| format!("failed to replace {what}: {error}"))
     });
     if result.is_err() {
         #[expect(
             clippy::disallowed_methods,
-            reason = "cleans a non-protected close-behavior temporary file"
+            reason = "cleans a non-protected desktop preference temporary file"
         )]
         let _ = std::fs::remove_file(&temp_path);
     }
@@ -6851,6 +6866,14 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         MainWindowStartupOutcome::Shown { focus_error: None } => {}
     }
 
+    // The window shows: the Store build's first update check is due a minute
+    // from now; every other build is told it is not eligible (#1214).
+    let store_log_dir = hub_log_dir_in(
+        &dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
+        channel::base_name(),
+    );
+    store_updates::install(app.handle(), hub_log::for_this_process(&store_log_dir));
+
     // Only now: a window told its material while hidden loses it as it is
     // shown, and comes up with the plain background it was built with.
     if let Some(window) = main_window.as_ref() {
@@ -6924,41 +6947,54 @@ pub fn run() {
                 update_uploads(webview.app_handle(), |gate| gate.page_started());
             }
         })
-        .invoke_handler(tauri::generate_handler![
-            get_hub_auth_token,
-            get_hub_port,
-            relay_hub_request,
-            relay_hub_upload_start,
-            relay_hub_upload_chunk,
-            relay_hub_upload_finish,
-            relay_hub_upload_cancel,
-            relay_hub_response_ack,
-            relay_hub_response_cancel,
-            relay_hub_ws_connect,
-            relay_hub_ws_send,
-            relay_hub_ws_ack,
-            relay_hub_ws_close,
-            relay_hub_ws_close_all,
-            is_tray_available,
-            get_close_behavior,
-            set_close_behavior,
-            set_shutdown_caller_client_id,
-            acknowledge_desktop_close,
-            answer_desktop_close,
-            cancel_desktop_close,
-            pick_and_read_agent_file,
-            quit_after_hub_exit,
-            restart_hub_after_exit,
-            apply_window_background,
-            apply_window_tone,
-            restart_desktop,
-            set_uploads_in_progress,
-            cancel_quit_when_finished,
-            pick_download_target,
-            download_hub_file_to,
-            cancel_hub_download,
-            reveal_downloaded
-        ])
+        .invoke_handler({
+            // The update commands come from their module's one list, which the
+            // tests register too (STORE-UPDATE-NOTICE, D10).
+            let updates = store_updates::invoke_handler();
+            let rest: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
+                Box::new(tauri::generate_handler![
+                    get_hub_auth_token,
+                    get_hub_port,
+                    relay_hub_request,
+                    relay_hub_upload_start,
+                    relay_hub_upload_chunk,
+                    relay_hub_upload_finish,
+                    relay_hub_upload_cancel,
+                    relay_hub_response_ack,
+                    relay_hub_response_cancel,
+                    relay_hub_ws_connect,
+                    relay_hub_ws_send,
+                    relay_hub_ws_ack,
+                    relay_hub_ws_close,
+                    relay_hub_ws_close_all,
+                    is_tray_available,
+                    get_close_behavior,
+                    set_close_behavior,
+                    set_shutdown_caller_client_id,
+                    acknowledge_desktop_close,
+                    answer_desktop_close,
+                    cancel_desktop_close,
+                    pick_and_read_agent_file,
+                    quit_after_hub_exit,
+                    restart_hub_after_exit,
+                    apply_window_background,
+                    apply_window_tone,
+                    restart_desktop,
+                    set_uploads_in_progress,
+                    cancel_quit_when_finished,
+                    pick_download_target,
+                    download_hub_file_to,
+                    cancel_hub_download,
+                    reveal_downloaded
+                ]);
+            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+                if store_updates::COMMANDS.contains(&invoke.message.command()) {
+                    updates(invoke)
+                } else {
+                    rest(invoke)
+                }
+            }
+        })
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 if let WindowEvent::CloseRequested { api, .. } = event {
@@ -7066,6 +7102,61 @@ mod tests {
                 },
             )
             .map(|_| ())
+        }
+    }
+
+    /// The update commands of a build that is not the Store's refuse, through
+    /// the same registration production uses, and touch no Store (#1214, R-1).
+    #[test]
+    fn update_commands_refuse_when_ineligible() {
+        let app = tauri::test::mock_builder()
+            .manage(store_updates::UpdateService::Ineligible(Box::new(
+                store_updates::UpdateState::ineligible("0.24.0".into()),
+            )))
+            .invoke_handler(store_updates::invoke_handler())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build the mock app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("open the mock webview");
+        let invoke = |command: &str, body: serde_json::Value| {
+            let url = if cfg!(windows) {
+                "http://tauri.localhost"
+            } else {
+                "tauri://localhost"
+            };
+            tauri::test::get_ipc_response(
+                &webview,
+                tauri::webview::InvokeRequest {
+                    cmd: command.into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: url.parse().unwrap(),
+                    body: tauri::ipc::InvokeBody::Json(body),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.to_string(),
+                },
+            )
+            .map(|response| response.deserialize::<serde_json::Value>().unwrap())
+        };
+        let state = invoke("get_update_state", serde_json::json!({})).expect("the state");
+        assert_eq!(
+            state,
+            serde_json::json!({
+                "seq": 1, "eligible": false, "mode": "ask", "runningVersion": "0.24.0",
+                "checking": "idle", "wantsDialog": false, "notices": []
+            })
+        );
+        let arguments = serde_json::json!({ "mode": "auto", "key": "k", "noticeId": 1 });
+        for command in store_updates::COMMANDS
+            .iter()
+            .filter(|command| **command != "get_update_state")
+        {
+            assert_eq!(
+                invoke(command, arguments.clone()),
+                Err(serde_json::json!("not_store_build")),
+                "{command}"
+            );
         }
     }
 

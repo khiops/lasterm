@@ -142,9 +142,9 @@ describe("tauri.conf.json", () => {
 		);
 	});
 
-	// The desktop does not update itself: the Store updates the MSIX build,
-	// winget the others, and a GitHub-release install is updated by hand
-	// (DESKTOP-UPDATES in docs/decisions.md, #645).
+	// The desktop ships no updater plugin: the Microsoft Store updates the only
+	// distributed build; the Store install only asks the Store whether an update
+	// exists (STORE-UPDATE-NOTICE in docs/decisions.md).
 	it("configures no updater", () => {
 		const bundle = conf.bundle as Record<string, unknown>;
 		expect(bundle).not.toHaveProperty("createUpdaterArtifacts");
@@ -177,6 +177,8 @@ describe("capabilities/default.json", () => {
 		const conf = readJson("src-tauri/tauri.conf.json") as Record<string, unknown>;
 		const open = (conf.plugins as Record<string, Record<string, unknown>>).shell?.open;
 		expect(typeof open).toBe("string");
+		// Exactly https: the Store's pages open through their own command (#1214).
+		expect(open).toBe("https://.+");
 		const scope = new RegExp(`^${open}$`);
 
 		// The pages the web client's components link to, the values they bind.

@@ -12,6 +12,8 @@ export interface ToastMessage {
 	level: "error" | "warning" | "info";
 	text: string;
 	action?: ToastAction;
+	/** Called when the user closes the toast with its close button, and only then (#1214). */
+	onUserDismiss?: () => void;
 }
 
 let nextId = 1;
@@ -32,9 +34,19 @@ export const useToastStore = defineStore("toast", () => {
 		text: string,
 		durationMs: number | null = 5000,
 		action?: ToastAction,
+		onUserDismiss?: () => void,
 	): number {
 		const id = nextId++;
-		messages.value = [...messages.value, { id, level, text, ...(action ? { action } : {}) }];
+		messages.value = [
+			...messages.value,
+			{
+				id,
+				level,
+				text,
+				...(action ? { action } : {}),
+				...(onUserDismiss ? { onUserDismiss } : {}),
+			},
+		];
 		if (durationMs !== null) setTimeout(() => dismiss(id), durationMs);
 		return id;
 	}
@@ -48,6 +60,13 @@ export const useToastStore = defineStore("toast", () => {
 		messages.value = messages.value.filter((m) => m.id !== id);
 	}
 
+	/** Its close button: the toast goes, and its owner hears the user closed it. */
+	function close(id: number): void {
+		const message = messages.value.find((m) => m.id === id);
+		dismiss(id);
+		message?.onUserDismiss?.();
+	}
+
 	/** Its button: what it does, and the toast goes. */
 	function act(id: number): void {
 		const message = messages.value.find((m) => m.id === id);
@@ -55,5 +74,5 @@ export const useToastStore = defineStore("toast", () => {
 		message?.action?.run();
 	}
 
-	return { messages, show, update, dismiss, act };
+	return { messages, show, update, dismiss, close, act };
 });

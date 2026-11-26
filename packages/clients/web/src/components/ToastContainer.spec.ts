@@ -130,3 +130,59 @@ describe.each(Object.entries(DRAWN))("a toast, %s (#830)", (theme, drawn) => {
 		}
 	});
 });
+
+// ─── Closed by the user, or removed by its owner (#1214) ────────────────────
+//
+// A notice's owner acknowledges it only when the user closes it: a toast its
+// owner removes, or whose button acts, is not a close by the user.
+describe("a toast's close button", () => {
+	it("tells its owner the user closed it; a removal or its button does not", async () => {
+		await mountToasts("one-half-dark");
+		const toasts = useToastStore();
+		const heard: string[] = [];
+		const closed = toasts.show("info", "Closed by the user", null, undefined, () =>
+			heard.push("closed"),
+		);
+		const removed = toasts.show("info", "Removed by its owner", null, undefined, () =>
+			heard.push("removed"),
+		);
+		const acted = toasts.show(
+			"info",
+			"Its button",
+			null,
+			{ label: "Show", run: () => heard.push("ran") },
+			() => heard.push("acted"),
+		);
+		await nextTick();
+		const item = (text: string) =>
+			[...document.querySelectorAll<HTMLElement>(".toast-item")].find((toast) =>
+				toast.textContent?.includes(text),
+			);
+		item("Closed by the user")?.querySelector<HTMLElement>(".toast-close")?.click();
+		toasts.dismiss(removed);
+		item("Its button")?.querySelector<HTMLElement>(".toast-action")?.click();
+		await nextTick();
+		expect(heard).toEqual(["closed", "ran"]);
+		expect(toasts.messages.map((message) => message.id)).not.toContain(closed);
+		expect(toasts.messages.map((message) => message.id)).not.toContain(acted);
+	});
+
+	it("keeps a toast whose button keeps it open, for its owner to remove", async () => {
+		await mountToasts("one-half-dark");
+		const toasts = useToastStore();
+		const ran: string[] = [];
+		const kept = toasts.show("info", "Kept open", null, {
+			label: "What's new",
+			keepOpen: true,
+			run: () => ran.push("ran"),
+		});
+		await nextTick();
+		[...document.querySelectorAll<HTMLElement>(".toast-item")]
+			.find((toast) => toast.textContent?.includes("Kept open"))
+			?.querySelector<HTMLElement>(".toast-action")
+			?.click();
+		await nextTick();
+		expect(ran).toEqual(["ran"]);
+		expect(toasts.messages.map((message) => message.id)).toContain(kept);
+	});
+});

@@ -36,6 +36,8 @@
 		/>
 
 		<HubExitedModal :code="hubExitCode" />
+		<!-- A newer desktop version in the Microsoft Store (#1214) -->
+		<UpdateDialog />
 		<CloseModal
 			:visible="closeModalVisible"
 			:busy="false"
@@ -426,6 +428,7 @@ import BatchImportModal from './components/BatchImportModal.vue';
 import ChannelSidebar from './components/ChannelSidebar.vue';
 import CloseModal from './components/CloseModal.vue';
 import HubExitedModal from './components/HubExitedModal.vue';
+import UpdateDialog from './components/UpdateDialog.vue';
 import HubUpdateBanner from './components/HubUpdateBanner.vue';
 import CommandPalette from './components/CommandPalette.vue';
 import KeyHintStrip from './components/KeyHintStrip.vue';
@@ -499,6 +502,7 @@ import { useFilesPanelStore } from './stores/files-panel.js';
 import { useHostsStore } from './stores/hosts.js';
 import { useProfilesStore } from './stores/profiles.js';
 import { useSessionStore } from './stores/session.js';
+import { useDesktopUpdatesStore } from './stores/desktopUpdates.js';
 import { useSettingsStore } from './stores/settings.js';
 import { useThemeStore } from './stores/theme.js';
 import { useToastStore } from './stores/toast.js';
@@ -943,6 +947,9 @@ const shortcutsOverlay = useShortcutsOverlay();
 const profilesStore = useProfilesStore();
 // In the settings store, so that a panel can open Settings at a place of its own (#835).
 const showSettings = toRef(useSettingsStore(), 'panelOpen');
+
+// The desktop's update state (#1214), followed from the start.
+const desktopUpdates = useDesktopUpdatesStore();
 const desktopVersion = ref<string | undefined>(undefined);
 const closeModalVisible = ref(false);
 const desktopCloseAttempt = ref<number | null>(null);
@@ -1371,6 +1378,7 @@ onMounted(async () => {
 	}
 
 	desktopVersion.value = await loadDesktopVersion();
+	void desktopUpdates.connect();
 
 	// In Tauri desktop, fetch the hub auth token via invoke BEFORE the
 	// token check — connect() is gated by token !== null, so the invoke

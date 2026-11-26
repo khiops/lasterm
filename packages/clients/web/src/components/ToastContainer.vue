@@ -24,7 +24,7 @@
 					class="toast-close"
 					type="button"
 					aria-label="Dismiss"
-					@click="toastStore.dismiss(msg.id)"
+					@click="toastStore.close(msg.id)"
 				>
 					&#10005;
 				</button>

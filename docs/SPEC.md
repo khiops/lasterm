@@ -710,8 +710,10 @@ The hub ships with the agent binary for its own platform, co-located with the hu
 next to itself via `sea-agent-resolver`; the desktop bundles it as a Tauri sidecar). Local sessions use
 this agent. It is therefore available **offline and immediately** at install, and its version always
 matches the hub by construction. A terminal app must open a local shell without a network round-trip, so
-this is never fetched. A daemon an older hub started outlives an update, though, and keeps its terminals:
-the hub replaces it with its own as soon as it holds none of this hub's terminals (#805, § 3.3).
+this is never fetched. A daemon an older hub started outlives a hub restart, and keeps its terminals; the
+new hub tries to replace it once it holds none of this hub's terminals, and keeps it if it refuses to
+stop (#805, § 3.3). Whether it outlives a Microsoft Store install is not established
+(STORE-UPDATE-NOTICE).
 
 **The hub's native addons — installed beside it.** `lasterm_hub_lock.node` and
 `lasterm_tls_identity.node` sit in the hub executable's own directory, and the single executable loads
@@ -1568,7 +1570,8 @@ Config dir (created 0700; SECURITY.md § 2.2, item 1):
 ├── fonts/                   # fonts uploaded from Settings, served under /public/fonts/
 ├── sounds/                  # bell sounds placed there by hand, served under /public/sounds/
 ├── wallpapers/              # wallpapers uploaded from Settings, served under /public/wallpapers/
-└── close-behavior.json      # the desktop's answer to "close or quit"
+├── close-behavior.json      # the desktop's answer to "close or quit"
+└── desktop-updates.json     # the desktop's update setting, its reminders and the last version it ran
 
 State dir (0700):
 ├── hub.lock                 # the single-hub lock (`hub-lock.ts`)
@@ -1823,8 +1826,11 @@ detached daemon, or deploys and runs it over SSH.
 What a release builds is declared in `.github/build-matrix.json`. The web UI runs in any browser
 that reaches the hub.
 
-The desktop app has no updater of its own. The Microsoft Store updates it, and winget is planned to
-install the package the Store signs (#620) (`docs/decisions.md`, STORE-ONLY-DESKTOP).
+The desktop app has no updater of its own. The Microsoft Store installs and updates it;
+`winget install 9P82QRJ6VDWL --source msstore` installs the same package (`docs/decisions.md`,
+STORE-ONLY-DESKTOP). The Store install asks the Store whether a newer version exists a minute after its
+window first shows and once a day while it runs, unless its scheduled checks are turned off, tells the
+user, and opens the Store's updates page on request (`docs/decisions.md`, STORE-UPDATE-NOTICE).
 
 Agent spawns PTYs for the host OS: bash/zsh (Linux), PowerShell/cmd/wsl.exe (Windows).
 Hub never spawns PTYs directly — it delegates to the agent (local or remote).

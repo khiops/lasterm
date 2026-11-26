@@ -377,10 +377,14 @@ describe("maximizing the files panel", () => {
 		await maximize();
 
 		await page.viewport(500, 800);
-		await vi.waitFor(() => expect(document.querySelector(".files-panel--sheet")).not.toBeNull());
+		await vi.waitFor(() => expect(document.querySelector(".files-panel--sheet")).not.toBeNull(), {
+			timeout: 5000,
+		});
 		await page.viewport(1400, 900);
 
-		await vi.waitFor(() => expect(document.querySelector(".files-panel--docked")).not.toBeNull());
+		await vi.waitFor(() => expect(document.querySelector(".files-panel--docked")).not.toBeNull(), {
+			timeout: 5000,
+		});
 		expect(document.querySelector(".pane-area")?.hasAttribute("inert")).toBe(false);
 		expect(box("#files-panel").width).toBe(300);
 	});

@@ -1,5 +1,7 @@
 version: 2
 
+# Every entry waits 14 days after a release before proposing it (`cooldown`), the
+# minimum age this project takes for a dependency; security updates are not delayed.
 updates:
   # Actions are pinned to commit SHAs, which is the only immutable reference a
   # `uses:` can take. Without this ecosystem those pins never move again, so the
@@ -8,6 +10,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 14
     groups:
       actions:
         patterns: ["*"]
@@ -18,6 +22,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 14
     groups:
       cargo:
         patterns: ["*"]
@@ -26,6 +32,8 @@ updates:
     directory: /packages/clients/desktop/src-tauri
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 14
     groups:
       cargo-desktop:
         patterns: ["*"]

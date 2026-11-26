@@ -14,6 +14,8 @@ import {
 	type ProfileWriteScope,
 	planProfileWrite,
 	type TerminalProfile,
+	TRANSFER_PANEL_WIDTH_CEILING,
+	TRANSFER_PANEL_WIDTH_MIN,
 	type TransferOnConflict,
 } from "@lasterm/shared";
 
@@ -30,6 +32,22 @@ export type FilesPanelForm = "docked" | "overlay" | "sheet";
 
 /** Below this window width the panel is a sheet over the terminal area. */
 export const SHEET_BELOW_WINDOW_WIDTH = 560;
+
+/** The share of the area the panes and the panel share that the panel can take (#1208). */
+export const FILES_PANEL_MAX_SHARE = 0.5;
+
+/**
+ * The widest the panel can be in an area of that width: half of it, never under the narrowest
+ * panel. Unmeasured (0), the ceiling a saved width can have, so that a saved width is not cut
+ * before the area is known.
+ */
+export function filesPanelMaxWidth(areaWidth: number): number {
+	if (areaWidth <= 0) return TRANSFER_PANEL_WIDTH_CEILING;
+	return Math.min(
+		TRANSFER_PANEL_WIDTH_CEILING,
+		Math.max(TRANSFER_PANEL_WIDTH_MIN, Math.floor(areaWidth * FILES_PANEL_MAX_SHARE)),
+	);
+}
 
 /** Docked only while the panes keep at least this much room beside it. */
 export const DOCKED_PANES_MIN_WIDTH = 480;

@@ -302,7 +302,7 @@ export interface LayoutConfig {
 	hostRailBadgeSize: HostRailBadgeSize;
 	/** Channel sidebar width in pixels. 0 means collapsed. Default: 200. */
 	sidebarWidth: number;
-	/** The files panel's width in pixels, 240 to 520, as its edge was last dragged (#835). Default: 300. */
+	/** The files panel's width in pixels, 240 to 4096, shown no wider than half of the area the panes and the panel share, as its edge was last dragged (#835, #1208). Default: 300. */
 	transferPanelWidth: number;
 }
 

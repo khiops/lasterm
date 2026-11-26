@@ -146,11 +146,11 @@ describe("TRANSFER_CONFIG_VALIDATORS", () => {
 });
 
 describe("isTransferPanelWidth", () => {
-	it.each([240, 300, 520])("accepts %j", (width) => {
+	it.each([240, 300, 520, 1920, 4096])("accepts %j", (width) => {
 		expect(isTransferPanelWidth(width)).toBe(true);
 	});
 
-	it.each([239, 521, 300.5, "300", 0])("refuses %j", (width) => {
+	it.each([239, 4097, 300.5, "300", 0])("refuses %j", (width) => {
 		expect(isTransferPanelWidth(width)).toBe(false);
 	});
 });

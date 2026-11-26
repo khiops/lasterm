@@ -1431,11 +1431,14 @@ describe("extractUiConfig — layout section", () => {
 	});
 
 	// The files panel's width (#835), kept as its edge is dragged.
-	it("parses transfer_panel_width from 240 to 520, and ignores anything else", () => {
+	it("parses transfer_panel_width from 240 to 4096, and ignores anything else", () => {
 		expect(
 			extractUiConfig({ layout: { transfer_panel_width: 420 } }).layout.transferPanelWidth,
 		).toBe(420);
-		for (const width of [239, 521, 300.5, "300"]) {
+		expect(
+			extractUiConfig({ layout: { transfer_panel_width: 1920 } }).layout.transferPanelWidth,
+		).toBe(1920);
+		for (const width of [239, 4097, 300.5, "300"]) {
 			const config = extractUiConfig({ layout: { transfer_panel_width: width } });
 			expect(config.layout.transferPanelWidth, String(width)).toBe(300);
 		}

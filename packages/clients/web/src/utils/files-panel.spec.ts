@@ -6,6 +6,7 @@ import {
 	entryLabel,
 	type FollowFacts,
 	filesPanelForm,
+	filesPanelMaxWidth,
 	followBlock,
 	followBlockText,
 	formatAttributes,
@@ -59,6 +60,28 @@ describe("the panel's form", () => {
 		expect(
 			filesPanelForm({ windowWidth: 390, areaWidth: 340, panelWidth: 300, follows: true }),
 		).toBe("sheet");
+	});
+});
+
+// ─── How wide the panel can be (#1208) ───────────────────────────────────────
+
+describe("the panel's widest width", () => {
+	it("is half of the area the panes and the panel share", () => {
+		expect(filesPanelMaxWidth(1100)).toBe(550);
+		expect(filesPanelMaxWidth(1900)).toBe(950);
+		expect(filesPanelMaxWidth(1101)).toBe(550);
+	});
+
+	it("never goes under the narrowest the panel can be", () => {
+		expect(filesPanelMaxWidth(400)).toBe(240);
+	});
+
+	it("stops at the ceiling a saved width can have", () => {
+		expect(filesPanelMaxWidth(20000)).toBe(4096);
+	});
+
+	it("is the ceiling while the area is not measured yet, so that a saved width is not cut", () => {
+		expect(filesPanelMaxWidth(0)).toBe(4096);
 	});
 });
 

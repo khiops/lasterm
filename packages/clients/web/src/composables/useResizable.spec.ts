@@ -60,6 +60,27 @@ describe("useResizable", () => {
 		fireMouseEvent("mouseup", 700);
 	});
 
+	it("reads a maxWidth given as a function at each move", () => {
+		let max = 400;
+		const r = useResizable({ initialWidth: 200, minWidth: 140, maxWidth: () => max });
+		r.onMouseDown(new MouseEvent("mousedown", { clientX: 200, bubbles: true }));
+		fireMouseEvent("mousemove", 700);
+		expect(r.width.value).toBe(400);
+		max = 600;
+		fireMouseEvent("mousemove", 700);
+		expect(r.width.value).toBe(600);
+		fireMouseEvent("mouseup", 700);
+	});
+
+	it("starts a drag from the width it shows, when the one it holds is over the maximum", () => {
+		const r = useResizable({ initialWidth: 200, minWidth: 140, maxWidth: () => 300 });
+		r.width.value = 900;
+		r.onMouseDown(new MouseEvent("mousedown", { clientX: 200, bubbles: true }));
+		fireMouseEvent("mousemove", 190); // 300 - 10
+		expect(r.width.value).toBe(290);
+		fireMouseEvent("mouseup", 190);
+	});
+
 	it("collapses when below collapseThreshold", () => {
 		const r = useResizable({
 			initialWidth: 200,

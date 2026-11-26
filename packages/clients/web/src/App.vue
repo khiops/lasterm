@@ -321,7 +321,7 @@
 					class="terminal-body"
 					:class="{ 'terminal-body--files-left': filesPanelSide === 'left' }"
 				>
-				<div class="pane-area" data-focus-zone="pane">
+				<div class="pane-area" data-focus-zone="pane" :inert="filesFillsTab">
 					<div
 						v-for="(tab, idx) in layout.tabs.value"
 						:key="tab.id"
@@ -363,27 +363,36 @@
 					</div>
 				</div>
 				<template v-if="filesPanelShown">
+					<!-- Maximized, the panel covers the panes; this keeps the room it took, so that no
+					     terminal is resized by it (#1208). -->
 					<div
-						v-if="filesForm === 'docked'"
+						v-if="filesFillsTab && filesForm === 'docked'"
+						class="files-dock-spacer"
+						:style="{ width: `${filesPanelWidth}px` }"
+					/>
+					<div
+						v-else-if="filesForm === 'docked'"
 						class="files-resize-handle"
 						role="separator"
 						aria-orientation="vertical"
 						aria-label="Resize the files panel"
 						tabindex="0"
-						:aria-valuenow="filesPanelResize.width.value"
+						:aria-valuenow="filesPanelWidth"
 						:aria-valuemin="TRANSFER_PANEL_WIDTH_MIN"
-						:aria-valuemax="TRANSFER_PANEL_WIDTH_MAX"
+						:aria-valuemax="filesPanelMax"
 						@mousedown="filesPanelResize.onMouseDown"
 						@dblclick="onFilesWidthReset"
 						@keydown="onFilesWidthKey"
 					/>
 					<FilesPanel
-						:form="filesForm"
+						:form="filesFillsTab ? 'sheet' : filesForm"
 						:side="filesPanelSide"
-						:width="filesPanelResize.width.value"
-						:over="filesForm === 'overlay' ? filesFloatOver : null"
+						:width="filesPanelWidth"
+						:over="filesForm === 'overlay' && !filesFillsTab ? filesFloatOver : null"
 						:attached-on-screen="filesAttachedOnScreen"
+						:maximized="filesFillsTab"
 						@close="closeFilesPanel"
+						@toggle-maximize="toggleFilesMaximized"
 						@show-terminal="showFilesTerminal"
 					/>
 				</template>
@@ -407,7 +416,6 @@ import {
 	isHostRailBadgeSize,
 	isHostRailColumns,
 	isTransferPanelWidth,
-	TRANSFER_PANEL_WIDTH_MAX,
 	TRANSFER_PANEL_WIDTH_MIN,
 } from '@lasterm/shared';
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue';
@@ -518,7 +526,7 @@ import {
 	tabNumberOf,
 	windowShortcutOf,
 } from './utils/app-shortcuts.js';
-import { filesPanelForm } from './utils/files-panel.js';
+import { filesPanelForm, filesPanelMaxWidth } from './utils/files-panel.js';
 import {
 	type FilesPart,
 	type FocusZone,
@@ -695,14 +703,40 @@ const filesPanelSide = computed<'left' | 'right'>(() =>
 	configStore.uiConfig.transfer?.panelSide === 'left' ? 'left' : 'right',
 );
 
+// The window's width, and the terminal area's, which the panel's form depends on.
+const windowWidth = ref(typeof window === 'undefined' ? 1024 : window.innerWidth);
+const terminalBody = ref<HTMLElement | null>(null);
+const terminalBodyWidth = ref(0);
+function onWindowResize(): void {
+	windowWidth.value = window.innerWidth;
+}
+watch(terminalBody, (el, _before, onCleanup) => {
+	if (el === null || typeof ResizeObserver === 'undefined') return;
+	terminalBodyWidth.value = el.clientWidth;
+	const observer = new ResizeObserver(() => {
+		terminalBodyWidth.value = el.clientWidth;
+	});
+	observer.observe(el);
+	onCleanup(() => observer.disconnect());
+});
+
+/**
+ * The widest the panel can be: half of the area the panes and the panel share (#1208). A saved
+ * `[layout] transfer_panel_width` over it shows clamped, and comes back with the room.
+ */
+const filesPanelMax = computed(() => filesPanelMaxWidth(terminalBodyWidth.value));
+
 const filesPanelResize = useResizable({
 	initialWidth: DEFAULT_TRANSFER_PANEL_WIDTH,
 	minWidth: TRANSFER_PANEL_WIDTH_MIN,
-	maxWidth: TRANSFER_PANEL_WIDTH_MAX,
+	maxWidth: () => filesPanelMax.value,
 	// Its edge faces the panes: dragging it towards them widens it.
 	grows: () => (filesPanelSide.value === 'right' ? -1 : 1),
 	onResizeEnd: (width) => saveLayout({ transferPanelWidth: width }),
 });
+
+/** The width it shows: the one dragged or saved, within what the window allows. */
+const filesPanelWidth = computed(() => Math.min(filesPanelResize.width.value, filesPanelMax.value));
 
 // `[layout] transfer_panel_width`, as it loads and as another window sets it.
 watch(
@@ -720,8 +754,8 @@ function onFilesWidthKey(event: KeyboardEvent): void {
 	event.preventDefault();
 	const grows = filesPanelSide.value === 'right' ? -1 : 1;
 	const width = Math.min(
-		TRANSFER_PANEL_WIDTH_MAX,
-		Math.max(TRANSFER_PANEL_WIDTH_MIN, filesPanelResize.width.value + step * grows),
+		filesPanelMax.value,
+		Math.max(TRANSFER_PANEL_WIDTH_MIN, filesPanelWidth.value + step * grows),
 	);
 	filesPanelResize.width.value = width;
 	saveLayout({ transferPanelWidth: width });
@@ -818,23 +852,6 @@ watch(
 	},
 );
 
-// The window's width, and the terminal area's, which the panel's form depends on.
-const windowWidth = ref(typeof window === 'undefined' ? 1024 : window.innerWidth);
-const terminalBody = ref<HTMLElement | null>(null);
-const terminalBodyWidth = ref(0);
-function onWindowResize(): void {
-	windowWidth.value = window.innerWidth;
-}
-watch(terminalBody, (el, _before, onCleanup) => {
-	if (el === null || typeof ResizeObserver === 'undefined') return;
-	terminalBodyWidth.value = el.clientWidth;
-	const observer = new ResizeObserver(() => {
-		terminalBodyWidth.value = el.clientWidth;
-	});
-	observer.observe(el);
-	onCleanup(() => observer.disconnect());
-});
-
 /**
  * Docked, floating or a sheet. The window's own panel docks, narrowing every pane of the tab, so
  * the terminals this window writes there get their new size (#831); the writer's panel a reader
@@ -844,10 +861,26 @@ const filesForm = computed(() =>
 	filesPanelForm({
 		windowWidth: windowWidth.value,
 		areaWidth: terminalBodyWidth.value,
-		panelWidth: filesPanelResize.width.value,
+		panelWidth: filesPanelWidth.value,
 		follows: filesPanel.followsWriter,
 	}),
 );
+
+/**
+ * The panel fills the tab over the panes (#1208): per window, never saved, and not kept once the
+ * panel closes. The panes keep their size and run on behind it; a sheet already fills the tab.
+ */
+const filesMaximized = ref(false);
+const filesFillsTab = computed(
+	() => filesPanelShown.value && filesMaximized.value && filesForm.value !== 'sheet',
+);
+watch([filesPanelShown, filesForm], ([shown, form]) => {
+	if (!shown || form === 'sheet') filesMaximized.value = false;
+});
+
+function toggleFilesMaximized(): void {
+	filesMaximized.value = !filesMaximized.value;
+}
 
 /** The pane of the terminal the panel is attached to, in the tab shown, when it follows the writer's. */
 const filesFollowedPaneId = computed<string | null>(() => {
@@ -1618,6 +1651,25 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 		// A modal dialog keeps the keyboard: nothing takes it behind the dialog (#637).
 		if (movesKeyboard(shortcut) && isInModalDialog(event.target)) return;
 		runAppAction(shortcut);
+		return;
+	}
+
+	// Esc brings the panes back from a maximized files panel, the keyboard to the pane (#1208). A
+	// text field, a question that Esc cancels and a dialog keep theirs.
+	if (
+		event.key === 'Escape' &&
+		filesFillsTab.value &&
+		!event.ctrlKey &&
+		!event.altKey &&
+		!event.metaKey &&
+		!event.shiftKey &&
+		!isTextField(event.target) &&
+		!ownsEscape(event.target) &&
+		!isInModalDialog(event.target)
+	) {
+		event.preventDefault();
+		filesMaximized.value = false;
+		void nextTick(focusActivePane);
 		return;
 	}
 
@@ -2795,6 +2847,10 @@ body,
 	z-index: 6;
 	cursor: col-resize;
 	transition: background 0.15s;
+}
+
+.files-dock-spacer {
+	flex-shrink: 0;
 }
 
 .files-resize-handle:hover,

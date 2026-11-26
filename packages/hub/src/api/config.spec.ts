@@ -119,7 +119,8 @@ describe("UI_VALUE_VALIDATORS", () => {
 		// File transfer (#835): the rules are shared, and each is tested beside
 		// its table in @lasterm/shared; one case each shows this table uses them.
 		["layout", "transferPanelWidth", "accepts", 240],
-		["layout", "transferPanelWidth", "refuses", 521],
+		["layout", "transferPanelWidth", "accepts", 1920],
+		["layout", "transferPanelWidth", "refuses", 4097],
 		["transfer", "panelSide", "accepts", "left"],
 		["transfer", "panelSide", "refuses", "top"],
 		["transfer", "openOnDrag", "accepts", false],

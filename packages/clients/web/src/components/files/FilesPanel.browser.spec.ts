@@ -4,7 +4,7 @@
  * the theme's text levels are made of, so this runs in a browser: the panel mounted with its own
  * rules and base.css, its listing failed and an option's change asking its scope.
  */
-import { BUNDLED_THEMES, DEFAULT_PROFILE, type Host } from "@lasterm/shared";
+import { BUNDLED_THEMES, DEFAULT_LAYOUT_CONFIG, DEFAULT_PROFILE, type Host } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick } from "vue";
@@ -349,5 +349,200 @@ describe("the permissions column, by the panel's width (#1195)", () => {
 		await frames();
 		expect(shown(notes.querySelector(".files-row__mode"))).toBe(true);
 		expect(shown(notes.querySelector(".files-row__owner"))).toBe(true);
+	});
+});
+
+describe("the columns' widths and choice, in the real layout (#1209)", () => {
+	const entry = (name: string, more: Partial<FileEntryView> = {}): FileEntryView => ({
+		name,
+		kind: "file",
+		size: 10,
+		mtime: "2026-10-30T10:00:00Z",
+		mode: 0o100644,
+		attributes: null,
+		owner: "o",
+		group: "g",
+		...more,
+	});
+	const fillers = Array.from({ length: 40 }, (_, index) =>
+		entry(`z${String(index).padStart(2, "0")}.txt`),
+	);
+	const row = (root: HTMLElement, name: string): HTMLElement =>
+		[...root.querySelectorAll<HTMLElement>(".files-row")].find(
+			(el) => el.querySelector(".files-row__name")?.textContent === name,
+		) as HTMLElement;
+	const rect = (el: Element | null): DOMRect => (el as Element).getBoundingClientRect();
+	const shown = (el: Element | null): boolean =>
+		el !== null && getComputedStyle(el).display !== "none";
+	const pointer = (target: Element, type: string, clientX: number): void => {
+		target.dispatchEvent(
+			new PointerEvent(type, { bubbles: true, cancelable: true, clientX, clientY: 10, button: 0 }),
+		);
+	};
+
+	it("lines the header's cells up with the rows' cells, a scrollbar or not", async () => {
+		const root = await mountBrowserIn(600, [entry("notes.md"), ...fillers]);
+		const list = root.querySelector(".files-list") as HTMLElement;
+		expect(list.scrollHeight).toBeGreaterThan(list.clientHeight);
+		const notes = row(root, "notes.md");
+		for (const column of ["size", "modified", "mode", "owner"]) {
+			const head = rect(root.querySelector(`.files-colhead--${column}`));
+			const cell = rect(notes.querySelector(`.files-row__${column}`));
+			expect(head.left, column).toBeCloseTo(cell.left, 0);
+			expect(head.width, column).toBeCloseTo(cell.width, 0);
+		}
+		expect(rect(root.querySelector(".files-colhead--name")).left).toBeCloseTo(
+			rect(notes.querySelector(".files-row__name")).left,
+			0,
+		);
+	});
+
+	it("widens a column by dragging its edge left, and narrows it dragging right", async () => {
+		const root = await mountBrowserIn(600, [entry("notes.md")]);
+		const notes = row(root, "notes.md");
+		const edge = root.querySelector('[data-resize="size"]') as HTMLElement;
+		expect(rect(notes.querySelector(".files-row__size")).width).toBe(52);
+		const name = rect(notes.querySelector(".files-row__name")).width;
+		pointer(edge, "pointerdown", 300);
+		pointer(edge, "pointermove", 270);
+		await frames();
+		expect(rect(notes.querySelector(".files-row__size")).width).toBe(82);
+		expect(rect(root.querySelector(".files-colhead--size")).width).toBe(82);
+		// Name takes what the column gives up.
+		expect(rect(notes.querySelector(".files-row__name")).width).toBe(name - 30);
+		pointer(edge, "pointermove", 320);
+		await frames();
+		expect(rect(notes.querySelector(".files-row__size")).width).toBe(40);
+		pointer(edge, "pointerup", 320);
+		await frames();
+		expect(edge.getAttribute("aria-valuenow")).toBe("40");
+	});
+
+	it("never lets a dragged column past 40 or 400 px", async () => {
+		const root = await mountBrowserIn(900, [entry("notes.md")]);
+		const edge = root.querySelector('[data-resize="owner"]') as HTMLElement;
+		pointer(edge, "pointerdown", 500);
+		pointer(edge, "pointermove", 0);
+		await frames();
+		expect(rect(row(root, "notes.md").querySelector(".files-row__owner")).width).toBe(400);
+		pointer(edge, "pointermove", 2000);
+		await frames();
+		expect(rect(row(root, "notes.md").querySelector(".files-row__owner")).width).toBe(40);
+		pointer(edge, "pointerup", 2000);
+	});
+
+	it("shows only the chosen columns, and a narrow list still drops some of them", async () => {
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			layout: { ...DEFAULT_LAYOUT_CONFIG, filesColumns: "modified,owner" },
+		};
+		const root = await mountBrowserIn(600, [entry("notes.md")]);
+		const notes = row(root, "notes.md");
+		expect(shown(notes.querySelector(".files-row__size"))).toBe(false);
+		expect(shown(notes.querySelector(".files-row__modified"))).toBe(true);
+		expect(shown(notes.querySelector(".files-row__mode"))).toBe(false);
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(true);
+		// A column not chosen says itself on hover, as one the width drops does.
+		expect(notes.getAttribute("title")).toBe("Size 10 B\nPermissions -rw-r--r--\nGroup g");
+		root.style.width = "479px";
+		await frames();
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(false);
+		expect(shown(notes.querySelector(".files-row__modified"))).toBe(true);
+		expect(notes.getAttribute("title")).toBe("Size 10 B\nPermissions -rw-r--r--\nOwner o\nGroup g");
+	});
+
+	it("keeps Name at 96 px by dropping the columns dragged too wide, the owner first", async () => {
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			layout: { ...DEFAULT_LAYOUT_CONFIG, filesOwnerWidth: 300, filesModeWidth: 100 },
+		};
+		const root = await mountBrowserIn(500, [entry("notes.md")]);
+		const notes = row(root, "notes.md");
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(false);
+		expect(shown(notes.querySelector(".files-row__mode"))).toBe(true);
+		expect(rect(notes.querySelector(".files-row__name")).width).toBeGreaterThanOrEqual(96);
+	});
+
+	it("sorts a long list from its headers without losing the rows' place", async () => {
+		const root = await mountBrowserIn(600, [
+			entry("a-small", { size: 1 }),
+			entry("b-big", { size: 999 }),
+			...fillers,
+		]);
+		const list = root.querySelector(".files-list") as HTMLElement;
+		list.scrollTop = 300;
+		await frames();
+		expect(list.scrollTop).toBe(300);
+		(root.querySelector('[data-sort="size"]') as HTMLButtonElement).click();
+		await frames();
+		(root.querySelector('[data-sort="size"]') as HTMLButtonElement).click();
+		await frames();
+		// By size, descending: b-big, the fillers, a-small last. The row the keyboard was on, a-small
+		// (the first by name), is the last of 42 and scrolled into view.
+		const small = row(root, "a-small");
+		expect(rect(small).top).toBeGreaterThanOrEqual(rect(list).top);
+		expect(rect(small).bottom).toBeLessThanOrEqual(rect(list).bottom);
+		expect(list.scrollTop).toBeGreaterThan(300);
+	});
+
+	it("says the most a column can have, and End and a double click stop there", async () => {
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			layout: { ...DEFAULT_LAYOUT_CONFIG, filesSizeWidth: 100, filesModifiedWidth: 40 },
+		};
+		const root = await mountBrowserIn(300, [entry("notes.md")]);
+		const size = root.querySelector('[data-resize="size"]') as HTMLElement;
+		const modified = root.querySelector('[data-resize="modified"]') as HTMLElement;
+		// 300 - 20 - 14 - 8 - 96 Name = 162 for Size and Modified with a gap each.
+		// Size beside Modified at 40: 162 - 48 - 8 = 106.
+		expect(size.getAttribute("aria-valuemax")).toBe("106");
+		// Modified beside Size at 100: 162 - 108 - 8 = 46, under its default 64.
+		expect(modified.getAttribute("aria-valuemax")).toBe("46");
+		modified.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+		await frames();
+		expect(modified.getAttribute("aria-valuenow")).toBe("46");
+		expect(shown(row(root, "notes.md").querySelector(".files-row__modified"))).toBe(true);
+		// End on Size stops at the room Modified leaves it: 162 - 54 - 8 = 100.
+		size.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+		await frames();
+		expect(size.getAttribute("aria-valuenow")).toBe("100");
+	});
+
+	it("keeps the columns shown as a drag found them until it ends", async () => {
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			layout: { ...DEFAULT_LAYOUT_CONFIG, filesOwnerWidth: 130 },
+		};
+		const root = await mountBrowserIn(480, [entry("notes.md")]);
+		const notes = row(root, "notes.md");
+		// 480 - 42 - (52 + 64 + 70 + 130 + 4 gaps) = 90 for Name: the owner does not fit.
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(false);
+		const edge = root.querySelector('[data-resize="size"]') as HTMLElement;
+		pointer(edge, "pointerdown", 300);
+		pointer(edge, "pointermove", 306);
+		await frames();
+		// Size now 46 would leave Name 96 and bring the owner back, under the pointer: not until the end.
+		expect(edge.getAttribute("aria-valuenow")).toBe("46");
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(false);
+		pointer(edge, "pointerup", 306);
+		await frames();
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(true);
+	});
+
+	it("never drags a column wider than the room that keeps it shown", async () => {
+		const root = await mountBrowserIn(480, [entry("notes.md")]);
+		const notes = row(root, "notes.md");
+		const edge = root.querySelector('[data-resize="owner"]') as HTMLElement;
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(true);
+		pointer(edge, "pointerdown", 400);
+		pointer(edge, "pointermove", 100);
+		await frames();
+		// 480 - 20 - 14 - 8 = 438; Name keeps 96; Size, Modified and Mode take 52 + 64 + 70 and a gap each.
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(true);
+		expect(rect(notes.querySelector(".files-row__owner")).width).toBe(124);
+		expect(rect(notes.querySelector(".files-row__name")).width).toBe(96);
+		pointer(edge, "pointerup", 100);
+		await frames();
+		expect(edge.getAttribute("aria-valuenow")).toBe("124");
 	});
 });

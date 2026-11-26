@@ -143,7 +143,12 @@ Whether matches are marked in the scrollbar is `[terminal] scrollbar_markers`, w
 | host_rail_columns | integer (1–5) | `1` | Host rail columns. More than one makes the rail a grid, filled left to right, then down |
 | host_rail_badge_size | `"small"` \| `"medium"` \| `"large"` | `"medium"` | Host rail badge size: 28, 36 or 44 px. Set in *Settings › Appearance › Host rail*, global only |
 | sidebar_width | number | `200` | Channel sidebar width in pixels (0 = collapsed) |
-| transfer_panel_width | integer (240–520) | `300` | The files panel's width in pixels, as its edge was last dragged; anything else leaves the default |
+| transfer_panel_width | integer (240–4096) | `300` | The files panel's width in pixels, as its edge was last dragged; shown no wider than half of the area the panes and the panel share, and kept as saved; anything else leaves the default |
+| files_columns | string | `"size,modified,mode,owner"` | The columns the files panel lists after Name, comma-separated, in that order; `""` shows Name only. A narrow panel still drops some. A name it does not know, a repeat or another order leaves the default |
+| files_size_width | integer (40–400) | `52` | The files panel's Size column, in pixels, as its header edge was last dragged; anything else leaves the default |
+| files_modified_width | integer (40–400) | `64` | The Modified column's width, as `files_size_width` |
+| files_mode_width | integer (40–400) | `70` | The Mode column's width, as `files_size_width` |
+| files_owner_width | integer (40–400) | `80` | The Owner column's width, as `files_size_width` |
 
 The rail's width follows from its columns and its badge size: `12 + n·badge + (n−1)·6` px, never under 48 px, so one Medium column is 48 px. Dragging the rail's edge snaps to whole columns, and a new badge size keeps the columns.
 

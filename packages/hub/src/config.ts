@@ -47,6 +47,8 @@ import {
 	ELEVATION_METHODS_LINUX,
 	ELEVATION_METHODS_WINDOWS,
 	isAgentLogFilesKept,
+	isFilesColumns,
+	isFilesColumnWidth,
 	isHostRailBadgeSize,
 	isHostRailColumns,
 	isTransferPanelWidth,
@@ -440,6 +442,16 @@ export function extractUiConfig(parsed: TOML.JsonMap): UiConfig {
 		if (isTransferPanelWidth(raw.transfer_panel_width)) {
 			config.layout.transferPanelWidth = raw.transfer_panel_width;
 		}
+		if (isFilesColumns(raw.files_columns)) config.layout.filesColumns = raw.files_columns;
+		if (isFilesColumnWidth(raw.files_size_width))
+			config.layout.filesSizeWidth = raw.files_size_width;
+		if (isFilesColumnWidth(raw.files_modified_width)) {
+			config.layout.filesModifiedWidth = raw.files_modified_width;
+		}
+		if (isFilesColumnWidth(raw.files_mode_width))
+			config.layout.filesModeWidth = raw.files_mode_width;
+		if (isFilesColumnWidth(raw.files_owner_width))
+			config.layout.filesOwnerWidth = raw.files_owner_width;
 	}
 
 	// ── [keyboard] section (#639) ───────────────────────────────────────

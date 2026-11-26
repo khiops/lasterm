@@ -413,11 +413,23 @@ overlay leave it out. Ctrl+Shift+E (`files.toggle`) waits behind `[experimental]
 **Files panel (#836, part of #721).** Everything below waits behind `[experimental] file_transfer`
 (`fileTransferEnabled`): off, no pane shows its folder button and nothing of the panel is drawn.
 - **Place.** One per window, below the tab bar beside the panes, on `[transfer] panel_side` (right by
-  default), `[layout] transfer_panel_width` wide (240–520 px, its edge dragged or moved with the arrows
-  when focused, a double click back to 300). Docked, it narrows every pane of the tab, so the window
+  default), `[layout] transfer_panel_width` wide (at least 240 px and at most half of the area the panes and
+  the panel share, its edge dragged or moved with the arrows when focused, a double click back to 300;
+  a saved width over that half shows clamped and is kept). A button in its header fills the tab with it,
+  over the panes, which keep their size and run on; the button, or Esc, brings the panes back; the state
+  is per window and not saved. Docked, it narrows every pane of the tab, so the window
   that writes those terminals resizes them (#831). It floats over the right of the pane area, below the
   pane header, on an opaque ground and resizing nothing, when docking would leave the panes less than
   480 px; it is a sheet over the terminal area below a 560 px window (`filesPanelForm`).
+- **The list's columns (#1209).** A `grid` with a header row: Name (the room left), then Size, Modified,
+  Mode and Owner, each header a button that sorts (ascending, then descending, folders first, entries
+  without a value last; the order is per window and not saved) with `aria-sort`. The edge on the left of a
+  column's header is a focusable `separator`: dragged, or moved with Left, Right, Shift, Home and End,
+  it sets the column's width (40 to 400 px, `[layout] files_*_width`, and never more than keeps the column shown); a context menu on the headers
+  chooses the columns (`[layout] files_columns`) and resets them. A column shows when chosen and the list is
+  wide enough (Size from 200 px, Modified 260, Mode 400, Owner 480) and Name keeps 96 px, as long as the
+  list is at least 138 px wide: the last columns drop first, and a column not shown says what it held in
+  the row's tooltip. The sort orders the entries the listing holds: the hub keeps the first 5,000 by name.
 - **The writer's panel, shared (#838).** The panel is a window-level change to a terminal, as its size
   is (#831), and the window that writes the terminal decides it:
   - **The writer's own panel always docks**, and in the writer's window narrows every pane of the
@@ -1443,7 +1455,7 @@ where it is written, by `TERMINAL_PROFILE_VALIDATORS` (`@lasterm/shared`: the ta
 `file-transfer.ts` and `paste_warning`'s), and one in `config.toml` that a route would refuse is not
 read. The window's settings of the files panel are global, in `[transfer]`
 (`panel_side`, `open_on_drag`, `max_concurrent` 1–3, `show_hidden`), and its width in
-`[layout] transfer_panel_width` (240–520 px); CONFIG_REFERENCE.md has them all.
+`[layout] transfer_panel_width` (240–4096 px); CONFIG_REFERENCE.md has them all.
 
 A key set for a host or globally holds on a given terminal only once the overrides nearer to it
 are gone: `planProfileWrite` (`@lasterm/shared`) plans that write, the value then each drop, and

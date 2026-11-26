@@ -82,6 +82,11 @@ describe("Appearance › Host rail › Badge size", () => {
 				hostRailBadgeSize: "small",
 				sidebarWidth: 200,
 				transferPanelWidth: 300,
+				filesColumns: "size,modified,mode,owner",
+				filesSizeWidth: 52,
+				filesModifiedWidth: 64,
+				filesModeWidth: 70,
+				filesOwnerWidth: 80,
 			},
 		};
 		await nextTick();

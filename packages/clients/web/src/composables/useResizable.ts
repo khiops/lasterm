@@ -3,7 +3,8 @@ import { type Ref, ref } from "vue";
 export interface ResizeOptions {
 	initialWidth: number;
 	minWidth: number;
-	maxWidth: number;
+	/** A function is read at each drag, for a maximum that follows the window. */
+	maxWidth: number | (() => number);
 	/** Width below which the panel collapses to 0 (optional) */
 	collapseThreshold?: number;
 	onResizeEnd?: (width: number) => void;
@@ -23,6 +24,10 @@ export function useResizable(options: ResizeOptions): {
 	const width = ref(options.initialWidth);
 	const collapsed = ref(false);
 
+	const maxOf = (): number =>
+		typeof options.maxWidth === "function" ? options.maxWidth() : options.maxWidth;
+	const clamp = (value: number): number => Math.min(maxOf(), Math.max(options.minWidth, value));
+
 	let startX = 0;
 	let startWidth = 0;
 
@@ -35,7 +40,7 @@ export function useResizable(options: ResizeOptions): {
 			width.value = 0;
 		} else {
 			collapsed.value = false;
-			width.value = Math.min(options.maxWidth, Math.max(options.minWidth, newWidth));
+			width.value = clamp(newWidth);
 		}
 	}
 
@@ -50,7 +55,7 @@ export function useResizable(options: ResizeOptions): {
 	function onMouseDown(e: MouseEvent): void {
 		e.preventDefault();
 		startX = e.clientX;
-		startWidth = collapsed.value ? options.initialWidth : width.value;
+		startWidth = collapsed.value ? options.initialWidth : clamp(width.value);
 		document.addEventListener("mousemove", onMouseMove);
 		document.addEventListener("mouseup", onMouseUp);
 		document.body.style.userSelect = "none";

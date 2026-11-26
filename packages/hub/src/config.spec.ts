@@ -1415,6 +1415,11 @@ describe("extractUiConfig — layout section", () => {
 			hostRailBadgeSize: "medium",
 			sidebarWidth: 200,
 			transferPanelWidth: 300,
+			filesColumns: "size,modified,mode,owner",
+			filesSizeWidth: 52,
+			filesModifiedWidth: 64,
+			filesModeWidth: 70,
+			filesOwnerWidth: 80,
 		});
 	});
 
@@ -1427,18 +1432,51 @@ describe("extractUiConfig — layout section", () => {
 			hostRailBadgeSize: "small",
 			sidebarWidth: 240,
 			transferPanelWidth: 300,
+			filesColumns: "size,modified,mode,owner",
+			filesSizeWidth: 52,
+			filesModifiedWidth: 64,
+			filesModeWidth: 70,
+			filesOwnerWidth: 80,
 		});
 	});
 
 	// The files panel's width (#835), kept as its edge is dragged.
-	it("parses transfer_panel_width from 240 to 520, and ignores anything else", () => {
+	it("parses transfer_panel_width from 240 to 4096, and ignores anything else", () => {
 		expect(
 			extractUiConfig({ layout: { transfer_panel_width: 420 } }).layout.transferPanelWidth,
 		).toBe(420);
-		for (const width of [239, 521, 300.5, "300"]) {
+		expect(
+			extractUiConfig({ layout: { transfer_panel_width: 1920 } }).layout.transferPanelWidth,
+		).toBe(1920);
+		for (const width of [239, 4097, 300.5, "300"]) {
 			const config = extractUiConfig({ layout: { transfer_panel_width: width } });
 			expect(config.layout.transferPanelWidth, String(width)).toBe(300);
 		}
+	});
+
+	// The files panel's columns (#1209): shown, and as wide as they were dragged.
+	it("parses files_columns and the files column widths, and ignores anything else", () => {
+		const config = extractUiConfig({
+			layout: {
+				files_columns: "size,mode",
+				files_size_width: 70,
+				files_modified_width: 120,
+				files_mode_width: 90,
+				files_owner_width: 400,
+			},
+		});
+		expect(config.layout.filesColumns).toBe("size,mode");
+		expect(config.layout.filesSizeWidth).toBe(70);
+		expect(config.layout.filesModifiedWidth).toBe(120);
+		expect(config.layout.filesModeWidth).toBe(90);
+		expect(config.layout.filesOwnerWidth).toBe(400);
+		const refused = extractUiConfig({
+			layout: { files_columns: "mode,size", files_size_width: 39, files_owner_width: "80" },
+		});
+		expect(refused.layout.filesColumns).toBe("size,modified,mode,owner");
+		expect(refused.layout.filesSizeWidth).toBe(52);
+		expect(refused.layout.filesOwnerWidth).toBe(80);
+		expect(extractUiConfig({ layout: { files_columns: "" } }).layout.filesColumns).toBe("");
 	});
 
 	it("ignores columns outside 1 to 5, and a size it does not know", () => {

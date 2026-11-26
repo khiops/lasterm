@@ -2,6 +2,8 @@
 import type { AppearanceConfig } from "./appearance.js";
 import type { ElevationMethod, Host, TerminalProfile } from "./entities.js";
 import {
+	DEFAULT_FILES_COLUMN_WIDTHS,
+	DEFAULT_FILES_COLUMNS,
 	DEFAULT_TRANSFER_PANEL_WIDTH,
 	EXPERIMENTAL_CONFIG_KEYS,
 	type ExperimentalConfig,
@@ -302,8 +304,18 @@ export interface LayoutConfig {
 	hostRailBadgeSize: HostRailBadgeSize;
 	/** Channel sidebar width in pixels. 0 means collapsed. Default: 200. */
 	sidebarWidth: number;
-	/** The files panel's width in pixels, 240 to 520, as its edge was last dragged (#835). Default: 300. */
+	/** The files panel's width in pixels, 240 to 4096, shown no wider than half of the area the panes and the panel share, as its edge was last dragged (#835, #1208). Default: 300. */
 	transferPanelWidth: number;
+	/** The columns the files panel lists after Name, comma-separated: "size,modified,mode,owner" (#1209). Narrow panels still drop some. */
+	filesColumns: string;
+	/** The files panel's Size column, in pixels, 40 to 400, as its edge was last dragged (#1209). Default: 52. */
+	filesSizeWidth: number;
+	/** The Modified column's width. Default: 64. */
+	filesModifiedWidth: number;
+	/** The Mode column's width. Default: 70. */
+	filesModeWidth: number;
+	/** The Owner column's width. Default: 80. */
+	filesOwnerWidth: number;
 }
 
 export const DEFAULT_LAYOUT_CONFIG: LayoutConfig = {
@@ -311,6 +323,11 @@ export const DEFAULT_LAYOUT_CONFIG: LayoutConfig = {
 	hostRailBadgeSize: "medium",
 	sidebarWidth: 200,
 	transferPanelWidth: DEFAULT_TRANSFER_PANEL_WIDTH,
+	filesColumns: DEFAULT_FILES_COLUMNS,
+	filesSizeWidth: DEFAULT_FILES_COLUMN_WIDTHS.size,
+	filesModifiedWidth: DEFAULT_FILES_COLUMN_WIDTHS.modified,
+	filesModeWidth: DEFAULT_FILES_COLUMN_WIDTHS.mode,
+	filesOwnerWidth: DEFAULT_FILES_COLUMN_WIDTHS.owner,
 };
 
 /** UI behavioral configuration (from [ui], [tabs], [panes], [channels], [startup], [title], [search], [layout], [keyboard], [transfer] and [experimental] in config.toml). */
@@ -494,6 +511,11 @@ export const LAYOUT_CONFIG_KEYS = [
 	"hostRailBadgeSize",
 	"sidebarWidth",
 	"transferPanelWidth",
+	"filesColumns",
+	"filesSizeWidth",
+	"filesModifiedWidth",
+	"filesModeWidth",
+	"filesOwnerWidth",
 ] as const;
 
 export const KEYBOARD_CONFIG_KEYS = ["keyHints"] as const;

@@ -8,7 +8,7 @@
 		:class="[
 			`files-panel--${form}`,
 			`files-panel--${side}`,
-			{ 'files-panel--follows': filesPanel.followsWriter },
+			{ 'files-panel--follows': filesPanel.followsWriter, 'files-panel--maximized': maximized },
 		]"
 		:style="panelStyle"
 		:aria-label="hostLabel === '' ? 'Files' : `Files on ${hostLabel}`"
@@ -61,6 +61,17 @@
 					@click="filesPanel.togglePin()"
 				>
 					<FilesIcon name="pin" />
+				</button>
+				<!-- A sheet already fills the tab: only a panel that docks or floats can maximize. -->
+				<button
+					v-if="form !== 'sheet' || maximized"
+					type="button"
+					class="files-header__btn"
+					:aria-label="maximized ? 'Restore the panes' : 'Maximize the files panel'"
+					:title="maximized ? 'Restore the panes (Esc)' : 'Fill the tab with the files panel'"
+					@click="emit('toggle-maximize')"
+				>
+					<FilesIcon :name="maximized ? 'restore' : 'maximize'" />
 				</button>
 				<button
 					type="button"
@@ -167,6 +178,8 @@ const props = defineProps<{
 	width: number;
 	/** The terminal it is attached to is in the tab shown. */
 	attachedOnScreen: boolean;
+	/** It fills the tab over the panes (#1208): drawn as a sheet, with its restore button. */
+	maximized?: boolean;
 	/**
 	 * Floating, the pane it floats over, below its header: the writer's panel a reader follows
 	 * covers that terminal's pane and no other (#838). Absent, it floats over the right of the
@@ -177,6 +190,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
 	(e: "close"): void;
+	/** The maximize button, or the restore one while it fills the tab. */
+	(e: "toggle-maximize"): void;
 	/** Show the tab of the terminal the panel is pinned to. */
 	(e: "show-terminal"): void;
 }>();
@@ -385,7 +400,7 @@ function onSplitDown(event: PointerEvent): void {
 	z-index: 30;
 }
 
-.files-panel--sheet .files-header__title {
+.files-panel--sheet:not(.files-panel--maximized) .files-header__title {
 	display: none;
 }
 

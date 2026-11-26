@@ -68,18 +68,21 @@ let app: App | null = null;
 let root: HTMLElement;
 let closed: number;
 let shown: number;
+let toggled: number;
 const props = reactive<{
 	form: FilesPanelForm;
 	side: "left" | "right";
 	width: number;
 	attachedOnScreen: boolean;
 	over: PaneBox | null;
+	maximized: boolean;
 }>({
 	form: "docked",
 	side: "right",
 	width: 300,
 	attachedOnScreen: true,
 	over: null,
+	maximized: false,
 });
 
 async function settle(): Promise<void> {
@@ -98,6 +101,7 @@ async function mountPanel(): Promise<void> {
 				...props,
 				onClose: () => closed++,
 				onShowTerminal: () => shown++,
+				onToggleMaximize: () => toggled++,
 			}),
 	});
 	app.mount(root);
@@ -119,8 +123,10 @@ beforeEach(() => {
 		width: 300,
 		attachedOnScreen: true,
 		over: null,
+		maximized: false,
 	});
 	closed = 0;
+	toggled = 0;
 	shown = 0;
 	mocks.listHostFiles.mockReset();
 	mocks.listHostFiles.mockResolvedValue({
@@ -265,6 +271,43 @@ describe("moving the focus to a pane on another host", () => {
 		await mountPanel();
 		root.querySelector<HTMLButtonElement>('button[aria-label="Close the files panel"]')?.click();
 		expect(closed).toBe(1);
+	});
+});
+
+describe("maximizing (#1208)", () => {
+	const maximizeButton = () =>
+		root.querySelector<HTMLButtonElement>('button[aria-label="Maximize the files panel"]');
+	const restoreButton = () =>
+		root.querySelector<HTMLButtonElement>('button[aria-label="Restore the panes"]');
+
+	it("asks to maximize on its header button, docked", async () => {
+		await mountPanel();
+		expect(restoreButton()).toBeNull();
+		maximizeButton()?.click();
+		expect(toggled).toBe(1);
+	});
+
+	it("offers the same button to maximize a floating panel", async () => {
+		props.form = "overlay";
+		await mountPanel();
+		expect(maximizeButton()).not.toBeNull();
+	});
+
+	it("offers to restore the panes, as a sheet with its title, while maximized", async () => {
+		props.form = "sheet";
+		props.maximized = true;
+		await mountPanel();
+		expect(maximizeButton()).toBeNull();
+		restoreButton()?.click();
+		expect(toggled).toBe(1);
+		expect(aside().classList.contains("files-panel--maximized")).toBe(true);
+	});
+
+	it("has no maximize button as a sheet that already fills the tab", async () => {
+		props.form = "sheet";
+		await mountPanel();
+		expect(maximizeButton()).toBeNull();
+		expect(restoreButton()).toBeNull();
 	});
 });
 

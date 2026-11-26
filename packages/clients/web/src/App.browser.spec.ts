@@ -199,6 +199,127 @@ describe("the files panel's form", () => {
 		expect(box("#files-panel").width).toBe(340);
 		expect(box(".pane-area").width).toBeCloseTo(area - 340, 0);
 	});
+
+	// #1208: no fixed 520 px; the widest is half of what the panes and the panel share.
+	it("is dragged past 520 px, up to half of the area", async () => {
+		const { hub } = await mountWindow({
+			channels: [live("T1")],
+			ui: ON,
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+		});
+		const body = box(".terminal-body").width;
+		focusPane("P1");
+		await press("E", { ctrl: true, shift: true });
+		const x = box(".files-resize-handle").left;
+
+		document
+			.querySelector(".files-resize-handle")
+			?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: x }));
+		document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: x - 2000 }));
+		document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: x - 2000 }));
+		await settle();
+
+		const widest = Math.floor(body / 2);
+		expect(widest).toBeGreaterThan(520);
+		expect(box("#files-panel").width).toBe(widest);
+		expect(hub.calls("PUT", "/api/config/ui").map((call) => call.body)).toEqual([
+			{ layout: { transferPanelWidth: widest } },
+		]);
+		expect(document.querySelector(".files-resize-handle")?.getAttribute("aria-valuemax")).toBe(
+			String(widest),
+		);
+	});
+
+	it("clamps a saved width over the widest, and gives it back when the window grows", async () => {
+		const { hub } = await mountWindow({
+			channels: [live("T1")],
+			ui: { ...ON, layout: { transferPanelWidth: 1000 } },
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+		});
+		focusPane("P1");
+		await press("E", { ctrl: true, shift: true });
+		expect(box("#files-panel").width).toBe(Math.floor(box(".terminal-body").width / 2));
+
+		await page.viewport(2600, 900);
+		await vi.waitFor(() => expect(box("#files-panel").width).toBe(1000));
+		expect(hub.calls("PUT", "/api/config/ui")).toEqual([]);
+	});
+});
+
+// #1208: the panel fills the tab, in place of the panes, which keep running and keep their size.
+describe("maximizing the files panel", () => {
+	const ON = { experimental: { fileTransfer: true } };
+
+	const open = async () => {
+		const mounted = await mountWindow({
+			channels: [live("T1")],
+			ui: ON,
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+		});
+		focusPane("P1");
+		await press("E", { ctrl: true, shift: true });
+		return mounted;
+	};
+	const maximizeButton = () =>
+		document.querySelector<HTMLElement>('#files-panel [aria-label="Maximize the files panel"]');
+	const maximize = async () => {
+		const button = maximizeButton();
+		if (button === null) throw new Error("no Maximize button");
+		button.click();
+		await settle(4);
+	};
+
+	it("fills the tab over the panes, which keep their place and size", async () => {
+		await open();
+		const terminal = pane("P1");
+		const before = placeOf(box(".pane-area"));
+
+		await maximize();
+
+		expect(placeOf(box("#files-panel"))).toEqual(placeOf(box(".terminal-body")));
+		expect(placeOf(box(".pane-area"))).toEqual(before);
+		expect(pane("P1")).toBe(terminal);
+		expect(document.querySelector(".pane-area")?.hasAttribute("inert")).toBe(true);
+		expect(document.querySelector('#files-panel [aria-label="Restore the panes"]')).not.toBeNull();
+	});
+
+	it("brings the panes back at the width the panel had, on its button", async () => {
+		await open();
+		await maximize();
+
+		document.querySelector<HTMLElement>('#files-panel [aria-label="Restore the panes"]')?.click();
+		await settle(4);
+
+		expect(box("#files-panel").width).toBe(300);
+		expect(document.querySelector(".pane-area")?.hasAttribute("inert")).toBe(false);
+		expect(maximizeButton()).not.toBeNull();
+	});
+
+	it("brings the panes back on Escape, the keyboard in the pane", async () => {
+		await open();
+		await maximize();
+
+		await press("Escape");
+		await settle(4);
+
+		expect(box("#files-panel").width).toBe(300);
+		expect(paneWithKeyboard()).toBe("P1");
+	});
+
+	it("is not kept: a panel closed while maximized opens docked again", async () => {
+		const { hub } = await open();
+		await maximize();
+		document
+			.querySelector<HTMLElement>('#files-panel [aria-label="Close the files panel"]')
+			?.click();
+		await settle(4);
+
+		focusPane("P1");
+		await press("E", { ctrl: true, shift: true });
+
+		expect(box("#files-panel").width).toBe(300);
+		expect(hub.calls("PUT", "/api/config/ui")).toEqual([]);
+	});
 });
 
 // Opened from the palette, Settings has nowhere to give the keyboard back to: the keyboard goes to

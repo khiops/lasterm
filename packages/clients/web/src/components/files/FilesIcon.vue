@@ -16,6 +16,8 @@ type FilesIconName =
 	| "folder-plus"
 	| "pin"
 	| "close"
+	| "maximize"
+	| "restore"
 	| "chevron-right"
 	| "chevron-down"
 	| "alert"
@@ -54,6 +56,8 @@ const PATHS: Readonly<Record<FilesIconName, readonly string[]>> = {
 		"M9 13h6",
 		"M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
 	],
+	maximize: ["M15 3h6v6", "m21 3-7 7", "m3 21 7-7", "M9 21H3v-6"],
+	restore: ["m14 10 7-7", "M20 10h-6V4", "m3 21 7-7", "M4 14h6v6"],
 	pin: [
 		"M12 17v5",
 		"M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z",

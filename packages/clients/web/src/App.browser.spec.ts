@@ -377,9 +377,15 @@ describe("maximizing the files panel", () => {
 		await maximize();
 
 		await page.viewport(500, 800);
-		await vi.waitFor(() => expect(document.querySelector(".files-panel--sheet")).not.toBeNull(), {
-			timeout: 5000,
-		});
+		// A maximized panel is drawn as a sheet already: it is the window's shrinking that must be
+		// seen, which lets go of the maximized state, before the window grows back.
+		await vi.waitFor(
+			() => {
+				expect(document.querySelector(".files-panel--sheet")).not.toBeNull();
+				expect(document.querySelector(".files-panel--maximized")).toBeNull();
+			},
+			{ timeout: 5000 },
+		);
 		await page.viewport(1400, 900);
 
 		await vi.waitFor(() => expect(document.querySelector(".files-panel--docked")).not.toBeNull(), {

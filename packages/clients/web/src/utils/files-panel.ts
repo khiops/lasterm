@@ -352,7 +352,7 @@ export const COLUMN_MIN_LIST_WIDTH: Readonly<Record<FilesColumn, number>> = {
 export const ROW_PADDING = 10;
 export const ROW_ICON = 14;
 export const ROW_GAP = 8;
-/** The Name column never gets less than this: the columns that would take it go instead. */
+/** The Name column gets this much when the list allows it: the columns that would take it go instead. */
 export const NAME_MIN_WIDTH = 96;
 
 /**

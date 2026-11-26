@@ -1052,6 +1052,115 @@ describe("column headers, sorting, widths and the columns chosen (#1209)", () =>
 		expect(rowEl("adir").hasAttribute("title")).toBe(false);
 	});
 
+	it("keeps the keyboard on the same file when a refresh puts it elsewhere in the order", async () => {
+		mountBrowser();
+		await settle();
+		sortButton("Size").click();
+		await settle();
+		// By size: adir, zdir, small.txt (5), mid.log (200), big.bin (3000). The keyboard is on small.txt.
+		key(rowEl("adir"), "ArrowDown");
+		key(rowEl("zdir"), "ArrowDown");
+		await settle();
+		expect(root.querySelector('[role="row"][tabindex="0"]')?.textContent).toContain("small.txt");
+		// It grows past the others on the host; the refresh lists it last.
+		show([
+			sized("big.bin", 3000),
+			folder("zdir"),
+			sized("small.txt", 9000),
+			sized("mid.log", 200),
+			folder("adir"),
+		]);
+		(root.querySelector('button[aria-label="Refresh"]') as HTMLButtonElement).click();
+		await settle();
+		expect(rows()).toEqual(["adir", "zdir", "mid.log", "big.bin", "small.txt"]);
+		expect(root.querySelector('[role="row"][tabindex="0"]')?.textContent).toContain("small.txt");
+	});
+
+	it("draws the row the keyboard is on in index order, wherever the list is scrolled", async () => {
+		show(Array.from({ length: 200 }, (_, i) => sized(`f${String(i).padStart(3, "0")}`, i)));
+		mountBrowser();
+		await settle();
+		const list = root.querySelector(".files-list") as HTMLElement;
+		list.scrollTop = 24 * 120;
+		list.dispatchEvent(new Event("scroll"));
+		await settle();
+		const indexes = [...root.querySelectorAll<HTMLElement>(".files-row")].map((el) =>
+			Number(el.getAttribute("aria-rowindex")),
+		);
+		expect(indexes).toContain(2);
+		expect(indexes).toEqual([...indexes].sort((a, b) => a - b));
+	});
+
+	it("drops a drag that the pointer's cancellation interrupts, without writing", async () => {
+		mountBrowser();
+		await settle();
+		const edge = resizer("size");
+		const pointer = (type: string, clientX: number, pointerId = 1): void => {
+			edge.dispatchEvent(
+				new PointerEvent(type, { bubbles: true, cancelable: true, clientX, button: 0, pointerId }),
+			);
+		};
+		pointer("pointerdown", 300);
+		pointer("pointermove", 270);
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("82");
+		pointer("pointercancel", 270);
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("52");
+		expect(saved()).toEqual([]);
+	});
+
+	it("follows the first pointer of a drag only, and writes nothing for a click", async () => {
+		mountBrowser();
+		await settle();
+		const edge = resizer("size");
+		const pointer = (type: string, clientX: number, pointerId: number): void => {
+			edge.dispatchEvent(
+				new PointerEvent(type, { bubbles: true, cancelable: true, clientX, button: 0, pointerId }),
+			);
+		};
+		pointer("pointerdown", 300, 1);
+		pointer("pointerdown", 500, 2);
+		pointer("pointermove", 100, 2);
+		pointer("pointerup", 100, 2);
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("52");
+		expect(saved()).toEqual([]);
+		pointer("pointermove", 290, 1);
+		pointer("pointerup", 290, 1);
+		await settle();
+		expect(saved()).toEqual([{ layout: { filesSizeWidth: 62 } }]);
+		// A press and release on the edge with no move keeps what is there.
+		pointer("pointerdown", 300, 3);
+		pointer("pointerup", 300, 3);
+		await settle();
+		expect(saved()).toHaveLength(1);
+	});
+
+	it("reserves Escape to the menu while it is open", async () => {
+		mountBrowser();
+		await settle();
+		header("Size").dispatchEvent(menuRequest());
+		await settle();
+		expect(root.querySelector('[role="menu"]')?.hasAttribute("data-own-escape")).toBe(true);
+	});
+
+	it("puts the keyboard on the Name header when the choice hid the header it came from", async () => {
+		mountBrowser();
+		await settle();
+		const origin = sortButton("Modified");
+		origin.focus();
+		origin.dispatchEvent(menuRequest());
+		await settle();
+		const menu = root.querySelector('[role="menu"]') as HTMLElement;
+		const modified = [...menu.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]')][1];
+		modified?.click();
+		await settle();
+		key(modified as HTMLElement, "Tab");
+		await settle();
+		expect(document.activeElement).toBe(sortButton("Name"));
+	});
+
 	it("closes the menu on Escape and puts the keyboard back on the header", async () => {
 		mountBrowser();
 		await settle();

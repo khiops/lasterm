@@ -485,6 +485,50 @@ describe("the columns' widths and choice, in the real layout (#1209)", () => {
 		expect(list.scrollTop).toBeGreaterThan(300);
 	});
 
+	it("says the most a column can have, and End and a double click stop there", async () => {
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			layout: { ...DEFAULT_LAYOUT_CONFIG, filesSizeWidth: 100, filesModifiedWidth: 40 },
+		};
+		const root = await mountBrowserIn(300, [entry("notes.md")]);
+		const size = root.querySelector('[data-resize="size"]') as HTMLElement;
+		const modified = root.querySelector('[data-resize="modified"]') as HTMLElement;
+		// 300 - 20 - 14 - 8 - 96 Name = 162 for Size and Modified with a gap each.
+		// Size beside Modified at 40: 162 - 48 - 8 = 106.
+		expect(size.getAttribute("aria-valuemax")).toBe("106");
+		// Modified beside Size at 100: 162 - 108 - 8 = 46, under its default 64.
+		expect(modified.getAttribute("aria-valuemax")).toBe("46");
+		modified.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+		await frames();
+		expect(modified.getAttribute("aria-valuenow")).toBe("46");
+		expect(shown(row(root, "notes.md").querySelector(".files-row__modified"))).toBe(true);
+		// End on Size stops at the room Modified leaves it: 162 - 54 - 8 = 100.
+		size.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+		await frames();
+		expect(size.getAttribute("aria-valuenow")).toBe("100");
+	});
+
+	it("keeps the columns shown as a drag found them until it ends", async () => {
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			layout: { ...DEFAULT_LAYOUT_CONFIG, filesOwnerWidth: 130 },
+		};
+		const root = await mountBrowserIn(480, [entry("notes.md")]);
+		const notes = row(root, "notes.md");
+		// 480 - 42 - (52 + 64 + 70 + 130 + 4 gaps) = 90 for Name: the owner does not fit.
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(false);
+		const edge = root.querySelector('[data-resize="size"]') as HTMLElement;
+		pointer(edge, "pointerdown", 300);
+		pointer(edge, "pointermove", 306);
+		await frames();
+		// Size now 46 would leave Name 96 and bring the owner back, under the pointer: not until the end.
+		expect(edge.getAttribute("aria-valuenow")).toBe("46");
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(false);
+		pointer(edge, "pointerup", 306);
+		await frames();
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(true);
+	});
+
 	it("never drags a column wider than the room that keeps it shown", async () => {
 		const root = await mountBrowserIn(480, [entry("notes.md")]);
 		const notes = row(root, "notes.md");

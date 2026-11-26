@@ -158,11 +158,11 @@
 								:data-resize="column"
 								:aria-label="`Resize ${FILES_COLUMN_LABELS[column]} column`"
 								:aria-valuemin="FILES_COLUMN_WIDTH_MIN"
-								:aria-valuemax="FILES_COLUMN_WIDTH_MAX"
+								:aria-valuemax="roomFor(column)"
 								:aria-valuenow="widths[column]"
 								@pointerdown="startResize(column, $event)"
 								@keydown="onResizeKey(column, $event)"
-								@dblclick="commitWidths({ [column]: DEFAULT_FILES_COLUMN_WIDTHS[column] })"
+								@dblclick="resetWidth(column)"
 							/>
 							<button
 								type="button"
@@ -508,15 +508,16 @@ async function load(): Promise<void> {
 	}
 	failure.value = null;
 	const changed = listing.value?.path !== answer.value.path;
+	// The entry the keyboard is on, to find again where a reload puts it in the order shown.
+	const kept = changed ? undefined : sorted.value[current.value]?.name;
 	listing.value = answer.value;
-	const named =
-		focusName === null
-			? -1
-			: sortEntries(answer.value.entries, sort.value).findIndex((entry) => entry.name === focusName);
+	const asked = focusName;
+	const want = asked ?? kept ?? null;
+	const named = want === null ? -1 : sorted.value.findIndex((entry) => entry.name === want);
 	focusName = null;
 	if (named !== -1) current.value = named;
 	else if (changed || current.value >= answer.value.entries.length) current.value = 0;
-	if (named !== -1) void nextTick(() => focusRow(named));
+	if (named !== -1 && asked !== null) void nextTick(() => focusRow(named));
 }
 
 watch(
@@ -629,7 +630,8 @@ const visibleRows = computed(() => {
 	if (kept !== undefined && (current.value < first || current.value >= last)) {
 		rows.push({ index: current.value, entry: kept });
 	}
-	return rows;
+	// In index order, so that a grid reader meets the rows as they run.
+	return rows.sort((a, b) => a.index - b.index);
 });
 
 // ─── The columns: chosen, sized, sorted, and dropped by the width the rows get ─
@@ -649,10 +651,10 @@ const chosen = computed<readonly FilesColumn[]>(
 		FILES_COLUMNS,
 );
 
-/** The columns chosen where nothing saves them (no token): they last for this window only. */
+/** The columns chosen where nothing saves them (no token): they last as long as this list does. */
 const localChoice = ref<string | null>(null);
 
-/** Widths being dragged, or set where nothing saves them (no token): they win over the saved ones. */
+/** Widths being dragged, or set where nothing saves them (no token, for as long as this list lasts): they win over the saved ones. */
 const dragged = ref<Partial<Record<FilesColumn, number>>>({});
 
 const widths = computed<Record<FilesColumn, number>>(() => {
@@ -693,8 +695,13 @@ watch(
 
 onUnmounted(() => widthObserver?.disconnect());
 
+/** The columns shown while an edge is dragged: they stay as the drag found them until it ends. */
+const frozen = ref<readonly FilesColumn[] | null>(null);
+
 /** The columns shown: the chosen ones the width keeps, at the widths they have. */
-const shown = computed(() => shownColumns(chosen.value, widths.value, listWidth.value));
+const shown = computed(
+	() => frozen.value ?? shownColumns(chosen.value, widths.value, listWidth.value),
+);
 
 function isShown(column: SortKey): boolean {
 	return column === "name" || shown.value.includes(column);
@@ -796,7 +803,7 @@ function choiceValues(csv: string): Partial<LayoutConfig> {
 
 /** The edge of a header on its left: dragging it left widens the column, right narrows it. */
 function startResize(column: FilesColumn, event: PointerEvent): void {
-	if (event.button !== 0) return;
+	if (event.button !== 0 || resizing.value !== null) return;
 	event.preventDefault();
 	const handle = event.currentTarget as HTMLElement;
 	try {
@@ -808,19 +815,42 @@ function startResize(column: FilesColumn, event: PointerEvent): void {
 	const start = widths.value[column];
 	resizing.value = column;
 	const room = roomFor(column);
+	frozen.value = [...shown.value];
+	const before = dragged.value[column];
 	const move = (e: PointerEvent): void => {
+		if (e.pointerId !== event.pointerId) return;
 		dragged.value[column] = Math.min(room, clampWidth(start + from - e.clientX));
 	};
-	const end = (): void => {
+	const finish = (keep: boolean): void => {
 		handle.removeEventListener("pointermove", move);
 		handle.removeEventListener("pointerup", end);
-		handle.removeEventListener("pointercancel", end);
+		handle.removeEventListener("pointercancel", cancel);
+		handle.removeEventListener("lostpointercapture", cancel);
 		resizing.value = null;
-		commitWidths({ [column]: widths.value[column] });
+		frozen.value = null;
+		const width = widths.value[column];
+		// Unchanged or interrupted: nothing to keep, and no write.
+		if (!keep || width === start) {
+			if (before === undefined) delete dragged.value[column];
+			else dragged.value[column] = before;
+			return;
+		}
+		commitWidths({ [column]: width });
 	};
+	const end = (e: PointerEvent): void => {
+		if (e.pointerId === event.pointerId) finish(true);
+	};
+	const cancel = (): void => finish(false);
 	handle.addEventListener("pointermove", move);
 	handle.addEventListener("pointerup", end);
-	handle.addEventListener("pointercancel", end);
+	handle.addEventListener("pointercancel", cancel);
+	handle.addEventListener("lostpointercapture", cancel);
+}
+
+/** A double click on an edge: the column's default width, as far as the room keeps it shown. */
+function resetWidth(column: FilesColumn): void {
+	const to = Math.min(roomFor(column), DEFAULT_FILES_COLUMN_WIDTHS[column]);
+	if (to !== widths.value[column]) commitWidths({ [column]: to });
 }
 
 /** The edge from the keyboard: Left widens, Right narrows, Shift for larger steps; Home, End: least, most. */
@@ -836,7 +866,8 @@ function onResizeKey(column: FilesColumn, event: KeyboardEvent): void {
 	if (to === null) return;
 	event.preventDefault();
 	event.stopPropagation();
-	commitWidths({ [column]: Math.min(roomFor(column), clampWidth(to)) });
+	const next = Math.min(roomFor(column), clampWidth(to));
+	if (next !== now) commitWidths({ [column]: next });
 }
 
 // ─── The columns chosen, from the headers' menu ──────────────────────────────
@@ -844,12 +875,15 @@ function onResizeKey(column: FilesColumn, event: KeyboardEvent): void {
 const menuAt = ref<{ x: number; y: number } | null>(null);
 /** Where the keyboard goes back to when the menu is left by it. */
 let menuOrigin: HTMLElement | null = null;
+/** The header row it was opened on, for the keyboard to go back to when the origin is gone. */
+let menuHead: HTMLElement | null = null;
 
 function openColumnsMenu(event: MouseEvent): void {
 	event.preventDefault();
 	const wrap = (event.currentTarget as HTMLElement).closest(".files-list-wrap");
 	if (wrap === null) return;
 	const box = wrap.getBoundingClientRect();
+	menuHead = event.currentTarget as HTMLElement;
 	menuOrigin = (event.target as HTMLElement).closest<HTMLElement>("button, [role=separator]");
 	menuAt.value = {
 		x: Math.max(0, Math.min(event.clientX - box.left, box.width - 170)),
@@ -859,7 +893,11 @@ function openColumnsMenu(event: MouseEvent): void {
 
 function closeColumnsMenu(refocus: boolean): void {
 	menuAt.value = null;
-	if (refocus) void nextTick(() => menuOrigin?.focus());
+	if (!refocus) return;
+	// The header it came from, unless the choice just hid it: then the Name header.
+	const hidden = menuOrigin?.closest<HTMLElement>("[role=columnheader]")?.style.display === "none";
+	const back = menuOrigin === null || hidden ? menuHead?.querySelector<HTMLElement>(".files-sort") : menuOrigin;
+	void nextTick(() => back?.focus());
 }
 
 function toggleColumn(column: FilesColumn): void {

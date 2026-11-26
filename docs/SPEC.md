@@ -427,8 +427,9 @@ overlay leave it out. Ctrl+Shift+E (`files.toggle`) waits behind `[experimental]
   column's header is a focusable `separator`: dragged, or moved with Left, Right, Shift, Home and End,
   it sets the column's width (40 to 400 px, `[layout] files_*_width`, and never more than keeps the column shown); a context menu on the headers
   chooses the columns (`[layout] files_columns`) and resets them. A column shows when chosen and the list is
-  wide enough (Size from 200 px, Modified 260, Mode 400, Owner 480) and Name keeps 96 px: the last columns
-  drop first, and a column not shown says what it held in the row's tooltip.
+  wide enough (Size from 200 px, Modified 260, Mode 400, Owner 480) and Name keeps 96 px, as long as the
+  list is at least 138 px wide: the last columns drop first, and a column not shown says what it held in
+  the row's tooltip. The sort orders the entries the listing holds: the hub keeps the first 5,000 by name.
 - **The writer's panel, shared (#838).** The panel is a window-level change to a terminal, as its size
   is (#831), and the window that writes the terminal decides it:
   - **The writer's own panel always docks**, and in the writer's window narrows every pane of the

@@ -4,6 +4,7 @@
 		class="files-menu"
 		role="menu"
 		aria-label="Columns"
+		data-own-escape
 		:style="{ left: `${x}px`, top: `${y}px` }"
 		@keydown="onKeydown"
 		@pointerdown.stop
@@ -99,6 +100,8 @@ onUnmounted(() => document.removeEventListener("pointerdown", onOutside, true));
 	color: var(--nt-text-strong);
 	box-shadow: var(--nt-shadow);
 	font-size: 12px;
+	max-height: calc(100% - 8px);
+	overflow-y: auto;
 }
 
 .files-menu__item {

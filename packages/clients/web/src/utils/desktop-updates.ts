@@ -32,6 +32,8 @@ export interface UpdateState {
 	lastCheckedAt?: string;
 	lastAttemptAt?: string;
 	checkError?: string;
+	/** When the desktop saw that check fail. */
+	checkFailedAt?: string;
 	offer?: UpdateOffer;
 	wantsDialog: boolean;
 	loadError?: string;
@@ -49,7 +51,8 @@ export const updateCommands = {
 	getState: () => invoke<UpdateState>("get_update_state"),
 	setMode: (mode: UpdateMode) => invoke<void>("set_update_mode", { mode }),
 	chooseAlwaysUpdate: (key: string) => invoke<void>("choose_always_update", { key }),
-	check: () => invoke<void>("check_for_updates"),
+	/** Starts or joins a check; answers the state, a waiting one included. */
+	check: () => invoke<UpdateState>("check_for_updates"),
 	/** `false` when the choice holds until Lasterm restarts only. */
 	snooze: (key: string) => invoke<boolean>("snooze_update", { key }),
 	openStorePage: () => invoke<void>("open_store_page"),

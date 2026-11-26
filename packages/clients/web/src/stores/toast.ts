@@ -5,6 +5,8 @@ import { ref } from "vue";
 export interface ToastAction {
 	label: string;
 	run: () => void;
+	/** The toast stays when its button is pressed: `run` dismisses it once its work succeeded (#1214). */
+	keepOpen?: boolean;
 }
 
 export interface ToastMessage {
@@ -67,10 +69,10 @@ export const useToastStore = defineStore("toast", () => {
 		message?.onUserDismiss?.();
 	}
 
-	/** Its button: what it does, and the toast goes. */
+	/** Its button: what it does, and the toast goes, unless its action keeps it open. */
 	function act(id: number): void {
 		const message = messages.value.find((m) => m.id === id);
-		dismiss(id);
+		if (!message?.action?.keepOpen) dismiss(id);
 		message?.action?.run();
 	}
 

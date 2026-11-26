@@ -53,6 +53,7 @@ import { useModalFocus } from "../composables/useModalFocus.js";
 import { useDesktopUpdatesStore } from "../stores/desktopUpdates.js";
 import { useToastStore } from "../stores/toast.js";
 import { commandError, type UpdateNotice, updateCommands } from "../utils/desktop-updates.js";
+import { isTauriRuntime } from "../utils/tauri-runtime.js";
 
 /**
  * The desktop's update dialog and its notices (STORE-UPDATE-NOTICE, #1214).
@@ -100,9 +101,47 @@ const fallbackLine = computed(() => {
 // ── When it shows ──
 
 const pageShown = ref(typeof document === "undefined" || document.visibilityState === "visible");
+/**
+ * The desktop window is visible and not minimized, which the page's visibility does not always
+ * say. In the desktop app it counts as not shown until the window has been read.
+ */
+const windowShown = ref(!isTauriRuntime());
+const shown = computed(() => pageShown.value && windowShown.value);
 const otherDialog = ref(false);
 const dialogEl = ref<HTMLElement | null>(null);
 const laterEl = ref<HTMLElement | null>(null);
+
+let refreshWindow: () => Promise<void> = async () => {};
+let stopWindow: (() => void) | null = null;
+let unmounted = false;
+
+/** Follows the native window: shown, hidden to the tray, minimized, restored (D4). */
+async function followWindow(): Promise<void> {
+	if (!isTauriRuntime()) return;
+	try {
+		const { getCurrentWindow } = await import("@tauri-apps/api/window");
+		const win = getCurrentWindow();
+		refreshWindow = async () => {
+			try {
+				windowShown.value = (await win.isVisible()) && !(await win.isMinimized());
+			} catch {
+				windowShown.value = true;
+			}
+		};
+		const stops = await Promise.all([
+			win.onResized(() => void refreshWindow()),
+			win.onFocusChanged(() => void refreshWindow()),
+		]);
+		stopWindow = () => {
+			for (const stop of stops) stop();
+		};
+		if (unmounted) stopWindow();
+		await refreshWindow();
+	} catch {
+		// No window to follow: the page's own visibility decides.
+		windowShown.value = true;
+	}
+}
 
 function otherDialogPresent(): boolean {
 	for (const element of document.querySelectorAll<HTMLElement>('[aria-modal="true"]')) {
@@ -116,39 +155,59 @@ function otherDialogPresent(): boolean {
 let observer: MutationObserver | null = null;
 const onVisibility = () => {
 	pageShown.value = document.visibilityState === "visible";
+	void refreshWindow();
 };
 
 onMounted(() => {
-	otherDialog.value = otherDialogPresent();
-	observer = new MutationObserver(() => {
-		otherDialog.value = otherDialogPresent();
-	});
-	observer.observe(document.body, {
-		childList: true,
-		subtree: true,
-		attributes: true,
-		attributeFilter: ["aria-modal", "class"],
-	});
 	document.addEventListener("visibilitychange", onVisibility);
+	void followWindow();
 });
 
 onUnmounted(() => {
+	unmounted = true;
 	observer?.disconnect();
+	observer = null;
+	stopWindow?.();
 	document.removeEventListener("visibilitychange", onVisibility);
 });
+
+const wanted = computed(
+	() => offer.value !== undefined && (state.value?.wantsDialog === true || updates.openedFromSettings),
+);
+const visible = computed(() => wanted.value && shown.value && !otherDialog.value);
+
+// The page's other dialogs are watched only while this one is wanted: the terminal's output
+// changes the page all the time, and nothing needs to look at it otherwise.
+watch(
+	wanted,
+	(isWanted) => {
+		if (isWanted && !observer && typeof MutationObserver !== "undefined") {
+			otherDialog.value = otherDialogPresent();
+			observer = new MutationObserver(() => {
+				otherDialog.value = otherDialogPresent();
+			});
+			observer.observe(document.body, {
+				childList: true,
+				subtree: true,
+				attributes: true,
+				attributeFilter: ["aria-modal", "class"],
+			});
+		} else if (!isWanted && observer) {
+			observer.disconnect();
+			observer = null;
+			otherDialog.value = false;
+		}
+	},
+	{ immediate: true },
+);
 
 // The opened-from-Settings flag changes what counts as "another dialog".
 watch(
 	() => updates.openedFromSettings,
 	() => {
-		otherDialog.value = otherDialogPresent();
+		if (observer) otherDialog.value = otherDialogPresent();
 	},
 );
-
-const wanted = computed(
-	() => offer.value !== undefined && (state.value?.wantsDialog === true || updates.openedFromSettings),
-);
-const visible = computed(() => wanted.value && pageShown.value && !otherDialog.value);
 
 // Opened from Settings and hidden by another dialog: it comes back only while Settings and its
 // Update now… are still there.
@@ -167,8 +226,7 @@ watch(visible, (now) => {
 	if (now) error.value = null;
 });
 
-async function snoozeShown(): Promise<void> {
-	const key = offer.value?.key;
+async function snoozeShown(key = offer.value?.key): Promise<void> {
 	if (!key) return;
 	try {
 		const saved = await updateCommands.snooze(key);
@@ -181,6 +239,8 @@ async function snoozeShown(): Promise<void> {
 }
 
 async function onUpdateNow(): Promise<void> {
+	// The offer the user saw: a newer answer arriving meanwhile is not snoozed in its place (D5).
+	const key = offer.value?.key;
 	busy.value = true;
 	error.value = null;
 	try {
@@ -190,7 +250,7 @@ async function onUpdateNow(): Promise<void> {
 		busy.value = false;
 		return;
 	}
-	await snoozeShown();
+	await snoozeShown(key);
 	busy.value = false;
 	updates.closeDialog();
 }
@@ -239,28 +299,34 @@ const { onKeydown } = useModalFocus({
 	close: () => void onLater(),
 	initial: () => laterEl.value,
 	fallback: () => document.querySelector<HTMLElement>("[data-update-check]"),
+	// Stepping aside for another dialog leaves it the keyboard (D4).
+	restore: () => !otherDialog.value,
 });
 
 // ── Notices ──
 
 /** Each notice id shows once, as a toast that stays until the user closes it. */
 const shownNotices = new Map<number, number>();
+/** Acknowledged here and not yet gone from the state: never shown again meanwhile. */
+const acknowledged = new Set<number>();
 
 function noticeToast(notice: UpdateNotice): void {
 	const acknowledge = () => {
+		acknowledged.add(notice.id);
+		const toastId = shownNotices.get(notice.id);
 		shownNotices.delete(notice.id);
+		if (toastId !== undefined) toasts.dismiss(toastId);
 		void updateCommands.acknowledge(notice.id);
 	};
 	const action =
 		notice.kind === "updated"
 			? {
 					label: "What's new",
+					// The toast stays while the Store opens, and stays if it cannot (D9).
+					keepOpen: true,
 					run: () => {
 						updateCommands.openStorePage().then(acknowledge, (cause) => {
-							// Not acknowledged: it shows again, with the reason beside it.
-							shownNotices.delete(notice.id);
 							toasts.show("error", commandError(cause));
-							showNotices();
 						});
 					},
 				}
@@ -285,13 +351,16 @@ function showNotices(): void {
 			toasts.dismiss(toastId);
 		}
 	}
-	if (!pageShown.value) return;
+	for (const noticeId of acknowledged) {
+		if (!ids.has(noticeId)) acknowledged.delete(noticeId);
+	}
+	if (!shown.value) return;
 	for (const notice of notices) {
-		if (!shownNotices.has(notice.id)) noticeToast(notice);
+		if (!shownNotices.has(notice.id) && !acknowledged.has(notice.id)) noticeToast(notice);
 	}
 }
 
-watch([() => state.value?.notices, pageShown], showNotices, { immediate: true });
+watch([() => state.value?.notices, shown], showNotices, { immediate: true });
 </script>
 
 <style scoped>

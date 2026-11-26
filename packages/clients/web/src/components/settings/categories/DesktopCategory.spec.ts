@@ -128,6 +128,28 @@ describe("Settings › Desktop's update rows (AC-3)", () => {
 		expect(text()).toContain("The last check failed: The Microsoft Store did not answer");
 	});
 
+	it("dates a failure when it was seen, not by the next attempt, and says the Store's absence once", async () => {
+		const seen = "2026-11-26T10:00:00Z";
+		const next = "2026-11-26T11:30:00Z";
+		const store = await mountCategory(
+			eligible({
+				checking: "running",
+				checkError: "The Microsoft Store could not answer (0x80072EE7)",
+				checkFailedAt: seen,
+				lastAttemptAt: next,
+			}),
+		);
+		expect(text()).toContain(
+			`The last check failed: The Microsoft Store could not answer (0x80072EE7) (${new Date(seen).toLocaleString()})`,
+		);
+		expect(text()).not.toContain(new Date(next).toLocaleString());
+
+		const absent = "The Microsoft Store is not available on this computer right now";
+		store.state = eligible({ storeError: absent, checkError: absent, checkFailedAt: seen });
+		await settle();
+		expect(text().split(absent)).toHaveLength(2);
+	});
+
 	it("follows the desktop's mode after a failed save, and is disabled while saving", async () => {
 		let reject: (reason: unknown) => void = () => undefined;
 		mocks.invoke.mockImplementation((command: string) => {

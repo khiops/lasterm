@@ -62,8 +62,8 @@
 						</button>
 						<button class="update-button" type="button" @click="onWhatsNew">What's new</button>
 					</div>
-					<p v-if="update.checkError" class="update-error">
-						The last check failed: {{ update.checkError }}{{ attemptTime }}
+					<p v-if="update.checkError && update.checkError !== update.storeError" class="update-error">
+						The last check failed: {{ update.checkError }}{{ failureTime }}
 					</p>
 					<p v-if="linkError" class="update-error" role="alert">{{ linkError }}</p>
 				</div>
@@ -133,8 +133,9 @@ const offerLine = computed(() => {
 	return version ? `Lasterm ${version} is available` : "A newer version of Lasterm is available";
 });
 
-const attemptTime = computed(() =>
-	update.value?.lastAttemptAt ? ` (${when(update.value.lastAttemptAt)})` : "",
+// When that check failed, which the next attempt does not change.
+const failureTime = computed(() =>
+	update.value?.checkFailedAt ? ` (${when(update.value.checkFailedAt)})` : "",
 );
 
 async function onModeChange(value: unknown): Promise<void> {

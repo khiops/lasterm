@@ -6947,54 +6947,45 @@ pub fn run() {
                 update_uploads(webview.app_handle(), |gate| gate.page_started());
             }
         })
-        .invoke_handler({
-            // The update commands come from their module's one list, which the
-            // tests register too (STORE-UPDATE-NOTICE, D10).
-            let updates = store_updates::invoke_handler();
-            let rest: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
-                Box::new(tauri::generate_handler![
-                    get_hub_auth_token,
-                    get_hub_port,
-                    relay_hub_request,
-                    relay_hub_upload_start,
-                    relay_hub_upload_chunk,
-                    relay_hub_upload_finish,
-                    relay_hub_upload_cancel,
-                    relay_hub_response_ack,
-                    relay_hub_response_cancel,
-                    relay_hub_ws_connect,
-                    relay_hub_ws_send,
-                    relay_hub_ws_ack,
-                    relay_hub_ws_close,
-                    relay_hub_ws_close_all,
-                    is_tray_available,
-                    get_close_behavior,
-                    set_close_behavior,
-                    set_shutdown_caller_client_id,
-                    acknowledge_desktop_close,
-                    answer_desktop_close,
-                    cancel_desktop_close,
-                    pick_and_read_agent_file,
-                    quit_after_hub_exit,
-                    restart_hub_after_exit,
-                    apply_window_background,
-                    apply_window_tone,
-                    restart_desktop,
-                    set_uploads_in_progress,
-                    cancel_quit_when_finished,
-                    pick_download_target,
-                    download_hub_file_to,
-                    cancel_hub_download,
-                    reveal_downloaded
-                ]);
-            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
-                if store_updates::COMMANDS.contains(&invoke.message.command()) {
-                    updates(invoke)
-                } else {
-                    rest(invoke)
-                }
-            }
-        })
+        // The update commands are routed by their module's one list, through
+        // the dispatch the tests install too (STORE-UPDATE-NOTICE, D10).
+        .invoke_handler(store_updates::with_update_commands(
+            tauri::generate_handler![
+                get_hub_auth_token,
+                get_hub_port,
+                relay_hub_request,
+                relay_hub_upload_start,
+                relay_hub_upload_chunk,
+                relay_hub_upload_finish,
+                relay_hub_upload_cancel,
+                relay_hub_response_ack,
+                relay_hub_response_cancel,
+                relay_hub_ws_connect,
+                relay_hub_ws_send,
+                relay_hub_ws_ack,
+                relay_hub_ws_close,
+                relay_hub_ws_close_all,
+                is_tray_available,
+                get_close_behavior,
+                set_close_behavior,
+                set_shutdown_caller_client_id,
+                acknowledge_desktop_close,
+                answer_desktop_close,
+                cancel_desktop_close,
+                pick_and_read_agent_file,
+                quit_after_hub_exit,
+                restart_hub_after_exit,
+                apply_window_background,
+                apply_window_tone,
+                restart_desktop,
+                set_uploads_in_progress,
+                cancel_quit_when_finished,
+                pick_download_target,
+                download_hub_file_to,
+                cancel_hub_download,
+                reveal_downloaded
+            ],
+        ))
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 if let WindowEvent::CloseRequested { api, .. } = event {
@@ -7106,14 +7097,24 @@ mod tests {
     }
 
     /// The update commands of a build that is not the Store's refuse, through
-    /// the same registration production uses, and touch no Store (#1214, R-1).
+    /// the same dispatch production installs, and touch no Store (#1214, R-1).
+    /// A name left out of `COMMANDS` would reach the other handler instead.
     #[test]
     fn update_commands_refuse_when_ineligible() {
+        let others = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = others.clone();
         let app = tauri::test::mock_builder()
             .manage(store_updates::UpdateService::Ineligible(Box::new(
                 store_updates::UpdateState::ineligible("0.24.0".into()),
             )))
-            .invoke_handler(store_updates::invoke_handler())
+            .invoke_handler(store_updates::with_update_commands(
+                move |invoke: tauri::ipc::Invoke<tauri::test::MockRuntime>| {
+                    let command = invoke.message.command().to_string();
+                    seen.lock().unwrap().push(command);
+                    invoke.resolver.reject("another handler");
+                    true
+                },
+            ))
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .expect("build the mock app");
         let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -7158,6 +7159,14 @@ mod tests {
                 "{command}"
             );
         }
+        assert_eq!(
+            invoke("get_close_behavior", serde_json::json!({})),
+            Err(serde_json::json!("another handler"))
+        );
+        assert_eq!(
+            *others.lock().unwrap(),
+            vec!["get_close_behavior".to_string()]
+        );
     }
 
     /// A webview whose IPC cannot carry raw bytes sends them as JSON, and the

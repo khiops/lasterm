@@ -12,6 +12,7 @@
 //! scripted one instead (`LASTERM_DEV_STORE_UPDATE`).
 
 use serde::Serialize;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -39,6 +40,8 @@ const NOT_STORE_BUILD: &str = "not_store_build";
 const STALE_OFFER: &str = "stale_offer";
 const UNKNOWN_MODE: &str = "unknown_mode";
 const LOAD_ERROR: &str = "The update preference could not be loaded";
+const UNLOADED_CHOICE: &str =
+    "The update preference could not be loaded. Choose a mode under Settings › Desktop › Updates.";
 const NO_ANSWER: &str = "The Microsoft Store did not answer";
 const STORE_UNAVAILABLE: &str = "The Microsoft Store is not available on this computer right now";
 
@@ -170,7 +173,6 @@ pub(crate) enum Ineligible {
     Package,
     Family,
     Signature,
-    Script,
 }
 
 impl Ineligible {
@@ -180,7 +182,6 @@ impl Ineligible {
             Ineligible::Package => "package",
             Ineligible::Family => "family",
             Ineligible::Signature => "signature",
-            Ineligible::Script => "script",
         }
     }
 }
@@ -234,17 +235,56 @@ pub(crate) enum QueryOutcome {
     ContextFailed(String),
 }
 
+/// One entry's reads, each as the Store answered it.
+pub(crate) struct EntryReads {
+    pub(crate) family: Result<String, String>,
+    pub(crate) full_name: Result<String, String>,
+    pub(crate) mandatory: Result<bool, String>,
+    pub(crate) version: Result<Version4, String>,
+}
+
+/// D2: the whole answer (the list's size, then each entry by index), or the
+/// first read that failed. Only the version may fail: then none is shown.
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(dead_code, reason = "only the Windows backend reads a Store answer")
+)]
+pub(crate) fn read_answer(
+    size: Result<u32, String>,
+    mut entry: impl FnMut(u32) -> Result<EntryReads, String>,
+) -> Result<Vec<Entry>, String> {
+    let mut entries = Vec::new();
+    for index in 0..size? {
+        let reads = entry(index)?;
+        entries.push(Entry {
+            family: reads.family?,
+            full_name: reads.full_name?,
+            mandatory: reads.mandatory?,
+            version: reads.version.ok(),
+        });
+    }
+    Ok(entries)
+}
+
 /// A query in flight.
 pub(crate) trait QueryHandle: Send {
+    /// Asks the query to stop; what the Store makes of it is logged by the
+    /// backend.
     fn cancel(&self) -> Result<(), String>;
 }
+
+pub(crate) type Started = Box<dyn FnOnce() + Send>;
+pub(crate) type Done = Box<dyn FnOnce(QueryOutcome) + Send>;
+pub(crate) type SharedLog = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// The Store, as [`Core`] sees it: one query, and nothing that downloads or
 /// installs (R-3).
 pub(crate) trait StoreBackend: Send + Sync {
-    /// Starts `GetAppAndOptionalStorePackageUpdatesAsync`; `done` is called
-    /// once, later, never from inside this call.
-    fn start_query(&self, done: Box<dyn FnOnce(QueryOutcome) + Send>) -> Box<dyn QueryHandle>;
+    /// Starts `GetAppAndOptionalStorePackageUpdatesAsync`. `started` is called
+    /// once the native query has started (the context exists and the call
+    /// returned an operation), `done` once with how it ended. Neither is called
+    /// from inside this call, and they may arrive in either order.
+    fn start_query(&self, started: Started, done: Done) -> Box<dyn QueryHandle>;
 }
 
 /// Hands a fixed URI to the system's protocol handler.
@@ -351,6 +391,10 @@ pub(crate) struct UpdateState {
     last_attempt_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     check_error: Option<String>,
+    /// When the desktop saw that check fail, which a later attempt does not
+    /// change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    check_failed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     offer: Option<OfferView>,
     wants_dialog: bool,
@@ -374,6 +418,7 @@ impl UpdateState {
             last_checked_at: None,
             last_attempt_at: None,
             check_error: None,
+            check_failed_at: None,
             offer: None,
             wants_dialog: false,
             load_error: None,
@@ -535,8 +580,11 @@ struct Notice {
 
 struct Running {
     id: u64,
+    /// When the query's 60 s began: its request, then its native start.
     started: Instant,
     handle: Box<dyn QueryHandle>,
+    /// The native query has started: it counts as an attempt (D2).
+    native: bool,
     /// Reported failed at the timeout; its effects are dropped when it ends.
     timed_out: bool,
 }
@@ -560,12 +608,15 @@ pub(crate) struct Core {
     last_checked_at: Option<u64>,
     last_attempt_at: Option<u64>,
     check_error: Option<String>,
+    check_failed_at: Option<u64>,
     store_error: Option<String>,
     query: Option<Running>,
     next_query_id: u64,
-    /// A check due at a monotonic instant: 60 s after the window shows, after
-    /// leaving `off`, or 15 minutes after the Store context failed.
+    /// A check due at a monotonic instant: 60 s after the window shows, or
+    /// after leaving `off`.
     short_due: Option<Instant>,
+    /// The Store context failed: the next tick checks again (D1).
+    context_retry: bool,
     last_tick: Instant,
     notices: Vec<Notice>,
     next_notice_id: u64,
@@ -608,10 +659,12 @@ impl Core {
             last_checked_at: None,
             last_attempt_at: None,
             check_error: None,
+            check_failed_at: None,
             store_error: None,
             query: None,
             next_query_id: 1,
             short_due: None,
+            context_retry: false,
             last_tick: now,
             notices: Vec::new(),
             next_notice_id: 1,
@@ -713,6 +766,7 @@ impl Core {
         }
     }
 
+    /// The state as of now; the `seq` is the last one published.
     pub(crate) fn state(&self) -> UpdateState {
         let civil = self.clock.civil();
         UpdateState {
@@ -725,6 +779,7 @@ impl Core {
             last_checked_at: self.last_checked_at.map(iso),
             last_attempt_at: self.last_attempt_at.map(iso),
             check_error: self.check_error.clone(),
+            check_failed_at: self.check_failed_at.map(iso),
             offer: self.offer.as_ref().map(|offer| OfferView {
                 key: offer.key.clone(),
                 version: offer.version.map(Version4::three),
@@ -760,6 +815,16 @@ impl Core {
         state.seq = self.seq;
         (self.emit)(&state);
         self.last_emitted = Some(state);
+    }
+
+    /// What the commands answer: published first when it changed, so one `seq`
+    /// never carries two different states (D10).
+    pub(crate) fn current(&mut self) -> UpdateState {
+        self.publish();
+        match &self.last_emitted {
+            Some(state) => state.clone(),
+            None => self.state(),
+        }
     }
 
     /// D6: the `mandatory` and `waiting` notices that hold now.
@@ -811,24 +876,56 @@ impl Core {
         }
         let id = self.next_query_id;
         self.next_query_id += 1;
-        self.last_attempt_at = Some(self.clock.civil());
-        (self.log)("store call: GetAppAndOptionalStorePackageUpdatesAsync");
-        let core = self.this.clone();
-        let handle = self.backend.start_query(Box::new(move |outcome| {
-            if let Some(core) = core.upgrade() {
-                core.lock()
-                    .expect("store update core lock poisoned")
-                    .on_query(id, outcome);
-            }
-        }));
+        // Any check tries the context again.
+        self.context_retry = false;
+        let on_start = self.this.clone();
+        let on_done = self.this.clone();
+        let handle = self.backend.start_query(
+            Box::new(move || {
+                if let Some(core) = on_start.upgrade() {
+                    lock(&core).on_started(id);
+                }
+            }),
+            Box::new(move |outcome| {
+                if let Some(core) = on_done.upgrade() {
+                    lock(&core).on_query(id, outcome);
+                }
+            }),
+        );
         self.query = Some(Running {
             id,
             started: self.clock.mono(),
             handle,
+            native: false,
             timed_out: false,
         });
         self.publish();
         true
+    }
+
+    /// The native query of check `id` started: an attempt, and the context
+    /// exists (D1, D2).
+    fn on_started(&mut self, id: u64) {
+        let mono = self.clock.mono();
+        let Some(running) = self.query.as_mut().filter(|running| running.id == id) else {
+            return;
+        };
+        if running.native {
+            return;
+        }
+        running.native = true;
+        if !running.timed_out {
+            running.started = mono;
+        }
+        self.last_attempt_at = Some(self.clock.civil());
+        self.store_error = None;
+        self.publish();
+    }
+
+    fn fail_check(&mut self, line: &str, error: String) {
+        (self.log)(&format!("update check: failed {line}"));
+        self.check_error = Some(error);
+        self.check_failed_at = Some(self.clock.civil());
     }
 
     fn on_query(&mut self, id: u64, outcome: QueryOutcome) {
@@ -836,26 +933,35 @@ impl Core {
             return;
         }
         let running = self.query.take().expect("checked above");
+        if !running.native && !matches!(outcome, QueryOutcome::ContextFailed(_)) {
+            // Its start was not reported first: an answer implies it.
+            self.last_attempt_at = Some(self.clock.civil());
+            self.store_error = None;
+        }
         if running.timed_out {
             (self.log)("store result: GetAppAndOptionalStorePackageUpdatesAsync late, ignored");
             self.publish();
             return;
         }
+        if self.clock.mono().duration_since(running.started) >= QUERY_TIMEOUT {
+            // Past the bound before the poller saw it: no answer all the same (D2).
+            self.fail_check("no answer", NO_ANSWER.to_string());
+            self.publish();
+            return;
+        }
         match outcome {
             QueryOutcome::ContextFailed(reason) => {
-                (self.log)(&format!("update check: failed context {reason}"));
                 self.store_error = Some(STORE_UNAVAILABLE.to_string());
-                self.check_error = Some(STORE_UNAVAILABLE.to_string());
-                self.short_due = Some(self.clock.mono() + TICK);
+                self.fail_check(&format!("context {reason}"), STORE_UNAVAILABLE.to_string());
+                self.context_retry = true;
             }
             QueryOutcome::Failed(code) => {
-                (self.log)(&format!("update check: failed {code}"));
-                self.store_error = None;
-                self.check_error = Some(format!("The Microsoft Store could not answer ({code})"));
+                let error = format!("The Microsoft Store could not answer ({code})");
+                self.fail_check(&code, error);
             }
             QueryOutcome::Answer { entries, signal } => {
-                self.store_error = None;
                 self.check_error = None;
+                self.check_failed_at = None;
                 self.last_checked_at = Some(self.clock.civil());
                 self.apply_answer(entries, signal);
             }
@@ -871,11 +977,15 @@ impl Core {
         let Some(first) = ours.first() else {
             (self.log)("update check: none");
             self.offer = None;
+            let changed = self.records.pending_since.is_some() || self.records.snoozed.is_some();
             self.records.pending_since = None;
             self.records.snoozed = None;
             self.notices
                 .retain(|notice| notice.kind == NoticeKind::Updated);
-            let _ = self.persist();
+            // Nothing to write when nothing changed and no earlier write failed.
+            if changed || self.save_error.is_some() {
+                let _ = self.persist();
+            }
             return;
         };
         let offer = Offer {
@@ -915,15 +1025,18 @@ impl Core {
     /// Called every second: timeouts, short dues, and the 15-minute tick.
     fn poll(&mut self) {
         let mono = self.clock.mono();
-        if let Some(running) = &mut self.query {
-            if !running.timed_out && mono.duration_since(running.started) >= QUERY_TIMEOUT {
+        let expired = self.query.as_ref().is_some_and(|running| {
+            !running.timed_out && mono.duration_since(running.started) >= QUERY_TIMEOUT
+        });
+        if expired {
+            if let Some(running) = self.query.as_mut() {
                 running.timed_out = true;
-                if let Err(error) = running.handle.cancel() {
-                    (self.log)(&format!("store result: Cancel failed {error}"));
-                }
-                (self.log)("update check: failed no answer");
-                self.check_error = Some(NO_ANSWER.to_string());
-                self.publish();
+            }
+            // Reported first, then asked to stop (D2).
+            self.fail_check("no answer", NO_ANSWER.to_string());
+            self.publish();
+            if let Some(Err(error)) = self.query.as_ref().map(|running| running.handle.cancel()) {
+                (self.log)(&format!("store result: Cancel failed {error}"));
             }
         }
         if self.records.mode != Mode::Off {
@@ -945,11 +1058,13 @@ impl Core {
         if mono.duration_since(self.last_tick) >= TICK {
             self.last_tick = mono;
             let civil = self.clock.civil();
-            let daily = self.records.mode != Mode::Off
-                && self
-                    .last_attempt_at
-                    .is_some_and(|at| civil.saturating_sub(at) >= DAY);
-            if daily && self.query.is_none() {
+            // A short due pending decides the next scheduled check itself.
+            let scheduled =
+                self.records.mode != Mode::Off && self.query.is_none() && self.short_due.is_none();
+            let daily = self
+                .last_attempt_at
+                .is_some_and(|at| civil.saturating_sub(at) >= DAY);
+            if scheduled && (daily || self.context_retry) {
                 self.start_check();
             }
             self.refresh_notices();
@@ -957,8 +1072,11 @@ impl Core {
         }
     }
 
-    pub(crate) fn check_now(&mut self) {
+    /// Check for updates: starts or joins a check, and answers the state, the
+    /// waiting one included (D2).
+    pub(crate) fn check_now(&mut self) -> UpdateState {
         self.start_check();
+        self.current()
     }
 
     /// A mode change, written with the records it implies, in one step.
@@ -983,7 +1101,13 @@ impl Core {
                 records.snoozed = Some((key, civil + DAY));
             }
         }
-        self.write_records(&records)?;
+        // A failed mode change returns its error to the caller and changes no
+        // state: `saveError` is for the other records (D3).
+        let save_error = self.save_error.clone();
+        if let Err(error) = self.write_records(&records) {
+            self.save_error = save_error;
+            return Err(error);
+        }
         self.records = records;
         if previous == Mode::Off && mode != Mode::Off {
             self.short_due = Some(self.clock.mono() + FIRST_CHECK_DELAY);
@@ -1002,17 +1126,23 @@ impl Core {
         self.change_mode(mode, None)
     }
 
+    /// Always update. An unreadable file is rewritten by the Updates setting
+    /// alone (D3), so it refuses then.
     pub(crate) fn choose_always_update(&mut self, key: String) -> Result<(), String> {
+        if self.health == FileHealth::Invalid {
+            return Err(UNLOADED_CHOICE.to_string());
+        }
         self.change_mode(Mode::Auto, Some(key))
     }
 
-    /// Later (D5). `Ok(false)` when the snooze holds in memory only.
+    /// Later (D5). `Ok(false)` when the snooze holds in memory only: its write
+    /// failed, or the file is unreadable and left as it is (D3).
     pub(crate) fn snooze(&mut self, key: &str) -> Result<bool, String> {
         if self.offer.as_ref().map(|offer| offer.key.as_str()) != Some(key) {
             return Err(STALE_OFFER.to_string());
         }
         self.records.snoozed = Some((key.to_string(), self.clock.civil() + DAY));
-        let saved = self.persist().is_ok();
+        let saved = self.health != FileHealth::Invalid && self.persist().is_ok();
         self.publish();
         Ok(saved)
     }
@@ -1096,12 +1226,7 @@ fn lock(core: &Mutex<Core>) -> std::sync::MutexGuard<'_, Core> {
 fn get_update_state(service: tauri::State<'_, UpdateService>) -> UpdateState {
     match service.inner() {
         UpdateService::Ineligible(state) => (**state).clone(),
-        UpdateService::Eligible(core) => {
-            let core = lock(core);
-            let mut state = core.state();
-            state.seq = core.seq;
-            state
-        }
+        UpdateService::Eligible(core) => lock(core).current(),
     }
 }
 
@@ -1119,9 +1244,8 @@ fn choose_always_update(
 }
 
 #[tauri::command]
-fn check_for_updates(service: tauri::State<'_, UpdateService>) -> Result<(), String> {
-    lock(service.core()?).check_now();
-    Ok(())
+fn check_for_updates(service: tauri::State<'_, UpdateService>) -> Result<UpdateState, String> {
+    Ok(lock(service.core()?).check_now())
 }
 
 #[tauri::command]
@@ -1148,8 +1272,7 @@ fn acknowledge_notice(
     Ok(())
 }
 
-/// The update commands, registered from this one list in production and in
-/// the tests (D10).
+/// The update commands' names: what [`with_update_commands`] routes to them.
 pub(crate) const COMMANDS: &[&str] = &[
     "get_update_state",
     "set_update_mode",
@@ -1161,8 +1284,7 @@ pub(crate) const COMMANDS: &[&str] = &[
     "acknowledge_notice",
 ];
 
-pub(crate) fn invoke_handler<R: Runtime>(
-) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+fn invoke_handler<R: Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         get_update_state,
         set_update_mode,
@@ -1175,83 +1297,131 @@ pub(crate) fn invoke_handler<R: Runtime>(
     ]
 }
 
+/// The desktop's invoke handler: the update commands, by [`COMMANDS`], and
+/// `rest` for every other. Production and the tests install this same
+/// dispatch (D10).
+pub(crate) fn with_update_commands<R: Runtime>(
+    rest: impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    let updates = invoke_handler::<R>();
+    move |invoke: tauri::ipc::Invoke<R>| {
+        if COMMANDS.contains(&invoke.message.command()) {
+            updates(invoke)
+        } else {
+            rest(invoke)
+        }
+    }
+}
+
 // ── Wiring ────────────────────────────────────────────────────────────────────
 
-/// Decides eligibility, manages the service, and starts the poll thread.
+/// Where the Store answers come from in an eligible build.
+pub(crate) enum Source {
+    Native,
+    Scripted(ScriptedStore),
+}
+
+pub(crate) struct Chosen {
+    running: Version4,
+    source: Source,
+    path: PathBuf,
+}
+
+/// D1, once at start, with its one log line. `package` is read in a release
+/// build only, and the script in a development build only.
+pub(crate) fn choose(
+    release: bool,
+    package: &dyn Fn() -> Option<PackageFacts>,
+    script: Option<OsString>,
+    config_dir: &dyn Fn() -> Result<PathBuf, String>,
+    say: &dyn Fn(&str),
+) -> Option<Chosen> {
+    let picked = if release {
+        eligibility(true, package())
+            .map(|package| (package.version, Source::Native))
+            .map_err(Some)
+    } else {
+        match script {
+            None => Err(Some(Ineligible::Channel)),
+            Some(path) => match ScriptedStore::load(Path::new(&path)) {
+                Ok((version, store)) => Ok((version, Source::Scripted(store))),
+                Err(error) => {
+                    say(&format!("WARN: store updates: invalid script ({error})"));
+                    Err(None)
+                }
+            },
+        }
+    };
+    let (running, source) = match picked {
+        Ok(picked) => picked,
+        Err(Some(reason)) => {
+            say(&format!("store updates: ineligible ({})", reason.as_str()));
+            return None;
+        }
+        Err(None) => return None,
+    };
+    match config_dir() {
+        Ok(dir) => {
+            say("store updates: eligible");
+            Some(Chosen {
+                running,
+                source,
+                path: dir.join(UPDATES_FILE),
+            })
+        }
+        Err(error) => {
+            say(&format!(
+                "store updates: ineligible (config directory: {error})"
+            ));
+            None
+        }
+    }
+}
+
+/// Decides eligibility, manages the service, and starts the poll thread. An
+/// ineligible build gets no core, no backend and no thread (D1).
 pub(crate) fn install<R: Runtime>(app: &tauri::AppHandle<R>, log: crate::hub_log::HubLog) {
     let release = crate::channel::build_channel() == crate::channel::Channel::Release;
     let own_version = app.package_info().version.to_string();
-    let say = {
-        let log = log.clone();
-        move |line: &str| log.record(&format!("[store] {line}"))
+    let say: SharedLog = Arc::new(move |line: &str| log.record(&format!("[store] {line}")));
+    let chosen = choose(
+        release,
+        &current_package,
+        std::env::var_os(SCRIPT_ENV),
+        &crate::lasterm_config_dir,
+        &*say,
+    );
+    let Some(chosen) = chosen else {
+        app.manage(UpdateService::Ineligible(Box::new(
+            UpdateState::ineligible(own_version),
+        )));
+        return;
     };
-
-    let chosen: Result<(Version4, Arc<dyn StoreBackend>), Ineligible> = if release {
-        match eligibility(true, current_package()) {
-            Ok(package) => store_backend(app).map(|backend| (package.version, backend)),
-            Err(reason) => Err(reason),
-        }
-    } else {
-        scripted_from_env(&say)
+    let backend: Arc<dyn StoreBackend> = match chosen.source {
+        Source::Native => native_backend(app, say.clone()),
+        Source::Scripted(store) => Arc::new(store),
     };
-
-    let service = match chosen {
-        Err(reason) => {
-            say(&format!("store updates: ineligible ({})", reason.as_str()));
-            UpdateService::Ineligible(Box::new(UpdateState::ineligible(own_version)))
-        }
-        Ok((running, backend)) => {
-            say("store updates: eligible");
-            let path = match crate::lasterm_config_dir() {
-                Ok(dir) => dir.join(UPDATES_FILE),
-                Err(error) => {
-                    say(&format!(
-                        "store updates: ineligible (config directory: {error})"
-                    ));
-                    app.manage(UpdateService::Ineligible(Box::new(
-                        UpdateState::ineligible(own_version),
-                    )));
-                    return;
-                }
-            };
-            let emitter = app.clone();
-            let core = Core::create(CoreParts {
-                running,
-                backend,
-                opener: Arc::new(SystemOpener),
-                clock: Arc::new(SystemClock),
-                path,
-                emit: Box::new(move |state| {
-                    let _ = emitter.emit_to("main", "update-state", state);
-                }),
-                log: Box::new(say),
-            });
-            lock(&core).window_shown();
-            let poller = Arc::downgrade(&core);
-            std::thread::spawn(move || loop {
-                std::thread::sleep(POLL);
-                let Some(core) = poller.upgrade() else { return };
-                lock(&core).poll();
-            });
-            UpdateService::Eligible(core)
-        }
-    };
-    app.manage(service);
-}
-
-/// A development build with `LASTERM_DEV_STORE_UPDATE` set to a valid script
-/// uses the scripted backend; absent, the build is ineligible (channel).
-fn scripted_from_env(say: &dyn Fn(&str)) -> Result<(Version4, Arc<dyn StoreBackend>), Ineligible> {
-    let Some(path) = std::env::var_os(SCRIPT_ENV) else {
-        return Err(Ineligible::Channel);
-    };
-    match ScriptedStore::load(Path::new(&path)) {
-        Ok((version, store)) => Ok((version, Arc::new(store))),
-        Err(error) => {
-            say(&format!("store updates: invalid script ({error})"));
-            Err(Ineligible::Script)
-        }
-    }
+    let emitter = app.clone();
+    let core_log = say.clone();
+    let core = Core::create(CoreParts {
+        running: chosen.running,
+        backend,
+        opener: Arc::new(SystemOpener),
+        clock: Arc::new(SystemClock),
+        path: chosen.path,
+        emit: Box::new(move |state| {
+            let _ = emitter.emit_to("main", "update-state", state);
+        }),
+        log: Box::new(move |line| core_log(line)),
+    });
+    lock(&core).window_shown();
+    let poller = Arc::downgrade(&core);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(POLL);
+        let Some(core) = poller.upgrade() else { return };
+        lock(&core).poll();
+    });
+    app.manage(UpdateService::Eligible(core));
 }
 
 // ── The scripted backend (tests and Windows Sandbox only) ─────────────────────
@@ -1276,11 +1446,26 @@ impl QueryHandle for NoCancel {
     }
 }
 
+/// A script field: absent is `None`; present, it must have its form.
+fn script_field<'a, T>(
+    object: &'a serde_json::Value,
+    name: &str,
+    read: impl Fn(&'a serde_json::Value) -> Option<T>,
+) -> Result<Option<T>, String> {
+    match object.get(name) {
+        None => Ok(None),
+        Some(value) => read(value)
+            .map(Some)
+            .ok_or_else(|| format!("{name} has the wrong form")),
+    }
+}
+
 impl ScriptedStore {
     /// `{ "version": "a.b.c.d", "checks": [ … ] }`; each check is
-    /// `{ "offers": [{ "key", "version"?, "mandatory"?, "family"? }], "signal" }`,
+    /// `{ "offers": [{ "key", "version"?, "mandatory"?, "family"? }], "signal"? }`
+    /// with the signal `"true"` (when absent), `"false"` or `"error"`,
     /// `{ "error": "0x…" }`, `{ "contextError": "…" }` or `{ "noAnswer": true }`.
-    /// The last check repeats.
+    /// A field of the wrong form refuses the script. The last check repeats.
     pub(crate) fn load(path: &Path) -> Result<(Version4, ScriptedStore), String> {
         #[expect(
             clippy::disallowed_methods,
@@ -1304,52 +1489,7 @@ impl ScriptedStore {
             .filter(|checks| !checks.is_empty())
             .ok_or("no checks")?
             .iter()
-            .map(|check| -> Result<ScriptCheck, String> {
-                if let Some(code) = check.get("error").and_then(|code| code.as_str()) {
-                    return Ok(ScriptCheck::Failed(code.to_string()));
-                }
-                if let Some(reason) = check.get("contextError").and_then(|reason| reason.as_str()) {
-                    return Ok(ScriptCheck::ContextFailed(reason.to_string()));
-                }
-                if check.get("noAnswer").and_then(|flag| flag.as_bool()) == Some(true) {
-                    return Ok(ScriptCheck::NoAnswer);
-                }
-                let signal = match check.get("signal").and_then(|signal| signal.as_str()) {
-                    Some("true") | None => Signal::True,
-                    Some("false") => Signal::False,
-                    Some("error") => Signal::Error,
-                    Some(other) => return Err(format!("unknown signal {other}")),
-                };
-                let entries = check
-                    .get("offers")
-                    .and_then(|offers| offers.as_array())
-                    .ok_or("a check without offers")?
-                    .iter()
-                    .map(|offer| -> Result<Entry, String> {
-                        Ok(Entry {
-                            family: offer
-                                .get("family")
-                                .and_then(|family| family.as_str())
-                                .unwrap_or(STORE_FAMILY)
-                                .to_string(),
-                            full_name: offer
-                                .get("key")
-                                .and_then(|key| key.as_str())
-                                .ok_or("an offer without key")?
-                                .to_string(),
-                            mandatory: offer
-                                .get("mandatory")
-                                .and_then(|mandatory| mandatory.as_bool())
-                                .unwrap_or(false),
-                            version: offer
-                                .get("version")
-                                .and_then(|version| version.as_str())
-                                .and_then(Version4::parse),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(ScriptCheck::Answer { entries, signal })
-            })
+            .map(Self::parse_check)
             .collect::<Result<Vec<_>, _>>()?;
         Ok((
             version,
@@ -1359,20 +1499,69 @@ impl ScriptedStore {
             },
         ))
     }
+
+    fn parse_check(check: &serde_json::Value) -> Result<ScriptCheck, String> {
+        let text = |value: &serde_json::Value| value.as_str().map(str::to_string);
+        if let Some(code) = script_field(check, "error", text)? {
+            return Ok(ScriptCheck::Failed(code));
+        }
+        if let Some(reason) = script_field(check, "contextError", text)? {
+            return Ok(ScriptCheck::ContextFailed(reason));
+        }
+        if script_field(check, "noAnswer", |value| {
+            (value.as_bool() == Some(true)).then_some(())
+        })?
+        .is_some()
+        {
+            return Ok(ScriptCheck::NoAnswer);
+        }
+        let signal = script_field(check, "signal", |value| match value.as_str()? {
+            "true" => Some(Signal::True),
+            "false" => Some(Signal::False),
+            "error" => Some(Signal::Error),
+            _ => None,
+        })?
+        .unwrap_or(Signal::True);
+        let entries = check
+            .get("offers")
+            .and_then(|offers| offers.as_array())
+            .ok_or("a check without offers")?
+            .iter()
+            .map(|offer| -> Result<Entry, String> {
+                Ok(Entry {
+                    family: script_field(offer, "family", text)?
+                        .unwrap_or_else(|| STORE_FAMILY.to_string()),
+                    full_name: script_field(offer, "key", text)?.ok_or("an offer without key")?,
+                    mandatory: script_field(offer, "mandatory", |value| value.as_bool())?
+                        .unwrap_or(false),
+                    version: script_field(offer, "version", |value| {
+                        value.as_str().and_then(Version4::parse)
+                    })?,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ScriptCheck::Answer { entries, signal })
+    }
 }
 
 impl StoreBackend for ScriptedStore {
-    fn start_query(&self, done: Box<dyn FnOnce(QueryOutcome) + Send>) -> Box<dyn QueryHandle> {
+    fn start_query(&self, started: Started, done: Done) -> Box<dyn QueryHandle> {
         let mut next = self.next.lock().expect("scripted store lock poisoned");
         let check = self.checks[(*next).min(self.checks.len() - 1)].clone();
         *next += 1;
-        let outcome = match check {
-            ScriptCheck::NoAnswer => return Box::new(NoCancel),
-            ScriptCheck::Answer { entries, signal } => QueryOutcome::Answer { entries, signal },
-            ScriptCheck::Failed(code) => QueryOutcome::Failed(code),
-            ScriptCheck::ContextFailed(reason) => QueryOutcome::ContextFailed(reason),
-        };
-        std::thread::spawn(move || done(outcome));
+        // In order, from a thread of their own: the start, then the end.
+        std::thread::spawn(move || match check {
+            ScriptCheck::ContextFailed(reason) => done(QueryOutcome::ContextFailed(reason)),
+            ScriptCheck::NoAnswer => started(),
+            ScriptCheck::Failed(code) => {
+                started();
+                done(QueryOutcome::Failed(code));
+            }
+            ScriptCheck::Answer { entries, signal } => {
+                started();
+                done(QueryOutcome::Answer { entries, signal });
+            }
+        });
         Box::new(NoCancel)
     }
 }
@@ -1403,17 +1592,25 @@ fn current_package() -> Option<PackageFacts> {
 }
 
 #[cfg(windows)]
-fn store_backend<R: Runtime>(
-    app: &tauri::AppHandle<R>,
-) -> Result<Arc<dyn StoreBackend>, Ineligible> {
-    Ok(Arc::new(windows_store::WindowsStore::new(app.clone())))
+fn native_backend<R: Runtime>(app: &tauri::AppHandle<R>, log: SharedLog) -> Arc<dyn StoreBackend> {
+    Arc::new(windows_store::WindowsStore::new(app.clone(), log))
 }
 
+/// No package exists off Windows, so no build gets here; it answers as a Store
+/// that cannot be reached.
 #[cfg(not(windows))]
-fn store_backend<R: Runtime>(
+fn native_backend<R: Runtime>(
     _app: &tauri::AppHandle<R>,
-) -> Result<Arc<dyn StoreBackend>, Ineligible> {
-    Err(Ineligible::Package)
+    _log: SharedLog,
+) -> Arc<dyn StoreBackend> {
+    struct NoStore;
+    impl StoreBackend for NoStore {
+        fn start_query(&self, _started: Started, done: Done) -> Box<dyn QueryHandle> {
+            std::thread::spawn(move || done(QueryOutcome::ContextFailed("no Store".into())));
+            Box::new(NoCancel)
+        }
+    }
+    Arc::new(NoStore)
 }
 
 struct SystemOpener;
@@ -1446,7 +1643,10 @@ impl Opener for SystemOpener {
 
 #[cfg(windows)]
 mod windows_store {
-    use super::{Entry, QueryHandle, QueryOutcome, Signal, StoreBackend, Version4};
+    use super::{
+        read_answer, Done, EntryReads, QueryHandle, QueryOutcome, SharedLog, Signal, Started,
+        StoreBackend, Version4,
+    };
     use std::sync::{Arc, Mutex};
     use tauri::{Manager, Runtime};
     use windows::core::Interface;
@@ -1457,49 +1657,91 @@ mod windows_store {
         format!("0x{:08X}", error.code().0 as u32)
     }
 
-    /// The real Store. Every StoreContext call starts on the main thread
-    /// (D1), and `done` is called from a thread of its own, so it never runs
-    /// inside a caller holding the core's lock.
+    /// The real Store. The context is created, and every StoreContext call is
+    /// made, on the main thread (D1): the query, the signal and Cancel are
+    /// posted there; only the answer's list is read where its completion
+    /// arrives. Each native call is logged before and after it (D12).
+    /// `started` and `done` run on threads of their own, so never inside a
+    /// caller holding the core's lock.
     pub(super) struct WindowsStore<R: Runtime> {
         app: tauri::AppHandle<R>,
         context: Arc<Mutex<Option<StoreContext>>>,
+        log: SharedLog,
     }
 
     impl<R: Runtime> WindowsStore<R> {
-        pub(super) fn new(app: tauri::AppHandle<R>) -> Self {
+        pub(super) fn new(app: tauri::AppHandle<R>, log: SharedLog) -> Self {
             WindowsStore {
                 app,
                 context: Arc::new(Mutex::new(None)),
+                log,
             }
         }
     }
 
-    type Cancel = Box<dyn Fn() -> windows::core::Result<()> + Send>;
-    type DoneSlot = Arc<Mutex<Option<Box<dyn FnOnce(QueryOutcome) + Send>>>>;
+    type CancelCall = Box<dyn Fn() -> windows::core::Result<()> + Send>;
+    type DoneSlot = Arc<Mutex<Option<Done>>>;
 
+    /// One query's Cancel: called once, on the main thread, when both the
+    /// operation and the request exist.
     #[derive(Default)]
     struct Slot {
-        cancel: Option<Cancel>,
-        cancelled: bool,
+        cancel: Option<CancelCall>,
+        requested: bool,
+        called: bool,
     }
 
-    struct Handle(Arc<Mutex<Slot>>);
-
-    impl QueryHandle for Handle {
-        fn cancel(&self) -> Result<(), String> {
-            let mut slot = self.0.lock().expect("store query slot lock poisoned");
-            slot.cancelled = true;
-            match &slot.cancel {
-                Some(cancel) => cancel().map_err(|error| code(&error)),
-                None => Ok(()),
+    impl Slot {
+        fn cancel_if_due(&mut self, log: &SharedLog) {
+            if !self.requested || self.called {
+                return;
+            }
+            let Some(cancel) = &self.cancel else { return };
+            self.called = true;
+            log("store call: Cancel");
+            match cancel() {
+                Ok(()) => log("store result: Cancel ok"),
+                Err(error) => log(&format!("store result: Cancel {}", code(&error))),
             }
         }
     }
 
-    /// The context, created and tied to the main window the first time.
+    struct Handle<R: Runtime> {
+        app: tauri::AppHandle<R>,
+        slot: Arc<Mutex<Slot>>,
+        log: SharedLog,
+    }
+
+    impl<R: Runtime> QueryHandle for Handle<R> {
+        fn cancel(&self) -> Result<(), String> {
+            self.slot
+                .lock()
+                .expect("store query slot lock poisoned")
+                .requested = true;
+            let slot = self.slot.clone();
+            let log = self.log.clone();
+            self.app
+                .run_on_main_thread(move || {
+                    slot.lock()
+                        .expect("store query slot lock poisoned")
+                        .cancel_if_due(&log);
+                })
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    fn deliver(done: &DoneSlot, outcome: QueryOutcome) {
+        if let Some(done) = done.lock().expect("store done lock poisoned").take() {
+            std::thread::spawn(move || done(outcome));
+        }
+    }
+
+    /// The context, created and tied to the main window the first time; on
+    /// the main thread.
     fn context<R: Runtime>(
         app: &tauri::AppHandle<R>,
         slot: &Mutex<Option<StoreContext>>,
+        log: &SharedLog,
     ) -> Result<StoreContext, String> {
         let mut slot = slot.lock().expect("store context lock poisoned");
         if let Some(context) = slot.as_ref() {
@@ -1509,104 +1751,169 @@ mod windows_store {
             .get_webview_window("main")
             .ok_or("the main window is not there")?;
         let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-        let context =
-            StoreContext::GetDefault().map_err(|error| format!("GetDefault {}", code(&error)))?;
-        let initialize: IInitializeWithWindow = context
-            .cast()
-            .map_err(|error| format!("IInitializeWithWindow {}", code(&error)))?;
-        // SAFETY: `hwnd` is the main window's, alive on this, its own thread.
-        unsafe { initialize.Initialize(windows::Win32::Foundation::HWND(hwnd.0)) }
-            .map_err(|error| format!("Initialize {}", code(&error)))?;
+        log("store call: GetDefault");
+        let context = StoreContext::GetDefault().map_err(|error| {
+            log(&format!("store result: GetDefault {}", code(&error)));
+            format!("GetDefault {}", code(&error))
+        })?;
+        log("store result: GetDefault ok");
+        log("store call: Initialize");
+        let initialized = context
+            .cast::<IInitializeWithWindow>()
+            // SAFETY: `hwnd` is the main window's, alive on this, its own thread.
+            .and_then(|initialize| unsafe {
+                initialize.Initialize(windows::Win32::Foundation::HWND(hwnd.0))
+            });
+        if let Err(error) = initialized {
+            log(&format!("store result: Initialize {}", code(&error)));
+            return Err(format!("Initialize {}", code(&error)));
+        }
+        log("store result: Initialize ok");
         *slot = Some(context.clone());
         Ok(context)
     }
 
-    fn signal(entries: &[Entry], context: &StoreContext) -> Signal {
-        if !entries
-            .iter()
-            .any(|entry| entry.family == super::STORE_FAMILY)
-        {
-            return Signal::True;
-        }
+    /// `CanSilentlyDownloadStorePackageUpdates`, on the main thread.
+    fn signal(context: &StoreContext, log: &SharedLog) -> Signal {
+        log("store call: CanSilentlyDownloadStorePackageUpdates");
         match context.CanSilentlyDownloadStorePackageUpdates() {
-            Ok(true) => Signal::True,
-            Ok(false) => Signal::False,
-            Err(_) => Signal::Error,
+            Ok(true) => {
+                log("store result: CanSilentlyDownloadStorePackageUpdates true");
+                Signal::True
+            }
+            Ok(false) => {
+                log("store result: CanSilentlyDownloadStorePackageUpdates false");
+                Signal::False
+            }
+            Err(error) => {
+                log(&format!(
+                    "store result: CanSilentlyDownloadStorePackageUpdates {}",
+                    code(&error)
+                ));
+                Signal::Error
+            }
         }
     }
 
     impl<R: Runtime> StoreBackend for WindowsStore<R> {
-        fn start_query(&self, done: Box<dyn FnOnce(QueryOutcome) + Send>) -> Box<dyn QueryHandle> {
+        fn start_query(&self, started: Started, done: Done) -> Box<dyn QueryHandle> {
             let slot = Arc::new(Mutex::new(Slot::default()));
             let done: DoneSlot = Arc::new(Mutex::new(Some(done)));
-            let deliver = move |done: &DoneSlot, outcome: QueryOutcome| {
-                if let Some(done) = done.lock().expect("store done lock poisoned").take() {
-                    std::thread::spawn(move || done(outcome));
-                }
-            };
             let app = self.app.clone();
             let context_slot = self.context.clone();
+            let log = self.log.clone();
             let query_slot = slot.clone();
             let on_main = done.clone();
             let posted = self.app.run_on_main_thread(move || {
-                let context = match context(&app, &context_slot) {
+                let context = match context(&app, &context_slot, &log) {
                     Ok(context) => context,
                     Err(reason) => return deliver(&on_main, QueryOutcome::ContextFailed(reason)),
                 };
+                log("store call: GetAppAndOptionalStorePackageUpdatesAsync");
                 let operation = match context.GetAppAndOptionalStorePackageUpdatesAsync() {
                     Ok(operation) => operation,
-                    Err(error) => return deliver(&on_main, QueryOutcome::Failed(code(&error))),
+                    Err(error) => {
+                        let code = code(&error);
+                        log(&format!(
+                            "store result: GetAppAndOptionalStorePackageUpdatesAsync {code}"
+                        ));
+                        return deliver(&on_main, QueryOutcome::Failed(code));
+                    }
                 };
+                log("store result: GetAppAndOptionalStorePackageUpdatesAsync started");
+                std::thread::spawn(started);
                 {
                     let mut slot = query_slot.lock().expect("store query slot lock poisoned");
-                    if slot.cancelled {
-                        let _ = operation.Cancel();
-                    }
                     let to_cancel = operation.clone();
                     slot.cancel = Some(Box::new(move || to_cancel.Cancel()));
+                    slot.cancel_if_due(&log);
                 }
                 let finished = on_main.clone();
+                let completion_log = log.clone();
+                let main = app.clone();
                 let when = operation.when(move |answer| {
                     // The whole answer, or the first read that failed (D2).
-                    let read = || -> windows::core::Result<Vec<Entry>> {
-                        let list = answer?;
-                        let mut entries = Vec::new();
-                        for index in 0..list.Size()? {
-                            let update = list.GetAt(index)?;
-                            let id = update.Package()?.Id()?;
-                            entries.push(Entry {
-                                family: id.FamilyName()?.to_string(),
-                                full_name: id.FullName()?.to_string(),
-                                mandatory: update.Mandatory()?,
-                                version: id.Version().ok().map(|version| {
-                                    Version4([
-                                        version.Major,
-                                        version.Minor,
-                                        version.Build,
-                                        version.Revision,
-                                    ])
-                                }),
-                            });
+                    let read = match answer {
+                        Err(error) => Err(code(&error)),
+                        Ok(list) => read_answer(list.Size().map_err(|error| code(&error)), |index| {
+                            let update = list.GetAt(index).map_err(|error| code(&error))?;
+                            let id = update
+                                .Package()
+                                .and_then(|package| package.Id())
+                                .map_err(|error| code(&error))?;
+                            Ok(EntryReads {
+                                family: id
+                                    .FamilyName()
+                                    .map(|name| name.to_string())
+                                    .map_err(|error| code(&error)),
+                                full_name: id
+                                    .FullName()
+                                    .map(|name| name.to_string())
+                                    .map_err(|error| code(&error)),
+                                mandatory: update.Mandatory().map_err(|error| code(&error)),
+                                version: id
+                                    .Version()
+                                    .map(|version| {
+                                        Version4([
+                                            version.Major,
+                                            version.Minor,
+                                            version.Build,
+                                            version.Revision,
+                                        ])
+                                    })
+                                    .map_err(|error| code(&error)),
+                            })
+                        }),
+                    };
+                    let entries = match read {
+                        Err(code) => {
+                            completion_log(&format!(
+                                "store result: GetAppAndOptionalStorePackageUpdatesAsync {code}"
+                            ));
+                            return deliver(&finished, QueryOutcome::Failed(code));
                         }
-                        Ok(entries)
+                        Ok(entries) => entries,
                     };
-                    let outcome = match read() {
-                        Err(error) => QueryOutcome::Failed(code(&error)),
-                        Ok(entries) => QueryOutcome::Answer {
-                            signal: signal(&entries, &context),
-                            entries,
-                        },
-                    };
-                    deliver(&finished, outcome);
+                    completion_log(&format!(
+                        "store result: GetAppAndOptionalStorePackageUpdatesAsync {} entries",
+                        entries.len()
+                    ));
+                    if !entries
+                        .iter()
+                        .any(|entry| entry.family == super::STORE_FAMILY)
+                    {
+                        let signal = Signal::True;
+                        return deliver(&finished, QueryOutcome::Answer { entries, signal });
+                    }
+                    let kept = entries.clone();
+                    let on_signal = finished.clone();
+                    let signal_log = completion_log.clone();
+                    let posted = main.run_on_main_thread(move || {
+                        let signal = signal(&context, &signal_log);
+                        deliver(&on_signal, QueryOutcome::Answer { entries, signal });
+                    });
+                    if let Err(error) = posted {
+                        completion_log(&format!(
+                            "store result: CanSilentlyDownloadStorePackageUpdates not called ({error})"
+                        ));
+                        let signal = Signal::Error;
+                        deliver(&finished, QueryOutcome::Answer { entries: kept, signal });
+                    }
                 });
                 if let Err(error) = when {
-                    deliver(&on_main, QueryOutcome::Failed(code(&error)));
+                    // The query runs on unobserved: the core times it out and
+                    // waits for the rest of this run (D2).
+                    log(&format!("store result: Completed {}", code(&error)));
                 }
             });
             if let Err(error) = posted {
                 deliver(&done, QueryOutcome::Failed(error.to_string()));
             }
-            Box::new(Handle(slot))
+            Box::new(Handle {
+                app: self.app.clone(),
+                slot,
+                log: self.log.clone(),
+            })
         }
     }
 }
@@ -1660,25 +1967,38 @@ mod tests {
         }
     }
 
-    type Done = Box<dyn FnOnce(QueryOutcome) + Send>;
-
-    /// Records each query and holds its `done` for the test to call; also
-    /// counts cancels. Its interface has the query and Cancel only (R-3).
+    /// Records each query and holds its `started` and `done` for the test to
+    /// call; also counts cancels. Its interface has the query and Cancel only
+    /// (R-3).
     #[derive(Default)]
     struct RecordingStore {
+        starting: Mutex<Vec<Started>>,
         pending: Mutex<Vec<Done>>,
         queries: AtomicU64,
         cancels: Arc<AtomicU64>,
         cancel_fails: bool,
+        /// The states published, as the fixture records them.
+        published: Arc<Mutex<Vec<UpdateState>>>,
+        /// What the last published state said when each Cancel came.
+        cancel_saw: Arc<Mutex<Vec<Option<Checking>>>>,
     }
 
     struct RecordingHandle {
         cancels: Arc<AtomicU64>,
         fails: bool,
+        published: Arc<Mutex<Vec<UpdateState>>>,
+        cancel_saw: Arc<Mutex<Vec<Option<Checking>>>>,
     }
 
     impl QueryHandle for RecordingHandle {
         fn cancel(&self) -> Result<(), String> {
+            let last = self
+                .published
+                .lock()
+                .unwrap()
+                .last()
+                .map(|state| state.checking);
+            self.cancel_saw.lock().unwrap().push(last);
             self.cancels.fetch_add(1, Ordering::SeqCst);
             if self.fails {
                 Err("0x80004005".into())
@@ -1689,12 +2009,15 @@ mod tests {
     }
 
     impl StoreBackend for RecordingStore {
-        fn start_query(&self, done: Done) -> Box<dyn QueryHandle> {
+        fn start_query(&self, started: Started, done: Done) -> Box<dyn QueryHandle> {
             self.queries.fetch_add(1, Ordering::SeqCst);
+            self.starting.lock().unwrap().push(started);
             self.pending.lock().unwrap().push(done);
             Box::new(RecordingHandle {
                 cancels: self.cancels.clone(),
                 fails: self.cancel_fails,
+                published: self.published.clone(),
+                cancel_saw: self.cancel_saw.clone(),
             })
         }
     }
@@ -1703,8 +2026,19 @@ mod tests {
         fn queries(&self) -> u64 {
             self.queries.load(Ordering::SeqCst)
         }
+        /// The oldest query's native start.
+        fn begin(&self) {
+            let started = self.starting.lock().unwrap().remove(0);
+            started();
+        }
+        /// The oldest query's end; its start, if not reported, is not.
         fn answer(&self, outcome: QueryOutcome) {
             let done = self.pending.lock().unwrap().remove(0);
+            let mut starting = self.starting.lock().unwrap();
+            if starting.len() > self.pending.lock().unwrap().len() {
+                drop(starting.remove(0));
+            }
+            drop(starting);
             done(outcome);
         }
     }
@@ -1775,13 +2109,18 @@ mod tests {
         fn with(store: RecordingStore, opener: RecordingOpener) -> Self {
             let dir = tempfile_lite::TempDir::new();
             let path = dir.path().join(UPDATES_FILE);
+            let emitted = Arc::new(Mutex::new(Vec::new()));
+            let store = RecordingStore {
+                published: emitted.clone(),
+                ..store
+            };
             Fixture {
                 _dir: dir,
                 path,
                 clock: TestClock::new(),
                 store: Arc::new(store),
                 opener: Arc::new(opener),
-                emitted: Arc::new(Mutex::new(Vec::new())),
+                emitted,
                 logged: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -1951,8 +2290,16 @@ mod tests {
             &core,
             answer(vec![offer(KEY_25, Some("0.25.0.0"), false)], Signal::True),
         );
-        lock(&core).snooze(KEY_25).unwrap();
+        // Held in memory only, and said so: the file stays as it is.
+        assert_eq!(lock(&core).snooze(KEY_25), Ok(false));
         assert_eq!(fixture.read(), "\u{0}\u{1}garbage");
+        // Always update leaves it to the Updates setting.
+        assert_eq!(
+            lock(&core).choose_always_update(KEY_25.into()),
+            Err(UNLOADED_CHOICE.into())
+        );
+        assert_eq!(fixture.read(), "\u{0}\u{1}garbage");
+        assert_eq!(state(&core).mode, Mode::Ask);
         lock(&core).set_mode("off").unwrap();
         assert!(fixture.read().contains(r#""mode":"off""#));
     }
@@ -2137,11 +2484,19 @@ mod tests {
         fixture.clock.jump_civil(3600);
         lock(&core).poll();
         assert_eq!(state(&core).checking, Checking::Running);
-        poll_for(&fixture, &core, 60);
+        poll_for(&fixture, &core, 59);
+        assert_eq!(state(&core).checking, Checking::Running, "59 s");
+        assert_eq!(state(&core).check_error, None);
+        poll_for(&fixture, &core, 1);
         let timed_out = state(&core);
         assert_eq!(timed_out.checking, Checking::Waiting);
         assert_eq!(timed_out.check_error.as_deref(), Some(NO_ANSWER));
         assert_eq!(fixture.store.cancels.load(Ordering::SeqCst), 1);
+        // Reported first, then cancelled.
+        assert_eq!(
+            *fixture.store.cancel_saw.lock().unwrap(),
+            vec![Some(Checking::Waiting)]
+        );
         // Nothing new while it is out.
         lock(&core).check_now();
         assert_eq!(fixture.store.queries(), 1);
@@ -2151,6 +2506,7 @@ mod tests {
             Signal::True,
         ));
         assert!(state(&core).offer.is_none());
+        assert_eq!(state(&core).last_checked_at, None);
         assert_eq!(state(&core).checking, Checking::Idle);
         lock(&core).check_now();
         assert_eq!(fixture.store.queries(), 2);
@@ -2199,7 +2555,10 @@ mod tests {
             answer(vec![offer(KEY_25, Some("0.25.0.0"), true)], Signal::True),
         );
         assert!(state(&core).wants_dialog);
+        let before = fixture.read();
         assert_eq!(lock(&core).snooze(KEY_26), Err(STALE_OFFER.into()));
+        assert_eq!(fixture.read(), before, "a stale key stores nothing");
+        assert!(state(&core).wants_dialog);
         fixture.clock.advance(3600);
         assert_eq!(
             lock(&core).snooze(KEY_25),
@@ -2347,9 +2706,24 @@ mod tests {
         check(
             &fixture,
             &core,
+            answer(vec![offer(KEY_25, Some("0.25.0.0"), false)], Signal::False),
+        );
+        assert!(state(&core).notices.is_empty(), "signal false");
+        check(
+            &fixture,
+            &core,
+            answer(vec![offer(KEY_25, Some("0.25.0.0"), true)], Signal::True),
+        );
+        assert_eq!(
+            kinds(&state(&core)),
+            vec![NoticeKind::Mandatory, NoticeKind::Waiting]
+        );
+        check(
+            &fixture,
+            &core,
             answer(vec![offer(KEY_25, Some("0.25.0.0"), false)], Signal::Error),
         );
-        assert!(state(&core).notices.is_empty());
+        assert!(state(&core).notices.is_empty(), "signal error");
 
         // Acknowledged: not again within 24 h, across a restart; then again.
         check(
@@ -2391,6 +2765,20 @@ mod tests {
         );
         assert!(state(&again).notices.is_empty());
         assert!(fixture.read().contains(KEY_26));
+        // An acknowledgement holds for its key: another mandatory key shows at once.
+        check(
+            &fixture,
+            &again,
+            answer(vec![offer(KEY_25, Some("0.25.0.0"), true)], Signal::True),
+        );
+        let id = state(&again).notices[0].id;
+        lock(&again).acknowledge(id);
+        check(
+            &fixture,
+            &again,
+            answer(vec![offer(KEY_26, Some("0.26.0.0"), true)], Signal::True),
+        );
+        assert_eq!(kinds(&state(&again)), vec![NoticeKind::Mandatory]);
 
         // Both conditions on one check: both notices.
         let both = Fixture::new();
@@ -2422,9 +2810,14 @@ mod tests {
             kinds(&state(&core)),
             vec![NoticeKind::Updated, NoticeKind::Mandatory]
         );
+        lock(&core).set_mode("ask").unwrap();
+        lock(&core).snooze(KEY_25).unwrap();
+        assert!(off.read().contains("snoozedKey"));
+        lock(&core).set_mode("auto").unwrap();
         lock(&core).set_mode("off").unwrap();
         assert_eq!(kinds(&state(&core)), vec![NoticeKind::Updated]);
         assert!(!off.read().contains("pendingSince"));
+        assert!(!off.read().contains("snoozedKey"), "off clears the snooze");
         // A check completing in off: offer shown, nothing else.
         check(
             &off,
@@ -2442,6 +2835,13 @@ mod tests {
         // Entering auto sets pendingSince; re-entering for the same offer keeps it.
         lock(&core).set_mode("auto").unwrap();
         let first = off.read();
+        assert!(
+            first
+                .split("pendingSince")
+                .nth(1)
+                .is_some_and(|rest| rest.contains(KEY_25)),
+            "{first}"
+        );
         off.clock.advance(3600);
         lock(&core).set_mode("ask").unwrap();
         lock(&core).set_mode("auto").unwrap();
@@ -2585,7 +2985,10 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         for _ in 0..3 {
             let sender = sender.clone();
-            store.start_query(Box::new(move |outcome| sender.send(outcome).unwrap()));
+            store.start_query(
+                Box::new(|| {}),
+                Box::new(move |outcome| sender.send(outcome).unwrap()),
+            );
         }
         let mut outcomes: Vec<QueryOutcome> = (0..3).map(|_| receiver.recv().unwrap()).collect();
         outcomes.sort_by_key(|outcome| matches!(outcome, QueryOutcome::Answer { .. }));
@@ -2641,15 +3044,372 @@ mod tests {
         lock(&core).choose_always_update(KEY_25.into()).unwrap();
         fixture.clock.advance(DAY + TICK.as_secs());
         lock(&core).poll();
-        let logged = fixture.logged.lock().unwrap().clone();
-        let calls: Vec<&String> = logged
-            .iter()
-            .filter(|line| line.starts_with("store call:"))
-            .collect();
-        assert!(!calls.is_empty());
-        assert!(calls
-            .iter()
-            .all(|line| *line == "store call: GetAppAndOptionalStorePackageUpdatesAsync"));
+        // The first check and the daily one, and nothing else reached it.
+        assert_eq!(fixture.store.queries(), 2);
+    }
+
+    // ── AC-1, AC-2, AC-16: which builds check ──
+
+    fn chosen(
+        release: bool,
+        package: Option<PackageFacts>,
+        script: Option<&str>,
+        config: Result<PathBuf, String>,
+    ) -> (Option<Chosen>, Vec<String>, bool) {
+        let dir = tempfile_lite::TempDir::new();
+        let script = script.map(|text| {
+            let path = dir.path().join("script.json");
+            std::fs::write(&path, text).unwrap();
+            path.into_os_string()
+        });
+        let read = std::sync::atomic::AtomicBool::new(false);
+        let lines = Mutex::new(Vec::new());
+        let result = choose(
+            release,
+            &|| {
+                read.store(true, Ordering::SeqCst);
+                package.clone()
+            },
+            script,
+            &|| config.clone(),
+            &|line| lines.lock().unwrap().push(line.to_string()),
+        );
+        (
+            result,
+            lines.into_inner().unwrap(),
+            read.load(Ordering::SeqCst),
+        )
+    }
+
+    #[test]
+    fn choose_decides_once_with_one_line() {
+        let store = PackageFacts {
+            family: STORE_FAMILY.into(),
+            store_signed: true,
+            version: Version4([0, 25, 0, 0]),
+        };
+        let dir = || Ok(PathBuf::from("config"));
+        const SCRIPT: &str = r#"{"version":"0.24.0.0","checks":[{"noAnswer":true}]}"#;
+
+        // A release build of the Store's package: native, the package's version.
+        let (result, lines, _) = chosen(true, Some(store.clone()), None, dir());
+        let result = result.expect("eligible");
+        assert!(matches!(result.source, Source::Native));
+        assert_eq!(result.running, Version4([0, 25, 0, 0]));
+        assert_eq!(result.path, PathBuf::from("config").join(UPDATES_FILE));
+        assert_eq!(lines, vec!["store updates: eligible"]);
+
+        // A release build ignores a script, valid or not.
+        let (result, lines, _) = chosen(true, Some(store.clone()), Some("{"), dir());
+        assert!(matches!(
+            result.map(|chosen| chosen.source),
+            Some(Source::Native)
+        ));
+        assert_eq!(lines, vec!["store updates: eligible"]);
+        let (result, lines, _) = chosen(true, None, Some(SCRIPT), dir());
+        assert!(result.is_none());
+        assert_eq!(lines, vec!["store updates: ineligible (package)"]);
+        let developer = PackageFacts {
+            store_signed: false,
+            ..store.clone()
+        };
+        let (_, lines, _) = chosen(true, Some(developer), None, dir());
+        assert_eq!(lines, vec!["store updates: ineligible (signature)"]);
+
+        // A development build without the variable: channel, and its package
+        // is not even read.
+        let (result, lines, read) = chosen(false, Some(store.clone()), None, dir());
+        assert!(result.is_none());
+        assert_eq!(lines, vec!["store updates: ineligible (channel)"]);
+        assert!(!read);
+
+        // With a valid script: scripted, the script's version.
+        let (result, lines, read) = chosen(false, None, Some(SCRIPT), dir());
+        let result = result.expect("eligible by its script");
+        assert!(matches!(result.source, Source::Scripted(_)));
+        assert_eq!(result.running, RUNNING);
+        assert_eq!(lines, vec!["store updates: eligible"]);
+        assert!(!read);
+
+        // With an invalid one: ineligible, one WARN.
+        let (result, lines, _) = chosen(false, None, Some(r#"{"version":"0.24"}"#), dir());
+        assert!(result.is_none());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("WARN: store updates: invalid script ("),
+            "{lines:?}"
+        );
+
+        // No configuration directory: one line, ineligible.
+        let (result, lines, _) = chosen(true, Some(store), None, Err("no APPDATA".into()));
+        assert!(result.is_none());
+        assert_eq!(
+            lines,
+            vec!["store updates: ineligible (config directory: no APPDATA)"]
+        );
+    }
+
+    #[test]
+    fn the_script_refuses_fields_of_the_wrong_form() {
+        for invalid in [
+            r#"{"version":"0.24.0.0","checks":[{"offers":[{"key":"k"}],"signal":false}]}"#,
+            r#"{"version":"0.24.0.0","checks":[{"offers":[{"key":"k"}],"signal":"maybe"}]}"#,
+            r#"{"version":"0.24.0.0","checks":[{"offers":[{"key":"k","mandatory":"yes"}]}]}"#,
+            r#"{"version":"0.24.0.0","checks":[{"offers":[{"key":"k","family":3}]}]}"#,
+            r#"{"version":"0.24.0.0","checks":[{"offers":[{"key":"k","version":"0.25"}]}]}"#,
+            r#"{"version":"0.24.0.0","checks":[{"offers":[{"key":7}]}]}"#,
+            r#"{"version":"0.24.0.0","checks":[{"error":404}]}"#,
+            r#"{"version":"0.24.0.0","checks":[{"noAnswer":false}]}"#,
+        ] {
+            assert!(ScriptedStore::parse(invalid).is_err(), "{invalid}");
+        }
+        let (_, store) = ScriptedStore::parse(
+            r#"{"version":"0.24.0.0","checks":[{"offers":[{"key":"k","version":"0.25.0.0","mandatory":true,"family":"F"}],"signal":"error"}]}"#,
+        )
+        .unwrap();
+        let ScriptCheck::Answer { entries, signal } = &store.checks[0] else {
+            panic!("an answer");
+        };
+        assert_eq!(*signal, Signal::Error);
+        assert_eq!(
+            entries[0],
+            Entry {
+                family: "F".into(),
+                full_name: "k".into(),
+                mandatory: true,
+                version: Some(Version4([0, 25, 0, 0])),
+            }
+        );
+    }
+
+    // ── AC-6: reading the Store's answer ──
+
+    fn whole_entry() -> EntryReads {
+        EntryReads {
+            family: Ok(STORE_FAMILY.into()),
+            full_name: Ok(KEY_25.into()),
+            mandatory: Ok(true),
+            version: Ok(Version4([0, 25, 0, 0])),
+        }
+    }
+
+    #[test]
+    fn a_partial_read_fails_the_check_except_the_version() {
+        assert_eq!(
+            read_answer(Ok(1), |_| Ok(whole_entry())),
+            Ok(vec![offer(KEY_25, Some("0.25.0.0"), true)])
+        );
+        assert_eq!(
+            read_answer(Err("0x1".into()), |_| Ok(whole_entry())),
+            Err("0x1".into())
+        );
+        assert_eq!(
+            read_answer(Ok(2), |index| if index == 1 {
+                Err("0x2".into())
+            } else {
+                Ok(whole_entry())
+            }),
+            Err("0x2".into()),
+            "the second entry"
+        );
+        let broken: [fn() -> EntryReads; 3] = [
+            || EntryReads {
+                family: Err("0x3".into()),
+                ..whole_entry()
+            },
+            || EntryReads {
+                full_name: Err("0x3".into()),
+                ..whole_entry()
+            },
+            || EntryReads {
+                mandatory: Err("0x3".into()),
+                ..whole_entry()
+            },
+        ];
+        for reads in broken {
+            assert_eq!(read_answer(Ok(1), |_| Ok(reads())), Err("0x3".into()));
+        }
+        assert_eq!(
+            read_answer(Ok(1), |_| Ok(EntryReads {
+                version: Err("0x4".into()),
+                ..whole_entry()
+            })),
+            Ok(vec![offer(KEY_25, None, true)]),
+            "no version: none shown"
+        );
+    }
+
+    // ── AC-7, D1, D2: attempts, failures and their times ──
+
+    #[test]
+    fn a_failure_keeps_its_time_through_the_next_attempt() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        lock(&core).check_now();
+        fixture.store.begin();
+        let first_attempt = state(&core).last_attempt_at.expect("started");
+        fixture
+            .store
+            .answer(QueryOutcome::Failed("0x80072EE7".into()));
+        let failed = state(&core);
+        let failed_at = failed.check_failed_at.clone().expect("dated");
+        assert_eq!(failed_at, first_attempt);
+
+        fixture.clock.advance(600);
+        lock(&core).check_now();
+        assert_eq!(fixture.store.queries(), 2, "a check after a failed one");
+        fixture.store.begin();
+        let during = state(&core);
+        assert_ne!(
+            during.last_attempt_at.as_deref(),
+            Some(first_attempt.as_str())
+        );
+        assert_eq!(during.check_failed_at.as_deref(), Some(failed_at.as_str()));
+        assert!(during.check_error.unwrap().contains("0x80072EE7"));
+        fixture.store.answer(answer(vec![], Signal::True));
+        let after = state(&core);
+        assert_eq!(after.check_error, None);
+        assert_eq!(after.check_failed_at, None);
+    }
+
+    #[test]
+    fn an_answer_past_the_bound_is_no_answer() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        lock(&core).check_now();
+        // The poller last ran at 59 s; the answer comes at 61 s, before it runs again.
+        poll_for(&fixture, &core, 59);
+        fixture.clock.advance(2);
+        fixture.store.answer(answer(
+            vec![offer(KEY_25, Some("0.25.0.0"), false)],
+            Signal::True,
+        ));
+        let late = state(&core);
+        assert!(late.offer.is_none());
+        assert_eq!(late.last_checked_at, None);
+        assert_eq!(late.check_error.as_deref(), Some(NO_ANSWER));
+        assert_eq!(late.checking, Checking::Idle);
+    }
+
+    #[test]
+    fn the_bound_runs_from_the_native_start() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        lock(&core).check_now();
+        // Creating the context took 30 s; the query then has its own 60 s.
+        poll_for(&fixture, &core, 30);
+        fixture.store.begin();
+        poll_for(&fixture, &core, 59);
+        assert_eq!(state(&core).checking, Checking::Running);
+        poll_for(&fixture, &core, 1);
+        assert_eq!(state(&core).checking, Checking::Waiting);
+    }
+
+    #[test]
+    fn a_context_failure_is_no_attempt_and_retries_at_the_tick() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        lock(&core).window_shown();
+        poll_for(&fixture, &core, 60);
+        assert_eq!(fixture.store.queries(), 1);
+        fixture
+            .store
+            .answer(QueryOutcome::ContextFailed("GetDefault 0x80004005".into()));
+        let failed = state(&core);
+        assert_eq!(failed.last_attempt_at, None, "no native query started");
+        assert_eq!(failed.store_error.as_deref(), Some(STORE_UNAVAILABLE));
+        // The next tick is 15 minutes after start, not after the failure.
+        poll_for(&fixture, &core, TICK.as_secs() - 61);
+        assert_eq!(fixture.store.queries(), 1);
+        poll_for(&fixture, &core, 1);
+        assert_eq!(fixture.store.queries(), 2, "at the tick");
+        // The context, created this time, clears the error at once.
+        fixture.store.begin();
+        assert_eq!(state(&core).store_error, None);
+        assert!(state(&core).last_attempt_at.is_some());
+    }
+
+    #[test]
+    fn leaving_off_waits_60_s_even_at_a_tick() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        check(&fixture, &core, answer(vec![], Signal::True));
+        lock(&core).set_mode("off").unwrap();
+        // Two days in off; the next poll is a tick, with the last attempt old.
+        fixture.clock.jump_civil(2 * DAY);
+        fixture.clock.jump_mono(TICK.as_secs() - 1);
+        lock(&core).set_mode("ask").unwrap();
+        poll_for(&fixture, &core, 1);
+        assert_eq!(fixture.store.queries(), 1, "not at the tick");
+        poll_for(&fixture, &core, 58);
+        assert_eq!(fixture.store.queries(), 1);
+        poll_for(&fixture, &core, 1);
+        assert_eq!(fixture.store.queries(), 2, "60 s after leaving off");
+        fixture.store.answer(answer(vec![], Signal::True));
+        poll_for(&fixture, &core, 60);
+        assert_eq!(fixture.store.queries(), 2, "and only that one");
+    }
+
+    // ── D10: one state per seq ──
+
+    #[test]
+    fn a_read_never_gives_a_seq_two_states() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        check(
+            &fixture,
+            &core,
+            answer(vec![offer(KEY_25, Some("0.25.0.0"), false)], Signal::True),
+        );
+        lock(&core).snooze(KEY_25).unwrap();
+        let snoozed = lock(&core).current();
+        assert!(!snoozed.wants_dialog);
+        // The snooze ends between ticks: the read publishes the change.
+        fixture.clock.jump_civil(DAY + 1);
+        let read = lock(&core).current();
+        assert!(read.wants_dialog);
+        assert!(read.seq > snoozed.seq);
+        assert_eq!(fixture.last_state(), read);
+
+        // A failed mode change changes no state and publishes nothing.
+        let failing = Fixture::new();
+        failing.write(r#"{"mode":"ask","lastRunVersion":"0.24.0.0"}"#);
+        let core = Core::create_with_replace(
+            failing.parts(),
+            Box::new(|_, _| Err(std::io::Error::other("injected"))),
+        );
+        let before = lock(&core).current();
+        assert!(lock(&core).set_mode("off").is_err());
+        assert_eq!(lock(&core).current(), before);
+        assert_eq!(before.save_error, None);
+
+        // Check for updates answers the state, waiting included.
+        let waiting = Fixture::new();
+        let core = waiting.core();
+        assert_eq!(lock(&core).check_now().checking, Checking::Running);
+        poll_for(&waiting, &core, 60);
+        let pressed = lock(&core).check_now();
+        assert_eq!(pressed.checking, Checking::Waiting);
+        assert_eq!(waiting.store.queries(), 1);
+    }
+
+    #[test]
+    fn an_empty_answer_with_nothing_to_clear_writes_nothing() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        std::fs::remove_file(&fixture.path).unwrap();
+        check(&fixture, &core, answer(vec![], Signal::True));
+        assert!(!fixture.path.exists());
+        // With a snooze to clear, it writes.
+        check(
+            &fixture,
+            &core,
+            answer(vec![offer(KEY_25, Some("0.25.0.0"), false)], Signal::True),
+        );
+        lock(&core).snooze(KEY_25).unwrap();
+        check(&fixture, &core, answer(vec![], Signal::True));
+        assert!(fixture.path.exists());
+        assert!(!fixture.read().contains("snoozedKey"));
     }
 
     #[test]

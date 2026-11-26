@@ -13,11 +13,21 @@ import UpdateDialog from "./UpdateDialog.vue";
 const mocks = vi.hoisted(() => ({
 	invoke: vi.fn(),
 	listen: vi.fn(),
+	/** The native window, as `@tauri-apps/api/window` gives it. */
+	win: {
+		isVisible: vi.fn(),
+		isMinimized: vi.fn(),
+		onResized: vi.fn(),
+		onFocusChanged: vi.fn(),
+	},
+	windowEvents: [] as (() => void)[],
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => mocks.win }));
 
 const KEY_25 = "O2CSI.Lasterm_0.25.0.0_x64__sx7tynvv0nmw4";
+const KEY_26 = "O2CSI.Lasterm_0.26.0.0_x64__sx7tynvv0nmw4";
 
 /** An eligible state; `offer: null` leaves the offer out. */
 function eligible(
@@ -49,6 +59,15 @@ beforeEach(() => {
 	mocks.invoke.mockReset();
 	mocks.invoke.mockResolvedValue(undefined);
 	mocks.listen.mockReset();
+	mocks.windowEvents.length = 0;
+	mocks.win.isVisible.mockReset().mockResolvedValue(true);
+	mocks.win.isMinimized.mockReset().mockResolvedValue(false);
+	for (const subscribe of [mocks.win.onResized, mocks.win.onFocusChanged]) {
+		subscribe.mockReset().mockImplementation(async (handler: () => void) => {
+			mocks.windowEvents.push(handler);
+			return () => undefined;
+		});
+	}
 	Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
 });
 
@@ -56,7 +75,18 @@ afterEach(() => {
 	app?.unmount();
 	app = null;
 	document.body.innerHTML = "";
+	Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 });
+
+/** The page runs in the desktop app, whose window the dialog follows. */
+function inDesktop(): void {
+	Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+}
+
+/** The window moved: minimized, restored, hidden or shown again. */
+function windowEvent(): void {
+	for (const handler of mocks.windowEvents) handler();
+}
 
 /** Lets the dynamic imports, the commands and Vue's updates run their course. */
 async function settle(): Promise<void> {
@@ -144,7 +174,9 @@ describe("when the update dialog shows (AC-8)", () => {
 		await mountDialog(eligible());
 		const body = document.getElementById("update-dialog-body");
 		expect(dialog()?.getAttribute("aria-describedby")).toBe("update-dialog-body");
-		expect(body?.textContent).toContain("Save your work first: terminals on this computer can end");
+		expect(document.querySelector(".update-sessions")?.textContent).toBe(
+			"Installing the update may close Lasterm, or the Microsoft Store may ask you to close it. Save your work first: terminals on this computer can end, whoever is viewing them, and file transfers in progress stop. Terminals kept by a Lasterm agent on another host usually keep running (a host that ends a user's processes at logout may end them): select the host after the update to reattach them. Other SSH terminals end.",
+		);
 		expect(body?.textContent).toContain("Update now opens the Microsoft Store");
 		expect(dialog()?.querySelector("#update-dialog-title")?.textContent).toBe(
 			"Lasterm 0.25.0 is available",
@@ -392,20 +424,22 @@ describe("notices and the state's order (AC-15)", () => {
 		});
 		await mountDialog(eligible({ offer: null, notices: [updated] }));
 		const toasts = useToastStore();
-		toasts.act(toasts.messages[0]?.id ?? -1);
+		const notice = toasts.messages[0]?.id ?? -1;
+		toasts.act(notice);
 		await settle();
 		expect(invoked("open_store_page")).toHaveLength(1);
 		expect(invoked("acknowledge_notice")).toEqual([]);
 		expect(toasts.messages.map((message) => message.text)).toContain(
 			"The Microsoft Store could not be opened.",
 		);
-		expect(toasts.messages.map((message) => message.text)).toContain(updated.text);
+		// The same toast, still there to be tried again.
+		expect(toasts.messages.find((message) => message.text === updated.text)?.id).toBe(notice);
 
 		mocks.invoke.mockResolvedValue(undefined);
-		const again = toasts.messages.find((message) => message.text === updated.text);
-		toasts.act(again?.id ?? -1);
+		toasts.act(notice);
 		await settle();
 		expect(invoked("acknowledge_notice")).toEqual([{ noticeId: 3 }]);
+		expect(toasts.messages.map((message) => message.id)).not.toContain(notice);
 	});
 
 	it("Open Settings acknowledges and asks for Settings › Desktop", async () => {
@@ -420,5 +454,215 @@ describe("notices and the state's order (AC-15)", () => {
 		await settle();
 		expect(invoked("acknowledge_notice")).toEqual([{ noticeId: 4 }]);
 		expect(store.settingsRequests).toBe(1);
+	});
+});
+
+describe("the update dialog and the native window (AC-8)", () => {
+	it("waits while the window is minimized or hidden, notices too, and shows when it is back", async () => {
+		inDesktop();
+		mocks.win.isMinimized.mockResolvedValue(true);
+		const updated = { id: 9, kind: "updated" as const, text: "Lasterm was updated to 0.25.0." };
+		await mountDialog(eligible({ notices: [updated] }));
+		expect(dialog()).toBeNull();
+		expect(useToastStore().messages).toEqual([]);
+
+		mocks.win.isMinimized.mockResolvedValue(false);
+		windowEvent();
+		await settle();
+		expect(dialog()).not.toBeNull();
+		expect(useToastStore().messages.map((message) => message.text)).toEqual([updated.text]);
+
+		mocks.win.isVisible.mockResolvedValue(false);
+		windowEvent();
+		await settle();
+		expect(dialog()).toBeNull();
+		expect(invoked("snooze_update")).toEqual([]);
+	});
+});
+
+describe("an opening from Settings belongs to its offer (AC-8)", () => {
+	it("does not come back for a later offer once its own has gone", async () => {
+		const settings = document.createElement("div");
+		settings.className = "settings-panel";
+		settings.setAttribute("aria-modal", "true");
+		const opener = document.createElement("button");
+		opener.setAttribute("data-update-opener", "");
+		settings.appendChild(opener);
+		document.body.appendChild(settings);
+		const store = await mountDialog(eligible({ mode: "off", wantsDialog: false }));
+		store.openFromSettings();
+		await settle();
+		expect(dialog()).not.toBeNull();
+
+		store.state = eligible({ seq: 2, mode: "off", wantsDialog: false, offer: null });
+		await settle();
+		expect(dialog()).toBeNull();
+		store.state = eligible({
+			seq: 3,
+			mode: "off",
+			wantsDialog: false,
+			offer: { key: KEY_26, version: "0.26.0", mandatory: false, signal: "true" },
+		});
+		await settle();
+		expect(dialog()).toBeNull();
+		expect(store.openedFromSettings).toBe(false);
+	});
+});
+
+describe("Update now (AC-9)", () => {
+	it("opened from Settings: opens the Store, snoozes the offer shown, and closes", async () => {
+		const settings = document.createElement("div");
+		settings.className = "settings-panel";
+		settings.setAttribute("aria-modal", "true");
+		const opener = document.createElement("button");
+		opener.setAttribute("data-update-opener", "");
+		settings.appendChild(opener);
+		document.body.appendChild(settings);
+		const store = await mountDialog(eligible({ mode: "off", wantsDialog: false }));
+		store.openFromSettings();
+		await settle();
+		button("Update now")?.click();
+		await settle();
+		expect(invoked("open_store_updates")).toHaveLength(1);
+		expect(invoked("snooze_update")).toEqual([{ key: KEY_25 }]);
+		expect(dialog()).toBeNull();
+		expect(store.openedFromSettings).toBe(false);
+	});
+
+	it("snoozes the offer the user saw, not one that arrived while the Store opened", async () => {
+		let opened: (() => void) | undefined;
+		mocks.invoke.mockImplementation(async (command: string) => {
+			if (command === "open_store_updates") {
+				await new Promise<void>((resolve) => {
+					opened = resolve;
+				});
+			}
+			return command === "snooze_update" ? true : undefined;
+		});
+		const store = await mountDialog(eligible());
+		button("Update now")?.click();
+		await settle();
+		store.state = eligible({
+			seq: 2,
+			offer: { key: KEY_26, version: "0.26.0", mandatory: false, signal: "true" },
+		});
+		await settle();
+		opened?.();
+		await settle();
+		expect(invoked("snooze_update")).toEqual([{ key: KEY_25 }]);
+	});
+});
+
+describe("the keyboard when the dialog steps aside or closes (AC-10)", () => {
+	it("leaves the keyboard to a dialog that comes after it", async () => {
+		// The terminal had the keyboard before the dialog showed.
+		const terminal = document.createElement("textarea");
+		document.body.appendChild(terminal);
+		terminal.focus();
+		await mountDialog(eligible());
+		expect(document.activeElement?.textContent?.trim()).toBe("Later");
+		const prompt = document.createElement("div");
+		prompt.setAttribute("aria-modal", "true");
+		const password = document.createElement("input");
+		prompt.appendChild(password);
+		document.body.appendChild(prompt);
+		password.focus();
+		await settle();
+		expect(dialog()).toBeNull();
+		expect(document.activeElement).toBe(password);
+	});
+
+	it("gives the keyboard to Check for updates when its opener has gone", async () => {
+		const settings = document.createElement("div");
+		settings.className = "settings-panel";
+		settings.setAttribute("aria-modal", "true");
+		const opener = document.createElement("button");
+		opener.setAttribute("data-update-opener", "");
+		const check = document.createElement("button");
+		check.setAttribute("data-update-check", "");
+		settings.append(opener, check);
+		document.body.appendChild(settings);
+		opener.focus();
+		const store = await mountDialog(eligible({ mode: "off", wantsDialog: false }));
+		store.openFromSettings();
+		await settle();
+		expect(document.activeElement?.textContent?.trim()).toBe("Later");
+		opener.remove();
+		dialog()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+		await settle();
+		expect(dialog()).toBeNull();
+		expect(document.activeElement).toBe(check);
+	});
+});
+
+/** What a page reload leaves: a new page and new stores, mounted on the state read again. */
+async function reload(state: UpdateState) {
+	app?.unmount();
+	app = null;
+	document.body.innerHTML = "";
+	pinia = createPinia();
+	setActivePinia(pinia);
+	return mountDialog(state);
+}
+
+describe("a page reload (AC-18)", () => {
+	it("forgets a dialog opened from Settings and brings back a wanted one", async () => {
+		const settings = document.createElement("div");
+		settings.className = "settings-panel";
+		settings.setAttribute("aria-modal", "true");
+		const opener = document.createElement("button");
+		opener.setAttribute("data-update-opener", "");
+		settings.appendChild(opener);
+		document.body.appendChild(settings);
+		const store = await mountDialog(eligible({ mode: "off", wantsDialog: false }));
+		store.openFromSettings();
+		await settle();
+		expect(dialog()).not.toBeNull();
+
+		// The reload: a new page, Settings closed, its stores new, the desktop state read again.
+		await reload(eligible({ mode: "off", wantsDialog: false }));
+		expect(dialog()).toBeNull();
+		await reload(eligible({ wantsDialog: true }));
+		expect(dialog()).not.toBeNull();
+	});
+});
+
+describe("a notice whose acknowledgement is on its way (AC-15)", () => {
+	it("is not shown again by a state sent before the desktop dropped it", async () => {
+		mocks.invoke.mockImplementation(async (command: string) => {
+			if (command === "acknowledge_notice") await new Promise(() => undefined);
+			return undefined;
+		});
+		const updated = { id: 5, kind: "updated" as const, text: "Lasterm was updated to 0.25.0." };
+		const store = await mountDialog(eligible({ offer: null, notices: [updated] }));
+		const toasts = useToastStore();
+		toasts.close(toasts.messages[0]?.id ?? -1);
+		store.state = eligible({ seq: 2, offer: null, notices: [updated] });
+		await settle();
+		expect(toasts.messages).toEqual([]);
+		expect(invoked("acknowledge_notice")).toEqual([{ noticeId: 5 }]);
+	});
+});
+
+describe("the page's other dialogs, watched only while the update dialog is wanted", () => {
+	it("watches nothing without an offer, and starts with one", async () => {
+		const Real = globalThis.MutationObserver;
+		let made = 0;
+		globalThis.MutationObserver = class extends Real {
+			constructor(callback: MutationCallback) {
+				super(callback);
+				made += 1;
+			}
+		};
+		try {
+			const store = await mountDialog(eligible({ offer: null, wantsDialog: false }));
+			expect(made).toBe(0);
+			store.state = eligible({ seq: 2 });
+			await settle();
+			expect(made).toBe(1);
+			expect(dialog()).not.toBeNull();
+		} finally {
+			globalThis.MutationObserver = Real;
+		}
 	});
 });

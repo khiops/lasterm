@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { connectUpdateState, type UpdateState } from "../utils/desktop-updates.js";
 import { isTauriRuntime } from "../utils/tauri-runtime.js";
 
@@ -9,8 +9,19 @@ import { isTauriRuntime } from "../utils/tauri-runtime.js";
  */
 export const useDesktopUpdatesStore = defineStore("desktopUpdates", () => {
 	const state = ref<UpdateState | null>(null);
-	/** The dialog was opened from Settings' Update now…, in whatever mode. */
-	const openedFromSettings = ref(false);
+	/** The offer whose dialog Settings' Update now… opened, in whatever mode. */
+	const openedFor = ref<string | null>(null);
+	/** The dialog was opened from Settings for the offer known now. */
+	const openedFromSettings = computed(
+		() => openedFor.value !== null && openedFor.value === state.value?.offer?.key,
+	);
+	// An opening belongs to its offer: gone or replaced, a later offer does not inherit it.
+	watch(
+		() => state.value?.offer?.key,
+		(key) => {
+			if (openedFor.value !== null && openedFor.value !== key) openedFor.value = null;
+		},
+	);
 	/** Bumped when a notice's Open Settings asks for Settings › Desktop. */
 	const settingsRequests = ref(0);
 	let connecting: Promise<void> | null = null;
@@ -30,11 +41,11 @@ export const useDesktopUpdatesStore = defineStore("desktopUpdates", () => {
 	}
 
 	function openFromSettings(): void {
-		openedFromSettings.value = true;
+		openedFor.value = state.value?.offer?.key ?? null;
 	}
 
 	function closeDialog(): void {
-		openedFromSettings.value = false;
+		openedFor.value = null;
 	}
 
 	function requestSettings(): void {

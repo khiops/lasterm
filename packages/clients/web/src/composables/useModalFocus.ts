@@ -20,21 +20,36 @@ export function useModalFocus(options: {
 	initial?: () => HTMLElement | null;
 	/** Where it goes on close when what it came from is gone: a deleted item's button. */
 	fallback?: () => HTMLElement | null;
+	/**
+	 * Whether a close gives the keyboard back. A dialog that only steps aside for another one
+	 * answers false: the other dialog has the keyboard, and the place to go back to is kept for
+	 * when this one really closes (#1214).
+	 */
+	restore?: () => boolean;
 }): { onKeydown: (event: KeyboardEvent) => void } {
 	let returnTo: HTMLElement | null = null;
+	let suspended = false;
 
 	watch(
 		options.open,
 		(isOpen, wasOpen) => {
 			if (isOpen) {
 				const active = document.activeElement;
-				returnTo = active instanceof HTMLElement && active !== document.body ? active : null;
+				if (!suspended || returnTo?.isConnected !== true) {
+					returnTo = active instanceof HTMLElement && active !== document.body ? active : null;
+				}
+				suspended = false;
 				void nextTick(() => {
 					(options.initial?.() ?? firstTabbable(options.root.value))?.focus();
 				});
 				return;
 			}
 			if (wasOpen !== true) return;
+			if (options.restore?.() === false) {
+				suspended = true;
+				return;
+			}
+			suspended = false;
 			const back = returnTo;
 			returnTo = null;
 			// What it came from can go with the dialog's work: look once the page has caught up.

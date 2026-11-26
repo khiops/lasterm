@@ -3,6 +3,7 @@ import {
 	attachedChannel,
 	breadcrumbOf,
 	clampTransfersShare,
+	columnRoom,
 	DEFAULT_FILES_SORT,
 	entryLabel,
 	type FileEntryView,
@@ -744,6 +745,28 @@ describe("the listing's sort (#1209)", () => {
 		]);
 	});
 
+	it("breaks a tie on the column by name, in both directions", () => {
+		const list = [
+			entry("b", { size: 7, owner: "o", mtime: "2026-11-20T10:00:00Z", mode: 0o100644 }),
+			entry("c", { size: 7, owner: "o", mtime: "2026-11-20T10:00:00Z", mode: 0o100644 }),
+			entry("a", { size: 7, owner: "o", mtime: "2026-11-20T10:00:00Z", mode: 0o100644 }),
+		];
+		for (const key of ["size", "modified", "mode", "owner"] as const) {
+			expect(names(sortEntries(list, { key, descending: false })), key).toEqual(["a", "b", "c"]);
+			expect(names(sortEntries(list, { key, descending: true })), key).toEqual(["a", "b", "c"]);
+		}
+	});
+
+	it("puts an owner without a name last when descending too", () => {
+		const list = [
+			entry("n", { owner: null }),
+			entry("x", { owner: "root" }),
+			entry("y", { owner: "alice" }),
+		];
+		expect(names(sortEntries(list, { key: "owner", descending: true }))).toEqual(["x", "y", "n"]);
+		expect(names(sortEntries(list, { key: "owner", descending: false }))).toEqual(["y", "x", "n"]);
+	});
+
 	it("by owner and by mode, the same way", () => {
 		const list = [
 			entry("x", { owner: "root", mode: 0o100644 }),
@@ -778,6 +801,15 @@ describe("the columns a list shows (#1209)", () => {
 		// 600 - 20 padding - 14 icon - 8 gap = 558; each column takes 128 with its gap: three leave 174, four 46.
 		expect(shownColumns(all, wide, 600)).toEqual(["size", "modified", "mode"]);
 		expect(shownColumns(all, wide, 500)).toEqual(["size", "modified"]);
+	});
+
+	it("gives a column the room that leaves Name 96 px beside the others", () => {
+		// 480 - 20 padding - 14 icon - 8 gap - 96 Name = 342; the others, 52 + 64 + 70 with a gap each,
+		// take 210; the column's own gap takes 8 more: 124 px of room.
+		expect(columnRoom(480, [52, 64, 70], 40, 400)).toBe(124);
+		expect(columnRoom(900, [52, 64, 70], 40, 400)).toBe(400);
+		expect(columnRoom(300, [52, 64, 70], 40, 400)).toBe(40);
+		expect(columnRoom(null, [52, 64, 70], 40, 400)).toBe(400);
 	});
 
 	it("before the list is measured, shows the chosen Size and Modified only", () => {

@@ -943,15 +943,55 @@ describe("column headers, sorting, widths and the columns chosen (#1209)", () =>
 		expect(edge.getAttribute("aria-valuenow")).toBe("52");
 	});
 
-	it("opens with the widths saved in [layout]", async () => {
+	it("opens with the widths saved in [layout], each column its own", async () => {
 		useConfigStore().uiConfig = {
 			onChannelDead: "readonly",
-			layout: { ...DEFAULT_LAYOUT_CONFIG, filesOwnerWidth: 130 },
+			layout: {
+				...DEFAULT_LAYOUT_CONFIG,
+				filesOwnerWidth: 130,
+				filesModifiedWidth: 111,
+				filesModeWidth: 99,
+			},
 		};
 		mountBrowser();
 		await settle();
 		expect(resizer("owner").getAttribute("aria-valuenow")).toBe("130");
+		expect(resizer("modified").getAttribute("aria-valuenow")).toBe("111");
+		expect(resizer("mode").getAttribute("aria-valuenow")).toBe("99");
 		expect(resizer("size").getAttribute("aria-valuenow")).toBe("52");
+	});
+
+	it("saves each column's width under its own key", async () => {
+		mountBrowser();
+		await settle();
+		key(resizer("modified"), "ArrowLeft");
+		await settle();
+		expect(saved().at(-1)).toEqual({ layout: { filesModifiedWidth: 72 } });
+		key(resizer("mode"), "ArrowLeft");
+		await settle();
+		expect(saved().at(-1)).toEqual({ layout: { filesModeWidth: 78 } });
+		key(resizer("owner"), "ArrowLeft");
+		await settle();
+		expect(saved().at(-1)).toEqual({ layout: { filesOwnerWidth: 88 } });
+	});
+
+	it("keeps the width a drag of the edge ends on", async () => {
+		mountBrowser();
+		await settle();
+		const edge = resizer("size");
+		const pointer = (type: string, clientX: number): void => {
+			edge.dispatchEvent(
+				new PointerEvent(type, { bubbles: true, cancelable: true, clientX, button: 0 }),
+			);
+		};
+		pointer("pointerdown", 300);
+		pointer("pointermove", 270);
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("82");
+		expect(saved()).toEqual([]);
+		pointer("pointerup", 270);
+		await settle();
+		expect(saved()).toEqual([{ layout: { filesSizeWidth: 82 } }]);
 	});
 
 	it("hides a column from the headers' menu, and brings it back", async () => {
@@ -988,6 +1028,30 @@ describe("column headers, sorting, widths and the columns chosen (#1209)", () =>
 		expect(visible("Modified")).toBe(true);
 	});
 
+	it("chooses columns for this window where nothing saves them", async () => {
+		useAuthStore().token = null;
+		mountBrowser();
+		await settle();
+		header("Modified").dispatchEvent(menuRequest());
+		await settle();
+		const item = [...root.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]')][1];
+		item?.click();
+		await settle();
+		expect(header("Modified").style.display).toBe("none");
+		expect(saved()).toEqual([]);
+	});
+
+	it("tells a hidden column's value in the row's tooltip", async () => {
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			layout: { ...DEFAULT_LAYOUT_CONFIG, filesColumns: "" },
+		};
+		mountBrowser();
+		await settle();
+		expect(rowEl("big.bin").getAttribute("title")).toBe("Size 2.9 KB");
+		expect(rowEl("adir").hasAttribute("title")).toBe(false);
+	});
+
 	it("closes the menu on Escape and puts the keyboard back on the header", async () => {
 		mountBrowser();
 		await settle();
@@ -1000,6 +1064,37 @@ describe("column headers, sorting, widths and the columns chosen (#1209)", () =>
 		await settle();
 		expect(root.querySelector('[role="menu"]')).toBeNull();
 		expect(document.activeElement).toBe(button);
+	});
+
+	it("moves in the menu with the arrows, closes it on Tab, and on a press elsewhere", async () => {
+		mountBrowser();
+		await settle();
+		const open = async (): Promise<HTMLElement[]> => {
+			sortButton("Size").focus();
+			sortButton("Size").dispatchEvent(menuRequest());
+			await settle();
+			return [...root.querySelectorAll<HTMLElement>('[role^="menuitem"]')];
+		};
+		let items = await open();
+		expect(document.activeElement).toBe(items[0]);
+		const menu = root.querySelector('[role="menu"]') as HTMLElement;
+		key(items[0] as HTMLElement, "ArrowDown");
+		expect(document.activeElement?.textContent).toContain("Modified");
+		key(items[1] as HTMLElement, "End");
+		expect(document.activeElement?.textContent).toContain("Reset columns");
+		key(items[4] as HTMLElement, "ArrowDown");
+		expect(document.activeElement).toBe(items[0]);
+		key(items[0] as HTMLElement, "ArrowUp");
+		expect(document.activeElement?.textContent).toContain("Reset columns");
+		key(menu, "Tab");
+		await settle();
+		expect(root.querySelector('[role="menu"]')).toBeNull();
+		expect(document.activeElement).toBe(sortButton("Size"));
+		items = await open();
+		expect(items).toHaveLength(5);
+		document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		await settle();
+		expect(root.querySelector('[role="menu"]')).toBeNull();
 	});
 
 	it("resets the columns and their widths from the menu", async () => {
@@ -1016,6 +1111,18 @@ describe("column headers, sorting, widths and the columns chosen (#1209)", () =>
 		) as HTMLElement;
 		reset.click();
 		await settle();
+		// One request holds the columns and the four widths, so a failure undoes them together.
+		expect(saved()).toEqual([
+			{
+				layout: {
+					filesColumns: "size,modified,mode,owner",
+					filesSizeWidth: 52,
+					filesModifiedWidth: 64,
+					filesModeWidth: 70,
+					filesOwnerWidth: 80,
+				},
+			},
+		]);
 		expect(useConfigStore().uiConfig.layout).toMatchObject({
 			filesColumns: "size,modified,mode,owner",
 			filesSizeWidth: 52,

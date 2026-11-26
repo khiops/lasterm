@@ -425,7 +425,7 @@ overlay leave it out. Ctrl+Shift+E (`files.toggle`) waits behind `[experimental]
   Mode and Owner, each header a button that sorts (ascending, then descending, folders first, entries
   without a value last; the order is per window and not saved) with `aria-sort`. The edge on the left of a
   column's header is a focusable `separator`: dragged, or moved with Left, Right, Shift, Home and End,
-  it sets the column's width (40 to 400 px, `[layout] files_*_width`); a context menu on the headers
+  it sets the column's width (40 to 400 px, `[layout] files_*_width`, and never more than keeps the column shown); a context menu on the headers
   chooses the columns (`[layout] files_columns`) and resets them. A column shows when chosen and the list is
   wide enough (Size from 200 px, Modified 260, Mode 400, Owner 480) and Name keeps 96 px: the last columns
   drop first, and a column not shown says what it held in the row's tooltip.

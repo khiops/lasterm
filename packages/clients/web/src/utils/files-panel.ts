@@ -356,6 +356,23 @@ export const ROW_GAP = 8;
 export const NAME_MIN_WIDTH = 96;
 
 /**
+ * The widest `column` can be at this list width: the room that leaves Name `NAME_MIN_WIDTH`
+ * beside the other columns shown, so that dragging it never drops it. Never under the least width
+ * a column has; the most, when the list is not measured.
+ */
+export function columnRoom(
+	listWidth: number | null,
+	othersShown: readonly number[],
+	least: number,
+	most: number,
+): number {
+	if (listWidth === null) return most;
+	const taken = othersShown.reduce((sum, width) => sum + width + ROW_GAP, 0);
+	const room = listWidth - 2 * ROW_PADDING - ROW_ICON - ROW_GAP - NAME_MIN_WIDTH - taken - ROW_GAP;
+	return Math.min(most, Math.max(least, room));
+}
+
+/**
  * The columns the list shows: those chosen, minus those its width drops, the owner first, then
  * Mode, Modified and Size, and minus any more that would leave Name under `NAME_MIN_WIDTH` at the
  * widths they have. Before the list is measured, the chosen Size and Modified show and the others

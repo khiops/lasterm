@@ -177,15 +177,6 @@
 							</button>
 						</div>
 					</div>
-					<FilesColumnsMenu
-						v-if="menuAt !== null"
-						:x="menuAt.x"
-						:y="menuAt.y"
-						:chosen="chosen"
-						@toggle="toggleColumn"
-						@reset="resetColumns"
-						@close="closeColumnsMenu"
-					/>
 					<div
 						ref="listEl"
 						class="files-list"
@@ -234,6 +225,15 @@
 						</div>
 					</div>
 				</div>
+			<FilesColumnsMenu
+				v-if="menuAt !== null"
+				:x="menuAt.x"
+				:y="menuAt.y"
+				:chosen="chosen"
+				@toggle="toggleColumn"
+				@reset="resetColumns"
+				@close="closeColumnsMenu"
+			/>
 			<p v-if="listing !== null && listing.truncated > 0" class="files-note files-note--foot">
 				{{ listing.truncated }} more not shown.
 			</p>
@@ -351,6 +351,7 @@ import {
 	formatSize,
 	isFolderEntry,
 	joinPath,
+	columnRoom,
 	FILES_COLUMN_LABELS,
 	ROW_PADDING,
 	ROW_ICON,
@@ -643,8 +644,13 @@ const WIDTH_KEYS = {
 
 /** The columns chosen, `[layout] files_columns`; narrow lists still drop some. */
 const chosen = computed<readonly FilesColumn[]>(
-	() => parseFilesColumns(configStore.uiConfig.layout?.filesColumns) ?? FILES_COLUMNS,
+	() =>
+		parseFilesColumns(localChoice.value ?? configStore.uiConfig.layout?.filesColumns) ??
+		FILES_COLUMNS,
 );
+
+/** The columns chosen where nothing saves them (no token): they last for this window only. */
+const localChoice = ref<string | null>(null);
 
 /** Widths being dragged, or set where nothing saves them (no token): they win over the saved ones. */
 const dragged = ref<Partial<Record<FilesColumn, number>>>({});
@@ -706,6 +712,13 @@ const gridStyle = computed(() => ({
 /** A row's tooltip: what the width or the choice hides of it, the group always; none when there is nothing. */
 function rowTitle(entry: FileEntryView): string | undefined {
 	const lines: string[] = [];
+	if (!isShown("size") && !isFolderEntry(entry) && entry.size !== null) {
+		lines.push(`Size ${formatSize(entry.size)}`);
+	}
+	if (!isShown("modified")) {
+		const modified = formatModified(entry.mtime, now.value);
+		if (modified !== "") lines.push(`Modified ${modified}`);
+	}
 	if (!isShown("mode")) {
 		if (entry.mode !== null) lines.push(`Permissions ${formatMode(entry.mode)}`);
 		else if (entry.attributes !== null) lines.push(`Attributes ${formatAttributes(entry.attributes)}`);
@@ -728,8 +741,9 @@ function sortBy(column: SortKey): void {
 	filesPanel.sortFilesBy(column);
 	const at = kept === undefined ? -1 : sorted.value.findIndex((entry) => entry.name === kept);
 	if (at !== -1) current.value = at;
-	if (listEl.value !== null) listEl.value.scrollTop = 0;
-	onScroll();
+	// The kept row stays in view, wherever the new order puts it.
+	if (at !== -1) focusRow(at, false);
+	else onScroll();
 }
 
 // ─── Resizing, by an edge or the keyboard ────────────────────────────────────
@@ -746,8 +760,8 @@ function commitLayout(values: Partial<LayoutConfig>): void {
 	void configStore.saveUiSettings("layout", values);
 }
 
-/** Keep these widths; where nothing saves (no token), they last for this window only. */
-function commitWidths(toKeep: Partial<Record<FilesColumn, number>>): void {
+/** The values for these widths, kept for this window alone where nothing saves (no token). */
+function widthValues(toKeep: Partial<Record<FilesColumn, number>>): Partial<LayoutConfig> {
 	const values: Partial<LayoutConfig> = {};
 	for (const column of FILES_COLUMNS) {
 		const width = toKeep[column];
@@ -756,7 +770,28 @@ function commitWidths(toKeep: Partial<Record<FilesColumn, number>>): void {
 		if (authStore.token !== null) delete dragged.value[column];
 		else dragged.value[column] = width;
 	}
-	commitLayout(values);
+	return values;
+}
+
+/** Keep these widths; where nothing saves (no token), they last for this window only. */
+function commitWidths(toKeep: Partial<Record<FilesColumn, number>>): void {
+	commitLayout(widthValues(toKeep));
+}
+
+/** The most `column` can be now: the room that keeps it shown, with Name at its least. */
+function roomFor(column: FilesColumn): number {
+	return columnRoom(
+		listWidth.value,
+		shown.value.filter((other) => other !== column).map((other) => widths.value[other]),
+		FILES_COLUMN_WIDTH_MIN,
+		FILES_COLUMN_WIDTH_MAX,
+	);
+}
+
+/** The values for these columns, kept for this window alone where nothing saves (no token). */
+function choiceValues(csv: string): Partial<LayoutConfig> {
+	localChoice.value = authStore.token === null ? csv : null;
+	return { filesColumns: csv };
 }
 
 /** The edge of a header on its left: dragging it left widens the column, right narrows it. */
@@ -772,8 +807,9 @@ function startResize(column: FilesColumn, event: PointerEvent): void {
 	const from = event.clientX;
 	const start = widths.value[column];
 	resizing.value = column;
+	const room = roomFor(column);
 	const move = (e: PointerEvent): void => {
-		dragged.value[column] = clampWidth(start + from - e.clientX);
+		dragged.value[column] = Math.min(room, clampWidth(start + from - e.clientX));
 	};
 	const end = (): void => {
 		handle.removeEventListener("pointermove", move);
@@ -800,7 +836,7 @@ function onResizeKey(column: FilesColumn, event: KeyboardEvent): void {
 	if (to === null) return;
 	event.preventDefault();
 	event.stopPropagation();
-	commitWidths({ [column]: clampWidth(to) });
+	commitWidths({ [column]: Math.min(roomFor(column), clampWidth(to)) });
 }
 
 // ─── The columns chosen, from the headers' menu ──────────────────────────────
@@ -830,12 +866,14 @@ function toggleColumn(column: FilesColumn): void {
 	const kept = FILES_COLUMNS.filter((c) =>
 		c === column ? !chosen.value.includes(c) : chosen.value.includes(c),
 	);
-	commitLayout({ filesColumns: kept.join(",") });
+	commitLayout(choiceValues(kept.join(",")));
 }
 
 function resetColumns(): void {
-	commitLayout({ filesColumns: DEFAULT_FILES_COLUMNS });
-	commitWidths({ ...DEFAULT_FILES_COLUMN_WIDTHS });
+	commitLayout({
+		...choiceValues(DEFAULT_FILES_COLUMNS),
+		...widthValues({ ...DEFAULT_FILES_COLUMN_WIDTHS }),
+	});
 	closeColumnsMenu(true);
 }
 
@@ -844,7 +882,7 @@ function onScroll(): void {
 	viewHeight.value = listEl.value?.clientHeight ?? 0;
 }
 
-function focusRow(index: number): void {
+function focusRow(index: number, focus = true): void {
 	const list = listEl.value;
 	if (list === null) return;
 	current.value = index;
@@ -854,7 +892,7 @@ function focusRow(index: number): void {
 		list.scrollTop = top + ROW_HEIGHT - list.clientHeight;
 	}
 	onScroll();
-	void nextTick(() => list.querySelector<HTMLElement>(`[data-index="${index}"]`)?.focus());
+	if (focus) void nextTick(() => list.querySelector<HTMLElement>(`[data-index="${index}"]`)?.focus());
 }
 
 let typed = "";

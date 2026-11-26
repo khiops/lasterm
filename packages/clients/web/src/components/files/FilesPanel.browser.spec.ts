@@ -443,12 +443,12 @@ describe("the columns' widths and choice, in the real layout (#1209)", () => {
 		expect(shown(notes.querySelector(".files-row__mode"))).toBe(false);
 		expect(shown(notes.querySelector(".files-row__owner"))).toBe(true);
 		// A column not chosen says itself on hover, as one the width drops does.
-		expect(notes.getAttribute("title")).toBe("Permissions -rw-r--r--\nGroup g");
+		expect(notes.getAttribute("title")).toBe("Size 10 B\nPermissions -rw-r--r--\nGroup g");
 		root.style.width = "479px";
 		await frames();
 		expect(shown(notes.querySelector(".files-row__owner"))).toBe(false);
 		expect(shown(notes.querySelector(".files-row__modified"))).toBe(true);
-		expect(notes.getAttribute("title")).toBe("Permissions -rw-r--r--\nOwner o\nGroup g");
+		expect(notes.getAttribute("title")).toBe("Size 10 B\nPermissions -rw-r--r--\nOwner o\nGroup g");
 	});
 
 	it("keeps Name at 96 px by dropping the columns dragged too wide, the owner first", async () => {
@@ -469,15 +469,36 @@ describe("the columns' widths and choice, in the real layout (#1209)", () => {
 			entry("b-big", { size: 999 }),
 			...fillers,
 		]);
-		(root.querySelector('[data-sort="size"]') as HTMLButtonElement).click();
-		await frames();
-		(root.querySelector('[data-sort="size"]') as HTMLButtonElement).click();
-		await frames();
 		const list = root.querySelector(".files-list") as HTMLElement;
-		expect(list.scrollTop).toBe(0);
-		const first = [...root.querySelectorAll(".files-row")]
-			.sort((a, b) => rect(a).top - rect(b).top)
-			.map((el) => el.querySelector(".files-row__name")?.textContent);
-		expect(first[0]).toBe("b-big");
+		list.scrollTop = 300;
+		await frames();
+		expect(list.scrollTop).toBe(300);
+		(root.querySelector('[data-sort="size"]') as HTMLButtonElement).click();
+		await frames();
+		(root.querySelector('[data-sort="size"]') as HTMLButtonElement).click();
+		await frames();
+		// By size, descending: b-big, the fillers, a-small last. The row the keyboard was on, a-small
+		// (the first by name), is the last of 42 and scrolled into view.
+		const small = row(root, "a-small");
+		expect(rect(small).top).toBeGreaterThanOrEqual(rect(list).top);
+		expect(rect(small).bottom).toBeLessThanOrEqual(rect(list).bottom);
+		expect(list.scrollTop).toBeGreaterThan(300);
+	});
+
+	it("never drags a column wider than the room that keeps it shown", async () => {
+		const root = await mountBrowserIn(480, [entry("notes.md")]);
+		const notes = row(root, "notes.md");
+		const edge = root.querySelector('[data-resize="owner"]') as HTMLElement;
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(true);
+		pointer(edge, "pointerdown", 400);
+		pointer(edge, "pointermove", 100);
+		await frames();
+		// 480 - 20 - 14 - 8 = 438; Name keeps 96; Size, Modified and Mode take 52 + 64 + 70 and a gap each.
+		expect(shown(notes.querySelector(".files-row__owner"))).toBe(true);
+		expect(rect(notes.querySelector(".files-row__owner")).width).toBe(124);
+		expect(rect(notes.querySelector(".files-row__name")).width).toBe(96);
+		pointer(edge, "pointerup", 100);
+		await frames();
+		expect(edge.getAttribute("aria-valuenow")).toBe("124");
 	});
 });

@@ -2399,8 +2399,15 @@ mod tests {
             r#"{{"mode":"auto","lastRunVersion":"0.24.0.0","pendingSince":{{"key":"{KEY_25}","at":"{week_ago}"}}}}"#
         ));
         let core = both.core();
-        check(&both, &core, answer(vec![offer(KEY_25, Some("0.25.0.0"), true)], Signal::True));
-        assert_eq!(kinds(&state(&core)), vec![NoticeKind::Mandatory, NoticeKind::Waiting]);
+        check(
+            &both,
+            &core,
+            answer(vec![offer(KEY_25, Some("0.25.0.0"), true)], Signal::True),
+        );
+        assert_eq!(
+            kinds(&state(&core)),
+            vec![NoticeKind::Mandatory, NoticeKind::Waiting]
+        );
 
         // Off clears pendingSince, the snooze and these notices; keeps updated.
         let off = Fixture::new();

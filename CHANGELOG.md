@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.0](https://github.com/khiops/lasterm/compare/v0.23.1...v0.24.0) (2026-11-26)
+
+
+### Features
+
+* **web:** column headers, resizable and sortable columns in the files panel ([#1213](https://github.com/khiops/lasterm/issues/1213)) ([0c69299](https://github.com/khiops/lasterm/commit/0c69299d2dad2b909e58d2cae61f7433a42887fd)), closes [#1209](https://github.com/khiops/lasterm/issues/1209)
+* **web:** wider files panel and a maximize button ([#1211](https://github.com/khiops/lasterm/issues/1211)) ([625b001](https://github.com/khiops/lasterm/commit/625b001931fbbc0b8360852f77589c9f1f1fc55f))
+
 ## [0.23.1](https://github.com/khiops/lasterm/compare/v0.23.0...v0.23.1) (2026-11-25)
 
 

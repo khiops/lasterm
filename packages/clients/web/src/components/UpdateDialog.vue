@@ -53,6 +53,7 @@ import { useModalFocus } from "../composables/useModalFocus.js";
 import { useDesktopUpdatesStore } from "../stores/desktopUpdates.js";
 import { useToastStore } from "../stores/toast.js";
 import { commandError, type UpdateNotice, updateCommands } from "../utils/desktop-updates.js";
+import { firstTabbable } from "../utils/focusable.js";
 import { isTauriRuntime } from "../utils/tauri-runtime.js";
 
 /**
@@ -212,6 +213,23 @@ watch(
 		if (observer) otherDialog.value = otherDialogPresent();
 	},
 );
+
+// Stepping aside with the keyboard: useModalFocus sees no close, so unless the dialog that came
+// took the keyboard, it goes to the Update now… that opened this one, else into that dialog (D4).
+watch(visible, (now, was) => {
+	if (now || !was || !(wanted.value && shown.value)) return;
+	if (dialogEl.value?.contains(document.activeElement) !== true) return;
+	setTimeout(() => {
+		const active = document.activeElement;
+		if (active instanceof HTMLElement && active !== document.body && active.isConnected) return;
+		const others = [...document.querySelectorAll<HTMLElement>('[aria-modal="true"]')].filter(
+			(element) => !element.closest("[data-update-dialog]"),
+		);
+		const target =
+			document.querySelector<HTMLElement>("[data-update-opener]") ?? firstTabbable(others.at(-1) ?? null);
+		target?.focus();
+	}, 0);
+});
 
 // Back from behind another dialog: it takes the keyboard again (D4). Stepping aside left that
 // dialog the keyboard, since the dialog stays open meanwhile for useModalFocus.

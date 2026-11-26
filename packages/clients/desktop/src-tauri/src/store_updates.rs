@@ -95,28 +95,63 @@ fn iso(secs: u64) -> String {
     )
 }
 
-/// The inverse of [`iso`]; only that exact form is read.
+/// An ISO 8601 instant as D3 stores them: `YYYY-MM-DDTHH:MM:SS`, an optional
+/// fraction of a second (dropped), then `Z` or an offset `±HH:MM`, read as
+/// UTC. [`iso`] writes the `Z` form.
 fn parse_iso(text: &str) -> Option<u64> {
+    if !text.is_ascii() {
+        return None;
+    }
     let bytes = text.as_bytes();
-    if bytes.len() != 20
+    if bytes.len() < 20
         || bytes[4] != b'-'
         || bytes[7] != b'-'
         || bytes[10] != b'T'
         || bytes[13] != b':'
         || bytes[16] != b':'
-        || bytes[19] != b'Z'
     {
         return None;
     }
-    let number = |range: std::ops::Range<usize>| -> Option<u64> {
-        let part = text.get(range)?;
-        if !part.bytes().all(|byte| byte.is_ascii_digit()) {
+    let number = |part: &str| -> Option<u64> {
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
         part.parse().ok()
     };
-    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
-    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    let (year, month, day) = (
+        number(&text[0..4])?,
+        number(&text[5..7])?,
+        number(&text[8..10])?,
+    );
+    let (hour, minute, second) = (
+        number(&text[11..13])?,
+        number(&text[14..16])?,
+        number(&text[17..19])?,
+    );
+    let mut rest = &text[19..];
+    if let Some(fraction) = rest.strip_prefix('.') {
+        let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return None;
+        }
+        rest = &fraction[digits..];
+    }
+    let offset: i64 = match rest.as_bytes() {
+        [b'Z'] => 0,
+        [sign @ (b'+' | b'-'), _, _, b':', _, _] => {
+            let (hours, minutes) = (number(&rest[1..3])?, number(&rest[4..6])?);
+            if hours > 23 || minutes > 59 {
+                return None;
+            }
+            let seconds = (hours * 3600 + minutes * 60) as i64;
+            if *sign == b'+' {
+                seconds
+            } else {
+                -seconds
+            }
+        }
+        _ => return None,
+    };
     if !(1..=12).contains(&month)
         || !(1..=31).contains(&day)
         || hour > 23
@@ -129,7 +164,8 @@ fn parse_iso(text: &str) -> Option<u64> {
     if days < 0 || civil_from_days(days) != (year as i64, month as u32, day as u32) {
         return None;
     }
-    Some(days as u64 * DAY + hour * 3600 + minute * 60 + second)
+    let local = days * DAY as i64 + (hour * 3600 + minute * 60 + second) as i64;
+    u64::try_from(local - offset).ok()
 }
 
 // Howard Hinnant's algorithms, proleptic Gregorian calendar.
@@ -596,6 +632,8 @@ struct Running {
     started: Option<Instant>,
     /// Its answer arrived within the bound: it is no longer timed.
     answered: bool,
+    /// When that answer arrived, in civil time: the check's date (D2).
+    answered_civil: Option<u64>,
     /// Reported failed at the timeout; its effects are dropped when it ends.
     timed_out: bool,
 }
@@ -903,6 +941,7 @@ impl Core {
             handle,
             started: None,
             answered: false,
+            answered_civil: None,
             timed_out: false,
         });
         self.publish();
@@ -947,12 +986,19 @@ impl Core {
                     .started
                     .is_some_and(|started| at.saturating_duration_since(started) >= QUERY_TIMEOUT);
                 if late {
-                    // Past the bound before the poller saw it: no answer (D2).
+                    // Past the bound before the poller saw it: no answer,
+                    // reported, then asked to stop (D2).
                     running.timed_out = true;
                     self.fail_check("no answer", NO_ANSWER.to_string());
                     self.publish();
+                    if let Some(Err(error)) =
+                        self.query.as_ref().map(|running| running.handle.cancel())
+                    {
+                        (self.log)(&format!("store result: Cancel failed {error}"));
+                    }
                 } else {
                     running.answered = true;
+                    running.answered_civil = Some(self.clock.civil());
                 }
             }
             QueryEvent::Finished(outcome) => self.on_finished(outcome),
@@ -988,7 +1034,7 @@ impl Core {
             QueryOutcome::Answer { entries, signal } => {
                 self.check_error = None;
                 self.check_failed_at = None;
-                self.last_checked_at = Some(self.clock.civil());
+                self.last_checked_at = Some(running.answered_civil.unwrap_or(self.clock.civil()));
                 self.apply_answer(entries, signal);
             }
         }
@@ -1646,7 +1692,21 @@ impl StoreBackend for ScriptedStore {
         let check = self.checks[(*next).min(self.checks.len() - 1)].clone();
         *next += 1;
         if let Some(log) = &self.log {
-            log("store call (scripted): GetAppAndOptionalStorePackageUpdatesAsync");
+            match &check {
+                ScriptCheck::ContextFailed(reason) => {
+                    log("store call (scripted): GetDefault");
+                    log(&format!("store result (scripted): GetDefault {reason}"));
+                }
+                ScriptCheck::Answer { entries, .. } => {
+                    log("store call (scripted): GetAppAndOptionalStorePackageUpdatesAsync");
+                    if entries.iter().any(|entry| entry.family == STORE_FAMILY) {
+                        log("store call (scripted): CanSilentlyDownloadStorePackageUpdates");
+                    }
+                }
+                ScriptCheck::Failed(_) | ScriptCheck::NoAnswer => {
+                    log("store call (scripted): GetAppAndOptionalStorePackageUpdatesAsync");
+                }
+            }
         }
         // In order, from a thread of their own.
         std::thread::spawn(move || match check {
@@ -2631,6 +2691,24 @@ mod tests {
         assert_eq!(parse_iso("2026-11-18T11:06:40Z"), Some(1_795_000_000));
         assert_eq!(parse_iso("2026-02-30T00:00:00Z"), None);
         assert_eq!(parse_iso("2026-11-18 11:06:40Z"), None);
+        // D3's ISO 8601: a fraction of a second, an offset, both.
+        assert_eq!(parse_iso("2026-11-18T11:06:40.250Z"), Some(1_795_000_000));
+        assert_eq!(parse_iso("2026-11-18T12:06:40+01:00"), Some(1_795_000_000));
+        assert_eq!(parse_iso("2026-11-18T06:36:40-04:30"), Some(1_795_000_000));
+        assert_eq!(
+            parse_iso("2026-11-18T12:06:40.9+01:00"),
+            Some(1_795_000_000)
+        );
+        for invalid in [
+            "2026-11-18T11:06:40",
+            "2026-11-18T11:06:40.Z",
+            "2026-11-18T11:06:40+0100",
+            "2026-11-18T11:06:40+24:00",
+            "2026-11-18T11:06:40Zx",
+            "1970-01-01T00:00:00+01:00",
+        ] {
+            assert_eq!(parse_iso(invalid), None, "{invalid}");
+        }
     }
 
     // ── AC-7 ──
@@ -3178,10 +3256,32 @@ mod tests {
         };
         let handle = store.start_query(Arc::new(|_| {}));
         handle.cancel().unwrap();
+        // A context failure starts no query: the scripted log says so.
+        let (_, failing) = ScriptedStore::parse(
+            r#"{"version":"0.24.0.0","checks":[{"contextError":"0x80004005"}]}"#,
+        )
+        .unwrap();
+        let context_lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = context_lines.clone();
+        let failing = ScriptedStore {
+            log: Some(Arc::new(move |line: &str| {
+                seen.lock().unwrap().push(line.to_string())
+            })),
+            ..failing
+        };
+        drop(failing.start_query(Arc::new(|_| {})));
+        assert_eq!(
+            *context_lines.lock().unwrap(),
+            vec![
+                "store call (scripted): GetDefault",
+                "store result (scripted): GetDefault 0x80004005"
+            ]
+        );
         assert_eq!(
             *lines.lock().unwrap(),
             vec![
                 "store call (scripted): GetAppAndOptionalStorePackageUpdatesAsync",
+                "store call (scripted): CanSilentlyDownloadStorePackageUpdates",
                 "store call (scripted): Cancel"
             ]
         );
@@ -3307,8 +3407,17 @@ mod tests {
             family: "O2CSI.Lasterm_other".into(),
             ..store.clone()
         };
-        let (_, lines, _) = chosen(true, Some(other_family), None, dir());
+        let (_, lines, _) = chosen(true, Some(other_family.clone()), None, dir());
         assert_eq!(lines, vec!["store updates: ineligible (family)"]);
+        // Two conditions failing at once: the first in D1's order is named.
+        let foreign_unsigned = PackageFacts {
+            store_signed: false,
+            ..other_family
+        };
+        let (_, lines, _) = chosen(true, Some(foreign_unsigned.clone()), None, dir());
+        assert_eq!(lines, vec!["store updates: ineligible (family)"]);
+        let (_, lines, _) = chosen(false, Some(foreign_unsigned), None, dir());
+        assert_eq!(lines, vec!["store updates: ineligible (channel)"]);
 
         // A development build without the variable: channel, and its package
         // is not even read.
@@ -3506,6 +3615,8 @@ mod tests {
         assert_eq!(late.last_checked_at, None);
         assert_eq!(late.check_error.as_deref(), Some(NO_ANSWER));
         assert_eq!(late.checking, Checking::Idle);
+        // Reported failed, then asked to stop, as at a timeout (D2).
+        assert_eq!(fixture.store.cancels.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -3694,6 +3805,18 @@ mod tests {
 
     #[test]
     fn the_daily_check_waits_a_full_day() {
+        // Due, it still waits for the 15-minute tick.
+        let ticked = Fixture::new();
+        let core = ticked.core();
+        check(&ticked, &core, answer(vec![], Signal::True));
+        ticked.clock.jump_civil(DAY);
+        ticked.clock.jump_mono(1);
+        lock(&core).poll();
+        assert_eq!(ticked.store.queries(), 1, "between ticks");
+        ticked.clock.jump_mono(TICK.as_secs() - 1);
+        lock(&core).poll();
+        assert_eq!(ticked.store.queries(), 2, "at the tick");
+
         let fixture = Fixture::new();
         let core = fixture.core();
         check(&fixture, &core, answer(vec![], Signal::True));
@@ -3762,6 +3885,7 @@ mod tests {
         lock(&core).check_now();
         fixture.store.begin();
         poll_for(&fixture, &core, 59);
+        let arrived = iso(fixture.clock.civil());
         fixture.store.answered();
         // The signal is read on the main thread, past the bound.
         poll_for(&fixture, &core, 5);
@@ -3774,6 +3898,8 @@ mod tests {
         let done = state(&core);
         assert_eq!(done.offer.map(|offer| offer.key), Some(KEY_25.to_string()));
         assert_eq!(done.check_error, None);
+        // Dated when the answer arrived, not when its signal was read.
+        assert_eq!(done.last_checked_at, Some(arrived));
     }
 
     // ── AC-13: a failure re-derives the notices ──

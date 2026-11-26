@@ -106,7 +106,17 @@ describe("Settings › Desktop's update rows (AC-3)", () => {
 		expect(text()).toContain("Waiting for the Microsoft Store");
 		store.state = eligible({ lastCheckedAt: "2026-11-26T10:00:00Z" });
 		await settle();
-		expect(text()).toContain("The Microsoft Store reports no update");
+		expect(document.querySelector(".update-status")?.textContent).toBe(
+			`The Microsoft Store reports no update (${new Date("2026-11-26T10:00:00Z").toLocaleString()})`,
+		);
+		// A first attempt that failed: still no answer.
+		store.state = eligible({
+			lastAttemptAt: "2026-11-26T10:00:00Z",
+			checkError: "The Microsoft Store did not answer",
+			checkFailedAt: "2026-11-26T10:01:00Z",
+		});
+		await settle();
+		expect(document.querySelector(".update-status")?.textContent).toBe("Not checked yet");
 		// The Store's absence is a failed check, dated, with the button still there.
 		const at = "2026-11-26T10:00:00Z";
 		store.state = eligible({

@@ -699,6 +699,44 @@ describe("the keyboard when the dialog steps aside or closes (AC-10)", () => {
 		expect(document.activeElement).toBe(password);
 	});
 
+	it("hands the keyboard to a dialog that came without taking it", async () => {
+		await mountDialog(eligible());
+		expect(document.activeElement?.textContent?.trim()).toBe("Later");
+		// The close question, which takes no keyboard of its own.
+		const question = document.createElement("div");
+		question.setAttribute("aria-modal", "true");
+		const keep = document.createElement("button");
+		keep.textContent = "Keep running";
+		question.appendChild(keep);
+		document.body.appendChild(question);
+		await settle();
+		expect(dialog()).toBeNull();
+		expect(document.activeElement).toBe(keep);
+	});
+
+	it("closed from Settings with an offer still waiting, gives the keyboard back to its opener", async () => {
+		const settings = document.createElement("div");
+		settings.className = "settings-panel";
+		settings.setAttribute("aria-modal", "true");
+		const opener = document.createElement("button");
+		opener.setAttribute("data-update-opener", "");
+		const closeSettings = document.createElement("button");
+		closeSettings.textContent = "✕";
+		settings.append(closeSettings, opener);
+		document.body.appendChild(settings);
+		opener.focus();
+		// Mode ask: the offer is wanted, and waits behind Settings.
+		const store = await mountDialog(eligible({ mode: "ask", wantsDialog: true }));
+		expect(dialog()).toBeNull();
+		store.openFromSettings();
+		await settle();
+		expect(document.activeElement?.textContent?.trim()).toBe("Later");
+		dialog()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+		await settle();
+		expect(dialog()).toBeNull();
+		expect(document.activeElement).toBe(opener);
+	});
+
 	it("gives the keyboard to Check for updates when its opener has gone", async () => {
 		const settings = document.createElement("div");
 		settings.className = "settings-panel";

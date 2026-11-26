@@ -128,7 +128,8 @@ const statusLine = computed(() => {
 	if (current.lastCheckedAt && !current.offer) {
 		return `The Microsoft Store reports no update (${when(current.lastCheckedAt)})`;
 	}
-	if (!current.lastCheckedAt && !current.lastAttemptAt) return "Not checked yet";
+	// No answer yet, a failed attempt or none: the failure has its own line beneath (D3).
+	if (!current.lastCheckedAt && !current.offer) return "Not checked yet";
 	return "";
 });
 

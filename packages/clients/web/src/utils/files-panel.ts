@@ -8,6 +8,7 @@
 import {
 	type CwdSource,
 	type DroppedOverride,
+	type FilesColumn,
 	type HostOs,
 	type LiveCwd,
 	type ProfileWriteLayers,
@@ -268,11 +269,114 @@ export interface FileEntryView {
 	readonly linkKind?: "file" | "directory" | "other" | "missing";
 }
 
-/** The narrowest list, in pixels, that shows the Mode column; below, a tooltip. */
-export const MODE_COLUMN_MIN_WIDTH = 400;
+// ─── The columns: their order, what the width shows, and the sort ────────────
 
-/** The narrowest list, in pixels, that shows the owner column; below, a tooltip (#1201). */
-export const OWNER_COLUMN_MIN_WIDTH = 480;
+/** What the listing sorts by: Name, or one of the columns after it. */
+export type SortKey = "name" | FilesColumn;
+
+export interface FilesSort {
+	readonly key: SortKey;
+	readonly descending: boolean;
+}
+
+export const DEFAULT_FILES_SORT: FilesSort = { key: "name", descending: false };
+
+/** What a click on a column's header does: sort by it, ascending; again, descending; again, ascending. */
+export function sortAfterClick(current: FilesSort, key: SortKey): FilesSort {
+	if (current.key !== key) return { key, descending: false };
+	return { key, descending: !current.descending };
+}
+
+const NAMES = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+/** Nulls last, whichever way the column runs: -1, 0 or 1 for `a` before `b`, or undefined when both have a value. */
+function missing(a: unknown, b: unknown): number | undefined {
+	if (a === null && b === null) return 0;
+	if (a === null) return 1;
+	if (b === null) return -1;
+	return undefined;
+}
+
+function byName(a: FileEntryView, b: FileEntryView): number {
+	return NAMES.compare(a.name, b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
+
+/** The value a column sorts on; null where the host gave none. */
+function sortValue(entry: FileEntryView, key: Exclude<SortKey, "name">): number | string | null {
+	if (key === "size") return entry.size;
+	if (key === "modified") {
+		const at = entry.mtime === null ? Number.NaN : Date.parse(entry.mtime);
+		return Number.isNaN(at) ? null : at;
+	}
+	if (key === "mode") {
+		const text = formatPermissions(entry);
+		return text === "" ? null : text;
+	}
+	return entry.owner;
+}
+
+/**
+ * The entries in the order the list shows them: folders before files, in either direction, each
+ * group by the column, a tie by name. A folder has no size, so by Size the folders keep to name
+ * order; an entry the host gave no value for goes last, the direction notwithstanding.
+ */
+export function sortEntries(entries: readonly FileEntryView[], sort: FilesSort): FileEntryView[] {
+	const sign = sort.descending ? -1 : 1;
+	return [...entries].sort((a, b) => {
+		const folders = Number(isFolderEntry(b)) - Number(isFolderEntry(a));
+		if (folders !== 0) return folders;
+		if (sort.key === "name") return sign * byName(a, b);
+		if (sort.key === "size" && isFolderEntry(a)) return byName(a, b);
+		const left = sortValue(a, sort.key);
+		const right = sortValue(b, sort.key);
+		const absent = missing(left, right);
+		if (absent !== undefined) return absent !== 0 ? absent : byName(a, b);
+		if (left === right) return byName(a, b);
+		const order =
+			typeof left === "number" && typeof right === "number"
+				? left - right
+				: NAMES.compare(String(left), String(right));
+		return order !== 0 ? sign * order : byName(a, b);
+	});
+}
+
+/** The narrowest list, in pixels, that shows each column; below, a tooltip says what it held. */
+export const COLUMN_MIN_LIST_WIDTH: Readonly<Record<FilesColumn, number>> = {
+	size: 200,
+	modified: 260,
+	mode: 400,
+	owner: 480,
+};
+
+/** What a row spends besides its columns: its padding, the icon, and a gap between cells. */
+export const ROW_PADDING = 10;
+export const ROW_ICON = 14;
+export const ROW_GAP = 8;
+/** The Name column never gets less than this: the columns that would take it go instead. */
+export const NAME_MIN_WIDTH = 96;
+
+/**
+ * The columns the list shows: those chosen, minus those its width drops, the owner first, then
+ * Mode, Modified and Size, and minus any more that would leave Name under `NAME_MIN_WIDTH` at the
+ * widths they have. Before the list is measured, the chosen Size and Modified show and the others
+ * do not.
+ */
+export function shownColumns(
+	chosen: readonly FilesColumn[],
+	widths: Readonly<Record<FilesColumn, number>>,
+	listWidth: number | null,
+): FilesColumn[] {
+	if (listWidth === null) return chosen.filter((c) => c === "size" || c === "modified");
+	const shown = chosen.filter((column) => listWidth >= COLUMN_MIN_LIST_WIDTH[column]);
+	const nameWidth = (): number =>
+		listWidth -
+		2 * ROW_PADDING -
+		ROW_ICON -
+		ROW_GAP -
+		shown.reduce((sum, column) => sum + widths[column] + ROW_GAP, 0);
+	while (shown.length > 0 && nameWidth() < NAME_MIN_WIDTH) shown.pop();
+	return shown;
+}
 
 /** The Windows attributes PowerShell's `Mode` spells, in its order: `darhsl`. */
 const ATTRIBUTE_LETTERS: readonly (readonly [number, string])[] = [
@@ -741,3 +845,12 @@ export function clampTransfersShare(share: number): number {
 	if (!Number.isFinite(share)) return TRANSFERS_SHARE_DEFAULT;
 	return Math.min(TRANSFERS_SHARE_MAX, Math.max(TRANSFERS_SHARE_MIN, share));
 }
+
+/** What each column's header and menu entry say. */
+export const FILES_COLUMN_LABELS: Readonly<Record<SortKey, string>> = {
+	name: "Name",
+	size: "Size",
+	modified: "Modified",
+	mode: "Mode",
+	owner: "Owner",
+};

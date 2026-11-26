@@ -421,6 +421,14 @@ overlay leave it out. Ctrl+Shift+E (`files.toggle`) waits behind `[experimental]
   that writes those terminals resizes them (#831). It floats over the right of the pane area, below the
   pane header, on an opaque ground and resizing nothing, when docking would leave the panes less than
   480 px; it is a sheet over the terminal area below a 560 px window (`filesPanelForm`).
+- **The list's columns (#1209).** A `grid` with a header row: Name (the room left), then Size, Modified,
+  Mode and Owner, each header a button that sorts (ascending, then descending, folders first, entries
+  without a value last; the order is per window and not saved) with `aria-sort`. The edge on the left of a
+  column's header is a focusable `separator`: dragged, or moved with Left, Right, Shift, Home and End,
+  it sets the column's width (40 to 400 px, `[layout] files_*_width`); a context menu on the headers
+  chooses the columns (`[layout] files_columns`) and resets them. A column shows when chosen and the list is
+  wide enough (Size from 200 px, Modified 260, Mode 400, Owner 480) and Name keeps 96 px: the last columns
+  drop first, and a column not shown says what it held in the row's tooltip.
 - **The writer's panel, shared (#838).** The panel is a window-level change to a terminal, as its size
   is (#831), and the window that writes the terminal decides it:
   - **The writer's own panel always docks**, and in the writer's window narrows every pane of the

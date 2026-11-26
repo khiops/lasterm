@@ -1,7 +1,6 @@
 <template>
 	<div
 		class="files-browser"
-		:class="{ 'files-browser--mode': modeShown, 'files-browser--owner': ownerShown }"
 		@keydown="onBrowserKeydown"
 	>
 		<!-- The path bar: Up, the folders down to this one (F2 or Ctrl+L edits it as text),
@@ -122,54 +121,119 @@
 			<p v-else-if="listing !== null && listing.entries.length === 0" class="files-note">
 				This folder is empty.{{ showHidden ? "" : " Hidden files are not shown." }}
 			</p>
-			<div
-				v-else-if="listing !== null"
-				ref="listEl"
-				class="files-list"
-				role="listbox"
-				:aria-label="`Files in ${listing.path}`"
-				@scroll="onScroll"
-				@keydown="onListKeydown"
-			>
-				<div class="files-list__space" :style="{ height: `${listing.entries.length * ROW_HEIGHT}px` }">
+				<div
+					v-else-if="listing !== null"
+					class="files-grid"
+					role="grid"
+					:aria-label="`Files in ${listing.path}`"
+					:aria-rowcount="sorted.length + 1"
+					:style="gridStyle"
+				>
+					<!-- Column headers: a click sorts, an edge resizes, a right click chooses the columns (#1209). -->
 					<div
-						v-for="row in visibleRows"
-						:key="row.entry.name"
-						class="files-row"
-						:class="{
-							'files-row--current': row.index === current,
-							'files-row--drop': dropHere === 'row' && dropFolder === row.entry.name,
-						}"
-						:data-drop-folder="isFolderEntry(row.entry) ? row.entry.name : undefined"
-						role="option"
-						:aria-selected="row.index === current"
-						:aria-setsize="listing.entries.length"
-						:aria-posinset="row.index + 1"
-						:aria-label="entryLabel(row.entry, now)"
-						:title="rowTitle(row.entry)"
-						:tabindex="row.index === current ? 0 : -1"
-						:data-index="row.index"
-						data-zone-item
-						:style="{ transform: `translateY(${row.index * ROW_HEIGHT}px)` }"
-						@click="current = row.index"
-						@dblclick="openRow(row.index)"
-						@focus="current = row.index"
+						class="files-head"
+						role="row"
+						aria-rowindex="1"
+						title="Right-click to choose the columns"
+						:style="{ paddingRight: `${ROW_PADDING + scrollbarWidth}px` }"
+						@contextmenu="openColumnsMenu"
 					>
-						<FilesIcon
-							:name="isFolderEntry(row.entry) ? 'folder' : row.entry.kind === 'symlink' ? 'link' : 'file'"
-						/>
-						<span class="files-row__name">{{ row.entry.name }}</span>
-						<span class="files-row__size">{{ isFolderEntry(row.entry) ? "" : formatSize(row.entry.size) }}</span>
-						<span class="files-row__modified">{{ formatModified(row.entry.mtime, now) }}</span>
-						<span class="files-row__mode">{{ formatPermissions(row.entry) || "—" }}</span>
-						<span
-							class="files-row__owner"
-							:title="row.entry.owner !== null ? `Owner ${row.entry.owner}` : undefined"
-							>{{ row.entry.owner ?? "—" }}</span
+						<span aria-hidden="true" />
+						<div
+							v-for="column in HEADED"
+							v-show="column === 'name' || isShown(column)"
+							:key="column"
+							class="files-colhead"
+							:class="`files-colhead--${column}`"
+							role="columnheader"
+							:aria-sort="sortState(column)"
 						>
+							<span
+								v-if="column !== 'name'"
+								class="files-resize"
+								:class="{ 'files-resize--active': resizing === column }"
+								role="separator"
+								aria-orientation="vertical"
+								tabindex="0"
+								:data-resize="column"
+								:aria-label="`Resize ${FILES_COLUMN_LABELS[column]} column`"
+								:aria-valuemin="FILES_COLUMN_WIDTH_MIN"
+								:aria-valuemax="FILES_COLUMN_WIDTH_MAX"
+								:aria-valuenow="widths[column]"
+								@pointerdown="startResize(column, $event)"
+								@keydown="onResizeKey(column, $event)"
+								@dblclick="commitWidths({ [column]: DEFAULT_FILES_COLUMN_WIDTHS[column] })"
+							/>
+							<button
+								type="button"
+								class="files-sort"
+								:data-sort="column"
+								@click="sortBy(column)"
+							>
+								<span class="files-sort__label">{{ FILES_COLUMN_LABELS[column] }}</span>
+								<span class="files-sort__arrow" aria-hidden="true">{{
+									sort.key !== column ? "" : sort.descending ? "▼" : "▲"
+								}}</span>
+							</button>
+						</div>
+					</div>
+					<FilesColumnsMenu
+						v-if="menuAt !== null"
+						:x="menuAt.x"
+						:y="menuAt.y"
+						:chosen="chosen"
+						@toggle="toggleColumn"
+						@reset="resetColumns"
+						@close="closeColumnsMenu"
+					/>
+					<div
+						ref="listEl"
+						class="files-list"
+						role="rowgroup"
+						@scroll="onScroll"
+						@keydown="onListKeydown"
+					>
+						<div class="files-list__space" :style="{ height: `${sorted.length * ROW_HEIGHT}px` }">
+							<div
+								v-for="row in visibleRows"
+								:key="row.entry.name"
+								class="files-row"
+								:class="{
+									'files-row--current': row.index === current,
+									'files-row--drop': dropHere === 'row' && dropFolder === row.entry.name,
+								}"
+								:data-drop-folder="isFolderEntry(row.entry) ? row.entry.name : undefined"
+								role="row"
+								:aria-selected="row.index === current"
+								:aria-rowindex="row.index + 2"
+								:aria-label="entryLabel(row.entry, now)"
+								:title="rowTitle(row.entry)"
+								:tabindex="row.index === current ? 0 : -1"
+								:data-index="row.index"
+								data-zone-item
+								:style="{ transform: `translateY(${row.index * ROW_HEIGHT}px)` }"
+								@click="current = row.index"
+								@dblclick="openRow(row.index)"
+								@focus="current = row.index"
+							>
+								<FilesIcon
+									:name="isFolderEntry(row.entry) ? 'folder' : row.entry.kind === 'symlink' ? 'link' : 'file'"
+								/>
+								<span class="files-row__name" role="gridcell">{{ row.entry.name }}</span>
+								<span v-show="isShown('size')" class="files-row__size" role="gridcell">{{ isFolderEntry(row.entry) ? "" : formatSize(row.entry.size) }}</span>
+								<span v-show="isShown('modified')" class="files-row__modified" role="gridcell">{{ formatModified(row.entry.mtime, now) }}</span>
+								<span v-show="isShown('mode')" class="files-row__mode" role="gridcell">{{ formatPermissions(row.entry) || "—" }}</span>
+								<span
+									v-show="isShown('owner')"
+									class="files-row__owner"
+									role="gridcell"
+									:title="row.entry.owner !== null ? `Owner ${row.entry.owner}` : undefined"
+									>{{ row.entry.owner ?? "—" }}</span
+								>
+							</div>
+						</div>
 					</div>
 				</div>
-			</div>
 			<p v-if="listing !== null && listing.truncated > 0" class="files-note files-note--foot">
 				{{ listing.truncated }} more not shown.
 			</p>
@@ -258,8 +322,21 @@
 </template>
 
 <script setup lang="ts">
-import type { HostOs } from "@lasterm/shared";
+import {
+	DEFAULT_FILES_COLUMN_WIDTHS,
+	DEFAULT_FILES_COLUMNS,
+	FILES_COLUMN_WIDTH_MAX,
+	FILES_COLUMN_WIDTH_MIN,
+	FILES_COLUMNS,
+	type FilesColumn,
+	type HostOs,
+	isFilesColumnWidth,
+	type LayoutConfig,
+	parseFilesColumns,
+} from "@lasterm/shared";
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue";
+import { useAuthStore } from "../../stores/auth.js";
+import { useConfigStore } from "../../stores/config.js";
 import { useFilesPanelStore } from "../../stores/files-panel.js";
 import { useHostsStore } from "../../stores/hosts.js";
 import { useWriteLockStore } from "../../stores/writelock.js";
@@ -274,8 +351,13 @@ import {
 	formatSize,
 	isFolderEntry,
 	joinPath,
-	MODE_COLUMN_MIN_WIDTH,
-	OWNER_COLUMN_MIN_WIDTH,
+	FILES_COLUMN_LABELS,
+	ROW_PADDING,
+	ROW_ICON,
+	ROW_GAP,
+	shownColumns,
+	sortEntries,
+	type SortKey,
 	parentPath,
 	pathStyleOf,
 	followBlock,
@@ -290,6 +372,7 @@ import { downloadHostFile } from "../../utils/host-download.js";
 import { createHostFolder, type FileListingView, listHostFiles } from "../../utils/host-files.js";
 import { hostConnectionFailure } from "../../utils/host-connection.js";
 import { overlayText, refusalText } from "../../utils/upload-drop.js";
+import FilesColumnsMenu from "./FilesColumnsMenu.vue";
 import FilesIcon from "./FilesIcon.vue";
 import UploadConfirm from "./UploadConfirm.vue";
 
@@ -325,6 +408,8 @@ const emit = defineEmits<{
 const filesPanel = useFilesPanelStore();
 const hostsStore = useHostsStore();
 const writeLockStore = useWriteLockStore();
+const configStore = useConfigStore();
+const authStore = useAuthStore();
 
 /** The height of a row, in pixels: the list draws only the rows in view. */
 const ROW_HEIGHT = 24;
@@ -349,6 +434,9 @@ const listing = ref<FileListingView | null>(null);
 const failure = ref<{ code: string; message: string } | null>(null);
 const loading = ref(false);
 const current = ref(0);
+const sort = computed(() => filesPanel.filesSort);
+/** The listing in the order shown: folders first, then by the column sorted on. */
+const sorted = computed(() => sortEntries(listing.value?.entries ?? [], sort.value));
 const now = ref(new Date());
 let sequence = 0;
 /** The folder to put the keyboard on once the next listing arrives: the one just left by Up. */
@@ -421,7 +509,9 @@ async function load(): Promise<void> {
 	const changed = listing.value?.path !== answer.value.path;
 	listing.value = answer.value;
 	const named =
-		focusName === null ? -1 : answer.value.entries.findIndex((entry) => entry.name === focusName);
+		focusName === null
+			? -1
+			: sortEntries(answer.value.entries, sort.value).findIndex((entry) => entry.name === focusName);
 	focusName = null;
 	if (named !== -1) current.value = named;
 	else if (changed || current.value >= answer.value.entries.length) current.value = 0;
@@ -458,7 +548,7 @@ function goUp(): void {
 }
 
 function openRow(index: number): void {
-	const entry = listing.value?.entries[index];
+	const entry = sorted.value[index];
 	if (entry === undefined || listing.value === null || !isFolderEntry(entry)) return;
 	browseTo(joinPath(listing.value.path, entry.name, style.value));
 }
@@ -523,7 +613,7 @@ const scrollTop = ref(0);
 const viewHeight = ref(0);
 
 const visibleRows = computed(() => {
-	const entries = listing.value?.entries ?? [];
+	const entries = sorted.value;
 	const inView =
 		viewHeight.value > 0 ? Math.ceil(viewHeight.value / ROW_HEIGHT) : UNMEASURED_ROWS;
 	const first = Math.max(0, Math.floor(scrollTop.value / ROW_HEIGHT) - OVERSCAN);
@@ -541,13 +631,40 @@ const visibleRows = computed(() => {
 	return rows;
 });
 
-// ─── The Mode and owner columns, by the width the rows get ───────────────────
+// ─── The columns: chosen, sized, sorted, and dropped by the width the rows get ─
+
+const HEADED: readonly SortKey[] = ["name", ...FILES_COLUMNS];
+const WIDTH_KEYS = {
+	size: "filesSizeWidth",
+	modified: "filesModifiedWidth",
+	mode: "filesModeWidth",
+	owner: "filesOwnerWidth",
+} as const satisfies Record<FilesColumn, keyof LayoutConfig>;
+
+/** The columns chosen, `[layout] files_columns`; narrow lists still drop some. */
+const chosen = computed<readonly FilesColumn[]>(
+	() => parseFilesColumns(configStore.uiConfig.layout?.filesColumns) ?? FILES_COLUMNS,
+);
+
+/** Widths being dragged, or set where nothing saves them (no token): they win over the saved ones. */
+const dragged = ref<Partial<Record<FilesColumn, number>>>({});
+
+const widths = computed<Record<FilesColumn, number>>(() => {
+	const out = { ...DEFAULT_FILES_COLUMN_WIDTHS };
+	for (const column of FILES_COLUMNS) {
+		const saved = configStore.uiConfig.layout?.[WIDTH_KEYS[column]];
+		out[column] = dragged.value[column] ?? (isFilesColumnWidth(saved) ? saved : out[column]);
+	}
+	return out;
+});
 
 /**
  * The list's client width as last measured: what its rows get, a vertical scrollbar left out.
  * Null before any measurement, and while no list shows (an empty folder, an error).
  */
 const listWidth = ref<number | null>(null);
+/** The width the list's vertical scrollbar takes, which the header leaves free too. */
+const scrollbarWidth = ref(0);
 let widthObserver: ResizeObserver | null = null;
 
 // The list comes and goes with the listing: the observer follows it.
@@ -557,9 +674,11 @@ watch(
 		widthObserver?.disconnect();
 		widthObserver = null;
 		listWidth.value = null;
+		scrollbarWidth.value = 0;
 		if (el === null || typeof ResizeObserver === "undefined") return;
 		widthObserver = new ResizeObserver(() => {
 			listWidth.value = el.clientWidth;
+			scrollbarWidth.value = el.offsetWidth - el.clientWidth;
 		});
 		widthObserver.observe(el);
 	},
@@ -568,26 +687,156 @@ watch(
 
 onUnmounted(() => widthObserver?.disconnect());
 
-/** The Mode column shows from `MODE_COLUMN_MIN_WIDTH` on; unmeasured, it counts as hidden. */
-const modeShown = computed(
-	() => listWidth.value !== null && listWidth.value >= MODE_COLUMN_MIN_WIDTH,
-);
+/** The columns shown: the chosen ones the width keeps, at the widths they have. */
+const shown = computed(() => shownColumns(chosen.value, widths.value, listWidth.value));
 
-/** The owner column shows from `OWNER_COLUMN_MIN_WIDTH` on; unmeasured, it counts as hidden. */
-const ownerShown = computed(
-	() => listWidth.value !== null && listWidth.value >= OWNER_COLUMN_MIN_WIDTH,
-);
+function isShown(column: SortKey): boolean {
+	return column === "name" || shown.value.includes(column);
+}
 
-/** A row's tooltip: what the width hides of it, the group always; none when there is nothing. */
+/** One template for the header and every row, so the cells line up. */
+const gridStyle = computed(() => ({
+	"--files-cols": `${ROW_ICON}px minmax(0, 1fr) ${shown.value
+		.map((column) => `${widths.value[column]}px`)
+		.join(" ")}`.trim(),
+	"--files-pad": `${ROW_PADDING}px`,
+	"--files-gap": `${ROW_GAP}px`,
+}));
+
+/** A row's tooltip: what the width or the choice hides of it, the group always; none when there is nothing. */
 function rowTitle(entry: FileEntryView): string | undefined {
 	const lines: string[] = [];
-	if (!modeShown.value) {
+	if (!isShown("mode")) {
 		if (entry.mode !== null) lines.push(`Permissions ${formatMode(entry.mode)}`);
 		else if (entry.attributes !== null) lines.push(`Attributes ${formatAttributes(entry.attributes)}`);
 	}
-	if (!ownerShown.value && entry.owner !== null) lines.push(`Owner ${entry.owner}`);
+	if (!isShown("owner") && entry.owner !== null) lines.push(`Owner ${entry.owner}`);
 	if (entry.group !== null) lines.push(`Group ${entry.group}`);
 	return lines.length > 0 ? lines.join("\n") : undefined;
+}
+
+// ─── Sorting, by a click on a header ─────────────────────────────────────────
+
+function sortState(column: SortKey): "ascending" | "descending" | "none" {
+	if (sort.value.key !== column) return "none";
+	return sort.value.descending ? "descending" : "ascending";
+}
+
+/** Sort by the column, or reverse it; the row with the keyboard stays the same entry. */
+function sortBy(column: SortKey): void {
+	const kept = sorted.value[current.value]?.name;
+	filesPanel.sortFilesBy(column);
+	const at = kept === undefined ? -1 : sorted.value.findIndex((entry) => entry.name === kept);
+	if (at !== -1) current.value = at;
+	if (listEl.value !== null) listEl.value.scrollTop = 0;
+	onScroll();
+}
+
+// ─── Resizing, by an edge or the keyboard ────────────────────────────────────
+
+const resizing = ref<FilesColumn | null>(null);
+
+function clampWidth(width: number): number {
+	return Math.min(FILES_COLUMN_WIDTH_MAX, Math.max(FILES_COLUMN_WIDTH_MIN, Math.round(width)));
+}
+
+/** Keep widths and the columns chosen as `[layout]`, as the panels' widths are kept. */
+function commitLayout(values: Partial<LayoutConfig>): void {
+	if (authStore.token === null) return;
+	void configStore.saveUiSettings("layout", values);
+}
+
+/** Keep these widths; where nothing saves (no token), they last for this window only. */
+function commitWidths(toKeep: Partial<Record<FilesColumn, number>>): void {
+	const values: Partial<LayoutConfig> = {};
+	for (const column of FILES_COLUMNS) {
+		const width = toKeep[column];
+		if (width === undefined) continue;
+		values[WIDTH_KEYS[column]] = width;
+		if (authStore.token !== null) delete dragged.value[column];
+		else dragged.value[column] = width;
+	}
+	commitLayout(values);
+}
+
+/** The edge of a header on its left: dragging it left widens the column, right narrows it. */
+function startResize(column: FilesColumn, event: PointerEvent): void {
+	if (event.button !== 0) return;
+	event.preventDefault();
+	const handle = event.currentTarget as HTMLElement;
+	try {
+		handle.setPointerCapture(event.pointerId);
+	} catch {
+		// A pointer that is no longer active: the drag goes on by the events it already sends.
+	}
+	const from = event.clientX;
+	const start = widths.value[column];
+	resizing.value = column;
+	const move = (e: PointerEvent): void => {
+		dragged.value[column] = clampWidth(start + from - e.clientX);
+	};
+	const end = (): void => {
+		handle.removeEventListener("pointermove", move);
+		handle.removeEventListener("pointerup", end);
+		handle.removeEventListener("pointercancel", end);
+		resizing.value = null;
+		commitWidths({ [column]: widths.value[column] });
+	};
+	handle.addEventListener("pointermove", move);
+	handle.addEventListener("pointerup", end);
+	handle.addEventListener("pointercancel", end);
+}
+
+/** The edge from the keyboard: Left widens, Right narrows, Shift for larger steps; Home, End: least, most. */
+function onResizeKey(column: FilesColumn, event: KeyboardEvent): void {
+	if (event.ctrlKey || event.altKey || event.metaKey) return;
+	const step = event.shiftKey ? 32 : 8;
+	const now = widths.value[column];
+	let to: number | null = null;
+	if (event.key === "ArrowLeft") to = now + step;
+	else if (event.key === "ArrowRight") to = now - step;
+	else if (event.key === "Home") to = FILES_COLUMN_WIDTH_MIN;
+	else if (event.key === "End") to = FILES_COLUMN_WIDTH_MAX;
+	if (to === null) return;
+	event.preventDefault();
+	event.stopPropagation();
+	commitWidths({ [column]: clampWidth(to) });
+}
+
+// ─── The columns chosen, from the headers' menu ──────────────────────────────
+
+const menuAt = ref<{ x: number; y: number } | null>(null);
+/** Where the keyboard goes back to when the menu is left by it. */
+let menuOrigin: HTMLElement | null = null;
+
+function openColumnsMenu(event: MouseEvent): void {
+	event.preventDefault();
+	const wrap = (event.currentTarget as HTMLElement).closest(".files-list-wrap");
+	if (wrap === null) return;
+	const box = wrap.getBoundingClientRect();
+	menuOrigin = (event.target as HTMLElement).closest<HTMLElement>("button, [role=separator]");
+	menuAt.value = {
+		x: Math.max(0, Math.min(event.clientX - box.left, box.width - 170)),
+		y: Math.max(0, Math.min(event.clientY - box.top, box.height - 140)),
+	};
+}
+
+function closeColumnsMenu(refocus: boolean): void {
+	menuAt.value = null;
+	if (refocus) void nextTick(() => menuOrigin?.focus());
+}
+
+function toggleColumn(column: FilesColumn): void {
+	const kept = FILES_COLUMNS.filter((c) =>
+		c === column ? !chosen.value.includes(c) : chosen.value.includes(c),
+	);
+	commitLayout({ filesColumns: kept.join(",") });
+}
+
+function resetColumns(): void {
+	commitLayout({ filesColumns: DEFAULT_FILES_COLUMNS });
+	commitWidths({ ...DEFAULT_FILES_COLUMN_WIDTHS });
+	closeColumnsMenu(true);
 }
 
 function onScroll(): void {
@@ -612,7 +861,7 @@ let typed = "";
 let typedTimer: ReturnType<typeof setTimeout> | null = null;
 
 function onListKeydown(event: KeyboardEvent): void {
-	const entries = listing.value?.entries ?? [];
+	const entries = sorted.value;
 	if (event.ctrlKey || event.altKey || event.metaKey) return;
 	const page = Math.max(1, Math.floor((listEl.value?.clientHeight ?? 0) / ROW_HEIGHT) - 1) || 10;
 	let to: number | null = null;
@@ -782,7 +1031,7 @@ const downloadFailure = ref<string | null>(null);
 
 /** Why "Download…" cannot act on the selected row, or null when it can (#840). */
 const downloadBlocked = computed<string | null>(() => {
-	const entry = listing.value?.entries[current.value];
+	const entry = sorted.value[current.value];
 	if (listing.value === null || entry === undefined) return "Select a file to download";
 	if (entry.kind === "symlink") return "Links are not followed — open the folder the link points to";
 	if (entry.kind === "directory") return "Downloading folders is not available yet";
@@ -799,7 +1048,7 @@ function onWindows(): boolean {
 /** "Download…": the selected file, through the desktop's dialog or the browser's downloads. */
 async function download(): Promise<void> {
 	const shown = listing.value;
-	const entry = shown?.entries[current.value];
+	const entry = sorted.value[current.value];
 	if (shown === null || shown === undefined || entry === undefined || downloadBlocked.value !== null) return;
 	downloading.value = true;
 	downloadFailure.value = null;
@@ -842,6 +1091,9 @@ defineExpose({ reload });
 	min-height: 0;
 	flex: 1;
 	container-type: inline-size;
+	--files-cols: 14px minmax(0, 1fr);
+	--files-pad: 10px;
+	--files-gap: 8px;
 }
 
 .files-pathbar {
@@ -1031,6 +1283,122 @@ defineExpose({ reload });
 	pointer-events: none;
 }
 
+.files-grid {
+	position: relative;
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+/* The header and every row share one template, from the columns shown and their widths. */
+.files-head,
+.files-row {
+	display: grid;
+	grid-template-columns: var(--files-cols);
+	align-items: center;
+	column-gap: var(--files-gap, 8px);
+	padding: 0 var(--files-pad, 10px);
+	font-size: 12px;
+}
+
+.files-head {
+	flex-shrink: 0;
+	height: 24px;
+	border-bottom: 1px solid var(--nt-border);
+	color: var(--nt-text-secondary);
+	font-size: 11px;
+	user-select: none;
+}
+
+.files-colhead {
+	position: relative;
+	min-width: 0;
+	height: 100%;
+}
+
+.files-sort {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	width: 100%;
+	height: 100%;
+	padding: 0;
+	border: none;
+	background: none;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.files-sort:hover {
+	color: var(--nt-text-strong);
+}
+
+.files-sort:focus-visible {
+	outline: 2px solid var(--nt-accent);
+	outline-offset: -2px;
+}
+
+.files-colhead[aria-sort="ascending"] .files-sort,
+.files-colhead[aria-sort="descending"] .files-sort {
+	color: var(--nt-text-strong);
+	font-weight: 600;
+}
+
+.files-sort__label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.files-sort__arrow {
+	flex-shrink: 0;
+	font-size: 8px;
+}
+
+/* Size and Modified read from the right, as their values do. */
+.files-colhead--size .files-sort,
+.files-colhead--modified .files-sort {
+	flex-direction: row-reverse;
+	justify-content: flex-start;
+	text-align: right;
+}
+
+/* The edge a column is dragged by: on its left, over the gap, a wider target than its line. */
+.files-resize {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: -7px;
+	width: 7px;
+	z-index: 1;
+	cursor: col-resize;
+	touch-action: none;
+	outline: none;
+}
+
+.files-resize::after {
+	content: "";
+	position: absolute;
+	top: 4px;
+	bottom: 4px;
+	right: 3px;
+	width: 1px;
+	background: var(--nt-border);
+}
+
+.files-resize:hover::after,
+.files-resize--active::after,
+.files-resize:focus-visible::after {
+	right: 2px;
+	width: 3px;
+	border-radius: 1px;
+	background: var(--nt-accent);
+}
+
 .files-list {
 	flex: 1;
 	min-height: 0;
@@ -1048,11 +1416,6 @@ defineExpose({ reload });
 	left: 0;
 	right: 0;
 	height: 24px;
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 0 10px;
-	font-size: 12px;
 	color: var(--nt-sidebar-text, var(--nt-fg));
 	cursor: default;
 	outline: none;
@@ -1071,7 +1434,6 @@ defineExpose({ reload });
 }
 
 .files-row__name {
-	flex: 1;
 	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -1079,41 +1441,10 @@ defineExpose({ reload });
 }
 
 .files-row__size,
-.files-row__modified {
-	flex-shrink: 0;
-	color: var(--nt-text-secondary);
-	font-size: 11px;
-	text-align: right;
-}
-
-.files-row__size {
-	width: 52px;
-}
-
-.files-row__modified {
-	width: 58px;
-}
-
-/* As `ls -l` spells them, ten characters, or PowerShell's Mode, six: a column of their own from 400 px on. */
-.files-row__mode {
-	display: none;
-	flex-shrink: 0;
-	width: 10ch;
-	color: var(--nt-text-secondary);
-	font-family: ui-monospace, monospace;
-	font-size: 11px;
-	white-space: pre;
-}
-
-.files-browser--mode .files-row__mode {
-	display: block;
-}
-
-/* The owner, cut with an ellipsis, whole in its cell's tooltip: a column of its own from 480 px on. */
+.files-row__modified,
+.files-row__mode,
 .files-row__owner {
-	display: none;
-	flex-shrink: 0;
-	width: 80px;
+	min-width: 0;
 	overflow: hidden;
 	color: var(--nt-text-secondary);
 	font-size: 11px;
@@ -1121,21 +1452,15 @@ defineExpose({ reload });
 	white-space: nowrap;
 }
 
-.files-browser--owner .files-row__owner {
-	display: block;
+.files-row__size,
+.files-row__modified {
+	text-align: right;
 }
 
-/* A narrow panel drops the date first, then the size. */
-@container (max-width: 260px) {
-	.files-row__modified {
-		display: none;
-	}
-}
-
-@container (max-width: 200px) {
-	.files-row__size {
-		display: none;
-	}
+/* As `ls -l` spells them, ten characters, or PowerShell's Mode, six. */
+.files-row__mode {
+	font-family: ui-monospace, monospace;
+	white-space: pre;
 }
 
 .files-note {

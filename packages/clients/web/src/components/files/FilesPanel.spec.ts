@@ -112,7 +112,8 @@ const aside = (): HTMLElement => root.querySelector("aside") as HTMLElement;
 const filesPart = (): HTMLElement => root.querySelector('[data-files-part="files"]') as HTMLElement;
 const transfersPart = (): HTMLElement =>
 	root.querySelector('[data-files-part="transfers"]') as HTMLElement;
-const separator = (): HTMLElement | null => root.querySelector('[role="separator"]');
+const separator = (): HTMLElement | null =>
+	root.querySelector('[role="separator"][aria-orientation="horizontal"]');
 
 beforeEach(() => {
 	localStorage.clear();

@@ -5,11 +5,15 @@ import {
 	attachedChannel,
 	type CwdSource,
 	clampTransfersShare,
+	DEFAULT_FILES_SORT,
+	type FilesSort,
 	type LiveCwd,
 	type PanelShowing,
 	panelShowing,
 	type ReaderChoice,
 	readerChoiceAfter,
+	type SortKey,
+	sortAfterClick,
 	TRANSFERS_SHARE_DEFAULT,
 	writerStatements,
 } from "../utils/files-panel.js";
@@ -462,7 +466,16 @@ export const useFilesPanelStore = defineStore("filesPanel", () => {
 		write(STORAGE.transfersCollapsed, value ? "true" : null);
 	}
 
+	// The listing's order: this window's, kept until it reloads (#1209).
+	const filesSort = ref<FilesSort>(DEFAULT_FILES_SORT);
+
+	function sortFilesBy(key: SortKey): void {
+		filesSort.value = sortAfterClick(filesSort.value, key);
+	}
+
 	return {
+		filesSort,
+		sortFilesBy,
 		open,
 		pinnedChannelId,
 		focusedChannelId,

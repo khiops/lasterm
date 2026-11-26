@@ -13,8 +13,11 @@ import {
 	DEFAULT_TRANSFER_CONFIG,
 	EXPERIMENTAL_CONFIG_KEYS,
 	HOST_ONLY_PROFILE_KEYS,
+	isFilesColumns,
+	isFilesColumnWidth,
 	isFileTransferEnabled,
 	isTransferPanelWidth,
+	parseFilesColumns,
 	TRANSFER_CONFIG_KEYS,
 	TRANSFER_CONFIG_VALIDATORS,
 	TRANSFER_PROFILE_KEYS,
@@ -168,5 +171,49 @@ describe("isFileTransferEnabled", () => {
 		expect(isFileTransferEnabled({})).toBe(false);
 		expect(isFileTransferEnabled({ experimental: DEFAULT_EXPERIMENTAL_CONFIG })).toBe(false);
 		expect(isFileTransferEnabled({ experimental: {} })).toBe(false);
+	});
+});
+
+// ─── [layout] files_columns and the column widths (#1209) ────────────────────
+
+describe("files_columns", () => {
+	it("accepts any of the four columns, each once, in listing order, or none", () => {
+		for (const value of ["", "size", "modified,owner", "size,modified,mode,owner"]) {
+			expect(isFilesColumns(value), value).toBe(true);
+		}
+	});
+
+	it("refuses another order, a repeat, an unknown name, a space and a non-string", () => {
+		for (const value of ["owner,size", "size,size", "name", "size, mode", "size,", 1, null]) {
+			expect(isFilesColumns(value), String(value)).toBe(false);
+		}
+	});
+
+	it("reads the columns in listing order", () => {
+		expect(parseFilesColumns("modified,owner")).toEqual(["modified", "owner"]);
+		expect(parseFilesColumns("")).toEqual([]);
+		expect(parseFilesColumns("mode,size")).toEqual(["size", "mode"]);
+		expect(parseFilesColumns("bogus")).toBeNull();
+	});
+});
+
+describe("a files column's width", () => {
+	it("is a whole number of pixels from 40 to 400", () => {
+		for (const width of [40, 52, 400]) expect(isFilesColumnWidth(width), String(width)).toBe(true);
+		for (const width of [39, 401, 52.5, "52", null]) {
+			expect(isFilesColumnWidth(width), String(width)).toBe(false);
+		}
+	});
+
+	it("is kept in [layout], one key per column", () => {
+		for (const key of [
+			"filesColumns",
+			"filesSizeWidth",
+			"filesModifiedWidth",
+			"filesModeWidth",
+			"filesOwnerWidth",
+		]) {
+			expect(LAYOUT_CONFIG_KEYS, key).toContain(key);
+		}
 	});
 });

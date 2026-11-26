@@ -152,6 +152,54 @@ export function isTransferPanelWidth(value: unknown): value is number {
 	);
 }
 
+// ─── [layout] files_columns and the column widths ────────────────────────────
+
+/** The columns of the files panel's listing after Name, in the order they show. */
+export const FILES_COLUMNS = ["size", "modified", "mode", "owner"] as const;
+export type FilesColumn = (typeof FILES_COLUMNS)[number];
+
+/** `[layout] files_columns`: the columns shown, comma-separated, as the list spells them. */
+export const DEFAULT_FILES_COLUMNS = FILES_COLUMNS.join(",");
+
+/** The columns a `files_columns` value names, in listing order; null when it is not a list of them. */
+export function parseFilesColumns(value: unknown): readonly FilesColumn[] | null {
+	if (typeof value !== "string") return null;
+	if (value === "") return [];
+	const named = value.split(",");
+	const known = named.filter((name): name is FilesColumn =>
+		(FILES_COLUMNS as readonly string[]).includes(name),
+	);
+	if (known.length !== named.length || new Set(known).size !== known.length) return null;
+	return FILES_COLUMNS.filter((column) => known.includes(column));
+}
+
+/** A `files_columns` value: known columns, each once, in listing order. */
+export function isFilesColumns(value: unknown): value is string {
+	const columns = parseFilesColumns(value);
+	return columns !== null && columns.join(",") === value;
+}
+
+export const FILES_COLUMN_WIDTH_MIN = 40;
+export const FILES_COLUMN_WIDTH_MAX = 400;
+
+/** The width, in pixels, each column has until it is dragged. Name takes what is left. */
+export const DEFAULT_FILES_COLUMN_WIDTHS: Readonly<Record<FilesColumn, number>> = {
+	size: 52,
+	modified: 64,
+	mode: 70,
+	owner: 80,
+};
+
+/** A width a files column can have, in whole pixels. */
+export function isFilesColumnWidth(value: unknown): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isInteger(value) &&
+		value >= FILES_COLUMN_WIDTH_MIN &&
+		value <= FILES_COLUMN_WIDTH_MAX
+	);
+}
+
 // ─── [experimental]: features not finished yet, off by default ───────────────
 
 /**

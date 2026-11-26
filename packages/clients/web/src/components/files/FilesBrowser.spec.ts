@@ -4,12 +4,13 @@
  * directory is unknown, hidden files from the settings, the list's keys, and the new folder
  * that only the writer may create.
  */
-import type { ProtocolMessage } from "@lasterm/shared";
+import { DEFAULT_LAYOUT_CONFIG, type ProtocolMessage } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick } from "vue";
 import type { IWsClient } from "../../services/ws-client.js";
 import { useAuthStore } from "../../stores/auth.js";
+import { useConfigStore } from "../../stores/config.js";
 import { useFilesPanelStore } from "../../stores/files-panel.js";
 import { useToastStore } from "../../stores/toast.js";
 import { useWriteLockStore } from "../../stores/writelock.js";
@@ -72,7 +73,7 @@ const file = (name: string): FileEntryView => ({
 
 /** The host's folders, as the hub would list them. */
 const TREE: Record<string, FileEntryView[]> = {
-	"/home/pi": [folder("src"), folder("logs"), file("notes.md")],
+	"/home/pi": [folder("logs"), folder("src"), file("notes.md")],
 	"/home/pi/src": [folder("lasterm"), file("todo.txt")],
 	"/home/pi/src/lasterm": [file("Cargo.toml")],
 	"/home/pi/logs": [],
@@ -351,11 +352,11 @@ describe("Follow where the directory cannot be known (#1196)", () => {
 		store.browse(A, "/home/pi", true);
 		mountBrowser({ agentUpdatable: false, hostOs: "linux", shell: "pwsh" });
 		await settle();
-		key(rowEl("src"), "Enter");
+		key(rowEl("logs"), "Enter");
 		await settle();
-		expect(lastListed()).toEqual([A, "/home/pi/src", false]);
+		expect(lastListed()).toEqual([A, "/home/pi/logs", false]);
 		expect(store.terminalFiles(A, false).following).toBe(true);
-		store.takeCwd({ channelId: A, cwd: "/home/pi/logs", source: "shell" });
+		store.takeCwd({ channelId: A, cwd: "/home/pi/src", source: "shell" });
 		await settle();
 		expect(followToggle().textContent?.trim()).toBe("Following");
 	});
@@ -381,15 +382,15 @@ describe("the list and the path bar", () => {
 		useFilesPanelStore().browse(A, "/home/pi");
 		mountBrowser();
 		await settle();
-		const list = root.querySelector('[role="listbox"]') as HTMLElement;
+		const list = root.querySelector('[role="grid"]') as HTMLElement;
 		expect(list.getAttribute("aria-label")).toBe("Files in /home/pi");
 		const current = () =>
-			root.querySelector('[role="option"][tabindex="0"]')?.textContent?.trim() ?? "";
-		expect(current()).toMatch(/^src/);
-		key(rowEl("src"), "ArrowDown");
-		await settle();
+			root.querySelector('[role="row"][tabindex="0"]')?.textContent?.trim() ?? "";
 		expect(current()).toMatch(/^logs/);
-		key(rowEl("logs"), "End");
+		key(rowEl("logs"), "ArrowDown");
+		await settle();
+		expect(current()).toMatch(/^src/);
+		key(rowEl("src"), "End");
 		await settle();
 		expect(current()).toMatch(/^notes\.md/);
 		// Type-ahead.
@@ -444,7 +445,7 @@ describe("the list and the path bar", () => {
 			[...root.querySelectorAll(".files-row")].map(
 				(row) => row.querySelector(".files-row__owner")?.getAttribute("title") ?? null,
 			);
-		expect(cells(".files-row__mode")).toEqual(["drwxr-xr-x", "-rw-r--r--", "-a----", "—"]);
+		expect(cells(".files-row__mode")).toEqual(["drwxr-xr-x", "-a----", "-rw-r--r--", "—"]);
 		expect(cells(".files-row__owner")).toEqual(["o", "o", "o", "—"]);
 		expect(titles()).toEqual(["Owner o", "Owner o", "Owner o", null]);
 		// happy-dom measures no width: both columns count as hidden, so a row has them on hover.
@@ -536,7 +537,7 @@ describe("a new folder", () => {
 			expect(button.getAttribute("aria-describedby")).toBe(note.id);
 		}
 		// Readers still browse.
-		expect(rows()).toEqual(["src", "logs", "notes.md"]);
+		expect(rows()).toEqual(["logs", "src", "notes.md"]);
 		note.querySelector<HTMLButtonElement>("button")?.click();
 		expect(sent).toEqual([{ type: "WRITE_CLAIM", channelId: A }]);
 	});
@@ -806,10 +807,435 @@ describe("Download… (#840)", () => {
 		const reason = () =>
 			root.querySelector(`#${CSS.escape(downloadButton().getAttribute("aria-describedby") ?? "")}`)
 				?.textContent;
-		expect(reason()).toBe("Links are not followed — open the folder the link points to");
-		key(rowEl("latest"), "ArrowDown");
+		// Folders list first: the keyboard starts on the folder, then moves to the link.
+		expect(reason()).toBe("Downloading folders is not available yet");
+		key(rowEl("logs"), "ArrowDown");
 		await settle();
 		expect(downloadButton().disabled).toBe(true);
-		expect(reason()).toBe("Downloading folders is not available yet");
+		expect(reason()).toBe("Links are not followed — open the folder the link points to");
+	});
+});
+
+describe("column headers, sorting, widths and the columns chosen (#1209)", () => {
+	const sized = (name: string, size: number): FileEntryView => ({ ...file(name), size });
+	const show = (entries: FileEntryView[]): void => {
+		mocks.listHostFiles.mockImplementation(async () => ({
+			ok: true,
+			value: { path: "/srv/drop", entries, truncated: 0 },
+		}));
+	};
+	const headers = (): HTMLElement[] => [
+		...root.querySelectorAll<HTMLElement>('[role="columnheader"]'),
+	];
+	const label = (el: HTMLElement): string =>
+		el.querySelector(".files-sort__label")?.textContent?.trim() ?? "";
+	const header = (name: string): HTMLElement =>
+		headers().find((el) => label(el) === name) as HTMLElement;
+	const sortButton = (name: string): HTMLButtonElement =>
+		header(name).querySelector("button") as HTMLButtonElement;
+	const resizer = (column: string): HTMLElement =>
+		root.querySelector(`[data-resize="${column}"]`) as HTMLElement;
+	/** What the hub is told to keep, from the PUT bodies, in order. */
+	const saved = (): unknown[] =>
+		mocks.hubFetch.mock.calls
+			.filter(([url]) => String(url).endsWith("/api/config/ui"))
+			.map(([, init]) => JSON.parse(String(init?.body)));
+	const menuRequest = (): MouseEvent =>
+		new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 10 });
+
+	beforeEach(() => {
+		useAuthStore().token = "t";
+		mocks.hubFetch.mockReset();
+		mocks.hubFetch.mockImplementation(async () => new Response("{}", { status: 200 }));
+		show([
+			sized("big.bin", 3000),
+			folder("zdir"),
+			sized("small.txt", 5),
+			sized("mid.log", 200),
+			folder("adir"),
+		]);
+		useFilesPanelStore().browse(A, "/srv/drop");
+	});
+
+	it("exposes a grid with a column header for each column, and the sort state", async () => {
+		mountBrowser();
+		await settle();
+		const grid = root.querySelector('[role="grid"]') as HTMLElement;
+		expect(grid.getAttribute("aria-label")).toBe("Files in /srv/drop");
+		expect(grid.getAttribute("aria-rowcount")).toBe("6");
+		expect(headers().map(label)).toEqual(["Name", "Size", "Modified", "Mode", "Owner"]);
+		expect(headers().map((el) => el.getAttribute("aria-sort"))).toEqual([
+			"ascending",
+			"none",
+			"none",
+			"none",
+			"none",
+		]);
+		expect(rows()).toEqual(["adir", "zdir", "big.bin", "mid.log", "small.txt"]);
+		expect(rowEl("adir").getAttribute("aria-rowindex")).toBe("2");
+		expect(rowEl("adir").querySelector('[role="gridcell"]')).not.toBeNull();
+	});
+
+	it("sorts by Size ascending, then descending, folders first, and by Name back again", async () => {
+		mountBrowser();
+		await settle();
+		sortButton("Size").click();
+		await settle();
+		expect(rows()).toEqual(["adir", "zdir", "small.txt", "mid.log", "big.bin"]);
+		expect(header("Size").getAttribute("aria-sort")).toBe("ascending");
+		expect(header("Name").getAttribute("aria-sort")).toBe("none");
+		sortButton("Size").click();
+		await settle();
+		expect(rows()).toEqual(["adir", "zdir", "big.bin", "mid.log", "small.txt"]);
+		expect(header("Size").getAttribute("aria-sort")).toBe("descending");
+		sortButton("Name").click();
+		await settle();
+		expect(rows()).toEqual(["adir", "zdir", "big.bin", "mid.log", "small.txt"]);
+		sortButton("Name").click();
+		await settle();
+		expect(rows()).toEqual(["zdir", "adir", "small.txt", "mid.log", "big.bin"]);
+		expect(header("Name").getAttribute("aria-sort")).toBe("descending");
+	});
+
+	it("keeps the keyboard on the same entry when the order changes", async () => {
+		mountBrowser();
+		await settle();
+		key(rowEl("adir"), "End");
+		await settle();
+		expect(root.querySelector('[role="row"][tabindex="0"]')?.textContent).toContain("small.txt");
+		sortButton("Size").click();
+		await settle();
+		expect(root.querySelector('[role="row"][tabindex="0"]')?.textContent).toContain("small.txt");
+		expect(rows()).toEqual(["adir", "zdir", "small.txt", "mid.log", "big.bin"]);
+		key(rowEl("adir"), "Home");
+		await settle();
+		sortButton("Size").click();
+		await settle();
+		expect(root.querySelector('[role="row"][tabindex="0"]')?.textContent).toContain("adir");
+	});
+
+	it("resizes a column from the keyboard on its edge, and keeps the width", async () => {
+		mountBrowser();
+		await settle();
+		const edge = resizer("size");
+		expect(edge.getAttribute("role")).toBe("separator");
+		expect(edge.getAttribute("aria-label")).toBe("Resize Size column");
+		expect(edge.getAttribute("aria-valuenow")).toBe("52");
+		key(edge, "ArrowLeft");
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("60");
+		key(edge, "ArrowLeft", { shiftKey: true });
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("92");
+		key(edge, "ArrowRight");
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("84");
+		expect(saved().at(-1)).toEqual({ layout: { filesSizeWidth: 84 } });
+		key(edge, "Home");
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("40");
+		key(edge, "End");
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("400");
+		expect(saved().at(-1)).toEqual({ layout: { filesSizeWidth: 400 } });
+		edge.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("52");
+	});
+
+	it("opens with the widths saved in [layout], each column its own", async () => {
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			layout: {
+				...DEFAULT_LAYOUT_CONFIG,
+				filesOwnerWidth: 130,
+				filesModifiedWidth: 111,
+				filesModeWidth: 99,
+			},
+		};
+		mountBrowser();
+		await settle();
+		expect(resizer("owner").getAttribute("aria-valuenow")).toBe("130");
+		expect(resizer("modified").getAttribute("aria-valuenow")).toBe("111");
+		expect(resizer("mode").getAttribute("aria-valuenow")).toBe("99");
+		expect(resizer("size").getAttribute("aria-valuenow")).toBe("52");
+	});
+
+	it("saves each column's width under its own key", async () => {
+		mountBrowser();
+		await settle();
+		key(resizer("modified"), "ArrowLeft");
+		await settle();
+		expect(saved().at(-1)).toEqual({ layout: { filesModifiedWidth: 72 } });
+		key(resizer("mode"), "ArrowLeft");
+		await settle();
+		expect(saved().at(-1)).toEqual({ layout: { filesModeWidth: 78 } });
+		key(resizer("owner"), "ArrowLeft");
+		await settle();
+		expect(saved().at(-1)).toEqual({ layout: { filesOwnerWidth: 88 } });
+	});
+
+	it("keeps the width a drag of the edge ends on", async () => {
+		mountBrowser();
+		await settle();
+		const edge = resizer("size");
+		const pointer = (type: string, clientX: number): void => {
+			edge.dispatchEvent(
+				new PointerEvent(type, { bubbles: true, cancelable: true, clientX, button: 0 }),
+			);
+		};
+		pointer("pointerdown", 300);
+		pointer("pointermove", 270);
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("82");
+		expect(saved()).toEqual([]);
+		pointer("pointerup", 270);
+		await settle();
+		expect(saved()).toEqual([{ layout: { filesSizeWidth: 82 } }]);
+	});
+
+	it("hides a column from the headers' menu, and brings it back", async () => {
+		mountBrowser();
+		await settle();
+		const visible = (name: string) => header(name).style.display !== "none";
+		header("Modified").dispatchEvent(menuRequest());
+		await settle();
+		const menu = root.querySelector('[role="menu"]') as HTMLElement;
+		expect(menu.getAttribute("aria-label")).toBe("Columns");
+		const items = [...menu.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]')];
+		expect(items.map((el) => [el.textContent?.trim(), el.getAttribute("aria-checked")])).toEqual([
+			["✓ Size", "true"],
+			["✓ Modified", "true"],
+			["✓ Mode", "true"],
+			["✓ Owner", "true"],
+		]);
+		(items[1] as HTMLElement).click();
+		await settle();
+		expect(saved().at(-1)).toEqual({ layout: { filesColumns: "size,mode,owner" } });
+		expect(visible("Modified")).toBe(false);
+		expect(visible("Size")).toBe(true);
+		expect(rowEl("big.bin").querySelector<HTMLElement>(".files-row__modified")?.style.display).toBe(
+			"none",
+		);
+		expect(
+			[...root.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]')].map((el) =>
+				el.getAttribute("aria-checked"),
+			),
+		).toEqual(["true", "false", "true", "true"]);
+		(root.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]')[1] as HTMLElement).click();
+		await settle();
+		expect(saved().at(-1)).toEqual({ layout: { filesColumns: "size,modified,mode,owner" } });
+		expect(visible("Modified")).toBe(true);
+	});
+
+	it("chooses columns for this window where nothing saves them", async () => {
+		useAuthStore().token = null;
+		mountBrowser();
+		await settle();
+		header("Modified").dispatchEvent(menuRequest());
+		await settle();
+		const item = [...root.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]')][1];
+		item?.click();
+		await settle();
+		expect(header("Modified").style.display).toBe("none");
+		expect(saved()).toEqual([]);
+	});
+
+	it("tells a hidden column's value in the row's tooltip", async () => {
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			layout: { ...DEFAULT_LAYOUT_CONFIG, filesColumns: "" },
+		};
+		mountBrowser();
+		await settle();
+		expect(rowEl("big.bin").getAttribute("title")).toBe("Size 2.9 KB");
+		expect(rowEl("adir").hasAttribute("title")).toBe(false);
+	});
+
+	it("keeps the keyboard on the same file when a refresh puts it elsewhere in the order", async () => {
+		mountBrowser();
+		await settle();
+		sortButton("Size").click();
+		await settle();
+		// By size: adir, zdir, small.txt (5), mid.log (200), big.bin (3000). The keyboard is on small.txt.
+		key(rowEl("adir"), "ArrowDown");
+		key(rowEl("zdir"), "ArrowDown");
+		await settle();
+		expect(root.querySelector('[role="row"][tabindex="0"]')?.textContent).toContain("small.txt");
+		// It grows past the others on the host; the refresh lists it last.
+		show([
+			sized("big.bin", 3000),
+			folder("zdir"),
+			sized("small.txt", 9000),
+			sized("mid.log", 200),
+			folder("adir"),
+		]);
+		(root.querySelector('button[aria-label="Refresh"]') as HTMLButtonElement).click();
+		await settle();
+		expect(rows()).toEqual(["adir", "zdir", "mid.log", "big.bin", "small.txt"]);
+		expect(root.querySelector('[role="row"][tabindex="0"]')?.textContent).toContain("small.txt");
+	});
+
+	it("draws the row the keyboard is on in index order, wherever the list is scrolled", async () => {
+		show(Array.from({ length: 200 }, (_, i) => sized(`f${String(i).padStart(3, "0")}`, i)));
+		mountBrowser();
+		await settle();
+		const list = root.querySelector(".files-list") as HTMLElement;
+		list.scrollTop = 24 * 120;
+		list.dispatchEvent(new Event("scroll"));
+		await settle();
+		const indexes = [...root.querySelectorAll<HTMLElement>(".files-row")].map((el) =>
+			Number(el.getAttribute("aria-rowindex")),
+		);
+		expect(indexes).toContain(2);
+		expect(indexes).toEqual([...indexes].sort((a, b) => a - b));
+	});
+
+	it("drops a drag that the pointer's cancellation interrupts, without writing", async () => {
+		mountBrowser();
+		await settle();
+		const edge = resizer("size");
+		const pointer = (type: string, clientX: number, pointerId = 1): void => {
+			edge.dispatchEvent(
+				new PointerEvent(type, { bubbles: true, cancelable: true, clientX, button: 0, pointerId }),
+			);
+		};
+		pointer("pointerdown", 300);
+		pointer("pointermove", 270);
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("82");
+		pointer("pointercancel", 270);
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("52");
+		expect(saved()).toEqual([]);
+	});
+
+	it("follows the first pointer of a drag only, and writes nothing for a click", async () => {
+		mountBrowser();
+		await settle();
+		const edge = resizer("size");
+		const pointer = (type: string, clientX: number, pointerId: number): void => {
+			edge.dispatchEvent(
+				new PointerEvent(type, { bubbles: true, cancelable: true, clientX, button: 0, pointerId }),
+			);
+		};
+		pointer("pointerdown", 300, 1);
+		pointer("pointerdown", 500, 2);
+		pointer("pointermove", 100, 2);
+		pointer("pointerup", 100, 2);
+		await settle();
+		expect(edge.getAttribute("aria-valuenow")).toBe("52");
+		expect(saved()).toEqual([]);
+		pointer("pointermove", 290, 1);
+		pointer("pointerup", 290, 1);
+		await settle();
+		expect(saved()).toEqual([{ layout: { filesSizeWidth: 62 } }]);
+		// A press and release on the edge with no move keeps what is there.
+		pointer("pointerdown", 300, 3);
+		pointer("pointerup", 300, 3);
+		await settle();
+		expect(saved()).toHaveLength(1);
+	});
+
+	it("reserves Escape to the menu while it is open", async () => {
+		mountBrowser();
+		await settle();
+		header("Size").dispatchEvent(menuRequest());
+		await settle();
+		expect(root.querySelector('[role="menu"]')?.hasAttribute("data-own-escape")).toBe(true);
+	});
+
+	it("puts the keyboard on the Name header when the choice hid the header it came from", async () => {
+		mountBrowser();
+		await settle();
+		const origin = sortButton("Modified");
+		origin.focus();
+		origin.dispatchEvent(menuRequest());
+		await settle();
+		const menu = root.querySelector('[role="menu"]') as HTMLElement;
+		const modified = [...menu.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]')][1];
+		modified?.click();
+		await settle();
+		key(modified as HTMLElement, "Tab");
+		await settle();
+		expect(document.activeElement).toBe(sortButton("Name"));
+	});
+
+	it("closes the menu on Escape and puts the keyboard back on the header", async () => {
+		mountBrowser();
+		await settle();
+		const button = sortButton("Size");
+		button.focus();
+		button.dispatchEvent(menuRequest());
+		await settle();
+		const menu = root.querySelector('[role="menu"]') as HTMLElement;
+		key(menu.querySelector('[role="menuitemcheckbox"]') as HTMLElement, "Escape");
+		await settle();
+		expect(root.querySelector('[role="menu"]')).toBeNull();
+		expect(document.activeElement).toBe(button);
+	});
+
+	it("moves in the menu with the arrows, closes it on Tab, and on a press elsewhere", async () => {
+		mountBrowser();
+		await settle();
+		const open = async (): Promise<HTMLElement[]> => {
+			sortButton("Size").focus();
+			sortButton("Size").dispatchEvent(menuRequest());
+			await settle();
+			return [...root.querySelectorAll<HTMLElement>('[role^="menuitem"]')];
+		};
+		let items = await open();
+		expect(document.activeElement).toBe(items[0]);
+		const menu = root.querySelector('[role="menu"]') as HTMLElement;
+		key(items[0] as HTMLElement, "ArrowDown");
+		expect(document.activeElement?.textContent).toContain("Modified");
+		key(items[1] as HTMLElement, "End");
+		expect(document.activeElement?.textContent).toContain("Reset columns");
+		key(items[4] as HTMLElement, "ArrowDown");
+		expect(document.activeElement).toBe(items[0]);
+		key(items[0] as HTMLElement, "ArrowUp");
+		expect(document.activeElement?.textContent).toContain("Reset columns");
+		key(menu, "Tab");
+		await settle();
+		expect(root.querySelector('[role="menu"]')).toBeNull();
+		expect(document.activeElement).toBe(sortButton("Size"));
+		items = await open();
+		expect(items).toHaveLength(5);
+		document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		await settle();
+		expect(root.querySelector('[role="menu"]')).toBeNull();
+	});
+
+	it("resets the columns and their widths from the menu", async () => {
+		useConfigStore().uiConfig = {
+			onChannelDead: "readonly",
+			layout: { ...DEFAULT_LAYOUT_CONFIG, filesColumns: "mode", filesSizeWidth: 200 },
+		};
+		mountBrowser();
+		await settle();
+		header("Size").dispatchEvent(menuRequest());
+		await settle();
+		const reset = [...root.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+			(el) => el.textContent?.trim() === "Reset columns",
+		) as HTMLElement;
+		reset.click();
+		await settle();
+		// One request holds the columns and the four widths, so a failure undoes them together.
+		expect(saved()).toEqual([
+			{
+				layout: {
+					filesColumns: "size,modified,mode,owner",
+					filesSizeWidth: 52,
+					filesModifiedWidth: 64,
+					filesModeWidth: 70,
+					filesOwnerWidth: 80,
+				},
+			},
+		]);
+		expect(useConfigStore().uiConfig.layout).toMatchObject({
+			filesColumns: "size,modified,mode,owner",
+			filesSizeWidth: 52,
+		});
+		expect(root.querySelector('[role="menu"]')).toBeNull();
 	});
 });

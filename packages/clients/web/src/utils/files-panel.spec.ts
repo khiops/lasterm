@@ -3,7 +3,10 @@ import {
 	attachedChannel,
 	breadcrumbOf,
 	clampTransfersShare,
+	columnRoom,
+	DEFAULT_FILES_SORT,
 	entryLabel,
+	type FileEntryView,
 	type FollowFacts,
 	filesPanelForm,
 	filesPanelMaxWidth,
@@ -21,6 +24,9 @@ import {
 	readerChoiceAfter,
 	type StatusFacts,
 	scopeChoices,
+	shownColumns,
+	sortAfterClick,
+	sortEntries,
 	sourceLabel,
 	statusLines,
 	TRANSFERS_SHARE_DEFAULT,
@@ -641,5 +647,173 @@ describe("the split between Files and Transfers", () => {
 		expect(TRANSFERS_SHARE_MAX).toBe(0.7);
 		expect(clampTransfersShare(0.4)).toBe(0.4);
 		expect(clampTransfersShare(Number.NaN)).toBe(TRANSFERS_SHARE_DEFAULT);
+	});
+});
+
+describe("the listing's sort (#1209)", () => {
+	const entry = (name: string, more: Partial<FileEntryView> = {}): FileEntryView => ({
+		name,
+		kind: "file",
+		size: 0,
+		mtime: null,
+		mode: null,
+		attributes: null,
+		owner: null,
+		group: null,
+		...more,
+	});
+	const dir = (name: string, more: Partial<FileEntryView> = {}): FileEntryView =>
+		entry(name, { kind: "directory", size: null, ...more });
+	const names = (entries: readonly FileEntryView[]): string[] => entries.map((e) => e.name);
+
+	it("a click sorts ascending, the next on the same column descending, then ascending again", () => {
+		let sort = DEFAULT_FILES_SORT;
+		expect(sort).toEqual({ key: "name", descending: false });
+		sort = sortAfterClick(sort, "size");
+		expect(sort).toEqual({ key: "size", descending: false });
+		sort = sortAfterClick(sort, "size");
+		expect(sort).toEqual({ key: "size", descending: true });
+		sort = sortAfterClick(sort, "size");
+		expect(sort).toEqual({ key: "size", descending: false });
+		// Another column starts ascending, whatever the direction left.
+		sort = sortAfterClick(sortAfterClick(sort, "size"), "modified");
+		expect(sort).toEqual({ key: "modified", descending: false });
+	});
+
+	it("by size, folders come first in both directions and files run by size", () => {
+		const list = [
+			entry("b", { size: 30 }),
+			dir("z"),
+			entry("a", { size: 5 }),
+			dir("m"),
+			entry("c", { size: 20 }),
+		];
+		expect(names(sortEntries(list, { key: "size", descending: false }))).toEqual([
+			"m",
+			"z",
+			"a",
+			"c",
+			"b",
+		]);
+		expect(names(sortEntries(list, { key: "size", descending: true }))).toEqual([
+			"m",
+			"z",
+			"b",
+			"c",
+			"a",
+		]);
+	});
+
+	it("by name, folders stay first, and names read as a person reads them", () => {
+		const list = [entry("file10"), dir("Beta"), entry("file9"), dir("alpha"), entry("File2")];
+		expect(names(sortEntries(list, { key: "name", descending: false }))).toEqual([
+			"alpha",
+			"Beta",
+			"File2",
+			"file9",
+			"file10",
+		]);
+		expect(names(sortEntries(list, { key: "name", descending: true }))).toEqual([
+			"Beta",
+			"alpha",
+			"file10",
+			"file9",
+			"File2",
+		]);
+	});
+
+	it("a link to a folder sorts with the folders", () => {
+		const link = entry("lnk", { kind: "symlink", linkKind: "directory" });
+		expect(names(sortEntries([entry("a"), link], DEFAULT_FILES_SORT))).toEqual(["lnk", "a"]);
+	});
+
+	it("an entry without a value goes last, whichever way the column runs", () => {
+		const list = [
+			entry("none", { mtime: null }),
+			entry("new", { mtime: "2026-11-20T10:00:00Z" }),
+			entry("old", { mtime: "2026-01-02T10:00:00Z" }),
+		];
+		expect(names(sortEntries(list, { key: "modified", descending: false }))).toEqual([
+			"old",
+			"new",
+			"none",
+		]);
+		expect(names(sortEntries(list, { key: "modified", descending: true }))).toEqual([
+			"new",
+			"old",
+			"none",
+		]);
+	});
+
+	it("breaks a tie on the column by name, in both directions", () => {
+		const list = [
+			entry("b", { size: 7, owner: "o", mtime: "2026-11-20T10:00:00Z", mode: 0o100644 }),
+			entry("c", { size: 7, owner: "o", mtime: "2026-11-20T10:00:00Z", mode: 0o100644 }),
+			entry("a", { size: 7, owner: "o", mtime: "2026-11-20T10:00:00Z", mode: 0o100644 }),
+		];
+		for (const key of ["size", "modified", "mode", "owner"] as const) {
+			expect(names(sortEntries(list, { key, descending: false })), key).toEqual(["a", "b", "c"]);
+			expect(names(sortEntries(list, { key, descending: true })), key).toEqual(["a", "b", "c"]);
+		}
+	});
+
+	it("puts an owner without a name last when descending too", () => {
+		const list = [
+			entry("n", { owner: null }),
+			entry("x", { owner: "root" }),
+			entry("y", { owner: "alice" }),
+		];
+		expect(names(sortEntries(list, { key: "owner", descending: true }))).toEqual(["x", "y", "n"]);
+		expect(names(sortEntries(list, { key: "owner", descending: false }))).toEqual(["y", "x", "n"]);
+	});
+
+	it("by owner and by mode, the same way", () => {
+		const list = [
+			entry("x", { owner: "root", mode: 0o100644 }),
+			entry("y", { owner: "alice", mode: 0o100600 }),
+			entry("z", { owner: null, mode: null }),
+		];
+		expect(names(sortEntries(list, { key: "owner", descending: false }))).toEqual(["y", "x", "z"]);
+		expect(names(sortEntries(list, { key: "mode", descending: true }))).toEqual(["x", "y", "z"]);
+	});
+});
+
+describe("the columns a list shows (#1209)", () => {
+	const widths = { size: 52, modified: 64, mode: 70, owner: 80 };
+	const all = ["size", "modified", "mode", "owner"] as const;
+
+	it("drops the owner at 479 px, then Mode, Modified and Size as the list narrows", () => {
+		expect(shownColumns(all, widths, 480)).toEqual(["size", "modified", "mode", "owner"]);
+		expect(shownColumns(all, widths, 479)).toEqual(["size", "modified", "mode"]);
+		expect(shownColumns(all, widths, 399)).toEqual(["size", "modified"]);
+		expect(shownColumns(all, widths, 259)).toEqual(["size"]);
+		expect(shownColumns(all, widths, 199)).toEqual([]);
+	});
+
+	it("shows only the chosen ones, the width dropping from among them", () => {
+		expect(shownColumns(["modified", "owner"], widths, 600)).toEqual(["modified", "owner"]);
+		expect(shownColumns(["modified", "owner"], widths, 400)).toEqual(["modified"]);
+		expect(shownColumns([], widths, 600)).toEqual([]);
+	});
+
+	it("drops the last columns when the ones dragged wide would leave Name under 96 px", () => {
+		const wide = { size: 120, modified: 120, mode: 120, owner: 120 };
+		// 600 - 20 padding - 14 icon - 8 gap = 558; each column takes 128 with its gap: three leave 174, four 46.
+		expect(shownColumns(all, wide, 600)).toEqual(["size", "modified", "mode"]);
+		expect(shownColumns(all, wide, 500)).toEqual(["size", "modified"]);
+	});
+
+	it("gives a column the room that leaves Name 96 px beside the others", () => {
+		// 480 - 20 padding - 14 icon - 8 gap - 96 Name = 342; the others, 52 + 64 + 70 with a gap each,
+		// take 210; the column's own gap takes 8 more: 124 px of room.
+		expect(columnRoom(480, [52, 64, 70], 40, 400)).toBe(124);
+		expect(columnRoom(900, [52, 64, 70], 40, 400)).toBe(400);
+		expect(columnRoom(300, [52, 64, 70], 40, 400)).toBe(40);
+		expect(columnRoom(null, [52, 64, 70], 40, 400)).toBe(400);
+	});
+
+	it("before the list is measured, shows the chosen Size and Modified only", () => {
+		expect(shownColumns(all, widths, null)).toEqual(["size", "modified"]);
+		expect(shownColumns(["mode", "owner"], widths, null)).toEqual([]);
 	});
 });

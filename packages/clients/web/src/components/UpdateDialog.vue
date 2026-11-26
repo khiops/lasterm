@@ -48,7 +48,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useModalFocus } from "../composables/useModalFocus.js";
 import { useDesktopUpdatesStore } from "../stores/desktopUpdates.js";
 import { useToastStore } from "../stores/toast.js";
@@ -185,6 +185,10 @@ watch(
 			otherDialog.value = otherDialogPresent();
 			observer = new MutationObserver(() => {
 				otherDialog.value = otherDialogPresent();
+				// Opened from Settings, it goes when Settings and its Update now… have gone.
+				if (updates.openedFromSettings && !document.querySelector("[data-update-opener]")) {
+					updates.closeDialog();
+				}
 			});
 			observer.observe(document.body, {
 				childList: true,
@@ -209,12 +213,10 @@ watch(
 	},
 );
 
-// Opened from Settings and hidden by another dialog: it comes back only while Settings and its
-// Update now… are still there.
+// Back from behind another dialog: it takes the keyboard again (D4). Stepping aside left that
+// dialog the keyboard, since the dialog stays open meanwhile for useModalFocus.
 watch(otherDialog, (present) => {
-	if (!present && updates.openedFromSettings && !document.querySelector("[data-update-opener]")) {
-		updates.closeDialog();
-	}
+	if (!present && visible.value) void nextTick(() => laterEl.value?.focus());
 });
 
 // ── Its buttons ──
@@ -222,9 +224,16 @@ watch(otherDialog, (present) => {
 const busy = ref(false);
 const error = ref<string | null>(null);
 
-watch(visible, (now) => {
-	if (now) error.value = null;
-});
+// A refusal stays with the offer it was for, through any stepping aside.
+watch(
+	() => offer.value?.key,
+	() => {
+		error.value = null;
+	},
+);
+
+/** A Store page asked for and not yet answered: one at a time. */
+const opening = ref(false);
 
 async function snoozeShown(key = offer.value?.key): Promise<void> {
 	if (!key) return;
@@ -256,11 +265,15 @@ async function onUpdateNow(): Promise<void> {
 }
 
 async function onWhatsNew(): Promise<void> {
+	if (opening.value) return;
+	opening.value = true;
 	error.value = null;
 	try {
 		await updateCommands.openStorePage();
 	} catch (cause) {
 		error.value = commandError(cause);
+	} finally {
+		opening.value = false;
 	}
 }
 
@@ -286,6 +299,8 @@ async function onAlwaysUpdate(): Promise<void> {
 }
 
 async function onLater(): Promise<void> {
+	// Update now or Always update is on its way: it decides.
+	if (busy.value) return;
 	if (updates.openedFromSettings) {
 		updates.closeDialog();
 		return;
@@ -294,13 +309,13 @@ async function onLater(): Promise<void> {
 }
 
 const { onKeydown } = useModalFocus({
-	open: () => visible.value,
+	// Open while wanted and the window shown: stepping aside for another dialog is not a close,
+	// so the keyboard is not taken back from that dialog (D4).
+	open: () => wanted.value && shown.value,
 	root: dialogEl,
 	close: () => void onLater(),
 	initial: () => laterEl.value,
 	fallback: () => document.querySelector<HTMLElement>("[data-update-check]"),
-	// Stepping aside for another dialog leaves it the keyboard (D4).
-	restore: () => !otherDialog.value,
 });
 
 // ── Notices ──
@@ -311,6 +326,8 @@ const shownNotices = new Map<number, number>();
 const acknowledged = new Set<number>();
 
 function noticeToast(notice: UpdateNotice): void {
+	let toastId = -1;
+	let pending = false;
 	const acknowledge = () => {
 		acknowledged.add(notice.id);
 		const toastId = shownNotices.get(notice.id);
@@ -325,8 +342,12 @@ function noticeToast(notice: UpdateNotice): void {
 					// The toast stays while the Store opens, and stays if it cannot (D9).
 					keepOpen: true,
 					run: () => {
+						if (pending) return;
+						pending = true;
 						updateCommands.openStorePage().then(acknowledge, (cause) => {
-							toasts.show("error", commandError(cause));
+							pending = false;
+							// On this toast, which stays to be tried again (D9).
+							toasts.update(toastId, `${notice.text} ${commandError(cause)}`);
 						});
 					},
 				}
@@ -337,7 +358,7 @@ function noticeToast(notice: UpdateNotice): void {
 						updates.requestSettings();
 					},
 				};
-	const toastId = toasts.show("info", notice.text, null, action, acknowledge);
+	toastId = toasts.show("info", notice.text, null, action, acknowledge);
 	shownNotices.set(notice.id, toastId);
 }
 

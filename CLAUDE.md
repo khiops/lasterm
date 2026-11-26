@@ -79,8 +79,10 @@ desktop package distributed is **the one the Microsoft Store signs**: the releas
 workflow publishes the agents and the Windows hub, no desktop installer, and keeps the
 unsigned MSIX as a run artifact for the Store (STORE-ONLY-DESKTOP in
 `docs/decisions.md`). The Store lists it (`winget install 9P82QRJ6VDWL --source msstore`
-installs the same package, README.md), and the release workflow's `store` job submits each
-release (`packages/clients/desktop/msix/README.md`); attaching the package the Store signs to
+installs the same package, README.md), and the release workflow's `store` job, once
+`STORE_PRODUCT_ID` is set, submits a release that adds a Store news fragment and leaves one
+without as a Partner Center draft (`packages/clients/desktop/msix/README.md`,
+`packaging/store/news/README.md`); attaching the package the Store signs to
 the release and publishing it to winget's default source are planned (#619, #620). The
 desktop has no updater of its own: the Store updates it; the Store install asks the Store for
 updates and opens its updates page (STORE-UPDATE-NOTICE).

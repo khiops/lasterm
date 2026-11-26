@@ -49,7 +49,7 @@
 						class="update-button"
 						type="button"
 						data-update-check
-						:disabled="update.checking !== 'idle'"
+						:disabled="update.checking === 'running'"
 						@click="onCheck"
 					>
 						Check for updates
@@ -62,9 +62,10 @@
 						</button>
 						<button class="update-button" type="button" @click="onWhatsNew">What's new</button>
 					</div>
-					<p v-if="update.checkError && update.checkError !== update.storeError" class="update-error">
+					<p v-if="update.checkError" class="update-error">
 						The last check failed: {{ update.checkError }}{{ failureTime }}
 					</p>
+					<p v-if="checkPressError" class="update-error" role="alert">{{ checkPressError }}</p>
 					<p v-if="linkError" class="update-error" role="alert">{{ linkError }}</p>
 				</div>
 			</SettingRow>
@@ -106,6 +107,10 @@ const update = computed(() => updates.state);
 const savingMode = ref(false);
 const modeError = ref<string | null>(null);
 const linkError = ref<string | null>(null);
+/** Check for updates itself refused, which is not a failed check. */
+const checkPressError = ref<string | null>(null);
+/** A Store page asked for and not yet answered: one at a time. */
+const opening = ref(false);
 
 function threeParts(version: string): string {
 	return version.split(".").slice(0, 3).join(".");
@@ -120,7 +125,6 @@ const statusLine = computed(() => {
 	if (!current) return "";
 	if (current.checking === "running") return "Checking…";
 	if (current.checking === "waiting") return "Waiting for the Microsoft Store";
-	if (current.storeError) return current.storeError;
 	if (current.lastCheckedAt && !current.offer) {
 		return `The Microsoft Store reports no update (${when(current.lastCheckedAt)})`;
 	}
@@ -153,19 +157,24 @@ async function onModeChange(value: unknown): Promise<void> {
 }
 
 async function onCheck(): Promise<void> {
+	checkPressError.value = null;
 	try {
 		await updateCommands.check();
 	} catch (error) {
-		linkError.value = commandError(error);
+		checkPressError.value = commandError(error);
 	}
 }
 
 async function onWhatsNew(): Promise<void> {
+	if (opening.value) return;
+	opening.value = true;
 	linkError.value = null;
 	try {
 		await updateCommands.openStorePage();
 	} catch (error) {
 		linkError.value = commandError(error);
+	} finally {
+		opening.value = false;
 	}
 }
 

@@ -6,6 +6,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type App, createApp, h, nextTick } from "vue";
 import { useDesktopUpdatesStore } from "../stores/desktopUpdates.js";
+import { useSettingsStore } from "../stores/settings.js";
 import { useToastStore } from "../stores/toast.js";
 import { connectUpdateState, type UpdateState } from "../utils/desktop-updates.js";
 import UpdateDialog from "./UpdateDialog.vue";
@@ -148,6 +149,26 @@ describe("when the update dialog shows (AC-8)", () => {
 		prompt.remove();
 		await settle();
 		expect(dialog()).not.toBeNull();
+		// Back, it has the keyboard again.
+		expect(document.activeElement?.textContent?.trim()).toBe("Later");
+	});
+
+	it("goes when the Settings panel that opened it goes", async () => {
+		const settings = document.createElement("div");
+		settings.className = "settings-panel";
+		settings.setAttribute("aria-modal", "true");
+		const opener = document.createElement("button");
+		opener.setAttribute("data-update-opener", "");
+		settings.appendChild(opener);
+		document.body.appendChild(settings);
+		const store = await mountDialog(eligible({ mode: "off", wantsDialog: false }));
+		store.openFromSettings();
+		await settle();
+		expect(dialog()).not.toBeNull();
+		settings.remove();
+		await settle();
+		expect(dialog()).toBeNull();
+		expect(store.openedFromSettings).toBe(false);
 	});
 
 	it("does not show by itself when the desktop does not want it", async () => {
@@ -222,6 +243,45 @@ describe("the update dialog's buttons (AC-9)", () => {
 			"The Microsoft Store could not be opened.",
 		);
 		expect(button("Update now")?.disabled).toBe(false);
+		// Through a dialog that comes and goes, the refusal stays.
+		const prompt = document.createElement("div");
+		prompt.setAttribute("aria-modal", "true");
+		document.body.appendChild(prompt);
+		await settle();
+		prompt.remove();
+		await settle();
+		expect(dialog()?.querySelector(".update-error")?.textContent).toBe(
+			"The Microsoft Store could not be opened.",
+		);
+	});
+
+	it("leaves Later and Esc to wait while Update now is on its way, and opens a page once", async () => {
+		let opened: (() => void) | undefined;
+		mocks.invoke.mockImplementation(async (command: string) => {
+			if (command === "open_store_updates" || command === "open_store_page") {
+				await new Promise<void>((resolve) => {
+					opened = resolve;
+				});
+			}
+			return command === "snooze_update" ? true : undefined;
+		});
+		await mountDialog(eligible());
+		button("Update now")?.click();
+		await settle();
+		button("Later")?.click();
+		dialog()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+		await settle();
+		expect(invoked("snooze_update")).toEqual([]);
+		opened?.();
+		await settle();
+		expect(invoked("snooze_update")).toEqual([{ key: KEY_25 }]);
+
+		// See what's new pressed twice while the first is on its way: one page.
+		await reload(eligible({ seq: 2 }));
+		button("See what's new")?.click();
+		button("See what's new")?.click();
+		await settle();
+		expect(invoked("open_store_page")).toHaveLength(1);
 	});
 
 	it("See what's new opens Lasterm's Store page and stays", async () => {
@@ -240,8 +300,8 @@ describe("the update dialog's buttons (AC-9)", () => {
 		expect(invoked("choose_always_update")).toEqual([{ key: KEY_25 }]);
 		expect(invoked("set_update_mode")).toEqual([]);
 		expect(store.openedFromSettings).toBe(false);
-		expect(useToastStore().messages.at(-1)?.text).toContain(
-			"Lasterm will no longer ask about ordinary updates",
+		expect(useToastStore().messages.at(-1)?.text).toBe(
+			"Lasterm will no longer ask about ordinary updates. The Microsoft Store installs them while Lasterm is closed when its automatic updates are on. You can change this in Settings › Desktop.",
 		);
 	});
 
@@ -250,6 +310,9 @@ describe("the update dialog's buttons (AC-9)", () => {
 			if (command === "choose_always_update") throw "failed to replace update preference";
 			return undefined;
 		});
+		const opener = document.createElement("button");
+		opener.setAttribute("data-update-opener", "");
+		document.body.appendChild(opener);
 		const store = await mountDialog(eligible());
 		store.openFromSettings();
 		button("Always update")?.click();
@@ -323,16 +386,16 @@ describe("the auto fallback (AC-13)", () => {
 		const store = await mountDialog(
 			eligible({ mode: "auto", offer: { key: KEY_25, mandatory: false, signal: "false" } }),
 		);
-		expect(dialog()?.textContent).toContain(
-			"its automatic app updates are off, or the network is metered",
+		expect(dialog()?.querySelector(".update-fallback")?.textContent).toBe(
+			"The Microsoft Store may not install this update by itself: its automatic app updates are off, or the network is metered.",
 		);
 		store.state = eligible({
 			mode: "auto",
 			offer: { key: KEY_25, mandatory: false, signal: "error" },
 		});
 		await settle();
-		expect(dialog()?.textContent).toContain(
-			"Lasterm could not tell whether the Microsoft Store will install",
+		expect(dialog()?.querySelector(".update-fallback")?.textContent).toBe(
+			"Lasterm could not tell whether the Microsoft Store will install this update by itself.",
 		);
 	});
 });
@@ -429,11 +492,10 @@ describe("notices and the state's order (AC-15)", () => {
 		await settle();
 		expect(invoked("open_store_page")).toHaveLength(1);
 		expect(invoked("acknowledge_notice")).toEqual([]);
-		expect(toasts.messages.map((message) => message.text)).toContain(
-			"The Microsoft Store could not be opened.",
-		);
-		// The same toast, still there to be tried again.
-		expect(toasts.messages.find((message) => message.text === updated.text)?.id).toBe(notice);
+		// On the same toast, still there to be tried again; no other toast.
+		expect(toasts.messages.map((message) => [message.id, message.text])).toEqual([
+			[notice, `${updated.text} The Microsoft Store could not be opened.`],
+		]);
 
 		mocks.invoke.mockResolvedValue(undefined);
 		toasts.act(notice);
@@ -453,7 +515,72 @@ describe("notices and the state's order (AC-15)", () => {
 		toasts.act(toasts.messages[0]?.id ?? -1);
 		await settle();
 		expect(invoked("acknowledge_notice")).toEqual([{ noticeId: 4 }]);
-		expect(store.settingsRequests).toBe(1);
+		expect(store.state?.eligible).toBe(true);
+		const settings = useSettingsStore();
+		expect([settings.panelOpen, settings.activeScope, settings.activeCategory]).toEqual([
+			true,
+			"global",
+			"desktop",
+		]);
+	});
+
+	it("Open Settings opens the Global scope, whichever scope Settings last showed", async () => {
+		const settings = useSettingsStore();
+		settings.activeScope = "host";
+		settings.activeCategory = "transfer";
+		const waiting = {
+			id: 6,
+			kind: "waiting" as const,
+			text: "A Lasterm update has been waiting 7 days.",
+		};
+		await mountDialog(eligible({ notices: [waiting], wantsDialog: false }));
+		const toasts = useToastStore();
+		toasts.act(toasts.messages[0]?.id ?? -1);
+		await settle();
+		expect([settings.activeScope, settings.activeCategory]).toEqual(["global", "desktop"]);
+	});
+
+	it("keeps a notice up until it is closed, however long that takes", async () => {
+		vi.useFakeTimers();
+		try {
+			const updated = { id: 8, kind: "updated" as const, text: "Lasterm was updated to 0.25.0." };
+			useDesktopUpdatesStore().state = eligible({ offer: null, notices: [updated] });
+			const root = document.createElement("div");
+			document.body.appendChild(root);
+			app = createApp({ render: () => h(UpdateDialog) });
+			app.use(pinia);
+			app.mount(root);
+			await nextTick();
+			vi.advanceTimersByTime(10 * 60 * 1000);
+			await nextTick();
+			expect(useToastStore().messages.map((message) => message.text)).toEqual([updated.text]);
+			expect(invoked("acknowledge_notice")).toEqual([]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("opens the Store page once for a toast's action pressed twice", async () => {
+		let answer: (() => void) | undefined;
+		mocks.invoke.mockImplementation(async (command: string) => {
+			if (command === "open_store_page") {
+				await new Promise<void>((resolve) => {
+					answer = resolve;
+				});
+			}
+			return undefined;
+		});
+		const updated = { id: 10, kind: "updated" as const, text: "Lasterm was updated to 0.25.0." };
+		await mountDialog(eligible({ offer: null, notices: [updated] }));
+		const toasts = useToastStore();
+		const notice = toasts.messages[0]?.id ?? -1;
+		toasts.act(notice);
+		toasts.act(notice);
+		await settle();
+		expect(invoked("open_store_page")).toHaveLength(1);
+		answer?.();
+		await settle();
+		expect(invoked("acknowledge_notice")).toEqual([{ noticeId: 10 }]);
 	});
 });
 
@@ -596,10 +723,11 @@ describe("the keyboard when the dialog steps aside or closes (AC-10)", () => {
 });
 
 /** What a page reload leaves: a new page and new stores, mounted on the state read again. */
-async function reload(state: UpdateState) {
+async function reload(state: UpdateState, page: () => void = () => undefined) {
 	app?.unmount();
 	app = null;
 	document.body.innerHTML = "";
+	page();
 	pinia = createPinia();
 	setActivePinia(pinia);
 	return mountDialog(state);
@@ -620,7 +748,16 @@ describe("a page reload (AC-18)", () => {
 		expect(dialog()).not.toBeNull();
 
 		// The reload: a new page, Settings closed, its stores new, the desktop state read again.
-		await reload(eligible({ mode: "off", wantsDialog: false }));
+		await reload(eligible({ mode: "off", wantsDialog: false }), () => {
+			// The reloaded page shows Settings › Desktop again, its Update now… unpressed.
+			const again = document.createElement("div");
+			again.className = "settings-panel";
+			again.setAttribute("aria-modal", "true");
+			const againOpener = document.createElement("button");
+			againOpener.setAttribute("data-update-opener", "");
+			again.appendChild(againOpener);
+			document.body.appendChild(again);
+		});
 		expect(dialog()).toBeNull();
 		await reload(eligible({ wantsDialog: true }));
 		expect(dialog()).not.toBeNull();

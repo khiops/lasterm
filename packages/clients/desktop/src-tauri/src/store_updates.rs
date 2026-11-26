@@ -273,18 +273,28 @@ pub(crate) trait QueryHandle: Send {
     fn cancel(&self) -> Result<(), String>;
 }
 
-pub(crate) type Started = Box<dyn FnOnce() + Send>;
-pub(crate) type Done = Box<dyn FnOnce(QueryOutcome) + Send>;
+/// What a query reports, in this order: its native start, the arrival of its
+/// answer, then how it ended. The instants are taken where each happened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum QueryEvent {
+    /// The context exists and the native query started: an attempt (D2),
+    /// whose 60 s run from here.
+    Started(Instant),
+    /// The Store's answer arrived, read or not; the signal may still be read.
+    Answered(Instant),
+    /// The end, always last.
+    Finished(QueryOutcome),
+}
+
+pub(crate) type Events = Arc<dyn Fn(QueryEvent) + Send + Sync>;
 pub(crate) type SharedLog = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// The Store, as [`Core`] sees it: one query, and nothing that downloads or
 /// installs (R-3).
 pub(crate) trait StoreBackend: Send + Sync {
-    /// Starts `GetAppAndOptionalStorePackageUpdatesAsync`. `started` is called
-    /// once the native query has started (the context exists and the call
-    /// returned an operation), `done` once with how it ended. Neither is called
-    /// from inside this call, and they may arrive in either order.
-    fn start_query(&self, started: Started, done: Done) -> Box<dyn QueryHandle>;
+    /// Starts `GetAppAndOptionalStorePackageUpdatesAsync`. Its events reach
+    /// `events` in order, never from inside this call.
+    fn start_query(&self, events: Events) -> Box<dyn QueryHandle>;
 }
 
 /// Hands a fixed URI to the system's protocol handler.
@@ -580,11 +590,12 @@ struct Notice {
 
 struct Running {
     id: u64,
-    /// When the query's 60 s began: its request, then its native start.
-    started: Instant,
     handle: Box<dyn QueryHandle>,
-    /// The native query has started: it counts as an attempt (D2).
-    native: bool,
+    /// The native start: the attempt, and the start of its 60 s (D1: making
+    /// the context is not bounded).
+    started: Option<Instant>,
+    /// Its answer arrived within the bound: it is no longer timed.
+    answered: bool,
     /// Reported failed at the timeout; its effects are dropped when it ends.
     timed_out: bool,
 }
@@ -617,6 +628,8 @@ pub(crate) struct Core {
     short_due: Option<Instant>,
     /// The Store context failed: the next tick checks again (D1).
     context_retry: bool,
+    /// A daily check that came due during a running check, joined to it (D2).
+    daily_joined_at: Option<u64>,
     last_tick: Instant,
     notices: Vec<Notice>,
     next_notice_id: u64,
@@ -665,6 +678,7 @@ impl Core {
             next_query_id: 1,
             short_due: None,
             context_retry: false,
+            daily_joined_at: None,
             last_tick: now,
             notices: Vec::new(),
             next_notice_id: 1,
@@ -878,74 +892,86 @@ impl Core {
         self.next_query_id += 1;
         // Any check tries the context again.
         self.context_retry = false;
-        let on_start = self.this.clone();
-        let on_done = self.this.clone();
-        let handle = self.backend.start_query(
-            Box::new(move || {
-                if let Some(core) = on_start.upgrade() {
-                    lock(&core).on_started(id);
-                }
-            }),
-            Box::new(move |outcome| {
-                if let Some(core) = on_done.upgrade() {
-                    lock(&core).on_query(id, outcome);
-                }
-            }),
-        );
+        let core = self.this.clone();
+        let handle = self.backend.start_query(Arc::new(move |event| {
+            if let Some(core) = core.upgrade() {
+                lock(&core).on_event(id, event);
+            }
+        }));
         self.query = Some(Running {
             id,
-            started: self.clock.mono(),
             handle,
-            native: false,
+            started: None,
+            answered: false,
             timed_out: false,
         });
         self.publish();
         true
     }
 
-    /// The native query of check `id` started: an attempt, and the context
-    /// exists (D1, D2).
-    fn on_started(&mut self, id: u64) {
-        let mono = self.clock.mono();
-        let Some(running) = self.query.as_mut().filter(|running| running.id == id) else {
-            return;
-        };
-        if running.native {
-            return;
-        }
-        running.native = true;
-        if !running.timed_out {
-            running.started = mono;
-        }
-        self.last_attempt_at = Some(self.clock.civil());
-        self.store_error = None;
-        self.publish();
-    }
-
     fn fail_check(&mut self, line: &str, error: String) {
         (self.log)(&format!("update check: failed {line}"));
         self.check_error = Some(error);
         self.check_failed_at = Some(self.clock.civil());
+        // The offer is kept, and its notices may have come due (D6).
+        self.refresh_notices();
     }
 
-    fn on_query(&mut self, id: u64, outcome: QueryOutcome) {
+    /// The native query of check `id` started: an attempt, and the context
+    /// exists (D1, D2).
+    fn mark_started(&mut self, at: Instant) {
+        if let Some(running) = self.query.as_mut() {
+            if running.started.is_none() {
+                running.started = Some(at);
+                self.last_attempt_at = Some(self.clock.civil());
+                self.store_error = None;
+            }
+        }
+    }
+
+    fn on_event(&mut self, id: u64, event: QueryEvent) {
         if self.query.as_ref().map(|running| running.id) != Some(id) {
             return;
         }
-        let running = self.query.take().expect("checked above");
-        if !running.native && !matches!(outcome, QueryOutcome::ContextFailed(_)) {
-            // Its start was not reported first: an answer implies it.
-            self.last_attempt_at = Some(self.clock.civil());
-            self.store_error = None;
+        match event {
+            QueryEvent::Started(at) => {
+                self.mark_started(at);
+                self.publish();
+            }
+            QueryEvent::Answered(at) => {
+                let running = self.query.as_mut().expect("checked above");
+                if running.timed_out {
+                    return;
+                }
+                let late = running
+                    .started
+                    .is_some_and(|started| at.saturating_duration_since(started) >= QUERY_TIMEOUT);
+                if late {
+                    // Past the bound before the poller saw it: no answer (D2).
+                    running.timed_out = true;
+                    self.fail_check("no answer", NO_ANSWER.to_string());
+                    self.publish();
+                } else {
+                    running.answered = true;
+                }
+            }
+            QueryEvent::Finished(outcome) => self.on_finished(outcome),
         }
+    }
+
+    fn on_finished(&mut self, outcome: QueryOutcome) {
+        if self
+            .query
+            .as_ref()
+            .is_some_and(|running| running.started.is_none())
+            && !matches!(outcome, QueryOutcome::ContextFailed(_))
+        {
+            // Its start was not reported: an answer implies it.
+            self.mark_started(self.clock.mono());
+        }
+        let running = self.query.take().expect("a query is running");
         if running.timed_out {
             (self.log)("store result: GetAppAndOptionalStorePackageUpdatesAsync late, ignored");
-            self.publish();
-            return;
-        }
-        if self.clock.mono().duration_since(running.started) >= QUERY_TIMEOUT {
-            // Past the bound before the poller saw it: no answer all the same (D2).
-            self.fail_check("no answer", NO_ANSWER.to_string());
             self.publish();
             return;
         }
@@ -1026,7 +1052,11 @@ impl Core {
     fn poll(&mut self) {
         let mono = self.clock.mono();
         let expired = self.query.as_ref().is_some_and(|running| {
-            !running.timed_out && mono.duration_since(running.started) >= QUERY_TIMEOUT
+            !running.timed_out
+                && !running.answered
+                && running
+                    .started
+                    .is_some_and(|started| mono.saturating_duration_since(started) >= QUERY_TIMEOUT)
         });
         if expired {
             if let Some(running) = self.query.as_mut() {
@@ -1058,14 +1088,21 @@ impl Core {
         if mono.duration_since(self.last_tick) >= TICK {
             self.last_tick = mono;
             let civil = self.clock.civil();
-            // A short due pending decides the next scheduled check itself.
-            let scheduled =
-                self.records.mode != Mode::Off && self.query.is_none() && self.short_due.is_none();
-            let daily = self
-                .last_attempt_at
-                .is_some_and(|at| civil.saturating_sub(at) >= DAY);
-            if scheduled && (daily || self.context_retry) {
-                self.start_check();
+            let since = self.last_attempt_at.max(self.daily_joined_at);
+            let daily = self.records.mode != Mode::Off
+                && since.is_some_and(|at| civil.saturating_sub(at) >= DAY);
+            match &self.query {
+                // A short due pending decides the next scheduled check itself.
+                None if self.records.mode != Mode::Off && self.short_due.is_none() => {
+                    if daily || self.context_retry {
+                        self.start_check();
+                    }
+                }
+                // Due during a running check: that check satisfies it (D2).
+                Some(running) if daily && !running.timed_out => {
+                    self.daily_joined_at = Some(civil);
+                }
+                _ => {}
             }
             self.refresh_notices();
             self.publish();
@@ -1378,11 +1415,43 @@ pub(crate) fn choose(
     }
 }
 
-/// Decides eligibility, manages the service, and starts the poll thread. An
-/// ineligible build gets no core, no backend and no thread (D1).
+/// What [`service`] builds an eligible build's core from. An ineligible build
+/// uses none of it.
+pub(crate) struct Wiring {
+    pub(crate) own_version: String,
+    pub(crate) backend: Box<dyn FnOnce(Source) -> Arc<dyn StoreBackend>>,
+    pub(crate) opener: Arc<dyn Opener>,
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) emit: Emit,
+    pub(crate) log: Log,
+    /// Starts what calls `poll` every second.
+    pub(crate) poller: Box<dyn FnOnce(Weak<Mutex<Core>>)>,
+}
+
+/// The service for what [`choose`] decided: an ineligible build gets no
+/// backend, no core and no poller (D1).
+pub(crate) fn service(chosen: Option<Chosen>, wiring: Wiring) -> UpdateService {
+    let Some(chosen) = chosen else {
+        return UpdateService::Ineligible(Box::new(UpdateState::ineligible(wiring.own_version)));
+    };
+    let backend = (wiring.backend)(chosen.source);
+    let core = Core::create(CoreParts {
+        running: chosen.running,
+        backend,
+        opener: wiring.opener,
+        clock: wiring.clock,
+        path: chosen.path,
+        emit: wiring.emit,
+        log: wiring.log,
+    });
+    lock(&core).window_shown();
+    (wiring.poller)(Arc::downgrade(&core));
+    UpdateService::Eligible(core)
+}
+
+/// Decides eligibility and manages the service.
 pub(crate) fn install<R: Runtime>(app: &tauri::AppHandle<R>, log: crate::hub_log::HubLog) {
     let release = crate::channel::build_channel() == crate::channel::Channel::Release;
-    let own_version = app.package_info().version.to_string();
     let say: SharedLog = Arc::new(move |line: &str| log.record(&format!("[store] {line}")));
     let chosen = choose(
         release,
@@ -1391,37 +1460,36 @@ pub(crate) fn install<R: Runtime>(app: &tauri::AppHandle<R>, log: crate::hub_log
         &crate::lasterm_config_dir,
         &*say,
     );
-    let Some(chosen) = chosen else {
-        app.manage(UpdateService::Ineligible(Box::new(
-            UpdateState::ineligible(own_version),
-        )));
-        return;
-    };
-    let backend: Arc<dyn StoreBackend> = match chosen.source {
-        Source::Native => native_backend(app, say.clone()),
-        Source::Scripted(store) => Arc::new(store),
-    };
+    let native_app = app.clone();
+    let backend_log = say.clone();
     let emitter = app.clone();
     let core_log = say.clone();
-    let core = Core::create(CoreParts {
-        running: chosen.running,
-        backend,
-        opener: Arc::new(SystemOpener),
-        clock: Arc::new(SystemClock),
-        path: chosen.path,
-        emit: Box::new(move |state| {
-            let _ = emitter.emit_to("main", "update-state", state);
-        }),
-        log: Box::new(move |line| core_log(line)),
-    });
-    lock(&core).window_shown();
-    let poller = Arc::downgrade(&core);
-    std::thread::spawn(move || loop {
-        std::thread::sleep(POLL);
-        let Some(core) = poller.upgrade() else { return };
-        lock(&core).poll();
-    });
-    app.manage(UpdateService::Eligible(core));
+    app.manage(service(
+        chosen,
+        Wiring {
+            own_version: app.package_info().version.to_string(),
+            backend: Box::new(move |source| match source {
+                Source::Native => native_backend(&native_app, backend_log),
+                Source::Scripted(store) => Arc::new(ScriptedStore {
+                    log: Some(backend_log),
+                    ..store
+                }),
+            }),
+            opener: Arc::new(SystemOpener),
+            clock: Arc::new(SystemClock),
+            emit: Box::new(move |state| {
+                let _ = emitter.emit_to("main", "update-state", state);
+            }),
+            log: Box::new(move |line| core_log(line)),
+            poller: Box::new(|core| {
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(POLL);
+                    let Some(core) = core.upgrade() else { return };
+                    lock(&core).poll();
+                });
+            }),
+        },
+    ));
 }
 
 // ── The scripted backend (tests and Windows Sandbox only) ─────────────────────
@@ -1437,11 +1505,17 @@ enum ScriptCheck {
 pub(crate) struct ScriptedStore {
     checks: Vec<ScriptCheck>,
     next: Mutex<usize>,
+    /// Where it records each call it stands in for (D1).
+    log: Option<SharedLog>,
 }
 
-struct NoCancel;
-impl QueryHandle for NoCancel {
+/// The scripted query's Cancel, recorded like its other calls.
+struct ScriptedCancel(Option<SharedLog>);
+impl QueryHandle for ScriptedCancel {
     fn cancel(&self) -> Result<(), String> {
+        if let Some(log) = &self.0 {
+            log("store call (scripted): Cancel");
+        }
         Ok(())
     }
 }
@@ -1496,35 +1570,57 @@ impl ScriptedStore {
             ScriptedStore {
                 checks,
                 next: Mutex::new(0),
+                log: None,
             },
         ))
     }
 
     fn parse_check(check: &serde_json::Value) -> Result<ScriptCheck, String> {
+        const FIELDS: [&str; 5] = ["error", "contextError", "noAnswer", "offers", "signal"];
+        let object = check.as_object().ok_or("a check that is not an object")?;
+        if let Some(unknown) = object.keys().find(|key| !FIELDS.contains(&key.as_str())) {
+            return Err(format!("unknown field {unknown}"));
+        }
         let text = |value: &serde_json::Value| value.as_str().map(str::to_string);
-        if let Some(code) = script_field(check, "error", text)? {
-            return Ok(ScriptCheck::Failed(code));
-        }
-        if let Some(reason) = script_field(check, "contextError", text)? {
-            return Ok(ScriptCheck::ContextFailed(reason));
-        }
-        if script_field(check, "noAnswer", |value| {
+        // Every field is read, so one of the wrong form refuses the script
+        // whichever form the check takes.
+        let error = script_field(check, "error", text)?;
+        let context = script_field(check, "contextError", text)?;
+        let no_answer = script_field(check, "noAnswer", |value| {
             (value.as_bool() == Some(true)).then_some(())
-        })?
-        .is_some()
-        {
-            return Ok(ScriptCheck::NoAnswer);
-        }
+        })?;
+        let offers = script_field(check, "offers", |value| value.as_array())?;
         let signal = script_field(check, "signal", |value| match value.as_str()? {
             "true" => Some(Signal::True),
             "false" => Some(Signal::False),
             "error" => Some(Signal::Error),
             _ => None,
-        })?
-        .unwrap_or(Signal::True);
-        let entries = check
-            .get("offers")
-            .and_then(|offers| offers.as_array())
+        })?;
+        let forms = [
+            error.is_some(),
+            context.is_some(),
+            no_answer.is_some(),
+            offers.is_some(),
+        ];
+        if forms.iter().filter(|form| **form).count() != 1 {
+            return Err(
+                "a check takes exactly one of error, contextError, noAnswer, offers".into(),
+            );
+        }
+        if signal.is_some() && offers.is_none() {
+            return Err("a signal belongs to a check with offers".into());
+        }
+        if let Some(code) = error {
+            return Ok(ScriptCheck::Failed(code));
+        }
+        if let Some(reason) = context {
+            return Ok(ScriptCheck::ContextFailed(reason));
+        }
+        if no_answer.is_some() {
+            return Ok(ScriptCheck::NoAnswer);
+        }
+        let signal = signal.unwrap_or(Signal::True);
+        let entries = offers
             .ok_or("a check without offers")?
             .iter()
             .map(|offer| -> Result<Entry, String> {
@@ -1545,24 +1641,34 @@ impl ScriptedStore {
 }
 
 impl StoreBackend for ScriptedStore {
-    fn start_query(&self, started: Started, done: Done) -> Box<dyn QueryHandle> {
+    fn start_query(&self, events: Events) -> Box<dyn QueryHandle> {
         let mut next = self.next.lock().expect("scripted store lock poisoned");
         let check = self.checks[(*next).min(self.checks.len() - 1)].clone();
         *next += 1;
-        // In order, from a thread of their own: the start, then the end.
+        if let Some(log) = &self.log {
+            log("store call (scripted): GetAppAndOptionalStorePackageUpdatesAsync");
+        }
+        // In order, from a thread of their own.
         std::thread::spawn(move || match check {
-            ScriptCheck::ContextFailed(reason) => done(QueryOutcome::ContextFailed(reason)),
-            ScriptCheck::NoAnswer => started(),
+            ScriptCheck::ContextFailed(reason) => {
+                events(QueryEvent::Finished(QueryOutcome::ContextFailed(reason)));
+            }
+            ScriptCheck::NoAnswer => events(QueryEvent::Started(Instant::now())),
             ScriptCheck::Failed(code) => {
-                started();
-                done(QueryOutcome::Failed(code));
+                events(QueryEvent::Started(Instant::now()));
+                events(QueryEvent::Answered(Instant::now()));
+                events(QueryEvent::Finished(QueryOutcome::Failed(code)));
             }
             ScriptCheck::Answer { entries, signal } => {
-                started();
-                done(QueryOutcome::Answer { entries, signal });
+                events(QueryEvent::Started(Instant::now()));
+                events(QueryEvent::Answered(Instant::now()));
+                events(QueryEvent::Finished(QueryOutcome::Answer {
+                    entries,
+                    signal,
+                }));
             }
         });
-        Box::new(NoCancel)
+        Box::new(ScriptedCancel(self.log.clone()))
     }
 }
 
@@ -1603,10 +1709,20 @@ fn native_backend<R: Runtime>(
     _app: &tauri::AppHandle<R>,
     _log: SharedLog,
 ) -> Arc<dyn StoreBackend> {
+    struct NoCancel;
+    impl QueryHandle for NoCancel {
+        fn cancel(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
     struct NoStore;
     impl StoreBackend for NoStore {
-        fn start_query(&self, _started: Started, done: Done) -> Box<dyn QueryHandle> {
-            std::thread::spawn(move || done(QueryOutcome::ContextFailed("no Store".into())));
+        fn start_query(&self, events: Events) -> Box<dyn QueryHandle> {
+            std::thread::spawn(move || {
+                events(QueryEvent::Finished(QueryOutcome::ContextFailed(
+                    "no Store".into(),
+                )));
+            });
             Box::new(NoCancel)
         }
     }
@@ -1644,10 +1760,12 @@ impl Opener for SystemOpener {
 #[cfg(windows)]
 mod windows_store {
     use super::{
-        read_answer, Done, EntryReads, QueryHandle, QueryOutcome, SharedLog, Signal, Started,
+        read_answer, EntryReads, Events, QueryEvent, QueryHandle, QueryOutcome, SharedLog, Signal,
         StoreBackend, Version4,
     };
+    use std::sync::mpsc::{channel, Sender};
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
     use tauri::{Manager, Runtime};
     use windows::core::Interface;
     use windows::Services::Store::StoreContext;
@@ -1660,9 +1778,10 @@ mod windows_store {
     /// The real Store. The context is created, and every StoreContext call is
     /// made, on the main thread (D1): the query, the signal and Cancel are
     /// posted there; only the answer's list is read where its completion
-    /// arrives. Each native call is logged before and after it (D12).
-    /// `started` and `done` run on threads of their own, so never inside a
-    /// caller holding the core's lock.
+    /// arrives. Each native call is logged before and after it (D12). A
+    /// query's events go, in order, to one thread of its own, so never inside
+    /// a caller holding the core's lock; each instant is taken where its event
+    /// happened.
     pub(super) struct WindowsStore<R: Runtime> {
         app: tauri::AppHandle<R>,
         context: Arc<Mutex<Option<StoreContext>>>,
@@ -1680,7 +1799,21 @@ mod windows_store {
     }
 
     type CancelCall = Box<dyn Fn() -> windows::core::Result<()> + Send>;
-    type DoneSlot = Arc<Mutex<Option<Done>>>;
+
+    /// Hands a query's events on, in the order they were sent.
+    fn forward(events: Events) -> Sender<QueryEvent> {
+        let (sender, receiver) = channel();
+        std::thread::spawn(move || {
+            for event in receiver {
+                events(event);
+            }
+        });
+        sender
+    }
+
+    fn finish(sender: &Sender<QueryEvent>, outcome: QueryOutcome) {
+        let _ = sender.send(QueryEvent::Finished(outcome));
+    }
 
     /// One query's Cancel: called once, on the main thread, when both the
     /// operation and the request exist.
@@ -1727,12 +1860,6 @@ mod windows_store {
                         .cancel_if_due(&log);
                 })
                 .map_err(|error| error.to_string())
-        }
-    }
-
-    fn deliver(done: &DoneSlot, outcome: QueryOutcome) {
-        if let Some(done) = done.lock().expect("store done lock poisoned").take() {
-            std::thread::spawn(move || done(outcome));
         }
     }
 
@@ -1796,18 +1923,18 @@ mod windows_store {
     }
 
     impl<R: Runtime> StoreBackend for WindowsStore<R> {
-        fn start_query(&self, started: Started, done: Done) -> Box<dyn QueryHandle> {
+        fn start_query(&self, events: Events) -> Box<dyn QueryHandle> {
             let slot = Arc::new(Mutex::new(Slot::default()));
-            let done: DoneSlot = Arc::new(Mutex::new(Some(done)));
+            let sender = forward(events);
             let app = self.app.clone();
             let context_slot = self.context.clone();
             let log = self.log.clone();
             let query_slot = slot.clone();
-            let on_main = done.clone();
+            let on_main = sender.clone();
             let posted = self.app.run_on_main_thread(move || {
                 let context = match context(&app, &context_slot, &log) {
                     Ok(context) => context,
-                    Err(reason) => return deliver(&on_main, QueryOutcome::ContextFailed(reason)),
+                    Err(reason) => return finish(&on_main, QueryOutcome::ContextFailed(reason)),
                 };
                 log("store call: GetAppAndOptionalStorePackageUpdatesAsync");
                 let operation = match context.GetAppAndOptionalStorePackageUpdatesAsync() {
@@ -1817,11 +1944,11 @@ mod windows_store {
                         log(&format!(
                             "store result: GetAppAndOptionalStorePackageUpdatesAsync {code}"
                         ));
-                        return deliver(&on_main, QueryOutcome::Failed(code));
+                        return finish(&on_main, QueryOutcome::Failed(code));
                     }
                 };
                 log("store result: GetAppAndOptionalStorePackageUpdatesAsync started");
-                std::thread::spawn(started);
+                let _ = on_main.send(QueryEvent::Started(Instant::now()));
                 {
                     let mut slot = query_slot.lock().expect("store query slot lock poisoned");
                     let to_cancel = operation.clone();
@@ -1832,6 +1959,7 @@ mod windows_store {
                 let completion_log = log.clone();
                 let main = app.clone();
                 let when = operation.when(move |answer| {
+                    let _ = finished.send(QueryEvent::Answered(Instant::now()));
                     // The whole answer, or the first read that failed (D2).
                     let read = match answer {
                         Err(error) => Err(code(&error)),
@@ -1870,7 +1998,7 @@ mod windows_store {
                             completion_log(&format!(
                                 "store result: GetAppAndOptionalStorePackageUpdatesAsync {code}"
                             ));
-                            return deliver(&finished, QueryOutcome::Failed(code));
+                            return finish(&finished, QueryOutcome::Failed(code));
                         }
                         Ok(entries) => entries,
                     };
@@ -1883,21 +2011,21 @@ mod windows_store {
                         .any(|entry| entry.family == super::STORE_FAMILY)
                     {
                         let signal = Signal::True;
-                        return deliver(&finished, QueryOutcome::Answer { entries, signal });
+                        return finish(&finished, QueryOutcome::Answer { entries, signal });
                     }
                     let kept = entries.clone();
                     let on_signal = finished.clone();
                     let signal_log = completion_log.clone();
                     let posted = main.run_on_main_thread(move || {
                         let signal = signal(&context, &signal_log);
-                        deliver(&on_signal, QueryOutcome::Answer { entries, signal });
+                        finish(&on_signal, QueryOutcome::Answer { entries, signal });
                     });
                     if let Err(error) = posted {
                         completion_log(&format!(
                             "store result: CanSilentlyDownloadStorePackageUpdates not called ({error})"
                         ));
                         let signal = Signal::Error;
-                        deliver(&finished, QueryOutcome::Answer { entries: kept, signal });
+                        finish(&finished, QueryOutcome::Answer { entries: kept, signal });
                     }
                 });
                 if let Err(error) = when {
@@ -1907,7 +2035,7 @@ mod windows_store {
                 }
             });
             if let Err(error) = posted {
-                deliver(&done, QueryOutcome::Failed(error.to_string()));
+                finish(&sender, QueryOutcome::Failed(error.to_string()));
             }
             Box::new(Handle {
                 app: self.app.clone(),
@@ -1967,16 +2095,22 @@ mod tests {
         }
     }
 
-    /// Records each query and holds its `started` and `done` for the test to
-    /// call; also counts cancels. Its interface has the query and Cancel only
-    /// (R-3).
+    /// One query the recording store holds for the test to drive.
+    struct Held {
+        events: Events,
+        created: Instant,
+        started: bool,
+    }
+
+    /// Records each query and holds its events for the test to send; also
+    /// counts cancels. Its interface has the query and Cancel only (R-3).
     #[derive(Default)]
     struct RecordingStore {
-        starting: Mutex<Vec<Started>>,
-        pending: Mutex<Vec<Done>>,
+        held: Mutex<Vec<Held>>,
         queries: AtomicU64,
         cancels: Arc<AtomicU64>,
         cancel_fails: bool,
+        clock: Option<Arc<TestClock>>,
         /// The states published, as the fixture records them.
         published: Arc<Mutex<Vec<UpdateState>>>,
         /// What the last published state said when each Cancel came.
@@ -2009,10 +2143,13 @@ mod tests {
     }
 
     impl StoreBackend for RecordingStore {
-        fn start_query(&self, started: Started, done: Done) -> Box<dyn QueryHandle> {
+        fn start_query(&self, events: Events) -> Box<dyn QueryHandle> {
             self.queries.fetch_add(1, Ordering::SeqCst);
-            self.starting.lock().unwrap().push(started);
-            self.pending.lock().unwrap().push(done);
+            self.held.lock().unwrap().push(Held {
+                events,
+                created: self.now(),
+                started: false,
+            });
             Box::new(RecordingHandle {
                 cancels: self.cancels.clone(),
                 fails: self.cancel_fails,
@@ -2023,23 +2160,44 @@ mod tests {
     }
 
     impl RecordingStore {
+        fn now(&self) -> Instant {
+            self.clock.as_ref().expect("the fixture's clock").mono()
+        }
         fn queries(&self) -> u64 {
             self.queries.load(Ordering::SeqCst)
         }
-        /// The oldest query's native start.
+        /// The oldest query's native start, now.
         fn begin(&self) {
-            let started = self.starting.lock().unwrap().remove(0);
-            started();
+            let events = {
+                let mut held = self.held.lock().unwrap();
+                let query = held.first_mut().expect("a query");
+                query.started = true;
+                query.events.clone()
+            };
+            events(QueryEvent::Started(self.now()));
         }
-        /// The oldest query's end; its start, if not reported, is not.
+        /// The oldest query's answer arrives, now; its end comes later.
+        fn answered(&self) {
+            let events = self.held.lock().unwrap()[0].events.clone();
+            events(QueryEvent::Answered(self.now()));
+        }
+        /// The oldest query's end alone.
+        fn finish(&self, outcome: QueryOutcome) {
+            let query = self.held.lock().unwrap().remove(0);
+            (query.events)(QueryEvent::Finished(outcome));
+        }
+        /// The oldest query's answer, now, and its end; a start not yet
+        /// reported is reported first, as of when the query was asked for.
         fn answer(&self, outcome: QueryOutcome) {
-            let done = self.pending.lock().unwrap().remove(0);
-            let mut starting = self.starting.lock().unwrap();
-            if starting.len() > self.pending.lock().unwrap().len() {
-                drop(starting.remove(0));
+            let query = self.held.lock().unwrap().remove(0);
+            let context_failed = matches!(outcome, QueryOutcome::ContextFailed(_));
+            if !query.started && !context_failed {
+                (query.events)(QueryEvent::Started(query.created));
             }
-            drop(starting);
-            done(outcome);
+            if !context_failed {
+                (query.events)(QueryEvent::Answered(self.now()));
+            }
+            (query.events)(QueryEvent::Finished(outcome));
         }
     }
 
@@ -2110,14 +2268,16 @@ mod tests {
             let dir = tempfile_lite::TempDir::new();
             let path = dir.path().join(UPDATES_FILE);
             let emitted = Arc::new(Mutex::new(Vec::new()));
+            let clock = TestClock::new();
             let store = RecordingStore {
                 published: emitted.clone(),
+                clock: Some(clock.clone()),
                 ..store
             };
             Fixture {
                 _dir: dir,
                 path,
-                clock: TestClock::new(),
+                clock,
                 store: Arc::new(store),
                 opener: Arc::new(opener),
                 emitted,
@@ -2480,6 +2640,7 @@ mod tests {
         let fixture = Fixture::new();
         let core = fixture.core();
         lock(&core).check_now();
+        fixture.store.begin();
         // Civil time alone does not time a query out.
         fixture.clock.jump_civil(3600);
         lock(&core).poll();
@@ -2521,6 +2682,7 @@ mod tests {
         );
         let core = failing.core();
         lock(&core).check_now();
+        failing.store.begin();
         poll_for(&failing, &core, 60);
         assert_eq!(state(&core).checking, Checking::Waiting);
         assert!(failing
@@ -2796,6 +2958,12 @@ mod tests {
             kinds(&state(&core)),
             vec![NoticeKind::Mandatory, NoticeKind::Waiting]
         );
+        // A successful answer with no offer: both notices, the offer and
+        // pendingSince go.
+        check(&both, &core, answer(vec![], Signal::True));
+        assert!(state(&core).notices.is_empty());
+        assert!(state(&core).offer.is_none());
+        assert!(!both.read().contains("pendingSince"));
 
         // Off clears pendingSince, the snooze and these notices; keeps updated.
         let off = Fixture::new();
@@ -2984,11 +3152,12 @@ mod tests {
         .unwrap();
         let (sender, receiver) = std::sync::mpsc::channel();
         for _ in 0..3 {
-            let sender = sender.clone();
-            store.start_query(
-                Box::new(|| {}),
-                Box::new(move |outcome| sender.send(outcome).unwrap()),
-            );
+            let sender = Mutex::new(sender.clone());
+            store.start_query(Arc::new(move |event| {
+                if let QueryEvent::Finished(outcome) = event {
+                    sender.lock().unwrap().send(outcome).unwrap();
+                }
+            }));
         }
         let mut outcomes: Vec<QueryOutcome> = (0..3).map(|_| receiver.recv().unwrap()).collect();
         outcomes.sort_by_key(|outcome| matches!(outcome, QueryOutcome::Answer { .. }));
@@ -2997,6 +3166,25 @@ mod tests {
             matches!(&outcomes[1], QueryOutcome::Answer { entries, .. } if entries[0].full_name == "k")
         );
         assert!(matches!(&outcomes[2], QueryOutcome::Answer { .. }));
+
+        // It records each call it stands in for, Cancel included (D1).
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = lines.clone();
+        let store = ScriptedStore {
+            log: Some(Arc::new(move |line: &str| {
+                seen.lock().unwrap().push(line.to_string())
+            })),
+            ..store
+        };
+        let handle = store.start_query(Arc::new(|_| {}));
+        handle.cancel().unwrap();
+        assert_eq!(
+            *lines.lock().unwrap(),
+            vec![
+                "store call (scripted): GetAppAndOptionalStorePackageUpdatesAsync",
+                "store call (scripted): Cancel"
+            ]
+        );
     }
 
     // ── AC-17 ──
@@ -3115,6 +3303,12 @@ mod tests {
         };
         let (_, lines, _) = chosen(true, Some(developer), None, dir());
         assert_eq!(lines, vec!["store updates: ineligible (signature)"]);
+        let other_family = PackageFacts {
+            family: "O2CSI.Lasterm_other".into(),
+            ..store.clone()
+        };
+        let (_, lines, _) = chosen(true, Some(other_family), None, dir());
+        assert_eq!(lines, vec!["store updates: ineligible (family)"]);
 
         // A development build without the variable: channel, and its package
         // is not even read.
@@ -3134,6 +3328,24 @@ mod tests {
         // With an invalid one: ineligible, one WARN.
         let (result, lines, _) = chosen(false, None, Some(r#"{"version":"0.24"}"#), dir());
         assert!(result.is_none());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("WARN: store updates: invalid script ("),
+            "{lines:?}"
+        );
+
+        // A script that cannot be read: ineligible, one WARN.
+        let missing = tempfile_lite::TempDir::new();
+        let lines = Mutex::new(Vec::new());
+        let result = choose(
+            false,
+            &|| None,
+            Some(missing.path().join("missing.json").into_os_string()),
+            &dir,
+            &|line| lines.lock().unwrap().push(line.to_string()),
+        );
+        assert!(result.is_none());
+        let lines = lines.into_inner().unwrap();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
             lines[0].starts_with("WARN: store updates: invalid script ("),
@@ -3160,6 +3372,11 @@ mod tests {
             r#"{"version":"0.24.0.0","checks":[{"offers":[{"key":7}]}]}"#,
             r#"{"version":"0.24.0.0","checks":[{"error":404}]}"#,
             r#"{"version":"0.24.0.0","checks":[{"noAnswer":false}]}"#,
+            r#"{"version":"0.24.0.0","checks":[{"error":"0x80004005","signal":17}]}"#,
+            r#"{"version":"0.24.0.0","checks":[{"error":"0x80004005","offers":[]}]}"#,
+            r#"{"version":"0.24.0.0","checks":[{"noAnswer":true,"offers":3}]}"#,
+            r#"{"version":"0.24.0.0","checks":[{"contextError":"x","signal":"true"}]}"#,
+            r#"{"version":"0.24.0.0","checks":[{"offers":[],"extra":1}]}"#,
         ] {
             assert!(ScriptedStore::parse(invalid).is_err(), "{invalid}");
         }
@@ -3296,8 +3513,12 @@ mod tests {
         let fixture = Fixture::new();
         let core = fixture.core();
         lock(&core).check_now();
-        // Creating the context took 30 s; the query then has its own 60 s.
-        poll_for(&fixture, &core, 30);
+        // Creating the context took 90 s, which D1 leaves unbounded: still
+        // running, no failure, no Cancel; the query then has its own 60 s.
+        poll_for(&fixture, &core, 90);
+        assert_eq!(state(&core).checking, Checking::Running);
+        assert_eq!(state(&core).check_error, None);
+        assert_eq!(fixture.store.cancels.load(Ordering::SeqCst), 0);
         fixture.store.begin();
         poll_for(&fixture, &core, 59);
         assert_eq!(state(&core).checking, Checking::Running);
@@ -3387,6 +3608,7 @@ mod tests {
         let waiting = Fixture::new();
         let core = waiting.core();
         assert_eq!(lock(&core).check_now().checking, Checking::Running);
+        waiting.store.begin();
         poll_for(&waiting, &core, 60);
         let pressed = lock(&core).check_now();
         assert_eq!(pressed.checking, Checking::Waiting);
@@ -3410,6 +3632,169 @@ mod tests {
         check(&fixture, &core, answer(vec![], Signal::True));
         assert!(fixture.path.exists());
         assert!(!fixture.read().contains("snoozedKey"));
+    }
+
+    // ── AC-2: an ineligible build starts nothing ──
+
+    fn wiring(
+        backend_made: Arc<AtomicU64>,
+        poller_started: Arc<AtomicU64>,
+        clock: Arc<TestClock>,
+    ) -> Wiring {
+        Wiring {
+            own_version: "0.24.0".into(),
+            backend: Box::new(move |_source| {
+                backend_made.fetch_add(1, Ordering::SeqCst);
+                Arc::new(RecordingStore {
+                    clock: Some(clock.clone()),
+                    ..RecordingStore::default()
+                }) as Arc<dyn StoreBackend>
+            }),
+            opener: Arc::new(RecordingOpener::default()),
+            clock: TestClock::new(),
+            emit: Box::new(|_| {}),
+            log: Box::new(|_| {}),
+            poller: Box::new(move |_core| {
+                poller_started.fetch_add(1, Ordering::SeqCst);
+            }),
+        }
+    }
+
+    #[test]
+    fn an_ineligible_build_gets_no_backend_core_or_poller() {
+        let made = Arc::new(AtomicU64::new(0));
+        let polled = Arc::new(AtomicU64::new(0));
+        let ineligible = service(None, wiring(made.clone(), polled.clone(), TestClock::new()));
+        let UpdateService::Ineligible(state) = &ineligible else {
+            panic!("ineligible");
+        };
+        assert_eq!(**state, UpdateState::ineligible("0.24.0".into()));
+        assert_eq!(made.load(Ordering::SeqCst), 0, "no backend");
+        assert_eq!(polled.load(Ordering::SeqCst), 0, "no poller");
+
+        // An eligible one gets each, once.
+        let dir = tempfile_lite::TempDir::new();
+        let (_, store) =
+            ScriptedStore::parse(r#"{"version":"0.24.0.0","checks":[{"noAnswer":true}]}"#).unwrap();
+        let chosen = Chosen {
+            running: RUNNING,
+            source: Source::Scripted(store),
+            path: dir.path().join(UPDATES_FILE),
+        };
+        let eligible = service(
+            Some(chosen),
+            wiring(made.clone(), polled.clone(), TestClock::new()),
+        );
+        assert!(matches!(eligible, UpdateService::Eligible(_)));
+        assert_eq!(made.load(Ordering::SeqCst), 1);
+        assert_eq!(polled.load(Ordering::SeqCst), 1);
+    }
+
+    // ── AC-5, AC-7: the scheduler ──
+
+    #[test]
+    fn the_daily_check_waits_a_full_day() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        check(&fixture, &core, answer(vec![], Signal::True));
+        fixture.clock.jump_civil(DAY - 1);
+        fixture.clock.jump_mono(TICK.as_secs());
+        lock(&core).poll();
+        assert_eq!(fixture.store.queries(), 1, "a second short of a day");
+        fixture.clock.jump_civil(1);
+        fixture.clock.jump_mono(TICK.as_secs());
+        lock(&core).poll();
+        assert_eq!(fixture.store.queries(), 2, "a day");
+    }
+
+    #[test]
+    fn no_scheduled_check_while_a_query_is_out_and_one_after_a_failure() {
+        // A query that never returns: none for the rest of the run.
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        lock(&core).check_now();
+        fixture.store.begin();
+        poll_for(&fixture, &core, 60);
+        assert_eq!(state(&core).checking, Checking::Waiting);
+        for _ in 0..8 {
+            fixture.clock.advance(DAY / 4);
+            lock(&core).poll();
+        }
+        assert_eq!(fixture.store.queries(), 1, "two days, still waiting");
+        // Once it returns, the first tick after checks.
+        fixture.store.answer(answer(vec![], Signal::True));
+        fixture.clock.advance(TICK.as_secs());
+        lock(&core).poll();
+        assert_eq!(fixture.store.queries(), 2);
+
+        // After an ordinary failure, the next due check runs.
+        let failed = Fixture::new();
+        let core = failed.core();
+        check(&failed, &core, QueryOutcome::Failed("0x80072EE7".into()));
+        failed.clock.advance(DAY);
+        lock(&core).poll();
+        assert_eq!(failed.store.queries(), 2);
+    }
+
+    #[test]
+    fn a_daily_check_due_during_a_check_joins_it() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        check(&fixture, &core, answer(vec![], Signal::True));
+        // A user check just before the tick; civil time jumps a day meanwhile.
+        fixture.clock.advance(TICK.as_secs() - 1);
+        lock(&core).check_now();
+        fixture.store.begin();
+        fixture.clock.jump_civil(DAY);
+        poll_for(&fixture, &core, 1);
+        assert_eq!(fixture.store.queries(), 2);
+        fixture.store.answer(answer(vec![], Signal::True));
+        // The next tick: that check satisfied the daily one.
+        fixture.clock.advance(TICK.as_secs());
+        lock(&core).poll();
+        assert_eq!(fixture.store.queries(), 2);
+    }
+
+    #[test]
+    fn an_answer_in_time_counts_though_its_signal_comes_later() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        lock(&core).check_now();
+        fixture.store.begin();
+        poll_for(&fixture, &core, 59);
+        fixture.store.answered();
+        // The signal is read on the main thread, past the bound.
+        poll_for(&fixture, &core, 5);
+        assert_eq!(state(&core).checking, Checking::Running);
+        assert_eq!(fixture.store.cancels.load(Ordering::SeqCst), 0);
+        fixture.store.finish(answer(
+            vec![offer(KEY_25, Some("0.25.0.0"), false)],
+            Signal::True,
+        ));
+        let done = state(&core);
+        assert_eq!(done.offer.map(|offer| offer.key), Some(KEY_25.to_string()));
+        assert_eq!(done.check_error, None);
+    }
+
+    // ── AC-13: a failure re-derives the notices ──
+
+    #[test]
+    fn a_failed_check_brings_a_notice_that_came_due() {
+        let fixture = Fixture::new();
+        let almost = iso(fixture.clock.civil() - WEEK + 60);
+        fixture.write(&format!(
+            r#"{{"mode":"auto","lastRunVersion":"0.24.0.0","pendingSince":{{"key":"{KEY_25}","at":"{almost}"}}}}"#
+        ));
+        let core = fixture.core();
+        check(
+            &fixture,
+            &core,
+            answer(vec![offer(KEY_25, Some("0.25.0.0"), false)], Signal::True),
+        );
+        assert!(state(&core).notices.is_empty(), "a minute short of 7 days");
+        fixture.clock.advance(120);
+        check(&fixture, &core, QueryOutcome::Failed("0x80072EE7".into()));
+        assert_eq!(kinds(&fixture.last_state()), vec![NoticeKind::Waiting]);
     }
 
     #[test]

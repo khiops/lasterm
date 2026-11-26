@@ -948,16 +948,8 @@ const profilesStore = useProfilesStore();
 // In the settings store, so that a panel can open Settings at a place of its own (#835).
 const showSettings = toRef(useSettingsStore(), 'panelOpen');
 
-// The desktop's update state (#1214): followed from the start, and a notice's Open Settings
-// opens Settings › Desktop.
+// The desktop's update state (#1214), followed from the start.
 const desktopUpdates = useDesktopUpdatesStore();
-watch(
-	() => desktopUpdates.settingsRequests,
-	() => {
-		useSettingsStore().activeCategory = 'desktop';
-		showSettings.value = true;
-	},
-);
 const desktopVersion = ref<string | undefined>(undefined);
 const closeModalVisible = ref(false);
 const desktopCloseAttempt = ref<number | null>(null);

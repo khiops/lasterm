@@ -107,11 +107,39 @@ describe("Settings › Desktop's update rows (AC-3)", () => {
 		store.state = eligible({ lastCheckedAt: "2026-11-26T10:00:00Z" });
 		await settle();
 		expect(text()).toContain("The Microsoft Store reports no update");
+		// The Store's absence is a failed check, dated, with the button still there.
+		const at = "2026-11-26T10:00:00Z";
 		store.state = eligible({
 			storeError: "The Microsoft Store is not available on this computer right now",
+			checkError: "The Microsoft Store is not available on this computer right now",
+			checkFailedAt: at,
 		});
 		await settle();
-		expect(text()).toContain("The Microsoft Store is not available on this computer right now");
+		expect(document.querySelector(".update-check .update-error")?.textContent?.trim()).toBe(
+			`The last check failed: The Microsoft Store is not available on this computer right now (${new Date(at).toLocaleString()})`,
+		);
+	});
+
+	it("leaves Check for updates to press while waiting, and clears its own refusal on the next press", async () => {
+		mocks.invoke.mockImplementation(async (command: string) => {
+			if (command === "get_close_behavior") return "ask";
+			if (command === "check_for_updates") throw "not_store_build";
+			return undefined;
+		});
+		const store = await mountCategory(eligible({ checking: "running" }));
+		expect(button("Check for updates")?.disabled).toBe(true);
+		store.state = eligible({ checking: "waiting" });
+		await settle();
+		expect(button("Check for updates")?.disabled).toBe(false);
+		button("Check for updates")?.click();
+		await settle();
+		expect(text()).toContain("not_store_build");
+		mocks.invoke.mockImplementation(async (command: string) =>
+			command === "get_close_behavior" ? "ask" : eligible({ checking: "waiting" }),
+		);
+		button("Check for updates")?.click();
+		await settle();
+		expect(text()).not.toContain("not_store_build");
 	});
 
 	it("keeps a known offer and its buttons beside a failed check", async () => {

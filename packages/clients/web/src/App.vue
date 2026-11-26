@@ -874,8 +874,8 @@ const filesMaximized = ref(false);
 const filesFillsTab = computed(
 	() => filesPanelShown.value && filesMaximized.value && filesForm.value !== 'sheet',
 );
-watch(filesPanelShown, (shown) => {
-	if (!shown) filesMaximized.value = false;
+watch([filesPanelShown, filesForm], ([shown, form]) => {
+	if (!shown || form === 'sheet') filesMaximized.value = false;
 });
 
 function toggleFilesMaximized(): void {

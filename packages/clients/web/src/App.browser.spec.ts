@@ -230,6 +230,33 @@ describe("the files panel's form", () => {
 		);
 	});
 
+	it("moves by 16 px on the arrows from the width it shows, never past the widest", async () => {
+		const { hub } = await mountWindow({
+			channels: [live("T1")],
+			ui: { ...ON, layout: { transferPanelWidth: 1000 } },
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+		});
+		focusPane("P1");
+		await press("E", { ctrl: true, shift: true });
+		const widest = Math.floor(box(".terminal-body").width / 2);
+		const edge = document.querySelector<HTMLElement>(".files-resize-handle");
+
+		// The panel shows `widest`, not the 1000 it was saved at: one step starts from what shows.
+		await press("ArrowRight", {}, edge);
+		await settle();
+		expect(box("#files-panel").width).toBe(widest - 16);
+
+		await press("ArrowLeft", {}, edge);
+		await press("ArrowLeft", {}, edge);
+		await settle();
+		expect(box("#files-panel").width).toBe(widest);
+		expect(hub.calls("PUT", "/api/config/ui").map((call) => call.body)).toEqual([
+			{ layout: { transferPanelWidth: widest - 16 } },
+			{ layout: { transferPanelWidth: widest } },
+			{ layout: { transferPanelWidth: widest } },
+		]);
+	});
+
 	it("clamps a saved width over the widest, and gives it back when the window grows", async () => {
 		const { hub } = await mountWindow({
 			channels: [live("T1")],
@@ -304,6 +331,58 @@ describe("maximizing the files panel", () => {
 
 		expect(box("#files-panel").width).toBe(300);
 		expect(paneWithKeyboard()).toBe("P1");
+	});
+
+	it("keeps Escape for a text field, a question, a dialog and a modified press", async () => {
+		await open();
+		await maximize();
+		const panel = document.querySelector("#files-panel") as HTMLElement;
+		const field = Object.assign(document.createElement("input"), { type: "text" });
+		const question = document.createElement("div");
+		question.setAttribute("data-own-escape", "");
+		question.tabIndex = 0;
+		const dialog = document.createElement("div");
+		dialog.setAttribute("aria-modal", "true");
+		dialog.tabIndex = 0;
+		panel.append(field, question, dialog);
+		try {
+			for (const target of [field, question, dialog]) {
+				target.focus();
+				await press("Escape");
+				await settle(2);
+				expect(document.querySelector(".pane-area")?.hasAttribute("inert")).toBe(true);
+			}
+			await press("Escape", { shift: true });
+			await settle(2);
+			expect(document.querySelector(".pane-area")?.hasAttribute("inert")).toBe(true);
+		} finally {
+			field.remove();
+			question.remove();
+			dialog.remove();
+		}
+	});
+
+	it("fills the tab from a floating panel too", async () => {
+		await page.viewport(900, 800);
+		await open();
+		expect(document.querySelector(".files-panel--overlay")).not.toBeNull();
+
+		await maximize();
+
+		expect(placeOf(box("#files-panel"))).toEqual(placeOf(box(".terminal-body")));
+	});
+
+	it("lets go of the maximized state when the window shrinks to a sheet", async () => {
+		await open();
+		await maximize();
+
+		await page.viewport(500, 800);
+		await vi.waitFor(() => expect(document.querySelector(".files-panel--sheet")).not.toBeNull());
+		await page.viewport(1400, 900);
+
+		await vi.waitFor(() => expect(document.querySelector(".files-panel--docked")).not.toBeNull());
+		expect(document.querySelector(".pane-area")?.hasAttribute("inert")).toBe(false);
+		expect(box("#files-panel").width).toBe(300);
 	});
 
 	it("is not kept: a panel closed while maximized opens docked again", async () => {

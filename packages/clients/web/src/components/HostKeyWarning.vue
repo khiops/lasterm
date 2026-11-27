@@ -50,26 +50,32 @@
 					>{{ prompt.fingerprint }}</button>
 				</div>
 
+				<!-- What the hub found in the known_hosts files it reads, and no more: it
+				     cannot tell whether OpenSSH uses those files, and the line may be the
+				     host's ~/.ssh/config alias rather than the address shown (#1217). -->
 				<template v-if="prompt.knownHosts?.verdict === 'trusted'">
 					<p class="hkw-known">
-						Your SSH configuration already trusts this exact key
-						(<code>{{ prompt.knownHosts.file }}:{{ prompt.knownHosts.line }}</code>), which
-						is why <code>ssh</code> connects to this host without asking.
+						This exact key is already in
+						<code>{{ prompt.knownHosts.file }}:{{ prompt.knownHosts.line }}</code>.
 					</p>
-					<label class="hkw-known-choice">
-						<input v-model="trustKnownHosts" type="checkbox" :disabled="savingPreference" />
-						<span>
-							Take that as reason enough from now on — hosts whose key is already in
-							<code>known_hosts</code> will not be asked about again.
-						</span>
-					</label>
-					<p v-if="preferenceError" class="hkw-known-error">{{ preferenceError }}</p>
+					<!-- The setting applies to first connections only: offered on a
+					     changed key, it would promise a question it never skips. -->
+					<template v-if="prompt.firstConnect">
+						<label class="hkw-known-choice">
+							<input v-model="trustKnownHosts" type="checkbox" :disabled="savingPreference" />
+							<span>
+								Take that as reason enough from now on — Lasterm will not ask about a first
+								connection to a host whose key is already in <code>known_hosts</code>.
+							</span>
+						</label>
+						<p v-if="preferenceError" class="hkw-known-error">{{ preferenceError }}</p>
+					</template>
 				</template>
 
 				<p v-else-if="prompt.knownHosts?.verdict === 'other-key'" class="hkw-known-warning">
-					⚠ Your SSH configuration knows this host under a <strong>different</strong> key
-					(<code>{{ prompt.knownHosts.file }}:{{ prompt.knownHosts.line }}</code>). Do not
-					trust this one unless you know why it changed.
+					⚠ A <strong>different</strong> key is listed for this host in
+					<code>{{ prompt.knownHosts.file }}:{{ prompt.knownHosts.line }}</code>. Do not trust
+					this one unless you know why they differ.
 				</p>
 
 				<div class="hkw-actions">

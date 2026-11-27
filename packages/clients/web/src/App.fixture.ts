@@ -280,6 +280,11 @@ export function asking(): boolean {
 /** Open the command palette with its chord and run the row with this label. */
 export async function runPaletteRow(label: string): Promise<void> {
 	await press("P", { ctrl: true, shift: true });
+	await choosePaletteRow(label);
+}
+
+/** Choose a row of the palette that is already open. */
+export async function choosePaletteRow(label: string): Promise<void> {
 	const row = [...document.querySelectorAll<HTMLElement>(".palette-item")].find(
 		(item) =>
 			(

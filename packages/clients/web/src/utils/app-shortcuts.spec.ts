@@ -10,11 +10,11 @@ import {
 	isActionOffered,
 	keyboardPlaceOf,
 	matchesChord,
-	movesKeyboard,
 	OUTSIDE_TERMINAL_SHORTCUTS,
 	outsideTerminalKeys,
 	paneMoveOf,
 	readSwitchesFrom,
+	runsInModalDialog,
 	shortcutKeys,
 	shortcutLabel,
 	TAB_NUMBERS,
@@ -190,9 +190,10 @@ describe("the shortcuts overlay's chord", () => {
 		expect(appShortcutOf(key("/", { ...CTRL_ALT, code: "Slash" }))).toBeNull();
 	});
 
-	// It opens a dialog over the others rather than moving the keyboard behind one.
-	it("does not move the keyboard, so it works with Settings open", () => {
-		expect(movesKeyboard("help.shortcuts")).toBe(false);
+	// It opens a dialog over the others and runs nothing behind them.
+	it("works with Settings open, as with any modal dialog", () => {
+		expect(runsInModalDialog("help.shortcuts", "settings.open")).toBe(true);
+		expect(runsInModalDialog("help.shortcuts", null)).toBe(true);
 	});
 });
 
@@ -485,21 +486,16 @@ describe("what an action is", () => {
 		expect(paneMoveOf("pane.splitRight")).toBeNull();
 	});
 
-	// Nothing takes the keyboard behind a modal dialog.
-	it("knows which actions take the keyboard elsewhere", () => {
-		const moving = IDS.filter(movesKeyboard);
-		expect(moving).toEqual([
-			"tab.next",
-			"tab.previous",
-			...TAB_NUMBERS.map((n) => `tab.goTo${n}`),
-			"pane.focusLeft",
-			"pane.focusRight",
-			"pane.focusUp",
-			"pane.focusDown",
-			"zone.next",
-			"zone.previous",
-			"files.toggle",
-		]);
+	// A modal dialog keeps the keyboard: behind it nothing closes, opens or moves (#637, #1220).
+	it("runs only the shortcuts overlay inside a modal dialog that has no chord of its own", () => {
+		expect(IDS.filter((id) => runsInModalDialog(id, null))).toEqual(["help.shortcuts"]);
+	});
+
+	it("runs a dialog's own action inside it too, and no other dialog's", () => {
+		const inPalette = IDS.filter((id) => runsInModalDialog(id, "palette.open"));
+		expect([...inPalette].sort()).toEqual(["help.shortcuts", "palette.open"]);
+		const inSettings = IDS.filter((id) => runsInModalDialog(id, "settings.open"));
+		expect([...inSettings].sort()).toEqual(["help.shortcuts", "settings.open"]);
 	});
 });
 
@@ -562,8 +558,10 @@ describe("the Settings chord", () => {
 	});
 
 	// Settings is a modal dialog: its chord must still close it from inside.
-	it("runs from inside a modal dialog", () => {
-		expect(movesKeyboard("settings.open")).toBe(false);
+	it("runs from inside Settings, and from inside no other modal dialog", () => {
+		expect(runsInModalDialog("settings.open", "settings.open")).toBe(true);
+		expect(runsInModalDialog("settings.open", "palette.open")).toBe(false);
+		expect(runsInModalDialog("settings.open", null)).toBe(false);
 	});
 });
 
@@ -593,7 +591,7 @@ describe("the files panel's chord", () => {
 	});
 
 	it("takes the keyboard into the panel, so it does nothing behind a modal dialog", () => {
-		expect(movesKeyboard("files.toggle")).toBe(true);
+		expect(runsInModalDialog("files.toggle", null)).toBe(false);
 	});
 });
 

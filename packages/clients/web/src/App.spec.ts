@@ -30,6 +30,7 @@ import {
 } from "./App.doubles.fixture.js";
 import {
 	asking,
+	choosePaletteRow,
 	click,
 	dialogs,
 	focusPane,
@@ -56,6 +57,7 @@ import {
 } from "./App.fixture.js";
 import { WALLPAPER_FADE_MS } from "./composables/useWallpaper.js";
 import { useHostsStore } from "./stores/hosts.js";
+import { useProfilesStore } from "./stores/profiles.js";
 import { APP_SHORTCUTS, type AppActionId } from "./utils/app-shortcuts.js";
 import { CONFIRMATIONS } from "./utils/confirmations.js";
 
@@ -734,7 +736,54 @@ describe("the window's shortcuts", () => {
 		expect(document.activeElement).toBe(input);
 	});
 
-	it("runs a chord that moves no keyboard from inside a modal dialog", async () => {
+	// Run behind a dialog, these act on what it covers: a pane closes, a tab or Settings opens
+	// (#1220).
+	it.each([
+		["pane.close", "W", { ctrl: true, shift: true }],
+		["pane.splitRight", "+", { alt: true, shift: true, code: "Equal" }],
+		["tab.new", "T", { ctrl: true, shift: true }],
+		["settings.open", ",", { ctrl: true }],
+	] as const)(
+		"takes the chord of %s, but does not run it, while a modal dialog has the keyboard",
+		async (_id, key, mods) => {
+			await mountWindow({
+				channels: [live("T1"), live("T2")],
+				layout: {
+					tabs: [{ id: "TAB1", root: split("vertical", term("T1", "P1"), term("T2", "P2")) }],
+				},
+			});
+			focusPane("P1");
+			await press("P", { ctrl: true, shift: true });
+			const input = document.querySelector(".palette-input");
+			expect(document.activeElement).toBe(input);
+
+			const event = await press(key, mods);
+
+			expect(event.defaultPrevented).toBe(true);
+			expect(panesShown()).toEqual(["P1", "P2"]);
+			expect(tabs()).toHaveLength(1);
+			expect(dialogs()).toEqual(["Command Palette"]);
+			expect(document.activeElement).toBe(input);
+		},
+	);
+
+	it("starts a profile on Ctrl+Shift+1 outside a terminal, but not while a modal dialog has the keyboard", async () => {
+		await oneTerminal();
+		const start = vi.spyOn(useProfilesStore(), "spawnNthHostProfile").mockResolvedValue();
+		document.querySelector<HTMLElement>('.tab-bar [role="tab"]')?.focus();
+
+		await press("1", { ctrl: true, shift: true });
+		expect(start).toHaveBeenCalledTimes(1);
+
+		await press("P", { ctrl: true, shift: true });
+		expect(document.activeElement).toBe(document.querySelector(".palette-input"));
+		await press("1", { ctrl: true, shift: true });
+
+		expect(start).toHaveBeenCalledTimes(1);
+	});
+
+	// A dialog's own chord closes it from inside: the palette's, Settings' and the overlay's.
+	it("closes a modal dialog on its own chord from inside it", async () => {
 		await oneTerminal();
 		focusPane("P1");
 		await press("/", { ctrl: true });
@@ -742,8 +791,32 @@ describe("the window's shortcuts", () => {
 		expect(document.activeElement?.closest('[aria-modal="true"]')).not.toBeNull();
 
 		await press("/", { ctrl: true });
-
 		expect(dialogs()).not.toContain("Keyboard shortcuts");
+
+		await press("P", { ctrl: true, shift: true });
+		expect(document.activeElement).toBe(document.querySelector(".palette-input"));
+		await press("P", { ctrl: true, shift: true });
+		expect(dialogs()).toEqual([]);
+
+		await press(",", { ctrl: true });
+		expect(document.activeElement?.closest(".settings-panel")).not.toBeNull();
+		await press(",", { ctrl: true });
+		await vi.waitFor(() => expect(dialogs()).toEqual([]));
+	});
+
+	// The shortcuts overlay opens over a dialog and runs nothing behind it (#639); the palette
+	// could run anything there, so it waits.
+	it("opens the shortcuts overlay from inside Settings, not the palette", async () => {
+		await oneTerminal();
+		focusPane("P1");
+		await press(",", { ctrl: true });
+		expect(document.activeElement?.closest(".settings-panel")).not.toBeNull();
+
+		await press("P", { ctrl: true, shift: true });
+		expect(dialogs()).toEqual(["Settings"]);
+
+		await press("/", { ctrl: true });
+		expect([...dialogs()].sort()).toEqual(["Keyboard shortcuts", "Settings"]);
 	});
 
 	it("leaves Ctrl+K to the shell", async () => {
@@ -1062,12 +1135,15 @@ describe("the palette's rows for the window's actions", () => {
 		expect(dialogs()).toEqual(["Keyboard shortcuts"]);
 	});
 
-	it("leaves the shortcuts overlay open when Keyboard Shortcuts is chosen over it", async () => {
+	// The overlay opens over the palette; the palette no longer opens over the overlay (#1220).
+	it("leaves the shortcuts overlay open when Keyboard Shortcuts is chosen under it", async () => {
 		await oneTerminal();
 		focusPane("P1");
+		await press("P", { ctrl: true, shift: true });
 		await press("/", { ctrl: true });
+		expect(dialogs()).toContain("Keyboard shortcuts");
 
-		await runPaletteRow("Keyboard Shortcuts");
+		await choosePaletteRow("Keyboard Shortcuts");
 
 		expect(dialogs()).toEqual(["Keyboard shortcuts"]);
 	});
@@ -2549,6 +2625,27 @@ describe("updating an older agent, from the host's menu (#1185)", () => {
 		await click("Cancel");
 
 		expect(replaces(hub)).toEqual([]);
+	});
+
+	// The window's shortcuts wait behind the question (#1220).
+	it("closes no pane behind the question on Ctrl+Shift+W", async () => {
+		await mountWindow({
+			hosts: [ALPHA, PI],
+			channels: [live("T1"), live("T2")],
+			layout: {
+				tabs: [{ id: "TAB1", root: split("vertical", term("T1", "P1"), term("T2", "P2")) }],
+			},
+		});
+		useHostsStore().rememberOutdatedAgent(PI.id, { running: "0.15.2", expected: "0.22.1" });
+		await rightClick(document.querySelector(`.badge-wrapper[data-host-id="${PI.id}"]`));
+		await click("Update agent…");
+		expect(document.activeElement?.textContent?.trim()).toBe("Cancel");
+
+		const event = await press("W", { ctrl: true, shift: true });
+
+		expect(event.defaultPrevented).toBe(true);
+		expect(panesShown()).toEqual(["P1", "P2"]);
+		expect(asking()).toBe(true);
 	});
 
 	it("puts the keyboard on Cancel, and Escape cancels, sending nothing (#1189)", async () => {

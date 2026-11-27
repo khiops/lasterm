@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.25.0](https://github.com/khiops/lasterm/compare/v0.24.0...v0.25.0) (2026-11-27)
+
+
+### Features
+
+* **desktop:** tell the Store app's user about a new version and open the Store ([#1218](https://github.com/khiops/lasterm/issues/1218)) ([f60aded](https://github.com/khiops/lasterm/commit/f60adedbd85f73ce4847af4fa8509dc345bb9d4c))
+
+
+### Bug Fixes
+
+* **hub:** keep a key trusted once for the saved host it was given for ([#1235](https://github.com/khiops/lasterm/issues/1235)) ([8a1732f](https://github.com/khiops/lasterm/commit/8a1732fab517c3e443aafb20e362261c1772bccf)), closes [#1228](https://github.com/khiops/lasterm/issues/1228)
+* **hub:** Test Connection reads known_hosts as a session does ([#1224](https://github.com/khiops/lasterm/issues/1224)) ([6ad31e2](https://github.com/khiops/lasterm/commit/6ad31e2df099837bfae44716660f01ebf539d4d2)), closes [#1217](https://github.com/khiops/lasterm/issues/1217)
+* **web:** leave the known_hosts checkbox as it was when its save fails ([#1226](https://github.com/khiops/lasterm/issues/1226)) ([4a8117b](https://github.com/khiops/lasterm/commit/4a8117b0bca448ae9dc04d333c20b4de866e3d2a)), closes [#1223](https://github.com/khiops/lasterm/issues/1223)
+
+
+### Documentation
+
+* **root:** add the Store news line for Test Connection and known_hosts ([#1225](https://github.com/khiops/lasterm/issues/1225)) ([4b9f15e](https://github.com/khiops/lasterm/commit/4b9f15e880e87aed36433f4ec3291547ac948337)), closes [#1217](https://github.com/khiops/lasterm/issues/1217)
+* SECURITY.md 3.3 and 3.3b, SPEC.md, decisions.md, CONFIG_REFERENCE.md. ([8a1732f](https://github.com/khiops/lasterm/commit/8a1732fab517c3e443aafb20e362261c1772bccf))
+
 ## [0.24.0](https://github.com/khiops/lasterm/compare/v0.23.1...v0.24.0) (2026-11-26)
 
 

@@ -1089,7 +1089,8 @@ host with no pinned key (SECURITY.md § 3.3):
 
 With `[ssh] trust_known_hosts = true`, a first key that `known_hosts` already trusts is accepted
 without asking: a session pins it, and a connection test pins it on a saved host's saved route
-and otherwise records no trust for it. A key that changes under a pinned one stops the connection, and a jump host's key
+and otherwise records no trust for it. A key that changes under a pinned one is asked about, unless it
+was already accepted for that route earlier in the hub run, and a jump host's key
 is never asked about on the way to another host (§ 4.5b).
 
 ## 5. Data Flow Diagrams

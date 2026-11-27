@@ -301,9 +301,10 @@ export interface SharedSessionContext {
 	/** requestId → callback for pending agent responses */
 	pendingRequests: Map<string, (msg: import("@lasterm/shared").ProtocolMessage) => void>;
 	/**
-	 * Host id → target route → fingerprint trusted for this hub run (trust_once,
-	 * not persisted). Kept per host: an answer about one saved host is never
-	 * trust for another on the same route (#1228). Read and written through
+	 * Host id → target route → the latest fingerprint trusted once for this hub
+	 * run (trust_once, not persisted); a later answer for the same host and route
+	 * replaces it. Kept per host: an answer about one saved host is never trust
+	 * for another on the same route (#1228). Read and written through
 	 * `trustedOnceFor` and `trustOnce`.
 	 */
 	trustedOnceFingerprints: TrustedOnceFingerprints;

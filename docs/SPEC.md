@@ -1084,13 +1084,13 @@ host with no pinned key (SECURITY.md § 3.3):
    what `~/.ssh/known_hosts` already believes about that key, which the hub reads and never writes
 3. UI shows modal: "Trust host fingerprint? [sha256:XXXX] — [Trust once] [Trust permanently] [Cancel]"
 4. "Trust permanently": hub stores the fingerprint in the meta.db hosts table
-5. "Trust once": hub accepts for this host on this route, for this run of the hub only, before the host's pin
+5. "Trust once": hub accepts for this host on this route, for this run of the hub only (until a later answer for them replaces it), before the host's pin
 6. "Cancel": connection aborted, session CLOSED
 
 With `[ssh] trust_known_hosts = true`, a first key that `known_hosts` already trusts is accepted
 without asking: a session pins it, and a connection test pins it on a saved host's saved route
-and otherwise records no trust for it. A key that changes under a pinned one is asked about, unless that host
-already accepted it for that route earlier in the hub run, and a jump host's key
+and otherwise records no trust for it. A key that changes under a pinned one is asked about in a Connect or a connection test, and refused by a
+reconnect, unless it is the key that host last accepted for that route earlier in the hub run, and a jump host's key
 is never asked about on the way to another host (§ 4.5b).
 
 ## 5. Data Flow Diagrams

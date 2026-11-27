@@ -204,15 +204,16 @@ function trustedTested(
 	return trustedOnceFor(ctx.trustedOnceFingerprints, msg.hostId, testedRoute(msg, ctx));
 }
 
-/** Every entry of the run-long cache, copied: [host id, route, fingerprint]. */
-function cachedEntries(cache: TrustedOnceFingerprints): Array<[string, string, string]> {
-	return [...cache].flatMap(([hostId, routes]) =>
-		[...routes].map(([route, fingerprint]): [string, string, string] => [
-			hostId,
-			route,
-			fingerprint,
-		]),
-	);
+/** The run-long cache, copied: its host map and each host's route map. */
+function cachedEntries(cache: TrustedOnceFingerprints): TrustedOnceFingerprints {
+	return new Map([...cache].map(([hostId, routes]) => [hostId, new Map(routes)]));
+}
+
+/** A run-long cache holding exactly these [host id, route, fingerprint] entries. */
+function cacheOf(...entries: Array<[string, string, string]>): TrustedOnceFingerprints {
+	const cache: TrustedOnceFingerprints = new Map();
+	for (const [hostId, route, fingerprint] of entries) trustOnce(cache, hostId, route, fingerprint);
+	return cache;
 }
 
 function testMessage(hostId: string, port: number): TestConnectMessage {
@@ -414,8 +415,8 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 			expect(updateHostFingerprint).not.toHaveBeenCalled();
 			expect(cachedEntries(ctx.trustedOnceFingerprints)).toEqual(
 				name === "message-alias-trusted-once"
-					? [["new-host", testedRoute(message, ctx), fingerprint]]
-					: [],
+					? cacheOf(["new-host", testedRoute(message, ctx), fingerprint])
+					: cacheOf(),
 			);
 		} finally {
 			vi.unstubAllEnvs();
@@ -477,9 +478,9 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 			expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "new-host" });
 			expect(mock.auth.attempts).toBeGreaterThan(0);
 			expect(updateHostFingerprint).not.toHaveBeenCalled();
-			expect(cachedEntries(ctx.trustedOnceFingerprints)).toEqual([
-				["new-host", testedRoute(message, ctx), prompt.fingerprint],
-			]);
+			expect(cachedEntries(ctx.trustedOnceFingerprints)).toEqual(
+				cacheOf(["new-host", testedRoute(message, ctx), prompt.fingerprint]),
+			);
 		},
 	);
 
@@ -536,10 +537,16 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 			await done;
 			expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
 			expect(updateHostFingerprint).not.toHaveBeenCalled();
-			expect(cachedEntries(ctx.trustedOnceFingerprints)).toEqual([
-				["saved-host", savedRoute, serverKey],
-				["saved-host", testedRoute(testMessage("saved-host", mock.port), ctx), prompt.fingerprint],
-			]);
+			expect(cachedEntries(ctx.trustedOnceFingerprints)).toEqual(
+				cacheOf(
+					["saved-host", savedRoute, serverKey],
+					[
+						"saved-host",
+						testedRoute(testMessage("saved-host", mock.port), ctx),
+						prompt.fingerprint,
+					],
+				),
+			);
 		},
 	);
 
@@ -1329,10 +1336,9 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
 			await done;
 			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
-			expect(cachedEntries(f.ctx.trustedOnceFingerprints)).toEqual([
-				...cacheBefore,
-				[f.msg.hostId, testedRoute(f.msg, f.ctx), fingerprint],
-			]);
+			const expected = cachedEntries(cacheBefore);
+			trustOnce(expected, f.msg.hostId, testedRoute(f.msg, f.ctx), fingerprint);
+			expect(cachedEntries(f.ctx.trustedOnceFingerprints)).toEqual(expected);
 			f.client.send.mockClear();
 			await f.mgr.handleTestConnect("c1", f.msg);
 			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
@@ -1352,7 +1358,8 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			expectedRoute !== null && (id === "jump" || id === "jump-b") ? fingerprint : null;
 		f.ctx.trustedOnceFingerprints.clear();
 		const msg = { ...f.msg, hostname: "127.0.0.1", port: f.targetPort };
-		// One host id, four routes: each route is asked about once, then trusted.
+		// One host id, four attempts on three routes: each route is asked about
+		// once, then trusted, and keeps that trust as the others are added.
 		for (const [sshProxyHostId, questions] of [
 			["jump", 1],
 			["jump", 0],
@@ -1375,6 +1382,12 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 				f.client.send.mock.calls.filter(([m]) => m.type === "HOST_VERIFY"),
 				String(sshProxyHostId),
 			).toHaveLength(questions);
+		}
+		for (const sshProxyHostId of ["jump", "jump-b", null]) {
+			const declaration: TestConnectMessage = { ...msg };
+			if (sshProxyHostId) declaration.sshProxyHostId = sshProxyHostId;
+			else delete declaration.sshProxyHostId;
+			expect(trustedTested(f.ctx, declaration), String(sshProxyHostId)).toBe(fingerprint);
 		}
 		await ended(f);
 		await ended(other);
@@ -1514,11 +1527,9 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 				expect.anything(),
 				expect.anything(),
 			);
-			const tested = testedRoute(f.msg, f.ctx);
-			expect(cachedEntries(f.ctx.trustedOnceFingerprints)).toEqual([
-				...cacheBefore.filter(([hostId, route]) => hostId !== f.msg.hostId || route !== tested),
-				[f.msg.hostId, tested, fingerprint],
-			]);
+			const expected = cachedEntries(cacheBefore);
+			trustOnce(expected, f.msg.hostId, testedRoute(f.msg, f.ctx), fingerprint);
+			expect(cachedEntries(f.ctx.trustedOnceFingerprints)).toEqual(expected);
 			await ended(f);
 		},
 	);

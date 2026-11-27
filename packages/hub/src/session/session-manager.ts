@@ -4420,7 +4420,8 @@ export class SessionManager {
 
 				// Trusted there, and the person has said once that this is reason
 				// enough: pinned here without asking again. Only ever for a first
-				// connection: this setting never replaces a pin.
+				// connection, one where this attempt found no pin: a key that changed
+				// under a pin it read is always asked about.
 				if (
 					kv.tofu &&
 					verdict.kind === "trusted" &&

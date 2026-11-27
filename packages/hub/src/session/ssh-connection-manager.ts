@@ -22,7 +22,12 @@ import type {
 import { Client as SshClient } from "ssh2";
 import { HUB_VERSION } from "../build-version.js";
 import { fingerprintOf } from "../ssh/fingerprint.js";
-import { findHostKeyRevocation } from "../ssh/known-hosts.js";
+import {
+	findHostKeyRevocation,
+	findKnownHostKeys,
+	judgeAgainstKnownHosts,
+	readUserKnownHosts,
+} from "../ssh/known-hosts.js";
 import type { AgentConnectionManager } from "./agent-connection-manager.js";
 import { type BinaryVerifyPromptFn, getBinaryCacheDir } from "./agent-deployer.js";
 import { computeTargetStatus } from "./agent-status.js";
@@ -686,7 +691,12 @@ export class SshConnectionManager {
 		};
 
 		// The key prompt belongs to the same test context as the passphrase one.
-		const verifyHostKey: HostKeyVerifyFn = async (oldFingerprint, newFingerprint, firstConnect) => {
+		const verifyHostKey: HostKeyVerifyFn = async (
+			oldFingerprint,
+			newFingerprint,
+			firstConnect,
+			knownHosts,
+		) => {
 			const result = await promptCtx(
 				this.ctx,
 				testCtxId,
@@ -700,6 +710,7 @@ export class SshConnectionManager {
 					...(oldFingerprint ? { oldFingerprint } : {}),
 					promptId: "",
 					...(firstConnect ? { firstConnect: true } : {}),
+					...(knownHosts ? { knownHosts } : {}),
 				},
 				deliverySend,
 				// The same question as the one above, asked while testing a host:
@@ -898,23 +909,52 @@ export class SshConnectionManager {
 		if (first.unverifiedFingerprint === undefined) return finish(first.result);
 
 		const fingerprint = first.unverifiedFingerprint;
-		const revoked = findHostKeyRevocation(fingerprint, namesToLookUp, msg.port);
-		if (revoked)
+		// What this machine's known_hosts says about the key, under the names the
+		// test looks it up by, as a session reads it (#1217). A revocation found
+		// only now (a file changed, or became readable, since the attempt) refuses.
+		const knownHostsSources = readUserKnownHosts();
+		const verdict = judgeAgainstKnownHosts(
+			fingerprint,
+			namesToLookUp.flatMap((name) => findKnownHostKeys(name, msg.port, knownHostsSources)),
+		);
+		if (verdict.kind === "revoked")
 			return {
 				ok: false,
-				message: `This host's key is marked @revoked in ${revoked.file}:${revoked.line}. Refusing to connect.`,
+				message: `This host's key is marked @revoked in ${verdict.file}:${verdict.line}. Refusing to connect.`,
 			};
-		const action = await verifyHostKey(
-			storedFingerprint ?? "",
-			fingerprint,
-			storedFingerprint === null,
-		);
-		if (action === "reject") return { ok: false, message: "SSH host key rejected" };
-		if (action === "trust_permanent" && savedRoute) {
-			if (!this.ctx.metaDal.updateHostFingerprint(msg.hostId, fingerprint, hostKey))
-				return { ok: false, message: "The host changed while connecting. Connect again." };
-		} else if (hostKey !== null) {
-			this.ctx.trustedOnceFingerprints.set(hostKey, fingerprint);
+		const hostChanged = { ok: false, message: "The host changed while connecting. Connect again." };
+		if (
+			storedFingerprint === null &&
+			verdict.kind === "trusted" &&
+			this.ctx.configResolver?.sshConfig?.trustKnownHosts === true
+		) {
+			// Trusted there, and the person has said that is reason enough: accepted
+			// without asking, as a session accepts it. Pinned on the saved host's own
+			// route only, never over a pin written meanwhile. Elsewhere it lets this
+			// retry through and is kept nowhere: the run-long cache is keyed by route,
+			// and a session takes a key cached there over another saved host's pin.
+			if (savedRoute) {
+				const pinned = this.ctx.metaDal.getHostFingerprint(msg.hostId, hostKey);
+				if (pinned !== null && pinned !== fingerprint) return hostChanged;
+				if (!this.ctx.metaDal.updateHostFingerprint(msg.hostId, fingerprint, hostKey))
+					return hostChanged;
+			}
+		} else {
+			const action = await verifyHostKey(
+				storedFingerprint ?? "",
+				fingerprint,
+				storedFingerprint === null,
+				verdict.kind === "trusted" || verdict.kind === "other-key"
+					? { verdict: verdict.kind, file: verdict.file, line: verdict.line }
+					: undefined,
+			);
+			if (action === "reject") return { ok: false, message: "SSH host key rejected" };
+			if (action === "trust_permanent" && savedRoute) {
+				if (!this.ctx.metaDal.updateHostFingerprint(msg.hostId, fingerprint, hostKey))
+					return hostChanged;
+			} else if (hostKey !== null) {
+				this.ctx.trustedOnceFingerprints.set(hostKey, fingerprint);
+			}
 		}
 
 		const second = await attempt(new Set([fingerprint]));
@@ -944,6 +984,7 @@ type HostKeyVerifyFn = (
 	oldFingerprint: string,
 	newFingerprint: string,
 	firstConnect: boolean,
+	knownHosts?: HostVerifyMessage["knownHosts"],
 ) => Promise<"trust_permanent" | "trust_once" | "reject">;
 
 const SSH_TEST_TIMEOUT_MS = 10_000;

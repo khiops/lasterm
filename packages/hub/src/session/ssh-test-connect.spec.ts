@@ -5,12 +5,22 @@ import { join } from "node:path";
 import { generateId, type TestConnectMessage } from "@lasterm/shared";
 import { Server, type Server as SshServer, utils } from "ssh2";
 import { afterAll, afterEach, beforeAll, describe, expect, it, type Mock, vi } from "vitest";
+import { readUserKnownHosts } from "../ssh/known-hosts.js";
 import { sshAddress, targetRoute } from "../ssh-route.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import type { PromptContext, SharedSessionContext } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
 import { attemptSshTest, SshConnectionManager } from "./ssh-connection-manager.js";
 import { probeTestConnectPlatform } from "./test-connect-platform.js";
+
+// The known_hosts reader the test calls when it decides on a key: the real one,
+// unless a test hands it what that read finds (#1217). The attempt's own
+// revocation check reads through `findHostKeyRevocation`, inside the module,
+// and is never affected.
+vi.mock("../ssh/known-hosts.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../ssh/known-hosts.js")>();
+	return { ...actual, readUserKnownHosts: vi.fn(actual.readUserKnownHosts) };
+});
 
 /**
  * How long a wait for what the hub sends may take: a guard against a hang. Vitest's
@@ -51,11 +61,14 @@ afterAll(() => removeTempDir(KEY_DIR));
  * An SSH server that accepts any client and counts authentication attempts.
  * With `uname`, it answers `uname -sm` with that system; any other command fails.
  * With `password`, it takes that password and nothing else, as OpenSSH does,
- * and counts the connections it is dialled.
+ * and counts the connections it is dialled. `onConnection` runs as each
+ * connection reaches it, on the client's ident line: the client is dialling,
+ * and has not checked the server's key yet.
  */
 function sshServer(
 	uname?: string,
 	password?: string,
+	onConnection?: (connections: number) => void,
 ): Promise<{
 	server: SshServer;
 	port: number;
@@ -65,6 +78,7 @@ function sshServer(
 	return new Promise((resolve) => {
 		const server = new Server({ hostKeys: [HOST_KEY] }, (client) => {
 			auth.connections++;
+			onConnection?.(auth.connections);
 			client.on("error", () => {});
 			client.on("authentication", (context) => {
 				auth.attempts++;
@@ -109,9 +123,11 @@ type SavedHost = {
 	sshConfigHost?: string;
 };
 
-function setup(saved?: SavedHost) {
+/** With `sshConfig`, the `[ssh]` settings the hub reads, which a test may change. */
+function setup(saved?: SavedHost, sshConfig?: { trustKnownHosts: boolean }) {
 	const updateHostFingerprint = vi.fn().mockReturnValue(true);
 	const ctx = {
+		...(sshConfig ? { configResolver: { sshConfig } } : {}),
 		passphraseCache: new Map(),
 		promptContexts: new Map<string, PromptContext>(),
 		promptIndex: new Map<string, string>(),
@@ -216,6 +232,77 @@ async function hostVerifyPrompt(client: { send: Mock }) {
 	}, WAIT);
 }
 
+/** A key as a `known_hosts` line names it, under `[name]:port`, after `marker` if any. */
+function keyLine(pem: string, name: string, port: number, marker = ""): string {
+	const key = utils.parseKey(pem);
+	if (key instanceof Error || Array.isArray(key)) throw new Error("invalid mock key");
+	return `${marker}[${name}]:${port} ${key.type} ${key.getPublicSSH().toString("base64")}\n`;
+}
+
+/** The fingerprint of a key, as the hub writes it. */
+function fingerprintOfPem(pem: string): string {
+	const key = utils.parseKey(pem);
+	if (key instanceof Error || Array.isArray(key)) throw new Error("invalid mock key");
+	return `SHA256:${createHash("sha256").update(key.getPublicSSH()).digest("base64").replace(/=+$/, "")}`;
+}
+
+/** Run `body` with a temporary HOME whose `~/.ssh` holds these files. */
+async function withKnownHosts<T>(
+	files: Record<string, string>,
+	body: (ssh: string) => Promise<T>,
+): Promise<T> {
+	const home = makeTempDir("lasterm-known-hosts-home-");
+	try {
+		const ssh = join(home, ".ssh");
+		mkdirSync(ssh);
+		for (const [name, contents] of Object.entries(files)) writeFileSync(join(ssh, name), contents);
+		vi.stubEnv("HOME", home);
+		vi.stubEnv("USERPROFILE", home);
+		return await body(ssh);
+	} finally {
+		vi.unstubAllEnvs();
+		removeTempDir(home);
+	}
+}
+
+type Sent = { type: string; promptId?: string } & Record<string, unknown>;
+
+/** The first key question or result the client was sent, whichever came first. */
+async function firstOutcome(client: { send: Mock }): Promise<Sent> {
+	return vi.waitFor(() => {
+		const first = client.send.mock.calls
+			.map(([message]) => message as Sent)
+			.find((message) =>
+				["HOST_VERIFY", "TEST_CONNECT_OK", "TEST_CONNECT_FAIL"].includes(message.type),
+			);
+		if (!first) throw new Error("nothing sent yet");
+		return first;
+	}, WAIT);
+}
+
+/**
+ * Run a test connection to its end, `inspect` reading the first question or
+ * result. A key question is answered `answer`, even when an assertion on it
+ * failed, so that no prompt is left open.
+ */
+async function runTest(
+	mgr: SshConnectionManager,
+	client: { send: Mock },
+	message: TestConnectMessage,
+	inspect: (first: Sent) => void,
+	answer: "reject" | "trust_once" | "trust_permanent" = "reject",
+): Promise<void> {
+	const done = mgr.handleTestConnect("c1", message);
+	const first = await firstOutcome(client);
+	try {
+		inspect(first);
+	} finally {
+		if (first.type === "HOST_VERIFY")
+			mgr.handleHostVerifyResponse(first.promptId ?? "", answer, "c1");
+		await done;
+	}
+}
+
 describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 }, () => {
 	let server: SshServer | undefined;
 
@@ -289,31 +376,37 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 		}
 	});
 
-	it("asks about an unknown key before authenticating, and stops when it is rejected", async () => {
-		const mock = await sshServer();
-		server = mock.server;
-		const { client, mgr } = setup();
+	// Nothing in known_hosts for the host: nothing to say about the key, and
+	// trust_known_hosts has nothing to go on (#1217).
+	it.each([false, true])(
+		"asks about an unknown key before authenticating, and stops when it is rejected (trust_known_hosts %s)",
+		async (trustKnownHosts) => {
+			const mock = await sshServer();
+			server = mock.server;
+			const { client, mgr } = setup(undefined, { trustKnownHosts });
 
-		const done = mgr.handleTestConnect("c1", testMessage("new-host", mock.port));
-		const prompt = await hostVerifyPrompt(client);
+			await withKnownHosts({}, () =>
+				runTest(mgr, client, testMessage("new-host", mock.port), (first) => {
+					expect(first).toMatchObject({
+						type: "HOST_VERIFY",
+						firstConnect: true,
+						fingerprint: expect.stringMatching(/^SHA256:/),
+						// The host is not saved: its address is what the dialog can name it by.
+						hostname: `127.0.0.1:${mock.port}`,
+					});
+					expect(first).not.toHaveProperty("knownHosts");
+					expect(mock.auth.attempts, "credentials went to an unchecked server").toBe(0);
+				}),
+			);
 
-		expect(prompt).toMatchObject({
-			firstConnect: true,
-			fingerprint: expect.stringMatching(/^SHA256:/),
-			// The host is not saved: its address is what the dialog can name it by.
-			hostname: `127.0.0.1:${mock.port}`,
-		});
-		expect(mock.auth.attempts, "credentials went to an unchecked server").toBe(0);
-		mgr.handleHostVerifyResponse(prompt.promptId, "reject", "c1");
-		await done;
-
-		expect(client.send).toHaveBeenCalledWith({
-			type: "TEST_CONNECT_FAIL",
-			hostId: "new-host",
-			message: "SSH host key rejected",
-		});
-		expect(mock.auth.attempts).toBe(0);
-	});
+			expect(client.send).toHaveBeenCalledWith({
+				type: "TEST_CONNECT_FAIL",
+				hostId: "new-host",
+				message: "SSH host key rejected",
+			});
+			expect(mock.auth.attempts).toBe(0);
+		},
+	);
 
 	it.each(["trust_once", "trust_permanent"] as const)(
 		"retries under a trusted key, and remembers it for the first session (%s)",
@@ -549,6 +642,301 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 			type: "TEST_CONNECT_OK",
 			hostId: "saved-host",
 			platform: expect.objectContaining({ system: "Linux armv7l", agent: "unsupported" }),
+		});
+	});
+
+	// What this machine's known_hosts says about the key, read as a session
+	// reads it, and `[ssh] trust_known_hosts` applied as a session applies it
+	// (#1217).
+	describe("reads known_hosts as a session does", () => {
+		const CACHED_OTHER = "SHA256:cached-other";
+		const fingerprint = fingerprintOfPem(HOST_KEY);
+
+		afterEach(() => {
+			vi.mocked(readUserKnownHosts).mockReset();
+		});
+
+		it.each([
+			["known_hosts", "", 1],
+			["known_hosts2", "# a comment\n", 2],
+		] as const)("says known_hosts already trusts the key (%s)", async (file, before, line) => {
+			const mock = await sshServer();
+			server = mock.server;
+			const { client, mgr } = setup();
+
+			await withKnownHosts({ [file]: before + keyLine(HOST_KEY, "127.0.0.1", mock.port) }, (ssh) =>
+				runTest(mgr, client, testMessage("new-host", mock.port), (first) => {
+					expect(first).toMatchObject({
+						type: "HOST_VERIFY",
+						firstConnect: true,
+						knownHosts: { verdict: "trusted", file: join(ssh, file), line },
+					});
+				}),
+			);
+		});
+
+		it("warns that known_hosts holds another key", async () => {
+			const mock = await sshServer();
+			server = mock.server;
+			const { client, mgr } = setup();
+
+			await withKnownHosts({ known_hosts: keyLine(CLIENT_KEY, "127.0.0.1", mock.port) }, (ssh) =>
+				runTest(mgr, client, testMessage("new-host", mock.port), (first) => {
+					expect(first).toMatchObject({
+						type: "HOST_VERIFY",
+						knownHosts: { verdict: "other-key", file: join(ssh, "known_hosts"), line: 1 },
+					});
+				}),
+			);
+		});
+
+		// message-alias: a New Host test of a picked ~/.ssh/config entry. mixed:
+		// the address lists another key, the alias the offered one. saved-alias:
+		// the saved host's own alias on its saved route. edited-route: the saved
+		// alias no longer applies once the address is edited (#1037).
+		it.each([
+			{
+				name: "message-alias",
+				saved: undefined,
+				alias: "alias",
+				lines: (port: number) => keyLine(HOST_KEY, "alias", port),
+				expected: { verdict: "trusted", line: 1 },
+			},
+			{
+				name: "mixed",
+				saved: undefined,
+				alias: "alias",
+				lines: (port: number) =>
+					keyLine(CLIENT_KEY, "127.0.0.1", port) + keyLine(HOST_KEY, "alias", port),
+				expected: { verdict: "trusted", line: 2 },
+			},
+			{
+				name: "saved-alias",
+				saved: "127.0.0.1",
+				alias: undefined,
+				lines: (port: number) => keyLine(HOST_KEY, "alias", port),
+				expected: { verdict: "trusted", line: 1 },
+			},
+			{
+				name: "edited-route",
+				saved: "127.0.0.2",
+				alias: undefined,
+				lines: (port: number) => keyLine(HOST_KEY, "alias", port),
+				expected: undefined,
+			},
+		])("finds the key under the ~/.ssh/config alias ($name)", async (row) => {
+			const mock = await sshServer();
+			server = mock.server;
+			const { client, mgr, updateHostFingerprint } = setup(
+				row.saved === undefined
+					? undefined
+					: {
+							type: "ssh",
+							sshHost: row.saved,
+							sshPort: mock.port,
+							sshConfigHost: "alias",
+							fingerprint: null,
+						},
+				{ trustKnownHosts: row.expected === undefined },
+			);
+			const hostId = row.saved === undefined ? "new-host" : "saved-host";
+			const message: TestConnectMessage = {
+				...testMessage(hostId, mock.port),
+				...(row.alias ? { sshConfigHost: row.alias } : {}),
+			};
+
+			await withKnownHosts({ known_hosts: row.lines(mock.port) }, (ssh) =>
+				runTest(mgr, client, message, (first) => {
+					expect(first).toMatchObject({ type: "HOST_VERIFY", firstConnect: true });
+					if (row.expected === undefined) expect(first).not.toHaveProperty("knownHosts");
+					else
+						expect(first.knownHosts).toEqual({
+							verdict: row.expected.verdict,
+							file: join(ssh, "known_hosts"),
+							line: row.expected.line,
+						});
+				}),
+			);
+			expect(updateHostFingerprint).not.toHaveBeenCalled();
+		});
+
+		// Accepted without asking, as a session accepts it, and recorded nowhere:
+		// the run-long cache is keyed by route, and a session takes a key cached
+		// there over another saved host's pin.
+		it.each([
+			{ hostId: "new-host", saved: undefined },
+			{ hostId: "saved-host", saved: "127.0.0.2" },
+		])(
+			"accepts a key known_hosts trusts without asking ($hostId, saved at $saved)",
+			async (row) => {
+				const mock = await sshServer();
+				server = mock.server;
+				const { ctx, client, mgr, updateHostFingerprint } = setup(
+					row.saved === undefined
+						? undefined
+						: { type: "ssh", sshHost: row.saved, sshPort: mock.port, fingerprint: null },
+					{ trustKnownHosts: true },
+				);
+				const message = testMessage(row.hostId, mock.port);
+				ctx.trustedOnceFingerprints.set(testedRoute(message, ctx), CACHED_OTHER);
+				const cacheBefore = new Map(ctx.trustedOnceFingerprints);
+				const cacheWrite = vi.spyOn(ctx.trustedOnceFingerprints, "set");
+
+				await withKnownHosts({ known_hosts: keyLine(HOST_KEY, "127.0.0.1", mock.port) }, () =>
+					runTest(mgr, client, message, (first) => {
+						expect(first).toEqual({ type: "TEST_CONNECT_OK", hostId: row.hostId });
+					}),
+				);
+
+				expect(mock.auth.attempts, "the test never connected").toBeGreaterThan(0);
+				expect(updateHostFingerprint).not.toHaveBeenCalled();
+				expect(cacheWrite).not.toHaveBeenCalled();
+				expect(ctx.trustedOnceFingerprints).toEqual(cacheBefore);
+			},
+		);
+
+		// The setting is read when the key is decided on, not when the test
+		// starts: it changes here as the dial reaches the server.
+		it.each([
+			[true, false],
+			[false, true],
+		])("reads trust_known_hosts when it decides (%s to %s)", async (from, to) => {
+			const sshConfig = { trustKnownHosts: from };
+			const mock = await sshServer(undefined, undefined, (connections) => {
+				if (connections === 1) sshConfig.trustKnownHosts = to;
+			});
+			server = mock.server;
+			const { client, mgr } = setup(undefined, sshConfig);
+
+			await withKnownHosts({ known_hosts: keyLine(HOST_KEY, "127.0.0.1", mock.port) }, () =>
+				runTest(mgr, client, testMessage("new-host", mock.port), (first) => {
+					if (to) expect(first).toEqual({ type: "TEST_CONNECT_OK", hostId: "new-host" });
+					else
+						expect(first).toMatchObject({
+							type: "HOST_VERIFY",
+							knownHosts: { verdict: "trusted" },
+						});
+				}),
+			);
+			if (to) expect(mock.auth.attempts).toBeGreaterThan(0);
+		});
+
+		// On the saved host's own route the key is pinned, as a session pins it,
+		// unless a pin appeared meanwhile: that one is never replaced here.
+		it.each([
+			{ name: "saved-host", meanwhile: undefined, writes: true, ok: true },
+			{ name: "same-meanwhile", meanwhile: fingerprint, writes: true, ok: true },
+			{ name: "refused", meanwhile: undefined, writes: false, ok: false },
+			{ name: "pinned-meanwhile", meanwhile: "SHA256:pinned-meanwhile", writes: true, ok: false },
+		])("pins a key known_hosts trusts on the saved host's route ($name)", async (row) => {
+			let saved: SavedHost | undefined;
+			const mock = await sshServer(undefined, undefined, (connections) => {
+				if (connections === 1 && saved && row.meanwhile) saved.fingerprint = row.meanwhile;
+			});
+			server = mock.server;
+			saved = { type: "ssh", sshHost: "127.0.0.1", sshPort: mock.port, fingerprint: null };
+			const { ctx, client, mgr, updateHostFingerprint } = setup(saved, { trustKnownHosts: true });
+			updateHostFingerprint.mockReturnValue(row.writes);
+			const message = testMessage("saved-host", mock.port);
+			const route = testedRoute(message, ctx);
+			ctx.trustedOnceFingerprints.set(route, CACHED_OTHER);
+			const cacheBefore = new Map(ctx.trustedOnceFingerprints);
+
+			await withKnownHosts({ known_hosts: keyLine(HOST_KEY, "127.0.0.1", mock.port) }, () =>
+				runTest(mgr, client, message, (first) => {
+					expect(first).toEqual(
+						row.ok
+							? { type: "TEST_CONNECT_OK", hostId: "saved-host" }
+							: {
+									type: "TEST_CONNECT_FAIL",
+									hostId: "saved-host",
+									message: "The host changed while connecting. Connect again.",
+								},
+					);
+				}),
+			);
+
+			if (row.ok) expect(mock.auth.attempts).toBeGreaterThan(0);
+			else expect(mock.auth.attempts).toBe(0);
+			if (row.name === "pinned-meanwhile") expect(updateHostFingerprint).not.toHaveBeenCalled();
+			if (row.name === "saved-host") {
+				expect(updateHostFingerprint).toHaveBeenCalledTimes(1);
+				expect(updateHostFingerprint).toHaveBeenCalledWith("saved-host", fingerprint, route);
+			}
+			expect(ctx.trustedOnceFingerprints).toEqual(cacheBefore);
+		});
+
+		it("still asks about a key known_hosts does not hold, under trust_known_hosts", async () => {
+			const mock = await sshServer();
+			server = mock.server;
+			const { client, mgr } = setup(undefined, { trustKnownHosts: true });
+
+			await withKnownHosts({ known_hosts: keyLine(CLIENT_KEY, "127.0.0.1", mock.port) }, () =>
+				runTest(mgr, client, testMessage("new-host", mock.port), (first) => {
+					expect(first).toMatchObject({
+						type: "HOST_VERIFY",
+						knownHosts: { verdict: "other-key" },
+					});
+				}),
+			);
+			expect(mock.auth.attempts).toBe(0);
+		});
+
+		it("still asks when the key changed under a pin, under trust_known_hosts", async () => {
+			const mock = await sshServer();
+			server = mock.server;
+			const { client, mgr, updateHostFingerprint } = setup(
+				{
+					type: "ssh",
+					sshHost: "127.0.0.1",
+					sshPort: mock.port,
+					fingerprint: "SHA256:pinned-other",
+				},
+				{ trustKnownHosts: true },
+			);
+
+			await withKnownHosts({ known_hosts: keyLine(HOST_KEY, "127.0.0.1", mock.port) }, () =>
+				runTest(mgr, client, testMessage("saved-host", mock.port), (first) => {
+					expect(first).toMatchObject({
+						type: "HOST_VERIFY",
+						oldFingerprint: "SHA256:pinned-other",
+						knownHosts: { verdict: "trusted" },
+					});
+					expect(first).not.toHaveProperty("firstConnect");
+				}),
+			);
+			expect(updateHostFingerprint).not.toHaveBeenCalled();
+		});
+
+		// A revocation the read that decides sees, though the attempt's own read
+		// did not: a file that changed, or became readable, in between.
+		it("refuses a key found revoked when it decides", async () => {
+			const mock = await sshServer();
+			server = mock.server;
+			const { ctx, client, mgr, updateHostFingerprint } = setup(
+				{ type: "ssh", sshHost: "127.0.0.1", sshPort: mock.port, fingerprint: null },
+				{ trustKnownHosts: true },
+			);
+			const message = testMessage("saved-host", mock.port);
+			ctx.trustedOnceFingerprints.set(testedRoute(message, ctx), CACHED_OTHER);
+			const cacheBefore = new Map(ctx.trustedOnceFingerprints);
+
+			await withKnownHosts({}, async (ssh) => {
+				const file = join(ssh, "known_hosts");
+				vi.mocked(readUserKnownHosts).mockReturnValueOnce([
+					{ file, contents: keyLine(HOST_KEY, "127.0.0.1", mock.port, "@revoked ") },
+				]);
+				await runTest(mgr, client, message, (first) => {
+					expect(first).toEqual({
+						type: "TEST_CONNECT_FAIL",
+						hostId: "saved-host",
+						message: `This host's key is marked @revoked in ${file}:1. Refusing to connect.`,
+					});
+				});
+			});
+			expect(mock.auth.attempts).toBe(0);
+			expect(updateHostFingerprint).not.toHaveBeenCalled();
+			expect(ctx.trustedOnceFingerprints).toEqual(cacheBefore);
 		});
 	});
 });

@@ -4235,6 +4235,67 @@ export class SessionManager {
 			console.error(`[lasterm-ssh] skipped jump pin for host ${jump.pinTo.hostId}`);
 	}
 
+	/**
+	 * Asks about a remote agent binary nobody here has approved, and gives back
+	 * its hash once it is trusted, recorded as the answer says. The connection
+	 * that found the binary is already closed — the deploy handed it back instead
+	 * of asking from inside it — so the question is asked with nothing of ours
+	 * open on that machine, for as long as it takes to answer (#444).
+	 *
+	 * Throws when the binary is refused, said to the client as such, and when the
+	 * connection was given up while the question was open.
+	 */
+	private async _askAboutAgentBinary(
+		found: AgentBinaryDecisionNeeded,
+		hostId: string,
+		client: WsClient,
+		sessionId: string,
+		signal?: AbortSignal,
+		ownerAcqId?: string,
+	): Promise<string> {
+		const action = await this.sshMgr.buildBinaryVerifyPrompt(client, ownerAcqId)(
+			found.hostId,
+			found.hostname,
+			found.remotePath,
+			found.remoteSha256,
+			found.os,
+			found.arch,
+			found.mismatch,
+			found.pinnedSha256,
+		);
+		// Cancelled, as a Disconnect does: the question was withdrawn, and
+		// whoever started this answers it (#1034).
+		if (action === "reject" && signal?.aborted) {
+			throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
+		}
+		if (action === "reject") {
+			const message = `Remote agent binary at ${found.remotePath} (sha256: ${found.remoteSha256}) was refused.`;
+			client.send({
+				type: "ERROR",
+				code: "AGENT_BINARY_REJECTED",
+				message,
+				hostId,
+			} satisfies ErrorMessage);
+			throw new DeployError("AGENT_BINARY_REJECTED", message);
+		}
+		if (action === "trust_permanent") {
+			this.ctx.metaDal.updateHostAgentSha256(hostId, found.remoteSha256);
+		} else {
+			this.ctx.trustedAgentSha256.set(hostId, found.remoteSha256);
+		}
+		// The answer was about the binary that was shown. The attempt that
+		// resumes compares what it finds against that hash, and asks again
+		// if the remote binary changed while the question was open.
+		if (
+			this.hostIsBeingStopped(hostId) ||
+			signal?.aborted ||
+			this.ctx.sessions.get(hostId)?.id !== sessionId
+		) {
+			throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
+		}
+		return found.remoteSha256;
+	}
+
 	private async _connectSshAgent(
 		hostId: string,
 		host: import("@lasterm/shared").Host,
@@ -4311,51 +4372,17 @@ export class SessionManager {
 		} catch (err) {
 			console.error(`[lasterm-ssh] SSH error: ${err instanceof Error ? err.message : String(err)}`);
 
-			// A remote binary nobody here has approved. The connection that found
-			// it is already closed — the deploy handed this back instead of asking
-			// from inside it — so the question is asked with nothing of ours open
-			// on that machine, for as long as it takes to answer (#444).
+			// A remote binary nobody here has approved: asked about, then dialled
+			// again with the hash that was approved (#444).
 			if (err instanceof AgentBinaryDecisionNeeded) {
-				const action = await this.sshMgr.buildBinaryVerifyPrompt(client, ownerAcqId)(
-					err.hostId,
-					err.hostname,
-					err.remotePath,
-					err.remoteSha256,
-					err.os,
-					err.arch,
-					err.mismatch,
-					err.pinnedSha256,
+				const approvedSha = await this._askAboutAgentBinary(
+					err,
+					hostId,
+					client,
+					sessionId,
+					signal,
+					ownerAcqId,
 				);
-				// Cancelled, as a Disconnect does: the question was withdrawn, and
-				// whoever started this answers it (#1034).
-				if (action === "reject" && signal?.aborted) {
-					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
-				}
-				if (action === "reject") {
-					const message = `Remote agent binary at ${err.remotePath} (sha256: ${err.remoteSha256}) was refused.`;
-					client.send({
-						type: "ERROR",
-						code: "AGENT_BINARY_REJECTED",
-						message,
-						hostId,
-					} satisfies ErrorMessage);
-					throw new DeployError("AGENT_BINARY_REJECTED", message);
-				}
-				if (action === "trust_permanent") {
-					this.ctx.metaDal.updateHostAgentSha256(hostId, err.remoteSha256);
-				} else {
-					this.ctx.trustedAgentSha256.set(hostId, err.remoteSha256);
-				}
-				// The answer was about the binary that was shown. The attempt that
-				// resumes compares what it finds against that hash, and asks again
-				// if the remote binary changed while the question was open.
-				if (
-					this.hostIsBeingStopped(hostId) ||
-					signal?.aborted ||
-					this.ctx.sessions.get(hostId)?.id !== sessionId
-				) {
-					throw Object.assign(new Error("SSH connect aborted"), { name: "AbortError" });
-				}
 				return await this._connectSshAgent(
 					hostId,
 					host,
@@ -4363,7 +4390,7 @@ export class SessionManager {
 					sessionId,
 					signal,
 					ownerAcqId,
-					err.remoteSha256,
+					approvedSha,
 					daemonOnly,
 				);
 			}
@@ -4478,55 +4505,76 @@ export class SessionManager {
 				// The same agent as the first attempt, daemon included: built without
 				// it, a host reached for the first time — which is when a key is
 				// confirmed — ran on stdio whatever its setting said.
-				const retryAgent = new SshAgent(
-					host,
-					promptAuth,
-					deployOpts,
-					agentLaunchConfig(this.ctx),
-					hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
-					daemonOnly,
-				);
-				console.error(`[lasterm-ssh] creating SshAgent for host ${host.id} (retry)`);
-				console.error(
-					`[lasterm-ssh] starting SSH connection to ${host.sshHost ?? host.label} (retry)`,
-				);
-				try {
-					console.error("[lasterm-ssh] deploying agent...");
-					// Through the same jump: the key just confirmed was seen through
-					// it, and a host behind a bastion is reached no other way.
-					await retryAgent.start(
-						action === "trust_permanent" ? retryFp : null,
-						action === "trust_once" ? retryFp : undefined,
-						signal,
-						resolvedJump,
+				const dialWithAnsweredKey = async (
+					retryDeployOpts: SshAgentDeployOptions,
+				): Promise<SshAgent> => {
+					const agent = new SshAgent(
+						host,
+						promptAuth,
+						retryDeployOpts,
+						agentLaunchConfig(this.ctx),
+						hostKeepsDaemon(host, this.ctx.configResolver?.sshConfig?.remoteDaemon === true),
+						daemonOnly,
 					);
-					this.pinJumpKey(resolvedJump, retryAgent, hostKey);
-					console.error("[lasterm-ssh] agent deployed, exec starting");
-					console.error("[lasterm-ssh] SSH connection established");
-				} catch (retryErr) {
+					console.error(`[lasterm-ssh] creating SshAgent for host ${host.id} (retry)`);
 					console.error(
-						`[lasterm-ssh] SSH error: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
+						`[lasterm-ssh] starting SSH connection to ${host.sshHost ?? host.label} (retry)`,
 					);
-					// Aborted during retry — don't send an error to the client.
-					if (signal?.aborted) {
-						throw retryErr instanceof Error ? retryErr : new Error("SSH connect aborted");
+					try {
+						console.error("[lasterm-ssh] deploying agent...");
+						// Through the same jump: the key just confirmed was seen through
+						// it, and a host behind a bastion is reached no other way.
+						await agent.start(
+							action === "trust_permanent" ? retryFp : null,
+							action === "trust_once" ? retryFp : undefined,
+							signal,
+							resolvedJump,
+						);
+						this.pinJumpKey(resolvedJump, agent, hostKey);
+						console.error("[lasterm-ssh] agent deployed, exec starting");
+						console.error("[lasterm-ssh] SSH connection established");
+						return agent;
+					} catch (retryErr) {
+						console.error(
+							`[lasterm-ssh] SSH error: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
+						);
+						// Aborted during retry — don't send an error to the client.
+						if (signal?.aborted) {
+							throw retryErr instanceof Error ? retryErr : new Error("SSH connect aborted");
+						}
+						// The key is asked about on the first dial, so this one is the
+						// first to see the host's agent binary: it is asked about as a
+						// first dial asks, and the next dial carries the key just
+						// answered and the hash approved, with no key question (#1231).
+						if (retryErr instanceof AgentBinaryDecisionNeeded) {
+							const approvedSha = await this._askAboutAgentBinary(
+								retryErr,
+								hostId,
+								client,
+								sessionId,
+								signal,
+								ownerAcqId,
+							);
+							return await dialWithAnsweredKey(this._buildDeployOpts(hostId, host, approvedSha));
+						}
+						if (retryErr instanceof DeployError) {
+							client.send({
+								type: "ERROR",
+								code: retryErr.code,
+								message: retryErr.message,
+								hostId,
+							} satisfies ErrorMessage);
+						} else {
+							client.send({
+								type: "ERROR",
+								code: sshConnectErrorCode(retryErr),
+								message: retryErr instanceof Error ? retryErr.message : "SSH connection failed",
+							} satisfies ErrorMessage);
+						}
+						throw retryErr instanceof Error ? retryErr : new Error("SSH connection failed");
 					}
-					if (retryErr instanceof DeployError) {
-						client.send({
-							type: "ERROR",
-							code: retryErr.code,
-							message: retryErr.message,
-							hostId,
-						} satisfies ErrorMessage);
-					} else {
-						client.send({
-							type: "ERROR",
-							code: sshConnectErrorCode(retryErr),
-							message: retryErr instanceof Error ? retryErr.message : "SSH connection failed",
-						} satisfies ErrorMessage);
-					}
-					throw retryErr instanceof Error ? retryErr : new Error("SSH connection failed");
-				}
+				};
+				const retryAgent = await dialWithAnsweredKey(deployOpts);
 				// Session-currency guard: verify the session is still the one we started.
 				// An abort racing the final wiring could revive a closed session without this.
 				if (

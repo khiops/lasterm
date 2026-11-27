@@ -8246,6 +8246,167 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 		expect(connecting(received)).toEqual([{ type: "HOST_CONNECTING", hostId, requestId: "r-bin" }]);
 	});
 
+	// ── #1231: the dial that follows a host-key answer asks about the agent binary too ──
+	//
+	// The key is asked about on the first dial, so the binary is first seen by the
+	// second: it is asked about there as on a first dial, and the dial after it
+	// carries both answers.
+
+	/** A dial that finds an agent binary nobody approved. */
+	const unapprovedBinary = (hostId: string, remoteSha256: string) => () =>
+		Promise.reject(
+			new AgentBinaryDecisionNeeded({
+				hostId,
+				hostname: "concurrent-test",
+				remotePath: "/home/user/.local/bin/lasterm-agent",
+				remoteSha256,
+				os: "linux",
+				arch: "x64",
+				mismatch: false,
+			}),
+		);
+
+	/** The question of one kind a client was asked last, once `count` of them were. */
+	const asked = (received: ProtocolMessage[], type: string, count = 1) =>
+		vi.waitFor(() => {
+			const questions = received.filter((m) => m.type === type);
+			if (questions.length < count) throw new Error(`${type} not asked yet`);
+			return questions[count - 1] as unknown as { promptId: string; remoteSha256?: string };
+		});
+
+	/** What the nth dial was built and started with. */
+	const dial = (n: number) => {
+		const built = vi.mocked(_SshAgentForMock).mock;
+		const options = built.calls[n - 1]?.[2] as { approvedSha256?: string } | undefined;
+		const agent = built.results[n - 1]?.value as MockSshAgent | undefined;
+		return {
+			approvedSha256: options?.approvedSha256,
+			key: (agent?.start.mock.calls[0] as unknown[] | undefined)?.slice(0, 2),
+		};
+	};
+
+	it("asks about an agent binary the dial after a host-key answer finds (#1231)", async () => {
+		const hostId = await createSshHost();
+		const sha = "ab".repeat(32);
+		nextSshAgent(() => Promise.reject(new Error("SSH_TOFU")), true);
+		nextSshAgent(unapprovedBinary(hostId, sha));
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1231", received));
+
+		const spawn = sm.handleSpawn("c-1231", { type: "SPAWN", hostId, requestId: "r-1231" });
+		sm.handleHostVerifyResponse(
+			(await asked(received, "HOST_VERIFY")).promptId,
+			"trust_once",
+			"c-1231",
+		);
+		sm.handleAgentVerifyResponse(
+			(await asked(received, "AGENT_BINARY_VERIFY")).promptId,
+			"trust_once",
+			"c-1231",
+		);
+
+		expect(await spawn).not.toBeNull();
+		// Three dials: refused at the key, then at the binary, then through with both answers.
+		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(3);
+		expect(dial(3)).toEqual({ approvedSha256: sha, key: [null, "SHA256:mockfp"] });
+		expect(received.filter((m) => m.type === "HOST_VERIFY")).toHaveLength(1);
+		expect(received.filter((m) => m.type === "ERROR")).toEqual([]);
+	});
+
+	it("asks again when the binary changed under the question, keeping a pinned key (#1231)", async () => {
+		const hostId = await createSshHost();
+		const first = "ab".repeat(32);
+		const second = "cd".repeat(32);
+		nextSshAgent(() => Promise.reject(new Error("SSH_TOFU")), true);
+		nextSshAgent(unapprovedBinary(hostId, first));
+		nextSshAgent(unapprovedBinary(hostId, second));
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1231-again", received));
+
+		const spawn = sm.handleSpawn("c-1231-again", { type: "SPAWN", hostId, requestId: "r-again" });
+		sm.handleHostVerifyResponse(
+			(await asked(received, "HOST_VERIFY")).promptId,
+			"trust_permanent",
+			"c-1231-again",
+		);
+		sm.handleAgentVerifyResponse(
+			(await asked(received, "AGENT_BINARY_VERIFY")).promptId,
+			"trust_permanent",
+			"c-1231-again",
+		);
+		const again = await asked(received, "AGENT_BINARY_VERIFY", 2);
+		expect(again.remoteSha256).toBe(second);
+		sm.handleAgentVerifyResponse(again.promptId, "trust_once", "c-1231-again");
+
+		expect(await spawn).not.toBeNull();
+		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(4);
+		expect(dial(3)).toEqual({ approvedSha256: first, key: ["SHA256:mockfp", undefined] });
+		expect(dial(4)).toEqual({ approvedSha256: second, key: ["SHA256:mockfp", undefined] });
+		expect(received.filter((m) => m.type === "HOST_VERIFY")).toHaveLength(1);
+		const { MetaDAL } = await import("../storage/meta.js");
+		expect(new MetaDAL(dbManager.meta).getHostAgentSha256(hostId)).toBe(first);
+	});
+
+	it("says an agent binary refused after a host-key answer was refused (#1231)", async () => {
+		const hostId = await createSshHost();
+		const sha = "ab".repeat(32);
+		nextSshAgent(() => Promise.reject(new Error("SSH_TOFU")), true);
+		nextSshAgent(unapprovedBinary(hostId, sha));
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1231-no", received));
+
+		const spawn = sm.handleSpawn("c-1231-no", { type: "SPAWN", hostId, requestId: "r-no" });
+		sm.handleHostVerifyResponse(
+			(await asked(received, "HOST_VERIFY")).promptId,
+			"trust_once",
+			"c-1231-no",
+		);
+		sm.handleAgentVerifyResponse(
+			(await asked(received, "AGENT_BINARY_VERIFY")).promptId,
+			"reject",
+			"c-1231-no",
+		);
+
+		expect(await spawn).toBeNull();
+		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(2);
+		expect(received.filter((m) => m.type === "ERROR")).toContainEqual(
+			expect.objectContaining({
+				type: "ERROR",
+				code: "AGENT_BINARY_REJECTED",
+				hostId,
+				message: `Remote agent binary at /home/user/.local/bin/lasterm-agent (sha256: ${sha}) was refused.`,
+			}),
+		);
+	});
+
+	it("answers a spawn disconnected during that binary question as disconnected (#1231)", async () => {
+		const hostId = await createSshHost();
+		nextSshAgent(() => Promise.reject(new Error("SSH_TOFU")), true);
+		nextSshAgent(unapprovedBinary(hostId, "ab".repeat(32)));
+		const received: ProtocolMessage[] = [];
+		sm.addClient(makeClient("c-1231-gone", received));
+
+		const spawn = sm.handleSpawn("c-1231-gone", { type: "SPAWN", hostId, requestId: "r-gone" });
+		sm.handleHostVerifyResponse(
+			(await asked(received, "HOST_VERIFY")).promptId,
+			"trust_once",
+			"c-1231-gone",
+		);
+		await asked(received, "AGENT_BINARY_VERIFY");
+		sm.disconnectHost(hostId);
+
+		expect(await spawn).toBeNull();
+		expect(vi.mocked(_SshAgentForMock).mock.calls).toHaveLength(2);
+		expect(received.filter((m) => m.type === "ERROR")).toEqual([
+			expect.objectContaining({
+				type: "ERROR",
+				hostId,
+				requestId: "r-gone",
+				message: "concurrent-ssh is disconnected. Connect it to start its terminals.",
+			}),
+		]);
+	});
+
 	it("answers a spawn disconnected during its host-key question as disconnected (#1034)", async () => {
 		const hostId = await createSshHost();
 		nextSshAgent(() => Promise.reject(new Error("SSH_TOFU")), true);

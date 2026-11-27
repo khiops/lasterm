@@ -452,7 +452,7 @@ const parent = computed(() =>
 	shownPath.value === null ? null : parentPath(shownPath.value, style.value),
 );
 
-/** Why Follow cannot work for this terminal for now, known before it reports a directory (#1196). */
+/** Why Follow cannot work for this terminal for now: nothing it can report yet, or a session on another host (#1196). */
 const block = computed(() =>
 	followBlock({
 		live: live.value,

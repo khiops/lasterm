@@ -361,6 +361,30 @@ describe("Follow where the directory cannot be known (#1196)", () => {
 		expect(followToggle().textContent?.trim()).toBe("Following");
 	});
 
+	it("is disabled while the terminal is in a session on another host, and follows again after it", async () => {
+		const store = useFilesPanelStore();
+		store.takeCwd({ channelId: A, cwd: null, source: "shell", otherHost: "db01" });
+		mountBrowser({ agentUpdatable: false, hostOs: "linux", shell: "bash" });
+		await settle();
+		expect(followToggle().disabled).toBe(true);
+		expect(followToggle().getAttribute("aria-pressed")).toBe("false");
+		expect(followToggle().textContent?.trim()).toBe("Follow");
+		expect(hint()).toBe(
+			"This terminal is in a session on another host, and Lasterm follows directories on raspberrypi only. Follow works again when that session ends",
+		);
+		const described = root.querySelector(`#${followToggle().getAttribute("aria-describedby")}`);
+		expect(described?.textContent).toBe(hint());
+		expect(status()).toContain("This terminal shows db01; these are the files of raspberrypi");
+		// The terminal's preference is kept for when the session ends.
+		expect(store.terminalFiles(A, true).following).toBe(true);
+		store.takeCwd({ channelId: A, cwd: "/home/pi/src", source: "shell" });
+		await settle();
+		expect(followToggle().disabled).toBe(false);
+		expect(followToggle().getAttribute("aria-pressed")).toBe("true");
+		expect(followToggle().textContent?.trim()).toBe("Following");
+		expect(lastListed()).toEqual([A, "/home/pi/src", false]);
+	});
+
 	it("stays enabled for cmd on a Windows host whose directory is null for a moment", async () => {
 		useFilesPanelStore().takeCwd(unknown);
 		mountBrowser({ agentUpdatable: false, hostOs: "windows", shell: "cmd.exe" });

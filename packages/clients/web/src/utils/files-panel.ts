@@ -665,11 +665,12 @@ export function statusLines(facts: StatusFacts): StatusLine[] {
 // ─── Where Follow cannot work (#1196) ────────────────────────────────────────
 
 /**
- * Why following cannot work for a terminal, known before it reports anything: `agent`, an agent
+ * Why following cannot work for a terminal. Known before it reports anything: `agent`, an agent
  * too old to report directories; `powershell`, `wsl` and `unread`, a program whose directory the
- * agent does not read, so that it must report it itself.
+ * agent does not read, so that it must report it itself. Known from what it reported: `nested`, a
+ * session on another host, whose directories are not this host's.
  */
-export type FollowBlock = "agent" | "powershell" | "wsl" | "unread";
+export type FollowBlock = "agent" | "powershell" | "wsl" | "unread" | "nested";
 
 export interface FollowFacts {
 	/** What the hub last said of the terminal's directory; undefined when nothing ever did. */
@@ -682,17 +683,18 @@ export interface FollowFacts {
 }
 
 /**
- * Why Follow is disabled, or null when it works or may work soon. Only a reason known up front
- * disables it: an older agent that never said a directory, or a program the agent does not read
+ * Why Follow is disabled, or null when it works or may work soon. Only a reason that lasts
+ * disables it: an older agent that never said a directory; a program the agent does not read
  * (PowerShell anywhere; on a Windows host anything but cmd, WSL first) that has reported no
- * directory yet. A terminal that has a directory, read or reported (OSC 7, 9;9, 633, 1337), or
- * that a nested session moved to another host, is followed; a program the agent reads whose
- * directory is null for the moment (before its first read, a deleted folder, an elevated shell)
- * never disables it.
+ * directory yet; or a session nested on another host, for as long as the terminal reports that
+ * host. A terminal that has a directory, read or reported (OSC 7, 9;9, 633, 1337), is followed; a
+ * program the agent reads whose directory is null for the moment (before its first read, a
+ * deleted folder, an elevated shell) never disables it.
  */
 export function followBlock(facts: FollowFacts): FollowBlock | null {
 	const live = facts.live;
-	if (live !== undefined && (live.cwd !== null || live.otherHost !== undefined)) return null;
+	if (live?.otherHost !== undefined) return "nested";
+	if (live !== undefined && live.cwd !== null) return null;
 	if (live === undefined && facts.agentUpdatable) return "agent";
 	const program = facts.program?.trim();
 	if (program === undefined || program === "") return null;
@@ -713,6 +715,8 @@ export function followBlockText(block: FollowBlock, hostLabel: string): string {
 			return "WSL does not tell other programs its directory. Have its prompt report it as a Windows path (OSC 9;9, with wslpath -w) to follow it: see the README, Following PowerShell's directory";
 		case "unread":
 			return "Lasterm does not read this program's directory. Follow works once the program reports it (OSC 7 or OSC 9;9)";
+		case "nested":
+			return `This terminal is in a session on another host, and Lasterm follows directories on ${hostLabel} only. Follow works again when that session ends`;
 	}
 }
 

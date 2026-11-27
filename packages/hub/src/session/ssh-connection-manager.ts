@@ -58,6 +58,8 @@ import {
 	agentLaunchConfig,
 	type PromptContext,
 	type SharedSessionContext,
+	trustedOnceFor,
+	trustOnce,
 } from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
 import {
@@ -592,7 +594,9 @@ export class SshConnectionManager {
 				const hostKey = targetRoute(host, (id) => sshAddress(this.ctx.metaDal.getHost(id)));
 				const storedFp = this.ctx.metaDal.getHostFingerprint(hostId, hostKey);
 				const sessionFp =
-					hostKey === null ? undefined : this.ctx.trustedOnceFingerprints.get(hostKey);
+					hostKey === null
+						? undefined
+						: trustedOnceFor(this.ctx.trustedOnceFingerprints, hostId, hostKey);
 
 				// Thread the abort signal into start() so closeSession() can cancel mid-handshake.
 				await sshAgent.start(
@@ -902,7 +906,9 @@ export class SshConnectionManager {
 		const trusted = new Set<string>();
 		if (storedFingerprint) trusted.add(storedFingerprint);
 		const sessionTrusted =
-			hostKey === null ? undefined : this.ctx.trustedOnceFingerprints.get(hostKey);
+			hostKey === null
+				? undefined
+				: trustedOnceFor(this.ctx.trustedOnceFingerprints, msg.hostId, hostKey);
 		if (sessionTrusted) trusted.add(sessionTrusted);
 
 		const first = await attempt(trusted);
@@ -931,8 +937,8 @@ export class SshConnectionManager {
 			// Trusted there, and the person has said that is reason enough: accepted
 			// without asking, as a session accepts it. Pinned on the saved host's own
 			// route only, never over a pin written meanwhile. Elsewhere it lets this
-			// retry through and is kept nowhere: the run-long cache is keyed by route,
-			// and a session takes a key cached there over another saved host's pin.
+			// retry through and is kept nowhere, not even for this host and route in
+			// the run-long cache: a key nobody was asked about is never cached.
 			if (savedRoute) {
 				const pinned = this.ctx.metaDal.getHostFingerprint(msg.hostId, hostKey);
 				if (pinned !== null && pinned !== fingerprint) return hostChanged;
@@ -953,7 +959,7 @@ export class SshConnectionManager {
 				if (!this.ctx.metaDal.updateHostFingerprint(msg.hostId, fingerprint, hostKey))
 					return hostChanged;
 			} else if (hostKey !== null) {
-				this.ctx.trustedOnceFingerprints.set(hostKey, fingerprint);
+				trustOnce(this.ctx.trustedOnceFingerprints, msg.hostId, hostKey, fingerprint);
 			}
 		}
 

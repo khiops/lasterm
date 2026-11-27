@@ -206,6 +206,30 @@ export interface ChannelState {
 	restartFailed?: true;
 }
 
+/** Host id → target route → fingerprint trusted for this hub run. */
+export type TrustedOnceFingerprints = Map<string, Map<string, string>>;
+
+/** The key trusted once for this host on this route in this hub run, if any. */
+export function trustedOnceFor(
+	cache: TrustedOnceFingerprints,
+	hostId: string,
+	route: string,
+): string | undefined {
+	return cache.get(hostId)?.get(route);
+}
+
+/** Trust `fingerprint` for this host on this route for the rest of the hub run. */
+export function trustOnce(
+	cache: TrustedOnceFingerprints,
+	hostId: string,
+	route: string,
+	fingerprint: string,
+): void {
+	const routes = cache.get(hostId);
+	if (routes === undefined) cache.set(hostId, new Map([[route, fingerprint]]));
+	else routes.set(route, fingerprint);
+}
+
 export interface SessionState {
 	id: string;
 	hostId: string;
@@ -276,8 +300,13 @@ export interface SharedSessionContext {
 	channelClock: number;
 	/** requestId → callback for pending agent responses */
 	pendingRequests: Map<string, (msg: import("@lasterm/shared").ProtocolMessage) => void>;
-	/** Target route tuple → fingerprint trusted for this hub run (trust_once, not persisted). */
-	trustedOnceFingerprints: Map<string, string>;
+	/**
+	 * Host id → target route → fingerprint trusted for this hub run (trust_once,
+	 * not persisted). Kept per host: an answer about one saved host is never
+	 * trust for another on the same route (#1228). Read and written through
+	 * `trustedOnceFor` and `trustOnce`.
+	 */
+	trustedOnceFingerprints: TrustedOnceFingerprints;
 	/** Per-host SHA256 of agent binary trusted for this session only (trust_once). */
 	trustedAgentSha256: Map<string, string>;
 	/** channelId → timestamps of recent BELL messages (sliding window for rate limiting) */

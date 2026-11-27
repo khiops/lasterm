@@ -150,6 +150,55 @@ describe("useHostForm", () => {
 		expect(testResult.value).toEqual({ ok: false, message: "failed" });
 	});
 
+	// The hub keeps a key trusted once for the host id a test names (#1228): a
+	// saved host's tests name it, each test of a new host names one of its own.
+	it("tests an edited host under its id, and each test of a new host under a fresh one", async () => {
+		const editHost = {
+			id: "h1",
+			label: "myhost",
+			type: "ssh" as const,
+			sshHost: "10.0.0.1",
+			sshPort: 2222,
+			sshUser: "admin",
+			sshAuth: "password" as const,
+			sshKeyPath: "",
+			iconType: "auto" as const,
+			iconValue: "",
+			color: "",
+			hostGroup: "",
+			trustRemoteHints: "apply" as const,
+			sortOrder: 0,
+			os: null as null,
+			arch: null as null,
+			createdAt: "2026-01-01T00:00:00Z",
+			updatedAt: "2026-01-01T00:00:00Z",
+		};
+		const harness = testConnectionHarness();
+		const testedIds = () =>
+			testWsClient.send.mock.calls.map(([message]) => (message as { hostId: string }).hostId);
+
+		const edited = useHostForm(editHost);
+		for (const index of [0, 1]) {
+			const test = edited.testConnectionInline();
+			await harness.respondOk(index, "linux");
+			await test;
+		}
+		const created = useHostForm();
+		created.form.value.sshHost = "10.0.0.2";
+		created.form.value.sshAuth = "password";
+		for (const index of [2, 3]) {
+			const test = created.testConnectionInline();
+			await harness.respondOk(index, "linux");
+			await test;
+		}
+
+		const [firstEdit, secondEdit, firstNew, secondNew] = testedIds();
+		expect([firstEdit, secondEdit]).toEqual(["h1", "h1"]);
+		expect(firstNew).not.toBe("h1");
+		expect(secondNew).not.toBe("h1");
+		expect(firstNew).not.toBe(secondNew);
+	});
+
 	describe("SC-09: port placeholder behavior", () => {
 		it("new host form has undefined sshPort", () => {
 			const { form } = useHostForm();

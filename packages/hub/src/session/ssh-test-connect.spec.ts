@@ -8,7 +8,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, type Mock, vi } f
 import { readUserKnownHosts } from "../ssh/known-hosts.js";
 import { sshAddress, targetRoute } from "../ssh-route.js";
 import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
-import type { PromptContext, SharedSessionContext } from "./session-context.js";
+import {
+	type PromptContext,
+	type SharedSessionContext,
+	type TrustedOnceFingerprints,
+	trustedOnceFor,
+	trustOnce,
+} from "./session-context.js";
 import type { WsClient } from "./session-manager.js";
 import { attemptSshTest, SshConnectionManager } from "./ssh-connection-manager.js";
 import { probeTestConnectPlatform } from "./test-connect-platform.js";
@@ -123,9 +129,14 @@ type SavedHost = {
 	sshConfigHost?: string;
 };
 
-/** With `sshConfig`, the `[ssh]` settings the hub reads, which a test may change. */
-function setup(saved?: SavedHost, sshConfig?: { trustKnownHosts: boolean }) {
+/**
+ * With `sshConfig`, the `[ssh]` settings the hub reads, which a test may change.
+ * `other` is a second saved host, `other-host`, with a pin of its own (#1228).
+ */
+function setup(saved?: SavedHost, sshConfig?: { trustKnownHosts: boolean }, other?: SavedHost) {
 	const updateHostFingerprint = vi.fn().mockReturnValue(true);
+	const savedById = (id: string): SavedHost | undefined =>
+		id === "saved-host" ? saved : id === "other-host" ? other : undefined;
 	const ctx = {
 		...(sshConfig ? { configResolver: { sshConfig } } : {}),
 		passphraseCache: new Map(),
@@ -135,15 +146,18 @@ function setup(saved?: SavedHost, sshConfig?: { trustKnownHosts: boolean }) {
 		clients: new Map(),
 		channels: new Map() as SharedSessionContext["channels"],
 		acquisitions: new Map() as SharedSessionContext["acquisitions"],
-		trustedOnceFingerprints: new Map<string, string>(),
+		trustedOnceFingerprints: new Map() as TrustedOnceFingerprints,
 		metaDal: {
-			getHost: (id: string) => (saved && id === "saved-host" ? { id, ...saved } : undefined),
-			getHostFingerprint: (id: string, expectedRoute: string | null) =>
-				saved &&
-				id === "saved-host" &&
-				targetRoute({ id, ...saved }, () => undefined) === expectedRoute
-					? saved.fingerprint
-					: null,
+			getHost: (id: string) => {
+				const host = savedById(id);
+				return host ? { id, ...host } : undefined;
+			},
+			getHostFingerprint: (id: string, expectedRoute: string | null) => {
+				const host = savedById(id);
+				return host && targetRoute({ id, ...host }, () => undefined) === expectedRoute
+					? host.fingerprint
+					: null;
+			},
 			updateHostFingerprint,
 		},
 	};
@@ -167,9 +181,38 @@ function testedRoute(msg: TestConnectMessage, ctx?: ReturnType<typeof setup>["ct
 			sshPort: msg.port,
 			sshProxyHostId: msg.sshProxyHostId ?? null,
 			sshProxySpec: msg.sshProxySpec ?? null,
+			sshProxyPort: msg.sshProxyPort ?? null,
 		},
 		(id) => sshAddress(ctx?.metaDal.getHost(id)),
 	)!;
+}
+
+/** Trust `fingerprint` once for the message's host id on the route it tests. */
+function trustTested(
+	ctx: ReturnType<typeof setup>["ctx"],
+	msg: TestConnectMessage,
+	fingerprint: string,
+): void {
+	trustOnce(ctx.trustedOnceFingerprints, msg.hostId, testedRoute(msg, ctx), fingerprint);
+}
+
+/** The key trusted once for the message's host id on the route it tests. */
+function trustedTested(
+	ctx: ReturnType<typeof setup>["ctx"],
+	msg: TestConnectMessage,
+): string | undefined {
+	return trustedOnceFor(ctx.trustedOnceFingerprints, msg.hostId, testedRoute(msg, ctx));
+}
+
+/** Every entry of the run-long cache, copied: [host id, route, fingerprint]. */
+function cachedEntries(cache: TrustedOnceFingerprints): Array<[string, string, string]> {
+	return [...cache].flatMap(([hostId, routes]) =>
+		[...routes].map(([route, fingerprint]): [string, string, string] => [
+			hostId,
+			route,
+			fingerprint,
+		]),
+	);
 }
 
 function testMessage(hostId: string, port: number): TestConnectMessage {
@@ -312,8 +355,8 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 	});
 
 	// message-alias: the alias a New Host test carries for a picked ~/.ssh/config
-	// entry, on a host the hub has not saved; trusted-once, after a first test
-	// left its key trusted for the route (#1037).
+	// entry, on a host the hub has not saved; trusted-once, after an earlier test
+	// sent with the same id left its key trusted for its route (#1037, #1228).
 	it.each([
 		"address",
 		"saved-alias",
@@ -349,7 +392,7 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 				? { ...testMessage("new-host", mock.port), sshConfigHost: "alias" }
 				: testMessage("saved-host", mock.port);
 			if (name === "message-alias-trusted-once") {
-				ctx.trustedOnceFingerprints.set(testedRoute(message, ctx), fingerprint);
+				trustTested(ctx, message, fingerprint);
 			}
 			const done = mgr.handleTestConnect("c1", message);
 			if (name === "edited-alias") {
@@ -369,7 +412,11 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 			}
 			expect(mock.auth.attempts).toBe(0);
 			expect(updateHostFingerprint).not.toHaveBeenCalled();
-			expect(ctx.trustedOnceFingerprints.size).toBe(name === "message-alias-trusted-once" ? 1 : 0);
+			expect(cachedEntries(ctx.trustedOnceFingerprints)).toEqual(
+				name === "message-alias-trusted-once"
+					? [["new-host", testedRoute(message, ctx), fingerprint]]
+					: [],
+			);
 		} finally {
 			vi.unstubAllEnvs();
 			removeTempDir(home);
@@ -383,7 +430,9 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 		async (trustKnownHosts) => {
 			const mock = await sshServer();
 			server = mock.server;
-			const { client, mgr } = setup(undefined, { trustKnownHosts });
+			const { ctx, client, mgr } = setup(undefined, { trustKnownHosts });
+			// Another key trusted once for this id: a refusal leaves it (#1228).
+			trustTested(ctx, testMessage("new-host", mock.port), "SHA256:trusted-before");
 
 			await withKnownHosts({}, () =>
 				runTest(mgr, client, testMessage("new-host", mock.port), (first) => {
@@ -405,45 +454,54 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 				message: "SSH host key rejected",
 			});
 			expect(mock.auth.attempts).toBe(0);
+			expect(trustedTested(ctx, testMessage("new-host", mock.port))).toBe("SHA256:trusted-before");
 		},
 	);
 
+	// An unsaved host has no row to record the key in: this hub run trusts it,
+	// for the id the test was sent with, replacing what that id trusted there (#1228).
 	it.each(["trust_once", "trust_permanent"] as const)(
-		"retries under a trusted key, and remembers it for the first session (%s)",
+		"retries under a trusted key, and keeps it for this id and route (%s)",
 		async (action) => {
 			const mock = await sshServer();
 			server = mock.server;
 			const { ctx, client, mgr, updateHostFingerprint } = setup();
+			const message = testMessage("new-host", mock.port);
+			trustTested(ctx, message, "SHA256:trusted-before");
 
-			const done = mgr.handleTestConnect("c1", testMessage("new-host", mock.port));
+			const done = mgr.handleTestConnect("c1", message);
 			const prompt = await hostVerifyPrompt(client);
 			mgr.handleHostVerifyResponse(prompt.promptId, action, "c1");
 			await done;
 
 			expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "new-host" });
 			expect(mock.auth.attempts).toBeGreaterThan(0);
-			// An unsaved host has no row to record the key in: this hub run trusts it.
 			expect(updateHostFingerprint).not.toHaveBeenCalled();
-			expect(ctx.trustedOnceFingerprints.get(testedRoute(testMessage("new-host", mock.port)))).toBe(
-				prompt.fingerprint,
-			);
+			expect(cachedEntries(ctx.trustedOnceFingerprints)).toEqual([
+				["new-host", testedRoute(message, ctx), prompt.fingerprint],
+			]);
 		},
 	);
 
+	// A key it trusted once before, another than the one shown, stays trusted
+	// once: the answer about this key is a pin, not a cache write (#1228).
 	it("records a trusted key on the saved host it was tested for", async () => {
 		const mock = await sshServer();
 		server = mock.server;
-		const { client, mgr, updateHostFingerprint } = setup({
+		const { ctx, client, mgr, updateHostFingerprint } = setup({
 			type: "ssh",
 			sshHost: "127.0.0.1",
 			sshPort: mock.port,
 			fingerprint: null,
 		});
+		const message = testMessage("saved-host", mock.port);
+		trustTested(ctx, message, "SHA256:trusted-before");
 
-		const done = mgr.handleTestConnect("c1", testMessage("saved-host", mock.port));
+		const done = mgr.handleTestConnect("c1", message);
 		const prompt = await hostVerifyPrompt(client);
 		mgr.handleHostVerifyResponse(prompt.promptId, "trust_permanent", "c1");
 		await done;
+		expect(trustedTested(ctx, message)).toBe("SHA256:trusted-before");
 
 		expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
 		expect(updateHostFingerprint).toHaveBeenCalledWith(
@@ -465,14 +523,12 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 				fingerprint: "SHA256:recorded-for-another-address",
 			});
 
-			ctx.trustedOnceFingerprints.set(
-				targetRoute(
-					{ id: "saved-host", type: "ssh", sshHost: "127.0.0.2", sshPort: mock.port },
-					() => undefined,
-				)!,
-				await serverFingerprint(mock.port),
-			);
-			const cacheBefore = new Map(ctx.trustedOnceFingerprints);
+			const savedRoute = targetRoute(
+				{ id: "saved-host", type: "ssh", sshHost: "127.0.0.2", sshPort: mock.port },
+				() => undefined,
+			)!;
+			const serverKey = await serverFingerprint(mock.port);
+			trustOnce(ctx.trustedOnceFingerprints, "saved-host", savedRoute, serverKey);
 			const done = mgr.handleTestConnect("c1", testMessage("saved-host", mock.port));
 			const prompt = await hostVerifyPrompt(client);
 			expect(prompt.firstConnect, "the edited address is a first connection").toBe(true);
@@ -480,10 +536,10 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 			await done;
 			expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
 			expect(updateHostFingerprint).not.toHaveBeenCalled();
-			expect(ctx.trustedOnceFingerprints.size).toBe(cacheBefore.size + 1);
-			expect(
-				ctx.trustedOnceFingerprints.get(testedRoute(testMessage("saved-host", mock.port))),
-			).toBe(prompt.fingerprint);
+			expect(cachedEntries(ctx.trustedOnceFingerprints)).toEqual([
+				["saved-host", savedRoute, serverKey],
+				["saved-host", testedRoute(testMessage("saved-host", mock.port), ctx), prompt.fingerprint],
+			]);
 		},
 	);
 
@@ -495,18 +551,75 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 			new Set(),
 		);
 		expect(probe.unverifiedFingerprint).toMatch(/^SHA256:/);
-		const { client, mgr } = setup({
+		const { ctx, client, mgr } = setup({
 			type: "ssh",
 			sshHost: "127.0.0.1",
 			sshPort: mock.port,
 			fingerprint: probe.unverifiedFingerprint ?? null,
 		});
+		// Another key trusted once for this host does not stand in for its pin (#1228).
+		trustTested(ctx, testMessage("saved-host", mock.port), "SHA256:another-key-trusted-once");
 
 		await mgr.handleTestConnect("c1", testMessage("saved-host", mock.port));
 
 		expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
 		expect(client.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "HOST_VERIFY" }));
 	});
+
+	// A "Trust once" answer is kept for the host it was given for, on its route,
+	// and for nothing else (#1228).
+	it.each([
+		["pinned to another key", "SHA256:other-host-pin"],
+		["with no pin", null],
+	])(
+		"does not let a host %s through with a key trusted once for another host on its route",
+		async (_, pin) => {
+			const mock = await sshServer();
+			server = mock.server;
+			const fingerprint = await serverFingerprint(mock.port);
+			const route = { type: "ssh" as const, sshHost: "127.0.0.1", sshPort: mock.port };
+			const { client, mgr, updateHostFingerprint } = setup(
+				{ ...route, fingerprint: null },
+				undefined,
+				{ ...route, fingerprint: pin },
+			);
+
+			await runTest(
+				mgr,
+				client,
+				testMessage("saved-host", mock.port),
+				(first) => expect(first).toMatchObject({ type: "HOST_VERIFY", firstConnect: true }),
+				"trust_once",
+			);
+			expect(client.send).toHaveBeenCalledWith({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
+
+			// The host it was given for: accepted again, without asking.
+			client.send.mockClear();
+			await runTest(mgr, client, testMessage("saved-host", mock.port), (first) =>
+				expect(first).toEqual({ type: "TEST_CONNECT_OK", hostId: "saved-host" }),
+			);
+
+			// Another host on the same route decides its own key.
+			client.send.mockClear();
+			await runTest(mgr, client, testMessage("other-host", mock.port), (first) => {
+				expect(first).toMatchObject({ type: "HOST_VERIFY", hostId: "other-host", fingerprint });
+				if (pin === null) {
+					expect(first.firstConnect).toBe(true);
+				} else {
+					expect(first.oldFingerprint).toBe(pin);
+					expect(first.firstConnect).toBeUndefined();
+				}
+			});
+			expect(client.send).toHaveBeenCalledWith(
+				expect.objectContaining({
+					type: "TEST_CONNECT_FAIL",
+					hostId: "other-host",
+					message: "SSH host key rejected",
+				}),
+			);
+			expect(updateHostFingerprint).not.toHaveBeenCalled();
+		},
+	);
 
 	// A wrong passphrase is asked for again, as for a session (#812), and the
 	// test caches none of them.
@@ -760,9 +873,9 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 			expect(updateHostFingerprint).not.toHaveBeenCalled();
 		});
 
-		// Accepted without asking, as a session accepts it, and recorded nowhere:
-		// the run-long cache is keyed by route, and a session takes a key cached
-		// there over another saved host's pin.
+		// Accepted without asking, as a session accepts it, and recorded nowhere,
+		// not even for this host and route: a key nobody was asked about is never
+		// cached (#1228).
 		it.each([
 			{ hostId: "new-host", saved: undefined },
 			{ hostId: "saved-host", saved: "127.0.0.2" },
@@ -778,9 +891,8 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 					{ trustKnownHosts: true },
 				);
 				const message = testMessage(row.hostId, mock.port);
-				ctx.trustedOnceFingerprints.set(testedRoute(message, ctx), CACHED_OTHER);
-				const cacheBefore = new Map(ctx.trustedOnceFingerprints);
-				const cacheWrite = vi.spyOn(ctx.trustedOnceFingerprints, "set");
+				trustTested(ctx, message, CACHED_OTHER);
+				const cacheBefore = cachedEntries(ctx.trustedOnceFingerprints);
 
 				await withKnownHosts({ known_hosts: keyLine(HOST_KEY, "127.0.0.1", mock.port) }, () =>
 					runTest(mgr, client, message, (first) => {
@@ -790,8 +902,7 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 
 				expect(mock.auth.attempts, "the test never connected").toBeGreaterThan(0);
 				expect(updateHostFingerprint).not.toHaveBeenCalled();
-				expect(cacheWrite).not.toHaveBeenCalled();
-				expect(ctx.trustedOnceFingerprints).toEqual(cacheBefore);
+				expect(cachedEntries(ctx.trustedOnceFingerprints)).toEqual(cacheBefore);
 			},
 		);
 
@@ -839,8 +950,8 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 			updateHostFingerprint.mockReturnValue(row.writes);
 			const message = testMessage("saved-host", mock.port);
 			const route = testedRoute(message, ctx);
-			ctx.trustedOnceFingerprints.set(route, CACHED_OTHER);
-			const cacheBefore = new Map(ctx.trustedOnceFingerprints);
+			trustTested(ctx, message, CACHED_OTHER);
+			const cacheBefore = cachedEntries(ctx.trustedOnceFingerprints);
 
 			await withKnownHosts({ known_hosts: keyLine(HOST_KEY, "127.0.0.1", mock.port) }, () =>
 				runTest(mgr, client, message, (first) => {
@@ -863,7 +974,7 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 				expect(updateHostFingerprint).toHaveBeenCalledTimes(1);
 				expect(updateHostFingerprint).toHaveBeenCalledWith("saved-host", fingerprint, route);
 			}
-			expect(ctx.trustedOnceFingerprints).toEqual(cacheBefore);
+			expect(cachedEntries(ctx.trustedOnceFingerprints)).toEqual(cacheBefore);
 		});
 
 		it("still asks about a key known_hosts does not hold, under trust_known_hosts", async () => {
@@ -918,8 +1029,8 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 				{ trustKnownHosts: true },
 			);
 			const message = testMessage("saved-host", mock.port);
-			ctx.trustedOnceFingerprints.set(testedRoute(message, ctx), CACHED_OTHER);
-			const cacheBefore = new Map(ctx.trustedOnceFingerprints);
+			trustTested(ctx, message, CACHED_OTHER);
+			const cacheBefore = cachedEntries(ctx.trustedOnceFingerprints);
 
 			await withKnownHosts({}, async (ssh) => {
 				const file = join(ssh, "known_hosts");
@@ -936,7 +1047,7 @@ describe("TEST_CONNECT checks the host key like a session", { timeout: 20_000 },
 			});
 			expect(mock.auth.attempts).toBe(0);
 			expect(updateHostFingerprint).not.toHaveBeenCalled();
-			expect(ctx.trustedOnceFingerprints).toEqual(cacheBefore);
+			expect(cachedEntries(ctx.trustedOnceFingerprints)).toEqual(cacheBefore);
 		});
 	});
 });
@@ -1118,7 +1229,12 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			hostname: "target",
 			...(options.spec ? { sshProxySpec: spec } : { sshProxyHostId: "jump" }),
 		};
-		ctx.trustedOnceFingerprints.set(JSON.stringify(["target", 2222, ["direct"]]), fingerprint);
+		trustOnce(
+			ctx.trustedOnceFingerprints,
+			msg.hostId,
+			JSON.stringify(["target", 2222, ["direct"]]),
+			fingerprint,
+		);
 		return {
 			ctx,
 			client,
@@ -1186,7 +1302,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		const msg: TestConnectMessage = { ...f.msg, hostname: "127.0.0.1", port };
 		const direct = { ...msg };
 		delete direct.sshProxyHostId;
-		f.ctx.trustedOnceFingerprints.set(testedRoute(direct), fingerprint);
+		trustTested(f.ctx, direct, fingerprint);
 		await f.mgr.handleTestConnect("c1", direct);
 		expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_FAIL" });
 		expect(dials).toBe(1);
@@ -1205,8 +1321,7 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 		"isolates direct trust and remembers trust through a jump (unsaved=%s)",
 		async (unsaved) => {
 			const f = await fixture({ unsaved });
-			const cacheBefore = new Map(f.ctx.trustedOnceFingerprints);
-			const cacheWrite = vi.spyOn(f.ctx.trustedOnceFingerprints, "set");
+			const cacheBefore = cachedEntries(f.ctx.trustedOnceFingerprints);
 			const done = f.mgr.handleTestConnect("c1", f.msg);
 			const prompt = await hostVerifyPrompt(f.client);
 			expect(prompt.fingerprint).toBe(fingerprint);
@@ -1214,9 +1329,10 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
 			await done;
 			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
-			expect(f.ctx.trustedOnceFingerprints.size).toBe(cacheBefore.size + 1);
-			expect(f.ctx.trustedOnceFingerprints.get(testedRoute(f.msg, f.ctx))).toBe(fingerprint);
-			expect(cacheWrite).toHaveBeenCalledWith(testedRoute(f.msg, f.ctx), fingerprint);
+			expect(cachedEntries(f.ctx.trustedOnceFingerprints)).toEqual([
+				...cacheBefore,
+				[f.msg.hostId, testedRoute(f.msg, f.ctx), fingerprint],
+			]);
 			f.client.send.mockClear();
 			await f.mgr.handleTestConnect("c1", f.msg);
 			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
@@ -1236,26 +1352,30 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 			expectedRoute !== null && (id === "jump" || id === "jump-b") ? fingerprint : null;
 		f.ctx.trustedOnceFingerprints.clear();
 		const msg = { ...f.msg, hostname: "127.0.0.1", port: f.targetPort };
-		for (const sshProxyHostId of ["jump", "jump", "jump-b", null]) {
+		// One host id, four routes: each route is asked about once, then trusted.
+		for (const [sshProxyHostId, questions] of [
+			["jump", 1],
+			["jump", 0],
+			["jump-b", 1],
+			[null, 1],
+		] as const) {
 			f.client.send.mockClear();
 			const declaration: TestConnectMessage = { ...msg };
 			if (sshProxyHostId) declaration.sshProxyHostId = sshProxyHostId;
 			else delete declaration.sshProxyHostId;
-			const cached = f.ctx.trustedOnceFingerprints.has(testedRoute(declaration, f.ctx));
 			const done = f.mgr.handleTestConnect("c1", declaration);
-			if (!cached) {
+			if (questions === 1) {
 				const prompt = await hostVerifyPrompt(f.client);
 				expect(prompt.fingerprint).toBe(fingerprint);
 				f.mgr.handleHostVerifyResponse(prompt.promptId, "trust_once", "c1");
 			}
 			await done;
 			expect(reply(f)).toMatchObject({ type: "TEST_CONNECT_OK" });
-			if (cached)
-				expect(f.client.send).not.toHaveBeenCalledWith(
-					expect.objectContaining({ type: "HOST_VERIFY" }),
-				);
+			expect(
+				f.client.send.mock.calls.filter(([m]) => m.type === "HOST_VERIFY"),
+				String(sshProxyHostId),
+			).toHaveLength(questions);
 		}
-		expect(f.ctx.trustedOnceFingerprints.size).toBe(3);
 		await ended(f);
 		await ended(other);
 	});
@@ -1373,12 +1493,11 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 				delete f.msg.sshProxySpec;
 				f.msg.sshProxyHostId = "jump";
 			}
-			if (!matchingCache)
-				f.ctx.trustedOnceFingerprints.set(testedRoute(f.msg, f.ctx), "SHA256:previous-cache-key");
-			const cacheBefore = new Map(f.ctx.trustedOnceFingerprints);
+			if (!matchingCache) trustTested(f.ctx, f.msg, "SHA256:previous-cache-key");
+			const cacheBefore = cachedEntries(f.ctx.trustedOnceFingerprints);
 			f.ctx.metaDal.getHostFingerprint = (id: string) =>
 				id === "saved-host" ? "SHA256:saved-row-pin" : fingerprint;
-			if (matchingCache) f.ctx.trustedOnceFingerprints.set(testedRoute(f.msg, f.ctx), fingerprint);
+			if (matchingCache) trustTested(f.ctx, f.msg, fingerprint);
 			const done = f.mgr.handleTestConnect("c1", f.msg);
 			if (!matchingCache) {
 				const prompt = await hostVerifyPrompt(f.client);
@@ -1395,8 +1514,11 @@ describe("TEST_CONNECT travels the declared jump", { timeout: 25_000 }, () => {
 				expect.anything(),
 				expect.anything(),
 			);
-			expect(f.ctx.trustedOnceFingerprints.get(testedRoute(f.msg, f.ctx))).toBe(fingerprint);
-			expect(f.ctx.trustedOnceFingerprints.size).toBeGreaterThanOrEqual(cacheBefore.size);
+			const tested = testedRoute(f.msg, f.ctx);
+			expect(cachedEntries(f.ctx.trustedOnceFingerprints)).toEqual([
+				...cacheBefore.filter(([hostId, route]) => hostId !== f.msg.hostId || route !== tested),
+				[f.msg.hostId, tested, fingerprint],
+			]);
 			await ended(f);
 		},
 	);
@@ -1780,7 +1902,7 @@ describe("TEST_CONNECT takes the host's connection timeout (#1034)", () => {
 			hostname: "target",
 			sshProxyHostId: "jump",
 		};
-		harness.ctx.trustedOnceFingerprints.set(testedRoute(msg, harness.ctx), fingerprint);
+		trustTested(harness.ctx, msg, fingerprint);
 		return { harness, msg };
 	}
 
@@ -1899,7 +2021,7 @@ describe("TEST_CONNECT takes the host's connection timeout (#1034)", () => {
 						fingerprint,
 					});
 					const msg = testMessage("saved-host", link.port);
-					harness.ctx.trustedOnceFingerprints.set(testedRoute(msg, harness.ctx), fingerprint);
+					trustTested(harness.ctx, msg, fingerprint);
 					const { reply } = await run(harness, msg);
 					expect(reply).toEqual({ type: "TEST_CONNECT_OK", hostId: "saved-host" });
 				} finally {

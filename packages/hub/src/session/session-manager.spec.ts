@@ -9253,7 +9253,7 @@ describe("SessionManager — concurrent SSH connect coalescing", () => {
 	//
 	// Mutation oracle: without clearing the owner PromptContext in closeSession, a
 	// user response arriving after abort resolves the promise and
-	// _connectSshAgent proceeds to call updateHostFingerprint / trustedOnceFingerprints.set
+	// _connectSshAgent proceeds to pin the key or trust it once for this run
 	// against a session that has already been torn down — stale trust persists.
 	it("closeSession clears reconnect host-verify PromptContext for the closing session", async () => {
 		const hostId = await createSshHost();

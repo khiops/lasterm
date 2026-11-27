@@ -97,6 +97,8 @@ interface MockServer {
 	accepted: Accepted[];
 	/** The destinations it opened a route to, as `host:port`. */
 	routes: string[];
+	/** Sign-ins it was sent. */
+	authentications: number;
 	close: () => Promise<void>;
 }
 
@@ -107,6 +109,7 @@ interface MockServer {
 function mockSshServer(route?: { from: string; toPort: number }): Promise<MockServer> {
 	const accepted: Accepted[] = [];
 	const routes: string[] = [];
+	const counts = { authentications: 0 };
 	const server = new Server({ hostKeys: [HOST_KEY] }, (conn) => {
 		const entry: Accepted = { ended: false, end: () => conn.end() };
 		accepted.push(entry);
@@ -114,7 +117,10 @@ function mockSshServer(route?: { from: string; toPort: number }): Promise<MockSe
 			entry.ended = true;
 		});
 		conn.on("error", () => {});
-		conn.on("authentication", (ctx) => ctx.accept());
+		conn.on("authentication", (ctx) => {
+			counts.authentications++;
+			ctx.accept();
+		});
 		conn.on("ready", () => {
 			conn.on("session", (accept) => {
 				accept().on("exec", (acceptExec) => {
@@ -143,6 +149,9 @@ function mockSshServer(route?: { from: string; toPort: number }): Promise<MockSe
 				port: (server.address() as net.AddressInfo).port,
 				accepted,
 				routes,
+				get authentications() {
+					return counts.authentications;
+				},
 				close: () => {
 					for (const entry of accepted) if (!entry.ended) entry.end();
 					return new Promise((done) => server.close(() => done()));
@@ -287,12 +296,21 @@ beforeEach(async () => {
 	// close is recorded in the database, which must still be there.
 	const closed: Array<Promise<unknown>> = [];
 	const start = SshAgent.prototype.start;
+	starts.length = 0;
 	const tracking = vi.spyOn(SshAgent.prototype, "start").mockImplementation(function (
 		this: SshAgent,
 		...args: Parameters<SshAgent["start"]>
 	) {
 		closed.push(once(this, "close"));
-		return start.apply(this, args);
+		const started = start.apply(this, args);
+		starts.push({
+			agent: this,
+			outcome: started.then(
+				() => "connected" as const,
+				() => "refused" as const,
+			),
+		});
+		return started;
 	});
 	cleanups.push(async () => {
 		await bastion.close();
@@ -313,6 +331,8 @@ beforeEach(async () => {
 });
 
 const cleanups: Array<() => Promise<void> | void> = [];
+/** Every `SshAgent.start` a test made, in order, with how it ended. */
+const starts: Array<{ agent: SshAgent; outcome: Promise<"connected" | "refused"> }> = [];
 
 afterEach(async () => {
 	harness = null;
@@ -364,23 +384,96 @@ async function connectedThroughBastion(): Promise<SshAgent> {
 	return agent;
 }
 
-function currentAgent(): SshAgent | undefined {
-	const { ctx, host } = the();
-	const agent = ctx.agents.get(host.id);
+function currentAgent(hostId = the().host.id): SshAgent | undefined {
+	const agent = the().ctx.agents.get(hostId);
 	return agent instanceof SshAgent ? agent : undefined;
+}
+
+/** A window that answers every host key question with `action`, counting them. */
+function answeringWindow(
+	id: string,
+	action: "trust_once" | "reject",
+): WsClient & { asked: number } {
+	const { sm } = the();
+	const client = {
+		id,
+		asked: 0,
+		attachedChannels: new Set<string>(),
+		send: (message: ProtocolMessage) => {
+			if (message.type !== "HOST_VERIFY") return;
+			client.asked++;
+			const { promptId } = message as HostVerifyMessage;
+			queueMicrotask(() => sm.handleHostVerifyResponse(promptId, action, id));
+		},
+	};
+	sm.addClient(client);
+	return client;
+}
+
+/** A host's first connection, as a terminal's start makes it. */
+function connectHost(host: Host, client: WsClient, sessionId: string): Promise<SshAgent> {
+	const { sm, ctx } = the();
+	(ctx.sessions as Map<string, SessionState>).set(host.id, {
+		id: sessionId,
+		hostId: host.id,
+		status: "starting",
+	});
+	return (
+		sm as unknown as {
+			_connectSshAgent(
+				hostId: string,
+				host: Host,
+				client: WsClient,
+				sessionId: string,
+			): Promise<SshAgent>;
+		}
+	)._connectSshAgent(host.id, host, client, sessionId);
+}
+
+/** Another saved host on the host's own route, through the same bastion. */
+function twinBehindTheBastion(): Host {
+	const { ctx, host, bastionHost } = the();
+	return ctx.metaDal.createHost({
+		type: "ssh",
+		label: "twin",
+		sshHost: host.sshHost!,
+		sshPort: host.sshPort!,
+		sshAuth: "key",
+		sshKeyPath: CLIENT_KEY_PATH,
+		sshProxyHostId: bastionHost.id,
+	});
+}
+
+/** The fingerprint of a key no mock server presents. */
+function otherFingerprint(): string {
+	const key = ssh2.utils.parseKey(rsaPem());
+	if (key instanceof Error || Array.isArray(key)) throw new Error("invalid key");
+	return fingerprintOf(key.getPublicSSH());
 }
 
 // ─── Reconnecting ────────────────────────────────────────────────────────────
 
 describe("a host reached through a bastion is reconnected through it", { timeout: 20_000 }, () => {
-	it("after its connection was lost", async () => {
+	// Its key pinned, or trusted once for it in this hub run (#1228).
+	it.each(["pinned", "trusted once"])("after its connection was lost (key %s)", async (trust) => {
 		const { ctx, host, target, bastion, direct } = the();
-		const first = await connectedThroughBastion();
-		ctx.metaDal.updateHostFingerprint(
-			host.id,
-			HOST_FINGERPRINT,
-			targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id))),
-		);
+		let first: SshAgent;
+		if (trust === "pinned") {
+			first = await connectedThroughBastion();
+			ctx.metaDal.updateHostFingerprint(
+				host.id,
+				HOST_FINGERPRINT,
+				targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id))),
+			);
+		} else {
+			const window = answeringWindow("c-once", "trust_once");
+			first = await connectHost(host, window, SESSION_ID);
+			expect(window.asked).toBe(1);
+			expect(ctx.metaDal.getHost(host.id)?.sshFingerprint ?? null).toBeNull();
+			seedSession("active");
+			(ctx.agents as Map<string, SshAgent>).set(host.id, first);
+		}
+		const routesBefore = bastion.routes.length;
 
 		// The host ends the connection: the hub did not ask for it, so it reconnects.
 		for (const connection of target.accepted) connection.end();
@@ -393,7 +486,8 @@ describe("a host reached through a bastion is reconnected through it", { timeout
 			},
 		);
 		expect(direct.dials).toBe(0);
-		expect(bastion.routes).toEqual([`127.0.0.1:${direct.port}`, `127.0.0.1:${direct.port}`]);
+		expect(bastion.routes.slice(routesBefore)).toEqual([`127.0.0.1:${direct.port}`]);
+		expect(bastion.routes.every((r) => r === `127.0.0.1:${direct.port}`)).toBe(true);
 		expect(ctx.sessions.get(host.id)?.status).toBe("active");
 	});
 
@@ -421,7 +515,8 @@ describe("a host reached through a bastion is reconnected through it", { timeout
 		const { sm, ctx, lifecycle, host, bastion, direct, target } = the();
 		let questions = 0;
 		seedSession("starting");
-		// Whoever is asked trusts the key, for this session only.
+		// Whoever is asked trusts the key once: for this host, on this route,
+		// for the rest of the hub run (#1228).
 		const client: WsClient = {
 			id: "c-jump",
 			send: (message: ProtocolMessage) => {
@@ -454,21 +549,15 @@ describe("a host reached through a bastion is reconnected through it", { timeout
 		seedSession("disconnected");
 		await expect(lifecycle.onReconnectAgent?.(host.id)).resolves.toBe(true);
 		expect(questions).toBe(1);
-		const separate = ctx.metaDal.createHost({
-			type: "ssh",
-			label: "direct-target",
-			sshHost: host.sshHost!,
-			sshPort: host.sshPort!,
-			sshAuth: "key",
-			sshKeyPath: CLIENT_KEY_PATH,
-		});
-		(ctx.sessions as Map<string, SessionState>).set(separate.id, {
-			id: "direct-session",
-			hostId: separate.id,
-			status: "starting",
-		});
+		// The same host, its route changed to direct: the key it trusted once
+		// through the bastion is asked about again on the new route.
+		currentAgent()?.close();
+		expect(ctx.metaDal.updateHost(host.id, { sshProxyHostId: null })).toBeTruthy();
+		const directHost = ctx.metaDal.getHost(host.id)!;
+		expect(directHost.sshProxyHostId ?? null).toBeNull();
+		seedSession("starting");
 		direct.forwardTo = target.port;
-		const directAgent = await connect(separate.id, separate, client, "direct-session");
+		const directAgent = await connect(host.id, directHost, client, SESSION_ID);
 		expect(directAgent.connected).toBe(true);
 		expect(questions).toBe(2);
 		directAgent.close();
@@ -518,6 +607,114 @@ describe("a host reached through a bastion is reconnected through it", { timeout
 			}),
 		);
 		pin.mockRestore();
+	});
+});
+
+// ─── Whose "Trust once" a reconnect reads ────────────────────────────────────
+
+/**
+ * A key trusted once for one saved host is never trusted for another (#1228).
+ * The twin is on the host's route through the bastion, pinned to another key,
+ * and trusted that key once itself only on another route (direct). The host
+ * answers "Trust once" on the shared route; neither of the twin's re-dials
+ * takes that answer.
+ */
+describe("a reconnect reads only its own host's trust", { timeout: 20_000 }, () => {
+	async function twinWithItsOwnTrustElsewhere(): Promise<{ twin: Host; pin: string }> {
+		const { ctx, host, direct, target } = the();
+		const twin = twinBehindTheBastion();
+		// The twin's own "Trust once", given while it was reached directly.
+		expect(ctx.metaDal.updateHost(twin.id, { sshProxyHostId: null })).toBeTruthy();
+		direct.forwardTo = target.port;
+		const twinWindow = answeringWindow("c-twin", "trust_once");
+		const directAgent = await connectHost(ctx.metaDal.getHost(twin.id)!, twinWindow, "twin-direct");
+		expect(twinWindow.asked).toBe(1);
+		directAgent.close();
+		delete direct.forwardTo;
+		// Back behind the bastion, pinned to a key the server does not present.
+		expect(ctx.metaDal.updateHost(twin.id, { sshProxyHostId: the().bastionHost.id })).toBeTruthy();
+		const pin = otherFingerprint();
+		const twinNow = ctx.metaDal.getHost(twin.id)!;
+		expect(
+			ctx.metaDal.updateHostFingerprint(
+				twin.id,
+				pin,
+				targetRoute(twinNow, (id) => sshAddress(ctx.metaDal.getHost(id))),
+			),
+		).toBe(true);
+		// The host's own "Trust once" on the shared route.
+		const hostWindow = answeringWindow("c-host", "trust_once");
+		const hostAgent = await connectHost(host, hostWindow, SESSION_ID);
+		expect(hostWindow.asked).toBe(1);
+		hostAgent.close();
+		return { twin: twinNow, pin };
+	}
+
+	it("when a terminal restarts on it", async () => {
+		const { ctx, lifecycle, bastion, target, direct } = the();
+		const { twin, pin } = await twinWithItsOwnTrustElsewhere();
+		(ctx.sessions as Map<string, SessionState>).set(twin.id, {
+			id: "twin-session",
+			hostId: twin.id,
+			status: "disconnected",
+		});
+		const window = answeringWindow("c-restart", "reject");
+		const routesBefore = bastion.routes.length;
+		const signInsBefore = target.authentications;
+		const startsBefore = starts.length;
+
+		await expect(lifecycle.onReconnectAgent?.(twin.id)).resolves.toBe(false);
+
+		expect(bastion.routes.slice(routesBefore)).toEqual([`127.0.0.1:${direct.port}`]);
+		expect(target.authentications).toBe(signInsBefore);
+		expect(starts.length).toBe(startsBefore + 1);
+		const attempt = starts.at(-1)!;
+		await expect(attempt.outcome).resolves.toBe("refused");
+		expect(attempt.agent.lastKeyVerification).toMatchObject({
+			mismatch: true,
+			capturedFingerprint: HOST_FINGERPRINT,
+		});
+		expect(window.asked).toBe(0);
+		expect(currentAgent(twin.id)?.connected ?? false).toBe(false);
+		expect(ctx.metaDal.getHost(twin.id)?.sshFingerprint).toBe(pin);
+	});
+
+	it("after its connection was lost", async () => {
+		const { ctx, agentMgr, bastion, target, direct } = the();
+		const { twin, pin } = await twinWithItsOwnTrustElsewhere();
+		// Connected under the key it had before: the server since presents another.
+		const first = new SshAgent(twin);
+		await first.start(HOST_FINGERPRINT, null, undefined, jumpThroughBastion());
+		(ctx.sessions as Map<string, SessionState>).set(twin.id, {
+			id: "twin-session",
+			hostId: twin.id,
+			status: "active",
+		});
+		(ctx.agents as Map<string, SshAgent>).set(twin.id, first);
+		agentMgr.wireAgentEvents(twin.id, "twin-session", first);
+		const window = answeringWindow("c-lost", "reject");
+		const routesBefore = bastion.routes.length;
+		const signInsBefore = target.authentications;
+		const startsBefore = starts.length;
+
+		// The server ends the twin's connection: the hub reconnects by itself.
+		target.accepted.at(-1)?.end();
+		await until("the reconnect's first attempt", () => starts.length > startsBefore);
+		const attempt = starts[startsBefore]!;
+		await expect(attempt.outcome).resolves.toBe("refused");
+
+		expect(attempt.agent.lastKeyVerification).toMatchObject({
+			mismatch: true,
+			capturedFingerprint: HOST_FINGERPRINT,
+		});
+		expect(bastion.routes.slice(routesBefore)).toEqual([`127.0.0.1:${direct.port}`]);
+		expect(target.authentications).toBe(signInsBefore);
+		expect(window.asked).toBe(0);
+		expect(currentAgent(twin.id)?.connected ?? false).toBe(false);
+		expect(ctx.metaDal.getHost(twin.id)?.sshFingerprint).toBe(pin);
+		const timer = ctx.reconnectTimers.get(twin.id);
+		if (timer !== undefined) clearTimeout(timer);
+		ctx.reconnectTimers.delete(twin.id);
 	});
 });
 

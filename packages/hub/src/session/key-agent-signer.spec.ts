@@ -607,7 +607,7 @@ describe("a host's connection test, with the key signed by the SSH agent (#876)"
 			clients: new Map(),
 			channels: new Map() as SharedSessionContext["channels"],
 			acquisitions: new Map() as SharedSessionContext["acquisitions"],
-			trustedOnceFingerprints: new Map<string, string>(),
+			trustedOnceFingerprints: new Map<string, Map<string, string>>(),
 			metaDal: {
 				getHost: (id: string) => (id === saved.id ? saved : undefined),
 				getHostFingerprint: (id: string, expectedRoute: string | null) =>

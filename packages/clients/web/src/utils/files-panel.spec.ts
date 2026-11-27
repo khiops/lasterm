@@ -538,14 +538,23 @@ describe("why Follow is disabled (#1196)", () => {
 		expect(followBlock(facts({ program: undefined, hostOs: "windows" }))).toBeNull();
 	});
 
-	it("lifts as soon as a directory is reported or read, or a nested host is named", () => {
+	it("lifts as soon as a directory is reported or read", () => {
 		const reported = { cwd: "C:\\Users\\me", source: "shell" as const };
 		expect(followBlock(facts({ program: "pwsh", live: reported }))).toBeNull();
 		expect(
 			followBlock(facts({ program: "wsl.exe", hostOs: "windows", live: reported })),
 		).toBeNull();
+	});
+
+	it("blocks a session nested on another host, whatever the program, until this host's shell is back", () => {
 		const nested = { cwd: null, source: "shell" as const, otherHost: "db01" };
-		expect(followBlock(facts({ program: "pwsh", live: nested }))).toBeNull();
+		expect(followBlock(facts({ live: nested }))).toBe("nested");
+		expect(followBlock(facts({ program: "pwsh", live: nested }))).toBe("nested");
+		expect(followBlock(facts({ program: "cmd.exe", hostOs: "windows", live: nested }))).toBe(
+			"nested",
+		);
+		expect(followBlock(facts({ live: nested, agentUpdatable: true }))).toBe("nested");
+		expect(followBlock(facts({ live: { cwd: "/home/pi", source: "process" } }))).toBeNull();
 	});
 
 	it("tells what makes each work", () => {
@@ -554,6 +563,9 @@ describe("why Follow is disabled (#1196)", () => {
 		expect(followBlockText("powershell", "pc")).toContain("report-directory.ps1");
 		expect(followBlockText("wsl", "pc")).toContain("wslpath -w");
 		expect(followBlockText("unread", "pc")).toContain("OSC 9;9");
+		expect(followBlockText("nested", "pi")).toBe(
+			"This terminal is in a session on another host, and Lasterm follows directories on pi only. Follow works again when that session ends",
+		);
 	});
 });
 

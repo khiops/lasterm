@@ -1076,7 +1076,7 @@ A `ProxyJump` from `~/.ssh/config` is linked to a saved SSH host when it names t
 
 ### 4.6 Known Hosts Verification
 
-A host key is stored on the host in meta.db (`hosts.ssh_fingerprint`) for its target route: target hostname and port plus the declared jump, including a saved jump's id and current address. Route edits clear the target pin; jump edits also clear the spec jump pin. Bastion address edits clear dependent target pins, and bastion deletion clears both dependent pins. User and label edits preserve trust. Reads and writes require the route the connection used; trust for this hub run uses that same route for sessions, reconnects and connection tests. On a first SSH connect to a
+A host key is stored on the host in meta.db (`hosts.ssh_fingerprint`) for its target route: target hostname and port plus the declared jump, including a saved jump's id and current address. Route edits clear the target pin; jump edits also clear the spec jump pin. Bastion address edits clear dependent target pins, and bastion deletion clears both dependent pins. User and label edits preserve trust. Reads and writes require the route the connection used; trust for this hub run is kept per saved host and that same route, for sessions, reconnects and connection tests, and never applies to another host on the route. On a first SSH connect to a
 host with no pinned key (SECURITY.md § 3.3):
 
 1. Hub receives fingerprint from ssh2 `hostVerifier` callback
@@ -1084,13 +1084,13 @@ host with no pinned key (SECURITY.md § 3.3):
    what `~/.ssh/known_hosts` already believes about that key, which the hub reads and never writes
 3. UI shows modal: "Trust host fingerprint? [sha256:XXXX] — [Trust once] [Trust permanently] [Cancel]"
 4. "Trust permanently": hub stores the fingerprint in the meta.db hosts table
-5. "Trust once": hub accepts for this run of the hub only
+5. "Trust once": hub accepts for this host on this route, for this run of the hub only (until a later answer for them replaces it), before the host's pin
 6. "Cancel": connection aborted, session CLOSED
 
 With `[ssh] trust_known_hosts = true`, a first key that `known_hosts` already trusts is accepted
 without asking: a session pins it, and a connection test pins it on a saved host's saved route
-and otherwise records no trust for it. A key that changes under a pinned one is asked about, unless it
-was already accepted for that route earlier in the hub run, and a jump host's key
+and otherwise records no trust for it. A key that changes under a pinned one is asked about in a Connect or a connection test, and refused by a
+reconnect, unless it is the key that host last accepted for that route earlier in the hub run, and a jump host's key
 is never asked about on the way to another host (§ 4.5b).
 
 ## 5. Data Flow Diagrams

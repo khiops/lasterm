@@ -34,7 +34,12 @@ import { makeTempDir, removeTempDir } from "../temp-dir.fixture.js";
 import { AgentRefusedHub } from "./agent-connection.js";
 import { deployAgentIfNeeded, getBinaryCacheDir } from "./agent-deployer.js";
 import { socketForwardingRefusedOn } from "./remote-daemon.js";
-import type { SessionState, SharedSessionContext } from "./session-context.js";
+import {
+	type SessionState,
+	type SharedSessionContext,
+	trustedOnceFor,
+	trustOnce,
+} from "./session-context.js";
 import { SessionManager, type WsClient } from "./session-manager.js";
 import { SshAgent } from "./ssh-agent.js";
 import type { SshConnectionManager } from "./ssh-connection-manager.js";
@@ -442,6 +447,13 @@ function mockHost(daemon: boolean, refusesForwarding = false): Promise<MockHost>
 				session.on("exec", (acceptExec, _reject, info) => {
 					const stream = acceptExec() as Stream;
 					result.execs.push(info.command);
+					// What a connection test reads of the system once connected (#1228).
+					if (info.command === "uname -sm") {
+						stream.write("Linux x86_64\n");
+						stream.exit?.(0);
+						stream.end();
+						return;
+					}
 					const windows = windowsLaunchArgs(info.command);
 					if (windows !== null) {
 						result.windowsArgs.push(windows);
@@ -679,6 +691,36 @@ async function connected(h: Harness): Promise<SshAgent> {
 	return agent;
 }
 
+/** The fingerprint of a key the mock host never presents. */
+function otherFingerprint(): string {
+	const parsed = ssh2.utils.parseKey(rsaPem());
+	if (parsed instanceof Error || Array.isArray(parsed)) throw new Error("invalid key");
+	return `SHA256:${createHash("sha256").update(parsed.getPublicSSH()).digest("base64").replace(/=+$/, "")}`;
+}
+
+/** The target route a host is reached by, as the hub computes it. */
+function routeOf(h: Harness, host: Host): string | null {
+	return targetRoute(host, (id) => sshAddress(h.ctx.metaDal.getHost(id)));
+}
+
+/** Answer every host key question the window gets with `action`; the questions, as they come. */
+function answerKeyQuestions(
+	h: Harness,
+	action: "trust_once" | "trust_permanent" | "reject",
+): HostVerifyMessage[] {
+	const asked: HostVerifyMessage[] = [];
+	h.window.send = (msg) => {
+		h.heard.push(msg);
+		if (msg.type === "HOST_VERIFY") {
+			asked.push(msg as HostVerifyMessage);
+			queueMicrotask(() =>
+				h.sm.handleHostVerifyResponse((msg as HostVerifyMessage).promptId, action, h.window.id),
+			);
+		}
+	};
+	return asked;
+}
+
 /** Terminals of the host's session, running there, which its daemon (if any) holds. */
 function terminalsOn(h: Harness, count: number): string[] {
 	const session = h.ctx.sessions.get(h.host.id);
@@ -741,6 +783,9 @@ describe("Connect (#648)", { timeout: 20_000 }, () => {
 		if (parsed instanceof Error || Array.isArray(parsed)) throw new Error("invalid key");
 		const old = `SHA256:${createHash("sha256").update(parsed.getPublicSSH()).digest("base64").replace(/=+$/, "")}`;
 		const h = await hubWith({ daemon: false, pin: old });
+		// Another key trusted once for this host: a refusal leaves it (#1228).
+		const route = routeOf(h, h.host)!;
+		trustOnce(h.ctx.trustedOnceFingerprints, h.host.id, route, "SHA256:trusted-before");
 		h.window.send = (msg) => {
 			h.heard.push(msg);
 			if (msg.type === "HOST_VERIFY") {
@@ -757,10 +802,107 @@ describe("Connect (#648)", { timeout: 20_000 }, () => {
 		if (outcome.kind !== "connecting") throw new Error(outcome.kind);
 		await expect(outcome.done).resolves.toBe(false);
 		expect(h.heard.filter((m) => m.type === "HOST_VERIFY")).toHaveLength(1);
+		expect(trustedOnceFor(h.ctx.trustedOnceFingerprints, h.host.id, route)).toBe(
+			"SHA256:trusted-before",
+		);
+	});
+
+	// A "Trust once" answer is kept for the host it was given for, on its route,
+	// and for nothing else (#1228).
+	it.each([
+		["pinned to another key", true],
+		["with no pin", false],
+	])(
+		"asks about its key on a host %s, whatever another host on its route was trusted once with",
+		async (_, pinned) => {
+			const h = await hubWith({ daemon: false, pinned: false });
+			const other = otherFingerprint();
+			const twin = h.ctx.metaDal.createHost({
+				type: "ssh",
+				label: "twin",
+				sshHost: "127.0.0.1",
+				sshPort: h.remote.port,
+				sshAuth: "key",
+				sshKeyPath: CLIENT_KEY_PATH,
+				sshRemoteDaemon: false,
+			});
+			if (pinned) h.ctx.metaDal.updateHostFingerprint(twin.id, other, routeOf(h, twin));
+
+			const asked = answerKeyQuestions(h, "trust_once");
+			await connected(h);
+			expect(asked).toEqual([expect.objectContaining({ hostId: h.host.id, firstConnect: true })]);
+			expect(h.ctx.metaDal.getHost(h.host.id)?.sshFingerprint ?? null).toBeNull();
+
+			const twinAsked = answerKeyQuestions(h, "reject");
+			const outcome = h.sm.connectHost(twin.id, { clientId: h.window.id });
+			if (outcome.kind !== "connecting") throw new Error(`not connecting: ${outcome.kind}`);
+			await expect(outcome.done).resolves.toBe(false);
+			expect(twinAsked).toHaveLength(1);
+			expect(twinAsked[0]).toMatchObject({ hostId: twin.id, fingerprint: HOST_FINGERPRINT });
+			if (pinned) {
+				expect(twinAsked[0]?.oldFingerprint).toBe(other);
+				expect(twinAsked[0]?.firstConnect).toBeUndefined();
+			} else {
+				expect(twinAsked[0]?.firstConnect).toBe(true);
+			}
+			expect(h.ctx.metaDal.getHost(twin.id)?.sshFingerprint ?? null).toBe(pinned ? other : null);
+			expect(h.ctx.agents.get(twin.id)?.connected ?? false).toBe(false);
+		},
+	);
+
+	it.each([
+		["with no pin", false],
+		["pinned to another key", true],
+	])("accepts again for a host %s the key trusted once for it", async (_, pinned) => {
+		const other = otherFingerprint();
+		const h = await hubWith(
+			pinned ? { daemon: false, pin: other } : { daemon: false, pinned: false },
+		);
+
+		const asked = answerKeyQuestions(h, "trust_once");
+		await connected(h);
+		expect(asked).toEqual([
+			expect.objectContaining(pinned ? { oldFingerprint: other } : { firstConnect: true }),
+		]);
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshFingerprint ?? null).toBe(pinned ? other : null);
+
+		expect(h.sm.disconnectHost(h.host.id)).toEqual({ kind: "disconnected", ended: 0 });
+		const askedAgain = answerKeyQuestions(h, "reject");
+		await connected(h);
+		expect(askedAgain).toEqual([]);
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshFingerprint ?? null).toBe(pinned ? other : null);
+	});
+
+	it("accepts in a host's Connect the key trusted once in its connection test", async () => {
+		const other = otherFingerprint();
+		const h = await hubWith({ daemon: false, pin: other });
+
+		const asked = answerKeyQuestions(h, "trust_once");
+		await h.sm.handleTestConnect(h.window.id, {
+			type: "TEST_CONNECT",
+			hostId: h.host.id,
+			hostname: "127.0.0.1",
+			port: h.remote.port,
+			sshAuth: "key",
+			sshKeyPath: CLIENT_KEY_PATH,
+			sshUser: "tester",
+		});
+		expect(asked).toEqual([
+			expect.objectContaining({ fingerprint: HOST_FINGERPRINT, oldFingerprint: other }),
+		]);
+		expect(h.heard).toContainEqual(expect.objectContaining({ type: "TEST_CONNECT_OK" }));
+
+		const askedByConnect = answerKeyQuestions(h, "reject");
+		await connected(h);
+		expect(askedByConnect).toEqual([]);
+		expect(h.ctx.metaDal.getHost(h.host.id)?.sshFingerprint).toBe(other);
 	});
 
 	it("prompts and writes an unpadded pin on first connection", async () => {
 		const h = await hubWith({ daemon: false, pinned: false });
+		// Another key trusted once for this host: a pin write leaves it (#1228).
+		const route = routeOf(h, h.host)!;
+		trustOnce(h.ctx.trustedOnceFingerprints, h.host.id, route, "SHA256:trusted-before");
 		const write = vi.spyOn(h.ctx.metaDal, "updateHostFingerprint");
 		h.window.send = (msg) => {
 			h.heard.push(msg);
@@ -779,6 +921,9 @@ describe("Connect (#648)", { timeout: 20_000 }, () => {
 		expect(h.heard.filter((m) => m.type === "HOST_VERIFY")).toHaveLength(1);
 		expect(write).toHaveBeenCalledWith(h.host.id, HOST_FINGERPRINT, expect.any(String));
 		expect(h.ctx.metaDal.getHost(h.host.id)?.sshFingerprint).toBe(HOST_FINGERPRINT);
+		expect(trustedOnceFor(h.ctx.trustedOnceFingerprints, h.host.id, route)).toBe(
+			"SHA256:trusted-before",
+		);
 		write.mockRestore();
 	});
 

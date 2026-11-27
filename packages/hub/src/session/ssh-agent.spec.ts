@@ -2251,10 +2251,14 @@ describe("SshAgent — TOFU host key verification", () => {
 			agent1.close();
 			agents = agents.filter((a) => a !== agent1);
 
-			// Second connect with the stored fingerprint — should match without mismatch
+			// Second connect with the stored fingerprint — should match without mismatch,
+			// a different key trusted once for this host notwithstanding (#1228)
 			const agent2 = new SshAgent(makeHost(port));
 			agents.push(agent2);
-			const { keyVerification: kv2 } = await agent2.start(capturedFingerprint);
+			const { keyVerification: kv2 } = await agent2.start(
+				capturedFingerprint,
+				"SHA256:another-key-trusted-once",
+			);
 
 			expect(kv2.tofu).toBe(false);
 			expect(kv2.mismatch).toBe(false);

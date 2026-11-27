@@ -12,7 +12,12 @@ import {
 	remoteDaemonStopCommand,
 	windowsDaemonStopCommand,
 } from "../session/remote-daemon.js";
-import type { SessionState, SharedSessionContext } from "../session/session-context.js";
+import {
+	type SessionState,
+	type SharedSessionContext,
+	trustedOnceFor,
+	trustOnce,
+} from "../session/session-context.js";
 import { SessionManager } from "../session/session-manager.js";
 import { SshAgent } from "../session/ssh-agent.js";
 import { SshConnectionManager } from "../session/ssh-connection-manager.js";
@@ -286,6 +291,7 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 	it("R1 refuses with the live count without sending or deleting anything", async () => {
 		const agent = connectedAgent();
 		const { channelId, ctx } = liveTerminalOn(agent);
+		trustOnce(ctx.trustedOnceFingerprints, hostId, "route", "SHA256:trusted-once");
 		const response = await remove();
 		expect(response.statusCode).toBe(409);
 		expect(response.json()).toEqual({
@@ -299,6 +305,10 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 		expect(agent.sent).toEqual([]);
 		expect(ctx.channels.has(channelId)).toBe(true);
 		expect((await server.inject(`/api/hosts/${hostId}`)).statusCode).toBe(200);
+		// A host the person did not delete keeps what it trusted once (#1228).
+		expect(trustedOnceFor(ctx.trustedOnceFingerprints, hostId, "route")).toBe(
+			"SHA256:trusted-once",
+		);
 	});
 
 	// An outdated daemon too: the delete holds the stop marker (D3 step 1), so
@@ -340,6 +350,16 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 			ctx.elevationCache.set("other:window", { secret: "other", expiresAt: Infinity });
 			ctx.trustedAgentSha256.set(hostId, "hash");
 			ctx.trustedAgentSha256.set("other", "other-hash");
+			// Keys trusted once for the host, on two routes, and for another host (#1228).
+			const trusted = ctx.trustedOnceFingerprints;
+			trustOnce(trusted, hostId, "route-a", "SHA256:a");
+			trustOnce(trusted, hostId, "route-b", "SHA256:b");
+			trustOnce(trusted, "other", "route-a", "SHA256:other");
+			expect([
+				trustedOnceFor(trusted, hostId, "route-a"),
+				trustedOnceFor(trusted, hostId, "route-b"),
+				trustedOnceFor(trusted, "other", "route-a"),
+			]).toEqual(["SHA256:a", "SHA256:b", "SHA256:other"]);
 			expect((await remove("?force=true")).statusCode).toBe(204);
 			// One DESTROY for each terminal, naming it, then the close.
 			expect(order).toEqual([...channelIds, "close"]);
@@ -372,6 +392,9 @@ describe("DELETE /api/hosts/:id ends its terminals after consent (#910)", () => 
 			expect(ctx.elevationCache.has("other:window")).toBe(true);
 			expect(ctx.trustedAgentSha256.has(hostId)).toBe(false);
 			expect(ctx.trustedAgentSha256.get("other")).toBe("other-hash");
+			expect(trustedOnceFor(trusted, hostId, "route-a")).toBeUndefined();
+			expect(trustedOnceFor(trusted, hostId, "route-b")).toBeUndefined();
+			expect(trustedOnceFor(trusted, "other", "route-a")).toBe("SHA256:other");
 			expect(
 				log.mock.calls.filter(([, message]) => message === "session-manager: host deleted"),
 			).toEqual([["info", "session-manager: host deleted", { hostId, ended: 2, unreachable: 0 }]]);

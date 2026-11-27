@@ -571,10 +571,15 @@ export class SshAgent extends AgentConnection {
 	 * What the shell prints before a stdio agent starts is skipped, up to
 	 * `MAX_SHELL_PRELUDE_BYTES`, and named when HELLO does not come.
 	 *
+	 * A key marked `@revoked` in a readable `known_hosts` is refused first: `start` rejects and
+	 * `lastKeyVerification.revoked` names the file and line, with `mismatch` and `tofu` false.
+	 * For an unrevoked key:
 	 * @param storedFingerprint - The trusted fingerprint from the DB (null = first connect / TOFU).
-	 *   When provided and the server key doesn't match, the connection is rejected and
-	 *   the returned HostKeyVerification will have `mismatch: true`.
-	 * @param sessionTrustedFingerprint - Fingerprint trusted for this session only (trust_once).
+	 *   When provided and the server key matches neither it nor `sessionTrustedFingerprint`,
+	 *   `start` rejects, and `lastKeyVerification` then has `mismatch: true`.
+	 * @param sessionTrustedFingerprint - The key this host last trusted once on this route in
+	 *   this hub run (trust_once), accepted before `storedFingerprint`. With neither matching and
+	 *   no stored fingerprint, `start` rejects and `lastKeyVerification` has `tofu: true`.
 	 * @param signal - Optional AbortSignal. When aborted, the SSH connect is cancelled:
 	 *   the underlying ssh2 Client is destroyed and the returned promise rejects with
 	 *   an AbortError. Any pending auth prompt for this host is also cleared.

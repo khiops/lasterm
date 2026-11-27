@@ -129,6 +129,8 @@ import {
 	type SessionMetaDAL,
 	type SessionState,
 	type SharedSessionContext,
+	trustedOnceFor,
+	trustOnce,
 } from "./session-context.js";
 import { SnapshotScheduler } from "./snapshot-scheduler.js";
 import {
@@ -587,7 +589,9 @@ export class SessionManager {
 				const hostKey = targetRoute(host, (id) => sshAddress(ctx.metaDal.getHost(id)));
 				const storedFp = ctx.metaDal.getHostFingerprint(hostId, hostKey);
 				const sessionTrustedFp =
-					hostKey === null ? undefined : ctx.trustedOnceFingerprints.get(hostKey);
+					hostKey === null
+						? undefined
+						: trustedOnceFor(ctx.trustedOnceFingerprints, hostId, hostKey);
 
 				await sshAgent.start(
 					storedFp,
@@ -3712,6 +3716,7 @@ export class SessionManager {
 			if (key.startsWith(`${hostId}:`)) this.ctx.elevationCache.delete(key);
 		}
 		this.ctx.trustedAgentSha256.delete(hostId);
+		this.ctx.trustedOnceFingerprints.delete(hostId);
 		this.ctx.hubLogger?.log("info", "session-manager: host deleted", {
 			hostId,
 			ended: terminals.length - unreachable,
@@ -4259,7 +4264,9 @@ export class SessionManager {
 			: (host.sshHost ?? host.label);
 		const sshPort = host.sshPort ?? 22;
 		const sessionTrustedFp =
-			hostKey === null ? undefined : this.ctx.trustedOnceFingerprints.get(hostKey);
+			hostKey === null
+				? undefined
+				: trustedOnceFor(this.ctx.trustedOnceFingerprints, hostId, hostKey);
 
 		const hostChanged = (): never => {
 			const message = "The host changed while connecting. Connect again.";
@@ -4413,7 +4420,8 @@ export class SessionManager {
 
 				// Trusted there, and the person has said once that this is reason
 				// enough: pinned here without asking again. Only ever for a first
-				// connection — a key that changed under a pin is never silent.
+				// connection, one where this attempt found no pin: a key that changed
+				// under a pin it read is always asked about.
 				if (
 					kv.tofu &&
 					verdict.kind === "trusted" &&
@@ -4473,7 +4481,7 @@ export class SessionManager {
 				if (action === "trust_permanent") {
 					if (!this.ctx.metaDal.updateHostFingerprint(hostId, retryFp, hostKey)) hostChanged();
 				} else if (hostKey !== null) {
-					this.ctx.trustedOnceFingerprints.set(hostKey, retryFp);
+					trustOnce(this.ctx.trustedOnceFingerprints, hostId, hostKey, retryFp);
 				}
 				// The same agent as the first attempt, daemon included: built without
 				// it, a host reached for the first time — which is when a key is

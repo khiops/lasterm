@@ -62,7 +62,12 @@
 					     changed key, it would promise a question it never skips. -->
 					<template v-if="prompt.firstConnect">
 						<label class="hkw-known-choice">
-							<input v-model="trustKnownHosts" type="checkbox" :disabled="savingPreference" />
+							<input
+								v-model="trustKnownHosts"
+								type="checkbox"
+								:disabled="savingPreference"
+								@change="saveTrustKnownHosts"
+							/>
 							<span>
 								Take that as reason enough from now on — Lasterm will not ask about a first
 								connection to a host whose key is already in <code>known_hosts</code>.
@@ -103,7 +108,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useHostVerifyStore } from "../stores/host-verify.js";
 import { hubFetch } from "../utils/hub-fetch.js";
@@ -120,12 +125,18 @@ const copiedNew = ref(false);
  * what to do with the *next* host whose key is already known here. It is
  * written the moment it is ticked, so the decision survives whatever is
  * clicked next — including Reject.
+ *
+ * It is saved from the box's `change` event, which only the user's click
+ * fires, not from a watcher on the ref: putting the box back after a refused
+ * save writes that ref too, and a watcher took the correction for a second
+ * decision — it cleared the reason and sent the opposite request (#1223).
  */
 const trustKnownHosts = ref(false);
 const savingPreference = ref(false);
 const preferenceError = ref("");
 
-watch(trustKnownHosts, async (wanted) => {
+async function saveTrustKnownHosts(event: Event): Promise<void> {
+	const wanted = (event.currentTarget as HTMLInputElement).checked;
 	savingPreference.value = true;
 	preferenceError.value = "";
 	try {
@@ -146,7 +157,7 @@ watch(trustKnownHosts, async (wanted) => {
 	} finally {
 		savingPreference.value = false;
 	}
-});
+}
 
 async function copyOld(): Promise<void> {
 	if (!prompt.value) return;

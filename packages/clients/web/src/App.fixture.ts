@@ -69,6 +69,8 @@ export interface WindowSetup {
 	storage?: Record<string, string>;
 	/** What this tab kept from before, in `sessionStorage`. */
 	session?: Record<string, string>;
+	/** Returns once mounted, without waiting for the startup to finish (a test holding its replies). */
+	noWait?: boolean;
 	/** Answers the hub gives from the start, by "METHOD /path" (`FakeHub.answers`). */
 	answers?: Record<string, Answer>;
 }
@@ -135,6 +137,7 @@ export async function mountWindow(setup: WindowSetup = {}): Promise<MountedWindo
 	app = createApp({ render: () => h(App) });
 	app.use(pinia);
 	app.mount(root);
+	if (setup.noWait === true) return { hub, root };
 	await vi.waitFor(() => {
 		if (root?.querySelector(".app-layout") === null) throw new Error("the window is not ready");
 	});

@@ -1342,6 +1342,9 @@ let folderStartup: 'none' | 'pending' | 'folder' = folderRequestsAvailable() ? '
 let deferredStartupOpening: (() => void) | null = null;
 let folderWaitToast: number | null = null;
 let stopFolderEvents: (() => void) | null = null;
+// A folder or a held batch waits at startup: the opener is told once the startup has loaded the
+// preferences and tried the host list, so a folder never opens before `tabs.scope` is known.
+let folderExpected = false;
 
 const folderOpener = createFolderOpener({
 	hostsUsable: () => hostsStore.hostListsLoaded > 0 && hostsStore.error === null,
@@ -1414,7 +1417,7 @@ async function startFolderRequests(): Promise<void> {
 		console.warn('[desktop] cannot tell whether a folder from File Explorer waits:', error);
 		waiting = true;
 	}
-	if (waiting || folderOpener.holdingBatch()) folderOpener.expect();
+	if (waiting || folderOpener.holdingBatch()) folderExpected = true;
 	else startupWithoutFolder();
 }
 
@@ -1532,6 +1535,7 @@ onMounted(async () => {
 			console.error('[App] startup connect failed:', err);
 		}
 	}
+	if (folderExpected) folderOpener.expect();
 	appReady.value = true;
 });
 

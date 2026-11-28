@@ -53,6 +53,7 @@ describe("createFolderOpener", () => {
 		const state = {
 			usable: true,
 			waiting: true,
+			waitingRejects: false,
 			queue: [] as string[],
 			last: null as { token: string; batch: string[] } | null,
 			takes: [] as string[],
@@ -65,7 +66,10 @@ describe("createFolderOpener", () => {
 		};
 		const deps: FolderOpenerDeps = {
 			hostsUsable: () => state.usable,
-			waiting: async () => state.waiting,
+			waiting: async () => {
+				if (state.waitingRejects) throw new Error("IPC failed");
+				return state.waiting;
+			},
 			take: async (token) => {
 				state.takes.push(token);
 				if (state.last?.token === token) return [...state.last.batch];
@@ -125,22 +129,52 @@ describe("createFolderOpener", () => {
 		expect(state.rereads).toBe(0);
 	});
 
-	it("re-reads the list 5 s after startup when a folder waits, with no event", async () => {
+	it("takes a folder expected at startup at once on a usable list", async () => {
+		const { state, deps } = fakeDeps();
+		const opener = createFolderOpener(deps);
+		state.queue = ["C:\\A"];
+		opener.expect();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(state.processed).toEqual([["C:\\A"]]);
+		expect(state.shown).toBe(0);
+	});
+
+	it("says a folder expected at startup waits, and re-reads every 5 s whatever `waiting` answers", async () => {
 		const { state, deps } = fakeDeps();
 		const opener = createFolderOpener(deps);
 		state.usable = false;
 		state.queue = ["C:\\A"];
+		state.waitingRejects = true;
 		opener.expect();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(state.shown).toBe(1);
 		await vi.advanceTimersByTimeAsync(4_900);
 		expect(state.rereads).toBe(0);
 		await vi.advanceTimersByTimeAsync(200);
 		expect(state.rereads).toBe(1);
-		expect(state.shown).toBe(1);
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(state.rereads).toBe(2);
+		expect(state.takes).toEqual([]);
 
 		state.usable = true;
 		await vi.advanceTimersByTimeAsync(5_000);
 		expect(state.processed).toEqual([["C:\\A"]]);
 		expect(state.hidden).toBe(1);
+		// Done waiting: no further re-read.
+		const rereads = state.rereads;
+		await vi.advanceTimersByTimeAsync(11_000);
+		expect(state.rereads).toBe(rereads);
+	});
+
+	it("re-reads no list that became usable before its timer", async () => {
+		const { state, deps } = fakeDeps();
+		const opener = createFolderOpener(deps);
+		state.usable = false;
+		state.queue = ["C:\\A"];
+		await opener.drain();
+		state.usable = true;
+		await vi.advanceTimersByTimeAsync(5_100);
+		expect(state.rereads).toBe(0);
 	});
 
 	it("shows the wait notice again for a later folder once the user closed it", async () => {

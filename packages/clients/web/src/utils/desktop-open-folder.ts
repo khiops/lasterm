@@ -6,9 +6,10 @@
  * token: the desktop removes what it returns, except that the token of its previous call returns
  * that call's batch again. The page keeps its token, in memory and in `sessionStorage`, until it
  * has processed the batch, so a call repeated after a lost reply or a failed call gets the same
- * folders and opens them once. After a reload, the next page replays the stored token: that holds
- * while `sessionStorage` kept the token and no other token reached the desktop first, which keeps
- * only its last token's batch.
+ * folders. After a reload, the next page replays the stored token and gets a batch taken but not
+ * processed, while `sessionStorage` kept the token and no other token reached the desktop first
+ * (it keeps only its last token's batch). A token whose removal the storage refused replays a
+ * processed batch: its folders open twice (accepted in #1236).
  */
 
 import { isTauriRuntime } from "./tauri-runtime.js";
@@ -93,8 +94,9 @@ export interface FolderOpener {
 	/** Takes and opens what waits; serialised, a call during a pass makes another pass. */
 	drain: () => Promise<void>;
 	/**
-	 * A folder or a held batch waits at startup: unless the host list has made it usable by
-	 * then, the page re-reads it 5 s later and takes what waits, with no event needed.
+	 * A folder or a held batch waits at startup, once the startup has loaded its preferences and
+	 * tried the host list: takes it now if the list is usable, else shows the notice and re-reads
+	 * the list every 5 s until it is, with no event needed and whatever `waiting` answers.
 	 */
 	expect: () => void;
 	/** Whether a batch was taken and not processed yet (its token is held). */
@@ -110,6 +112,8 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 	let retryTimer: ReturnType<typeof setTimeout> | null = null;
 	let rereadTimer: ReturnType<typeof setTimeout> | null = null;
 	let noticeShown = false;
+	// Folders known to wait since startup (`expect`), until a batch is processed.
+	let expected = false;
 	// Once stopped (the page is going), nothing is taken or opened; a batch taken meanwhile is
 	// replayed by the next page from the stored token.
 	let stopped = false;
@@ -131,7 +135,7 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 		if (rereadTimer !== null) return;
 		rereadTimer = setTimeout(() => {
 			rereadTimer = null;
-			deps.rereadHosts();
+			if (!deps.hostsUsable()) deps.rereadHosts();
 			// Still waiting after this read: the next pass asks again 5 s later.
 			void drain();
 		}, HOSTS_REREAD_MS);
@@ -140,7 +144,7 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 	async function pass(): Promise<void> {
 		if (stopped) return;
 		if (!deps.hostsUsable()) {
-			let waits = token !== null;
+			let waits = token !== null || expected;
 			if (!waits) {
 				try {
 					waits = await deps.waiting();
@@ -189,9 +193,11 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 		}
 		hideNotice();
 		deps.process(folders);
-		// Processed: the token goes only now, so a batch whose processing failed is taken again.
+		// Processed: the token goes only now, so a batch whose processing failed stays available
+		// to the next call, with its token.
 		token = null;
 		storeToken(null);
+		expected = false;
 		if (!firstSeen) {
 			firstSeen = true;
 			deps.firstBatch(folders.length > 0);
@@ -217,7 +223,9 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 	return {
 		drain,
 		expect: () => {
-			if (!stopped) scheduleReread();
+			if (stopped) return;
+			expected = true;
+			void drain();
 		},
 		holdingBatch: () => token !== null,
 		stop: () => {

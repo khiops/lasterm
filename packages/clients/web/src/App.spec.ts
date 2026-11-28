@@ -3296,12 +3296,21 @@ describe("folders from File Explorer", () => {
 		await settle();
 		expect(spawns(hub)).toEqual([]);
 		expect(desktopFolders.takes).toEqual([]);
-		// No event from the desktop: the page asks for the list again 5 s after startup, and says
-		// the folder waits.
+		// No event from the desktop: the page says the folder waits, and asks for the list again
+		// 5 s later, through the hosts store's protected re-read.
+		await vi.waitFor(() => expect(toasts()).toContain(waitText));
+		const hosts = useHostsStore();
+		const changed = vi.spyOn(hosts, "hubChanged");
+		const fetched = vi.spyOn(hosts, "fetchHosts");
+		onTestFinished(() => {
+			changed.mockRestore();
+			fetched.mockRestore();
+		});
 		const first = rereads();
 		await vi.advanceTimersByTimeAsync(5_500);
 		expect(rereads()).toBeGreaterThan(first);
-		await vi.waitFor(() => expect(toasts()).toContain(waitText));
+		expect(changed).toHaveBeenCalledWith("hosts");
+		expect(fetched).not.toHaveBeenCalled();
 		expect(desktopFolders.takes).toEqual([]);
 		// The notice stays while the folder waits; the page asks for the list again meanwhile.
 		const asked = rereads();
@@ -3362,6 +3371,42 @@ describe("folders from File Explorer", () => {
 		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(opened + 2));
 		expect(spawns(hub).slice(opened)).toMatchObject([{ cwd: D2 }, { cwd: D }]);
 		await vi.waitFor(() => expect(notice()).toBeUndefined());
+	});
+
+	it("opens a folder waiting at startup only once the preferences have loaded", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		desktopFolders.queue = [D];
+		const prefs = held();
+		let prefsAsked = false;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			ui: { tabs: { scope: "perHost" } },
+			session: { "lasterm:selected-host": S },
+			noWait: true,
+			answers: {
+				"GET /api/config/ui": async () => {
+					prefsAsked = true;
+					await prefs.promise;
+					return undefined;
+				},
+			},
+		});
+		await vi.waitFor(() => expect(prefsAsked).toBe(true));
+		// The preferences stay unanswered past the opener's 5 s re-read: the folder stays queued,
+		// untaken, so it is not opened before `tabs.scope` is known.
+		await vi.advanceTimersByTimeAsync(6_000);
+		expect(desktopFolders.queue).toEqual([D]);
+		expect(desktopFolders.takes).toEqual([]);
+		expect(spawns(hub)).toEqual([]);
+
+		prefs.release();
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		expect(spawns(hub)[0]).toMatchObject({ hostId: HOST_A, cwd: D });
+		await vi.waitFor(() => expect(useHostsStore().selectedHostId).toBe(HOST_A));
 	});
 
 	it("drops a folder with a notice when the hub has no local host", async () => {

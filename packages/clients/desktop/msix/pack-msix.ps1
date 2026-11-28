@@ -163,11 +163,12 @@ function Get-CargoPackageName([string]$CargoTomlPath) {
   $inPackage = $false
   foreach ($line in Get-Content -LiteralPath $CargoTomlPath) {
     $trimmed = $line.Trim()
-    if ($trimmed -match '^\[(.+)\]$') {
-      $inPackage = ($matches[1] -eq "package")
+    # Case-sensitive, as TOML keys are and as build.rs of lasterm-explorer-command reads them.
+    if ($trimmed -cmatch '^\[(.+)\]$') {
+      $inPackage = ($matches[1] -ceq "package")
       continue
     }
-    if ($inPackage -and $trimmed -match '^name\s*=\s*"([^"]+)"') {
+    if ($inPackage -and $trimmed -cmatch '^name\s*=\s*"([^"]+)"') {
       return $matches[1]
     }
   }
@@ -400,6 +401,19 @@ foreach ($resource in $tauriConfig.bundle.resources.PSObject.Properties) {
     throw "$source is empty, a placeholder rather than the hub's addon. Place the files the hub was built with (dist\sea) in src-tauri, as scripts\build-desktop.ps1 does."
   }
 }
+Get-ChildItem -Path (Join-Path (Split-Path -Parent $mainExe) "*") -File -Include "*.dll" |
+  Copy-Item -Destination $stageDir -Force
+# File Explorer's "Open in lasterm" command (#1236), which the manifest
+# registers as the package's COM server: copied after the DLLs beside the
+# executable, so a file of that name there cannot replace it, and checked as
+# the x64 library Explorer loads.
+$explorerCommand = Join-Path $srcTauriDir "lasterm_explorer_command.dll"
+$stagedExplorerCommand = Join-Path $stageDir "lasterm_explorer_command.dll"
+Copy-RequiredFile $explorerCommand $stagedExplorerCommand
+if ((Get-Item -LiteralPath $explorerCommand).Length -eq 0) {
+  throw "$explorerCommand is empty. Build it with scripts\build-explorer-command.ps1 and place dist\sea\lasterm_explorer_command.dll in src-tauri."
+}
+Assert-PeMachineX64 $stagedExplorerCommand
 if ($StageOnly) {
   Write-Host "Staged in $stageDir"
   return
@@ -412,9 +426,6 @@ foreach ($exe in @($desktopBinaryName, "lasterm-hub.exe", "lasterm-agent.exe")) 
 Assert-StagedSidecarVersions `
   -StageDir $stageDir `
   -ExpectedVersion $sidecarVersion
-
-Get-ChildItem -Path (Join-Path (Split-Path -Parent $mainExe) "*") -File -Include "*.dll" |
-  Copy-Item -Destination $stageDir -Force
 
 # The logos, one file per scale or target size, rendered by `pnpm icons` from
 # packaging/brand. The manifest names each one without its qualifiers

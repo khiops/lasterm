@@ -167,6 +167,11 @@ interface PendingSpawn {
 	readonly restored: boolean;
 	/** A run of it was started, so its SPAWN may have gone out. */
 	sent: boolean;
+	/**
+	 * The folder File Explorer asked to open (#1236): its terminal starts there,
+	 * on the local host only.
+	 */
+	readonly cwd?: string;
 }
 
 /**
@@ -192,6 +197,7 @@ const PENDING_SPAWNS_KEY = "lasterm:pending-spawns";
 interface StoredSpawn {
 	hostId: string;
 	sent: boolean;
+	cwd?: string;
 }
 
 /** The spawns the page before this one owed. Anything unreadable is left out. */
@@ -208,11 +214,15 @@ function loadStoredSpawns(): Map<string, StoredSpawn> {
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return stored;
 	for (const [tempId, entry] of Object.entries(parsed)) {
 		if (typeof entry !== "object" || entry === null) continue;
-		const { hostId, sent } = entry as { hostId?: unknown; sent?: unknown };
+		const { hostId, sent, cwd } = entry as { hostId?: unknown; sent?: unknown; cwd?: unknown };
 		if (typeof hostId !== "string" || hostId === "") continue;
 		// Anything but a plain false may have sent its SPAWN: it is read as the
 		// one that claims less.
-		stored.set(tempId, { hostId, sent: sent !== false });
+		stored.set(tempId, {
+			hostId,
+			sent: sent !== false,
+			...(typeof cwd === "string" && { cwd }),
+		});
 	}
 	return stored;
 }
@@ -220,6 +230,16 @@ function loadStoredSpawns(): Map<string, StoredSpawn> {
 /** Write the spawns still owed. Throws what `localStorage` throws. */
 function writeStoredSpawns(spawns: ReadonlyMap<string, StoredSpawn>): void {
 	localStorage.setItem(PENDING_SPAWNS_KEY, JSON.stringify(Object.fromEntries(spawns)));
+}
+
+/** The refusal of a folder's terminal on a host that is no longer local (#1236). */
+export const LOCAL_ONLY_SPAWN_REFUSAL = "This folder can only open on this computer's local host.";
+
+/** A run that failed before its SPAWN went out, with the reason its pane shows. */
+function refusedRun(message: string): PendingSpawnRun {
+	const outcome = Promise.reject<SpawnedTerminal>(new Error(message));
+	outcome.catch(() => {});
+	return { state: "failed", outcome };
 }
 
 /** A restored spawn's run: failed, with the reason its pane shows. */
@@ -1385,17 +1405,25 @@ export const useChannelsStore = defineStore("channels", () => {
 	 * reactive state.
 	 */
 	const pendingSpawns = new Map<string, PendingSpawn>(
-		[...loadStoredSpawns()].map(([tempId, { hostId, sent }]) => [
+		[...loadStoredSpawns()].map(([tempId, { hostId, sent, cwd }]) => [
 			tempId,
-			{ hostId, holders: 0, run: interruptedRun(!sent), restored: true, sent },
+			{
+				hostId,
+				holders: 0,
+				run: interruptedRun(!sent),
+				restored: true,
+				sent,
+				...(cwd !== undefined && { cwd }),
+			},
 		]),
 	);
 
 	/** The records as the next page is to find them. */
 	function storedSpawns(except?: string): Map<string, StoredSpawn> {
 		const spawns = new Map<string, StoredSpawn>();
-		for (const [tempId, { hostId, sent }] of pendingSpawns) {
-			if (tempId !== except) spawns.set(tempId, { hostId, sent });
+		for (const [tempId, { hostId, sent, cwd }] of pendingSpawns) {
+			if (tempId !== except)
+				spawns.set(tempId, { hostId, sent, ...(cwd !== undefined && { cwd }) });
 		}
 		return spawns;
 	}
@@ -1441,8 +1469,16 @@ export const useChannelsStore = defineStore("channels", () => {
 		}
 	}
 
-	function registerPendingSpawn(tempId: string, hostId: string): void {
-		pendingSpawns.set(tempId, { hostId, holders: 0, run: null, restored: false, sent: false });
+	/** `opts.cwd`: the folder File Explorer asked to open there (#1236). */
+	function registerPendingSpawn(tempId: string, hostId: string, opts?: { cwd?: string }): void {
+		pendingSpawns.set(tempId, {
+			hostId,
+			holders: 0,
+			run: null,
+			restored: false,
+			sent: false,
+			...(opts?.cwd !== undefined && { cwd: opts.cwd }),
+		});
 		storePendingSpawns();
 	}
 
@@ -1516,6 +1552,16 @@ export const useChannelsStore = defineStore("channels", () => {
 		const record = pendingSpawns.get(tempId);
 		if (record === undefined) return null;
 		if (record.run !== null) return record.run;
+		// A folder from File Explorer is this computer's path: never sent to a
+		// host that is no longer the local one, and refused before `sent` is
+		// written, which then still says nothing went out (#1236).
+		if (record.cwd !== undefined) {
+			const host = useHostsStore().hosts.find((h) => h.id === record.hostId);
+			if (host?.type !== "local") {
+				record.run = refusedRun(LOCAL_ONLY_SPAWN_REFUSAL);
+				return record.run;
+			}
+		}
 		// Its SPAWN may go out from here: a page that loads it after this must not
 		// offer to start a second terminal (#992). Written for every run: one that
 		// a refused write took out of storage comes back once storage accepts.
@@ -1530,6 +1576,7 @@ export const useChannelsStore = defineStore("channels", () => {
 				cols,
 				rows,
 				select: false,
+				...(record.cwd !== undefined && { cwd: record.cwd, localOnly: true }),
 				onAdaptsInput: (adapts, streams) => {
 					adaptsInput = adapts;
 					streamsPaste = streams;
@@ -1596,6 +1643,10 @@ export const useChannelsStore = defineStore("channels", () => {
 			directProcess?: boolean;
 			/** Bring this dead terminal back rather than open a new one beside it. */
 			reuseChannelId?: string;
+			/** The directory it starts in (a folder from File Explorer, #1236). */
+			cwd?: string;
+			/** The hub refuses it for a host that is not local (#1236). */
+			localOnly?: boolean;
 			/**
 			 * Nobody asked for it: the setting, or a host's return. A host its user
 			 * disconnected is not connected again by it (#648).
@@ -1785,6 +1836,8 @@ export const useChannelsStore = defineStore("channels", () => {
 				...(opts?.directProcess ? { directProcess: true } : {}),
 				...(opts?.reuseChannelId !== undefined ? { reuseChannelId: opts.reuseChannelId } : {}),
 				...(opts?.automatic === true ? { automatic: true } : {}),
+				...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
+				...(opts?.localOnly === true ? { localOnly: true } : {}),
 			});
 		});
 	}

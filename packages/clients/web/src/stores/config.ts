@@ -156,6 +156,11 @@ export const useConfigStore = defineStore("config", () => {
 	const systemFonts = ref<SystemFontFamily[] | null>(null);
 	const loaded = ref(false);
 	const uiConfig = ref<UiConfig>({ onChannelDead: "readonly" });
+	/**
+	 * Whether `uiConfig` holds settings the hub sent: until then it holds the defaults above, which
+	 * say nothing of `tabs.scope` (#1236).
+	 */
+	const uiConfigLoaded = ref(false);
 
 	/**
 	 * File transfer is on (`[experimental] file_transfer`, #835): what the drop
@@ -264,13 +269,16 @@ export const useConfigStore = defineStore("config", () => {
 	 * Controls how the client reacts to dead channels, etc.
 	 */
 	async function loadUiConfig(): Promise<void> {
+		const authStore = useAuthStore();
+		// Not paired yet: there is nothing to authenticate with, and a request would be refused.
+		if (authStore.token === null) return;
 		try {
-			const authStore = useAuthStore();
 			const resp = await hubFetch(`${hubBaseUrl()}/api/config/ui`, {
 				headers: { Authorization: `Bearer ${authStore.token}` },
 			});
 			if (resp.ok) {
 				uiConfig.value = await resp.json();
+				uiConfigLoaded.value = true;
 			}
 		} catch (err) {
 			console.warn("[config] failed to load UI config:", err);
@@ -475,6 +483,7 @@ export const useConfigStore = defineStore("config", () => {
 		systemFonts,
 		loaded,
 		uiConfig,
+		uiConfigLoaded,
 		fileTransferEnabled,
 		loadFonts,
 		loadSystemFonts,

@@ -517,6 +517,13 @@ import {
 	hostConnectionFailure,
 } from './utils/host-connection.js';
 import { hubUnreachable, whyRefused } from './utils/hub-answer.js';
+import {
+	createFolderOpener,
+	folderRequestsAvailable,
+	hasOpenFolderRequests,
+	listenOpenFolderRequested,
+	takeOpenFolderRequests,
+} from './utils/desktop-open-folder.js';
 import { hubBaseUrl, initAssetAccess, initHubPort } from './utils/hub-url.js';
 import { WALLPAPER_FADE_MS } from './composables/useWallpaper.js';
 import { hubFetch } from './utils/hub-fetch.js';
@@ -1313,12 +1320,153 @@ const appReady = ref(false);
 const postAuthLoading = ref(false);
 const needsPairing = computed(() => authStore.token === null || sessionStore.authFailed || postAuthLoading.value);
 
-/** Helper: open a tab backed by a pending spawn (TerminalPane handles the actual SPAWN). */
-function openPendingTab(hostId: string): void {
+/**
+ * Helper: open a tab backed by a pending spawn (TerminalPane handles the actual SPAWN).
+ * `opts.cwd`: a folder from File Explorer it starts in (#1236).
+ */
+function openPendingTab(hostId: string, opts?: { cwd?: string }): void {
 	const tempId = generateId();
-	channelsStore.registerPendingSpawn(tempId, hostId);
+	channelsStore.registerPendingSpawn(tempId, hostId, opts);
 	layout.openTab(tempId);
 }
+
+// ── Folders from File Explorer (#1236) ──────────────────────────────────────
+//
+// At startup with a folder waiting, the local host's first watcher run opens
+// neither its welcome tab nor its default tab: the folder's tab is the one. While
+// whether one waits is unknown ('pending'), that run defers its opening, which
+// runs once if the first batch turns out empty. The state never outlives startup.
+// Pending from the start in the desktop app: the host list may load before the desktop has said
+// whether a folder waits.
+let folderStartup: 'none' | 'pending' | 'folder' = folderRequestsAvailable() ? 'pending' : 'none';
+let deferredStartupOpening: (() => void) | null = null;
+let folderWaitToast: number | null = null;
+let stopFolderEvents: (() => void) | null = null;
+// What the desktop answered at mount when asked whether a folder waits, null when it could not
+// tell: handed to the opener once the startup has tried the host list.
+let folderStartupAnswer: boolean | null = false;
+// The preferences' read the folder opener asked for, while it runs.
+let folderPrefsRead: Promise<void> | null = null;
+
+/** A host list received, whose last load did not fail. */
+function hostsUsable(): boolean {
+	return hostsStore.hostListsLoaded > 0 && hostsStore.error === null;
+}
+
+const folderOpener = createFolderOpener({
+	// Without the preferences, `tabs.scope` is unknown: which host the folder's tab brings into view.
+	ready: () => hostsUsable() && configStore.uiConfigLoaded,
+	waiting: () => hasOpenFolderRequests(),
+	take: (token) => takeOpenFolderRequests(token),
+	process: (folders) => {
+		for (const folder of folders) {
+			const local = hostsStore.sortedHosts.find((h) => h.type === 'local');
+			if (local === undefined) {
+				toastStore.show('warning', `Lasterm has no local host to open ${folder} on.`);
+				if (folderStartup === 'pending') folderStartup = 'none';
+				continue;
+			}
+			// As the palette opens a terminal on a host: the tab, then the host in view.
+			openPendingTab(local.id, { cwd: folder });
+			if (configStore.uiConfig.tabs?.scope === 'perHost') hostsStore.selectHost(local.id);
+		}
+	},
+	firstBatch: (nonEmpty) => {
+		if (folderStartup !== 'pending') return;
+		const deferred = deferredStartupOpening;
+		deferredStartupOpening = null;
+		if (deferred !== null) {
+			// The startup run already passed: it opened nothing, and opens its tabs now only if no
+			// folder came.
+			folderStartup = 'none';
+			if (!nonEmpty) deferred();
+			return;
+		}
+		folderStartup = nonEmpty ? 'folder' : 'none';
+	},
+	reload: () => {
+		if (!hostsUsable()) hostsStore.hubChanged('hosts');
+		// One read of the preferences at a time: a slow one is not stacked with more.
+		if (!configStore.uiConfigLoaded && folderPrefsRead === null) {
+			folderPrefsRead = configStore.loadUiConfig().finally(() => {
+				folderPrefsRead = null;
+			});
+		}
+	},
+	showWaitNotice: (onUserDismiss) => {
+		folderWaitToast = toastStore.show(
+			'info',
+			'Lasterm is waiting for its hub to open a folder from File Explorer.',
+			null,
+			undefined,
+			() => {
+				folderWaitToast = null;
+				onUserDismiss();
+			},
+		);
+	},
+	hideWaitNotice: () => {
+		if (folderWaitToast !== null) toastStore.dismiss(folderWaitToast);
+		folderWaitToast = null;
+	},
+});
+
+/**
+ * Takes and opens the folders File Explorer sent, once the desktop says some wait. During the
+ * startup, the opener only remembers the call, for `startFolders`.
+ */
+function drainFolders(): void {
+	void folderOpener.drain();
+}
+
+/**
+ * The startup has tried the host list, or failed before it could: folders from File Explorer may
+ * open from now on, once the preferences have loaded (#1236). Only the first call counts.
+ */
+function startFolders(): void {
+	if (folderRequestsAvailable()) folderOpener.start(folderStartupAnswer);
+}
+
+/** Listens for folders from File Explorer, and learns whether one waits at startup. */
+async function startFolderRequests(): Promise<void> {
+	if (!folderRequestsAvailable()) return;
+	try {
+		stopFolderEvents = await listenOpenFolderRequested(drainFolders);
+	} catch (error) {
+		console.warn('[desktop] cannot listen for folders from File Explorer; asking every 2 s:', error);
+		const interval = setInterval(drainFolders, 2000);
+		stopFolderEvents = () => clearInterval(interval);
+	}
+	try {
+		folderStartupAnswer = await hasOpenFolderRequests();
+	} catch (error) {
+		console.warn('[desktop] cannot tell whether a folder from File Explorer waits:', error);
+		folderStartupAnswer = null;
+	}
+	if (folderStartupAnswer === false && !folderOpener.holdingBatch()) startupWithoutFolder();
+}
+
+/** No folder waits at startup: the local host's own tabs open, if its first run deferred them. */
+function startupWithoutFolder(): void {
+	if (folderStartup !== 'pending') return;
+	folderStartup = 'none';
+	const deferred = deferredStartupOpening;
+	deferredStartupOpening = null;
+	deferred?.();
+}
+
+watch(
+	() => hostsStore.hostListsLoaded,
+	() => {
+		if (folderRequestsAvailable()) drainFolders();
+	},
+);
+watch(
+	() => configStore.uiConfigLoaded,
+	(loaded) => {
+		if (loaded && folderRequestsAvailable()) drainFolders();
+	},
+);
 
 /**
  * On mount: if we have a token, connect the WebSocket and fetch hosts.
@@ -1359,6 +1507,10 @@ onMounted(async () => {
 	} catch (error) {
 		console.warn('[desktop] failed to register close presentations:', error);
 	}
+
+	// Folders from File Explorer (#1236): on their own, so no other listener's failure skips them,
+	// and before the hosts load, so the startup run knows whether one waits.
+	await startFolderRequests();
 
 	// In Tauri desktop, resolve the hub port BEFORE any API calls so that
 	// hubBaseUrl() / hubWsUrl() use the correct port (zero_conf may pick != 4100).
@@ -1405,6 +1557,8 @@ onMounted(async () => {
 			// it applies the OS-preferred theme. Otherwise the saved theme.
 			await themeStore.reloadAppearance();
 			await hostsStore.fetchHosts();
+			// Folders from File Explorer (#1236): the host list has been tried.
+			startFolders();
 			await profilesStore.fetchProfiles();
 			// Apply channel/host theme override if an active channel exists
 			if (channelsStore.selectedChannelId) {
@@ -1414,6 +1568,9 @@ onMounted(async () => {
 			console.error('[App] startup connect failed:', err);
 		}
 	}
+	// A step before the host list failed, or there is no token: the folders' wait starts all the
+	// same (a no-op once started).
+	startFolders();
 	appReady.value = true;
 });
 
@@ -1424,6 +1581,8 @@ onUnmounted(() => {
 	desktopCloseUnlisten?.();
 	hubExitUnlisten?.();
 	desktopCloseExpiryUnlisten?.();
+	stopFolderEvents?.();
+	folderOpener.stop();
 	stopHubUpdate();
 	window.removeEventListener('dragenter', onWindowDragEnter, { capture: true });
 	stopTransferGuards?.();
@@ -1508,24 +1667,43 @@ watch(
 			}
 		}
 
-		// Auto-open welcome tab if one exists and is alive — unless Settings ›
-		// Startup says not to: the toggle was offered and stored, and this opened
-		// the tab whatever it said.
-		const welcomeCh = channelsStore.channels.find((c) => c.isWelcome && c.status !== 'dead');
-		if (welcomeCh && configStore.uiConfig.startup?.autoOpenWelcome !== false) {
-			layout.openTab(welcomeCh.id);
-		}
-
-		// Auto-spawn only for local hosts with no live channels and no tabs open.
-		// SSH hosts require an explicit connection — auto-spawn would timeout.
+		// A folder from File Explorer at startup (#1236): the local host's first run opens
+		// neither the welcome tab nor the default tab; another host's run ends the wait.
 		const host = hostsStore.hosts.find((h) => h.id === hostId);
-		const hasAliveChannels = channelsStore.channels.some((c) => c.status !== 'dead');
-		if (host?.type === 'local' && !hasAliveChannels && layout.tabs.value.length === 0) {
-			openPendingTab(hostId);
+		if (folderStartup !== 'none') {
+			if (host?.type !== 'local') {
+				folderStartup = 'none';
+			} else if (folderStartup === 'pending') {
+				deferredStartupOpening = () => openStartupTabs(hostId);
+				return;
+			} else {
+				folderStartup = 'none';
+				return;
+			}
 		}
+		openStartupTabs(hostId);
 	},
 	{ immediate: true },
 );
+
+/** The tabs a host's selection opens by itself: its welcome tab, and on the local host a first terminal. */
+function openStartupTabs(hostId: string): void {
+	// Auto-open welcome tab if one exists and is alive — unless Settings ›
+	// Startup says not to: the toggle was offered and stored, and this opened
+	// the tab whatever it said.
+	const welcomeCh = channelsStore.channels.find((c) => c.isWelcome && c.status !== 'dead');
+	if (welcomeCh && configStore.uiConfig.startup?.autoOpenWelcome !== false) {
+		layout.openTab(welcomeCh.id);
+	}
+
+	// Auto-spawn only for local hosts with no live channels and no tabs open.
+	// SSH hosts require an explicit connection — auto-spawn would timeout.
+	const host = hostsStore.hosts.find((h) => h.id === hostId);
+	const hasAliveChannels = channelsStore.channels.some((c) => c.status !== 'dead');
+	if (host?.type === 'local' && !hasAliveChannels && layout.tabs.value.length === 0) {
+		openPendingTab(hostId);
+	}
+}
 
 /**
  * When a channel is selected programmatically (e.g. fetchChannels

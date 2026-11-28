@@ -56,7 +56,8 @@ installs on your hosts ([below](#on-the-hosts-you-add)):
 The interface keeps a few things in its own web storage: the access token, the layout of your tabs
 and panes, your recent searches in terminals, your recent command palette entries, which host and
 terminal groups you collapsed, the confirmations you chose to skip, the host selected in this
-window, and the version of the hub it last reloaded for. In a browser, it also keeps a copy of the
+window, the version of the hub it last reloaded for, and the folder a terminal opened from File
+Explorer waits to start in, until it has started. In a browser, it also keeps a copy of the
 interface's own files, so it opens without fetching them again. In the desktop app that storage is
 in `%LOCALAPPDATA%\app.lasterm.desktop`; in a browser, it is the browser's storage for the hub's
 address.

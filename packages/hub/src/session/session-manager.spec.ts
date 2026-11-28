@@ -36,7 +36,7 @@ import {
 	reconnectContextId,
 } from "./prompt-context.js";
 import type { CommitProtectedMap } from "./session-context.js";
-import { SessionManager, type WsClient } from "./session-manager.js";
+import { LOCAL_ONLY_REFUSAL, SessionManager, type WsClient } from "./session-manager.js";
 import { seedShellProfiles } from "./shell-profile-seed.js";
 import { WriteLockManager } from "./write-lock.js";
 
@@ -1977,6 +1977,41 @@ describe("SessionManager", () => {
 			if (channel !== undefined) expect(channel.shell).toBe(spawn?.shell);
 			return { spawn, launchProfileId: channel?.launchProfileId };
 		}
+
+		// A folder from File Explorer goes to the local host's agent only (#1236).
+		it("a local-only SPAWN is refused for a host that is not local", async () => {
+			const received: ProtocolMessage[] = [];
+			sm.addClient(makeClient("c-local-only", received));
+			const requestId = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
+			const folder = "C:\\Users\\me\\sub\\..\\dossier é 漢 x";
+			const ssh = await connectedSshHost("pi-local-only");
+			const absent = "01ARZ3NDEKTSV4RRFFQ69G5FAY";
+
+			for (const hostId of [ssh, absent]) {
+				received.length = 0;
+				const channelId = await sm.handleSpawn("c-local-only", {
+					type: "SPAWN",
+					hostId,
+					requestId,
+					cwd: folder,
+					localOnly: true,
+				});
+				expect(channelId).toBeNull();
+				expect(received).toEqual([
+					{ type: "ERROR", code: "INVALID_INPUT", message: LOCAL_ONLY_REFUSAL, requestId },
+				]);
+			}
+			// Nothing was reached for either: no SSH agent was even made.
+			expect(mockSshAgentInstance).toBeNull();
+
+			const local = await localHost();
+			const { spawn } = await started(local, { cwd: folder, localOnly: true });
+			expect(spawn?.cwd).toBe(folder);
+
+			// Without the flag, an SSH host is handled as before.
+			const { spawn: sshSpawn } = await started(ssh, { cwd: "/home/pi" });
+			expect(sshSpawn?.cwd).toBe("/home/pi");
+		});
 
 		/** The first profile of the host's menu: the ✓ one, what Ctrl+Shift+1 starts. */
 		function firstOfMenu(hostId: string) {

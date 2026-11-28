@@ -21,6 +21,62 @@ vi.mock("@xterm/addon-search", () =>
 vi.mock("./composables/terminal-font.js", () => ({ awaitTerminalFont: () => Promise.resolve() }));
 vi.mock("./composables/useBellSound.js", () => ({ playBellSound: vi.fn() }));
 
+/**
+ * The desktop's side of folders from File Explorer (#1236), as its commands answer: a queue the
+ * page takes with a token, the token of the previous call returning that call's batch again.
+ * Only the IPC boundary is replaced; the page's own logic runs as in the app.
+ */
+const desktopFolders = vi.hoisted(() => ({
+	available: false,
+	queue: [] as string[],
+	last: null as { token: string; batch: string[] } | null,
+	takes: [] as string[],
+	hasRejectsOnce: false,
+	takeRejectsOnce: false,
+	listenRejects: false,
+	hold: null as Promise<void> | null,
+	hasHold: null as Promise<void> | null,
+	listener: null as (() => void) | null,
+}));
+vi.mock("./utils/desktop-open-folder.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("./utils/desktop-open-folder.js")>();
+	return {
+		...actual,
+		folderRequestsAvailable: () => desktopFolders.available,
+		hasOpenFolderRequests: async () => {
+			if (desktopFolders.hasHold !== null) await desktopFolders.hasHold;
+			if (desktopFolders.hasRejectsOnce) {
+				desktopFolders.hasRejectsOnce = false;
+				throw new Error("IPC failed");
+			}
+			return desktopFolders.queue.length > 0;
+		},
+		takeOpenFolderRequests: async (token: string) => {
+			desktopFolders.takes.push(token);
+			if (desktopFolders.hold !== null) await desktopFolders.hold;
+			let batch: string[];
+			if (desktopFolders.last?.token === token) {
+				batch = desktopFolders.last.batch;
+			} else {
+				batch = desktopFolders.queue.splice(0);
+				desktopFolders.last = { token, batch };
+			}
+			if (desktopFolders.takeRejectsOnce) {
+				desktopFolders.takeRejectsOnce = false;
+				throw new Error("IPC reply lost");
+			}
+			return [...batch];
+		},
+		listenOpenFolderRequested: async (onRequest: () => void) => {
+			if (desktopFolders.listenRejects) throw new Error("IPC failed");
+			desktopFolders.listener = onRequest;
+			return () => {
+				desktopFolders.listener = null;
+			};
+		},
+	};
+});
+
 import {
 	type ChannelRow,
 	CLIENT_HERE,
@@ -56,8 +112,10 @@ import {
 } from "./App.fixture.js";
 import { WALLPAPER_FADE_MS } from "./composables/useWallpaper.js";
 import { useHostsStore } from "./stores/hosts.js";
+import { useToastStore } from "./stores/toast.js";
 import { APP_SHORTCUTS, type AppActionId } from "./utils/app-shortcuts.js";
 import { CONFIRMATIONS } from "./utils/confirmations.js";
+import { OPEN_FOLDER_TOKEN_KEY } from "./utils/desktop-open-folder.js";
 
 const live = (id: string, hostId = HOST_A): ChannelRow => ({
 	id,
@@ -2021,6 +2079,10 @@ describe("a new terminal's pane after a reload", () => {
 		expect(hub.frames("SPAWN")).toHaveLength(1);
 		expect(hub.frames("SPAWN")[0]).toMatchObject({ hostId: HOST_A });
 
+		// A record without a folder (#1236) starts as before: no directory named.
+		expect(hub.frames("SPAWN")[0]).not.toHaveProperty("cwd");
+		expect(hub.frames("SPAWN")[0]).not.toHaveProperty("localOnly");
+
 		accept(hub, hub.frames("SPAWN")[0], "R1");
 		await vi.waitFor(() => expect(savedLeafIds()).toEqual(["R1"]));
 		expect(stored()?.[first.pendingId]).toBeUndefined();
@@ -3020,5 +3082,798 @@ describe("the recordings the window shows (#80)", () => {
 		await vi.waitFor(() => expect(tab("TAB2")?.querySelector(".tab__rec-dot")).not.toBeNull());
 		expect(tab("TAB1")?.querySelector(".tab__rec-dot")).toBeNull();
 		expect(tabs().map((t) => t.selected)).toEqual([true, false]);
+	});
+});
+
+// ─── Folders from File Explorer (#1236) ─────────────────────────────────────
+
+describe("folders from File Explorer", () => {
+	const L2 = "01ARZ3NDEKTSV4RRFFQ69G5FL2";
+	const S = HOST_B;
+	const D = "C:\\Users\\me\\sub\\..\\dossier é 漢 x";
+	const D2 = "C:\\Work\\second dir";
+	const PENDING_KEY = "lasterm:pending-spawns";
+	const HOSTS: HostRow[] = [
+		{ id: HOST_A, label: "alpha", type: "local" },
+		{ id: L2, label: "alpha-old", type: "local" },
+		{ id: S, label: "bravo", type: "ssh", connected: true },
+	];
+
+	function reset(): void {
+		desktopFolders.available = true;
+		desktopFolders.queue = [];
+		desktopFolders.last = null;
+		desktopFolders.takes = [];
+		desktopFolders.hasRejectsOnce = false;
+		desktopFolders.takeRejectsOnce = false;
+		desktopFolders.listenRejects = false;
+		desktopFolders.hold = null;
+		desktopFolders.hasHold = null;
+		desktopFolders.listener = null;
+	}
+
+	afterEach(() => {
+		desktopFolders.available = false;
+	});
+
+	/** The SPAWN frames the hub received, without their request ids. */
+	function spawns(hub: FakeHub): Array<Record<string, unknown>> {
+		return hub.frames("SPAWN").map(({ requestId: _id, cols: _c, rows: _r, ...rest }) => rest);
+	}
+
+	const selectedTab = () => tabs().find((t) => t.selected)?.label;
+
+	/** A promise the test releases. */
+	function held(): { promise: Promise<void>; release: () => void } {
+		let release = () => {};
+		const promise = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		return { promise, release };
+	}
+
+	it("opens a folder the desktop was started with in a local tab, instead of the default one", async () => {
+		reset();
+		desktopFolders.queue = [D];
+		const { hub } = await mountWindow({ hosts: HOSTS });
+
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		await settle();
+		expect(spawns(hub)).toEqual([{ type: "SPAWN", hostId: HOST_A, cwd: D, localOnly: true }]);
+		await vi.waitFor(() => expect(selectedTab()).toMatch(/^NEW/));
+		expect(tabs()).toHaveLength(1);
+	});
+
+	it("takes the folder waiting at startup with a single take", async () => {
+		reset();
+		desktopFolders.queue = [D];
+		// Only the startup's read of the list answers: a list published later (the host rail reads
+		// it again once the window shows) is a request of its own, held here.
+		const later = held();
+		let hostReads = 0;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			answers: {
+				"GET /api/hosts": async () => {
+					hostReads += 1;
+					if (hostReads > 1) await later.promise;
+					return undefined;
+				},
+			},
+		});
+
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		await settle();
+		expect(hostReads).toBe(2);
+		expect(desktopFolders.takes).toHaveLength(1);
+		expect(spawns(hub)).toEqual([{ type: "SPAWN", hostId: HOST_A, cwd: D, localOnly: true }]);
+		later.release();
+		await settle();
+	});
+
+	it("opens no welcome tab at startup when a folder waits", async () => {
+		reset();
+		desktopFolders.queue = [D];
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			channels: [{ id: "T1", hostId: HOST_A, status: "live", title: "T1", welcome: true }],
+		});
+
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		await settle();
+		expect(tabs().map((t) => t.label)).not.toContain("T1");
+		await vi.waitFor(() => expect(selectedTab()).toMatch(/^NEW/));
+	});
+
+	it("leaves the welcome tab to a later selection when another host was in view", async () => {
+		reset();
+		desktopFolders.queue = [D];
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			ui: { tabs: { scope: "global" } },
+			channels: [{ id: "T1", hostId: HOST_A, status: "live", title: "T1", welcome: true }],
+			session: { "lasterm:selected-host": S },
+		});
+
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		expect(spawns(hub)[0]).toMatchObject({ hostId: HOST_A, cwd: D });
+		expect(useHostsStore().selectedHostId).toBe(S);
+
+		useHostsStore().selectHost(HOST_A);
+		await vi.waitFor(() => expect(tabs().map((t) => t.label)).toContain("T1"));
+	});
+
+	it("waits for the first batch when it cannot tell whether a folder waits", async () => {
+		reset();
+		desktopFolders.queue = [D];
+		desktopFolders.hasRejectsOnce = true;
+		const take = held();
+		desktopFolders.hold = take.promise;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			channels: [{ id: "T1", hostId: HOST_A, status: "live", title: "T1", welcome: true }],
+		});
+		// The local host's channel list has come; the take is still held.
+		await settle();
+		expect(spawns(hub)).toEqual([]);
+		expect(tabs()).toEqual([]);
+
+		take.release();
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		await settle();
+		expect(spawns(hub)).toHaveLength(1);
+		expect(spawns(hub)[0]).toMatchObject({ hostId: HOST_A, cwd: D });
+		expect(tabs().map((t) => t.label)).not.toContain("T1");
+	});
+
+	it("opens the default tab once when the batch it waited for is empty", async () => {
+		reset();
+		desktopFolders.hasRejectsOnce = true;
+		const take = held();
+		desktopFolders.hold = take.promise;
+		const { hub } = await mountWindow({ hosts: HOSTS });
+		await settle();
+		expect(spawns(hub)).toEqual([]);
+
+		take.release();
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		await settle();
+		expect(spawns(hub)).toEqual([{ type: "SPAWN", hostId: HOST_A }]);
+	});
+
+	it("opens a folder once at startup when it cannot listen for folders", async () => {
+		reset();
+		desktopFolders.listenRejects = true;
+		desktopFolders.queue = [D];
+		const { hub } = await mountWindow({ hosts: HOSTS });
+
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		await settle();
+		expect(spawns(hub)).toHaveLength(1);
+		expect(spawns(hub)[0]).toMatchObject({ cwd: D });
+	});
+
+	for (const scope of ["perHost", "global"] as const) {
+		it(`opens a folder sent by a second start in a new local tab (${scope})`, async () => {
+			reset();
+			const warn = vi.spyOn(console, "warn");
+			onTestFinished(() => warn.mockRestore());
+			const { hub } = await mountWindow({
+				hosts: HOSTS,
+				ui: { tabs: { scope } },
+				session: { "lasterm:selected-host": S },
+			});
+			await settle();
+			expect(spawns(hub)).toEqual([]);
+			expect(desktopFolders.listener).not.toBeNull();
+			// Outside Tauri, the close listener registered before the folders' one rejects.
+			expect(warn).toHaveBeenCalledWith(
+				"[desktop] failed to register close presentations:",
+				expect.anything(),
+			);
+
+			desktopFolders.queue = [D2];
+			desktopFolders.listener?.();
+			await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+			await settle();
+			expect(spawns(hub)).toEqual([{ type: "SPAWN", hostId: HOST_A, cwd: D2, localOnly: true }]);
+			expect(useHostsStore().selectedHostId).toBe(scope === "perHost" ? HOST_A : S);
+			await vi.waitFor(() => expect(selectedTab()).toMatch(/^NEW/));
+		});
+	}
+
+	it("opens a folder through the interval when it cannot listen for folders", async () => {
+		vi.useFakeTimers({
+			toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+			shouldAdvanceTime: true,
+		});
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		desktopFolders.listenRejects = true;
+		const { hub } = await mountWindow({ hosts: HOSTS, session: { "lasterm:selected-host": S } });
+		await settle();
+		desktopFolders.queue = [D2];
+		await vi.advanceTimersByTimeAsync(2_100);
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		expect(spawns(hub)[0]).toMatchObject({ hostId: HOST_A, cwd: D2 });
+	});
+
+	it("keeps a folder request until the hosts load, and drops it only without a local host", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		let refuse = true;
+		desktopFolders.queue = [D];
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			answers: {
+				"GET /api/hosts": () =>
+					refuse ? json({ error: { code: "UNAVAILABLE", message: "busy" } }, 503) : undefined,
+			},
+		});
+		const toasts = () => useToastStore().messages.map((m) => m.text);
+		const waitText = "Lasterm is waiting for its hub to open a folder from File Explorer.";
+		const rereads = () =>
+			hub.rest.filter((call) => call.method === "GET" && call.path === "/api/hosts").length;
+
+		await settle();
+		expect(spawns(hub)).toEqual([]);
+		expect(desktopFolders.takes).toEqual([]);
+		// No event from the desktop: the page says the folder waits, and asks for the list again
+		// 5 s later, through the hosts store's protected re-read.
+		await vi.waitFor(() => expect(toasts()).toContain(waitText));
+		const hosts = useHostsStore();
+		const changed = vi.spyOn(hosts, "hubChanged");
+		const fetched = vi.spyOn(hosts, "fetchHosts");
+		onTestFinished(() => {
+			changed.mockRestore();
+			fetched.mockRestore();
+		});
+		const first = rereads();
+		await vi.advanceTimersByTimeAsync(5_500);
+		expect(rereads()).toBeGreaterThan(first);
+		expect(changed).toHaveBeenCalledWith("hosts");
+		expect(fetched).not.toHaveBeenCalled();
+		expect(desktopFolders.takes).toEqual([]);
+		// The notice stays while the folder waits; the page asks for the list again meanwhile.
+		const asked = rereads();
+		await vi.advanceTimersByTimeAsync(6_000);
+		expect(toasts()).toContain(waitText);
+		expect(rereads()).toBeGreaterThan(asked);
+		expect(spawns(hub)).toEqual([]);
+
+		refuse = false;
+		await vi.advanceTimersByTimeAsync(5_500);
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		expect(spawns(hub)[0]).toMatchObject({ hostId: HOST_A, cwd: D, localOnly: true });
+		await vi.waitFor(() => expect(toasts()).not.toContain(waitText));
+	});
+
+	it("takes nothing on a list whose refresh failed, and shows the notice again once closed", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		let refuse = false;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			answers: {
+				"GET /api/hosts": () =>
+					refuse ? json({ error: { code: "UNAVAILABLE", message: "busy" } }, 503) : undefined,
+			},
+		});
+		await settle();
+		const opened = spawns(hub).length;
+		const toasts = useToastStore();
+		const waitText = "Lasterm is waiting for its hub to open a folder from File Explorer.";
+		const notice = () => toasts.messages.find((m) => m.text === waitText);
+		// A refresh fails after a list was published: that list is stale.
+		refuse = true;
+		useHostsStore().hubChanged("hosts");
+		await vi.advanceTimersByTimeAsync(500);
+		await vi.waitFor(() => expect(useHostsStore().error).not.toBeNull());
+		const taken = desktopFolders.takes.length;
+
+		desktopFolders.queue = [D2];
+		desktopFolders.listener?.();
+		await vi.waitFor(() => expect(notice()).toBeDefined());
+		expect(desktopFolders.takes).toHaveLength(taken);
+
+		// The user closes the notice; a second folder waits: the notice is back.
+		const shown = notice();
+		if (shown !== undefined) toasts.close(shown.id);
+		expect(notice()).toBeUndefined();
+		desktopFolders.queue.push(D);
+		desktopFolders.listener?.();
+		await vi.waitFor(() => expect(notice()).toBeDefined());
+		expect(desktopFolders.takes).toHaveLength(taken);
+
+		refuse = false;
+		await vi.advanceTimersByTimeAsync(5_500);
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(opened + 2));
+		expect(spawns(hub).slice(opened)).toMatchObject([{ cwd: D2 }, { cwd: D }]);
+		await vi.waitFor(() => expect(notice()).toBeUndefined());
+	});
+
+	it("opens a folder waiting at startup only once the preferences have loaded", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		desktopFolders.queue = [D];
+		const prefs = held();
+		let prefsAsked = false;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			ui: { tabs: { scope: "perHost" } },
+			session: { "lasterm:selected-host": S },
+			noWait: true,
+			answers: {
+				"GET /api/config/ui": async () => {
+					prefsAsked = true;
+					await prefs.promise;
+					return undefined;
+				},
+			},
+		});
+		await vi.waitFor(() => expect(prefsAsked).toBe(true));
+		// The preferences stay unanswered past the opener's 5 s re-read: the folder stays queued,
+		// untaken, so it is not opened before `tabs.scope` is known.
+		await vi.advanceTimersByTimeAsync(6_000);
+		expect(desktopFolders.queue).toEqual([D]);
+		expect(desktopFolders.takes).toEqual([]);
+		expect(spawns(hub)).toEqual([]);
+
+		prefs.release();
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		expect(spawns(hub)[0]).toMatchObject({ hostId: HOST_A, cwd: D });
+		await vi.waitFor(() => expect(useHostsStore().selectedHostId).toBe(HOST_A));
+	});
+
+	it("takes no folder before the preferences when it cannot listen for folders, and opens it after them", async () => {
+		vi.useFakeTimers({
+			toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+			shouldAdvanceTime: true,
+		});
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		desktopFolders.listenRejects = true;
+		desktopFolders.queue = [D];
+		const prefs = held();
+		let prefsAsked = false;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			ui: { tabs: { scope: "perHost" } },
+			session: { "lasterm:selected-host": S },
+			noWait: true,
+			answers: {
+				"GET /api/config/ui": async () => {
+					prefsAsked = true;
+					await prefs.promise;
+					return undefined;
+				},
+			},
+		});
+		await vi.waitFor(() => expect(prefsAsked).toBe(true));
+		// Past the interval's first pass (2 s) and a 5 s re-read after it: the folder stays queued.
+		await vi.advanceTimersByTimeAsync(8_000);
+		expect(desktopFolders.takes).toEqual([]);
+		expect(desktopFolders.queue).toEqual([D]);
+		expect(spawns(hub)).toEqual([]);
+
+		prefs.release();
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		expect(spawns(hub)[0]).toEqual({ type: "SPAWN", hostId: HOST_A, cwd: D, localOnly: true });
+		await vi.waitFor(() => expect(useHostsStore().selectedHostId).toBe(HOST_A));
+	});
+
+	it("opens a folder sent during the startup once the startup has loaded the preferences", async () => {
+		reset();
+		const prefs = held();
+		let prefsAsked = false;
+		// Only the startup's read of the list answers: the host rail's own read, once the window
+		// shows, would be a request of its own, held here.
+		const later = held();
+		let hostReads = 0;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			ui: { tabs: { scope: "perHost" } },
+			session: { "lasterm:selected-host": S },
+			noWait: true,
+			answers: {
+				"GET /api/config/ui": async () => {
+					prefsAsked = true;
+					await prefs.promise;
+					return undefined;
+				},
+				"GET /api/hosts": async () => {
+					hostReads += 1;
+					if (hostReads > 1) await later.promise;
+					return undefined;
+				},
+			},
+		});
+		await vi.waitFor(() => expect(prefsAsked).toBe(true));
+		// The desktop said no folder waited; one comes now, with its event, the only one.
+		desktopFolders.queue = [D2];
+		desktopFolders.listener?.();
+		await settle();
+		expect(desktopFolders.takes).toEqual([]);
+
+		prefs.release();
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		expect(spawns(hub)[0]).toEqual({ type: "SPAWN", hostId: HOST_A, cwd: D2, localOnly: true });
+		await vi.waitFor(() => expect(useHostsStore().selectedHostId).toBe(HOST_A));
+		expect(hostReads).toBe(2);
+		later.release();
+		await settle();
+	});
+
+	it("keeps a startup folder while the hub refuses the preferences, and opens it once they load", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		desktopFolders.queue = [D];
+		let refuse = true;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			ui: { tabs: { scope: "perHost" } },
+			session: { "lasterm:selected-host": S },
+			answers: {
+				"GET /api/config/ui": () =>
+					refuse ? json({ error: { code: "UNAVAILABLE", message: "busy" } }, 503) : undefined,
+			},
+		});
+		const prefsAsked = () =>
+			hub.rest.filter((call) => call.method === "GET" && call.path === "/api/config/ui").length;
+		await settle();
+		expect(prefsAsked()).toBe(1);
+		expect(desktopFolders.takes).toEqual([]);
+		expect(desktopFolders.queue).toEqual([D]);
+		expect(spawns(hub)).toEqual([]);
+
+		refuse = false;
+		await vi.advanceTimersByTimeAsync(5_500);
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		expect(prefsAsked()).toBe(2);
+		expect(spawns(hub)[0]).toEqual({ type: "SPAWN", hostId: HOST_A, cwd: D, localOnly: true });
+		await vi.waitFor(() => expect(useHostsStore().selectedHostId).toBe(HOST_A));
+	});
+
+	it("asks for the preferences once at a time while a slow read of them runs", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		desktopFolders.queue = [D];
+		const slow = held();
+		onTestFinished(() => slow.release());
+		let asked = 0;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			answers: {
+				"GET /api/config/ui": async () => {
+					asked += 1;
+					if (asked === 1) return json({ error: { code: "UNAVAILABLE", message: "busy" } }, 503);
+					await slow.promise;
+					return undefined;
+				},
+			},
+		});
+		await settle();
+		expect(asked).toBe(1);
+		// The re-read 5 s later asks again; that read does not answer, and later re-reads wait for it.
+		await vi.advanceTimersByTimeAsync(16_000);
+		expect(asked).toBe(2);
+		expect(spawns(hub)).toEqual([]);
+
+		slow.release();
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		expect(spawns(hub)[0]).toMatchObject({ hostId: HOST_A, cwd: D });
+	});
+
+	it("keeps a startup folder when the startup failed before the preferences, and opens it once they load", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		desktopFolders.queue = [D];
+		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+		onTestFinished(() => logged.mockRestore());
+		// The asset token is refused: the startup stops there, before the preferences and the hosts.
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			ui: { tabs: { scope: "perHost" } },
+			session: { "lasterm:selected-host": S },
+			answers: {
+				"GET /api/assets/token": () =>
+					json({ error: { code: "UNAVAILABLE", message: "busy" } }, 503),
+			},
+		});
+		const toasts = () => useToastStore().messages.map((m) => m.text);
+		const waitText = "Lasterm is waiting for its hub to open a folder from File Explorer.";
+		const prefsAsked = () =>
+			hub.rest.filter((call) => call.method === "GET" && call.path === "/api/config/ui").length;
+		await settle();
+		expect(logged).toHaveBeenCalledWith("[App] startup connect failed:", expect.anything());
+		expect(prefsAsked()).toBe(0);
+		expect(desktopFolders.takes).toEqual([]);
+		expect(toasts()).toContain(waitText);
+
+		await vi.advanceTimersByTimeAsync(5_500);
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		expect(prefsAsked()).toBe(1);
+		expect(spawns(hub)[0]).toEqual({ type: "SPAWN", hostId: HOST_A, cwd: D, localOnly: true });
+		await vi.waitFor(() => expect(useHostsStore().selectedHostId).toBe(HOST_A));
+		await vi.waitFor(() => expect(toasts()).not.toContain(waitText));
+	});
+
+	it("says a startup folder waits, and asks for the hosts again 5 s later, before the launch profiles load", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		desktopFolders.queue = [D];
+		const profiles = held();
+		let profilesAsked = false;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			noWait: true,
+			answers: {
+				"GET /api/hosts": () => json({ error: { code: "UNAVAILABLE", message: "busy" } }, 503),
+				"GET /api/launch-profiles": async () => {
+					profilesAsked = true;
+					await profiles.promise;
+					return undefined;
+				},
+			},
+		});
+		const toasts = () => useToastStore().messages.map((m) => m.text);
+		const waitText = "Lasterm is waiting for its hub to open a folder from File Explorer.";
+		const hostsAsked = () =>
+			hub.rest.filter((call) => call.method === "GET" && call.path === "/api/hosts").length;
+		// The startup has tried the host list and now waits for the launch profiles.
+		await vi.waitFor(() => expect(profilesAsked).toBe(true));
+		expect(hostsAsked()).toBe(1);
+		await vi.waitFor(() => expect(toasts()).toContain(waitText));
+		await vi.advanceTimersByTimeAsync(5_500);
+		expect(hostsAsked()).toBe(2);
+		expect(desktopFolders.takes).toEqual([]);
+
+		profiles.release();
+		await settle();
+	});
+
+	it("shows no notice when it cannot tell whether a folder waits and none does, and opens the default tab once the hosts load", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		desktopFolders.hasRejectsOnce = true;
+		let refuse = true;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			answers: {
+				"GET /api/hosts": () =>
+					refuse ? json({ error: { code: "UNAVAILABLE", message: "busy" } }, 503) : undefined,
+			},
+		});
+		const toasts = () => useToastStore().messages.map((m) => m.text);
+		const waitText = "Lasterm is waiting for its hub to open a folder from File Explorer.";
+		await settle();
+		await vi.advanceTimersByTimeAsync(6_000);
+		expect(toasts()).not.toContain(waitText);
+		expect(spawns(hub)).toEqual([]);
+
+		refuse = false;
+		await click("Retry", document.querySelector(".host-rail") as HTMLElement);
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		await settle();
+		expect(spawns(hub)).toEqual([{ type: "SPAWN", hostId: HOST_A }]);
+		expect(toasts()).not.toContain(waitText);
+	});
+
+	it("drops a folder with a notice when the hub has no local host", async () => {
+		reset();
+		desktopFolders.queue = [D];
+		const { hub } = await mountWindow({ hosts: [{ id: S, label: "bravo", type: "ssh" }] });
+
+		await vi.waitFor(() => expect(desktopFolders.queue).toEqual([]));
+		await settle();
+		expect(spawns(hub)).toEqual([]);
+		expect(useToastStore().messages.map((m) => m.text)).toContain(
+			`Lasterm has no local host to open ${D} on.`,
+		);
+	});
+
+	it("keeps a batch whose take answered after the host list failed, and opens it once later", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		let refuse = false;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			answers: {
+				"GET /api/hosts": () =>
+					refuse ? json({ error: { code: "UNAVAILABLE", message: "busy" } }, 503) : undefined,
+			},
+		});
+		await settle();
+		const opened = spawns(hub).length;
+		const base = desktopFolders.takes.length;
+		const take = held();
+		desktopFolders.hold = take.promise;
+		desktopFolders.queue = [D];
+		desktopFolders.listener?.();
+		await vi.waitFor(() => expect(desktopFolders.takes).toHaveLength(base + 1));
+		// A refresh fails while the take is held.
+		refuse = true;
+		useHostsStore().hubChanged("hosts");
+		await vi.advanceTimersByTimeAsync(500);
+		await vi.waitFor(() => expect(useHostsStore().error).not.toBeNull());
+		take.release();
+		desktopFolders.hold = null;
+		await settle();
+		expect(spawns(hub)).toHaveLength(opened);
+
+		refuse = false;
+		await vi.advanceTimersByTimeAsync(5_500);
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(opened + 1));
+		expect(desktopFolders.takes[base + 1]).toBe(desktopFolders.takes[base]);
+		expect(spawns(hub).at(-1)).toMatchObject({ cwd: D });
+		await settle();
+		expect(spawns(hub)).toHaveLength(opened + 1);
+	});
+
+	it("a folder request that arrives during a drain is not left queued, and a failed take is retried with its token", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		const { hub } = await mountWindow({ hosts: HOSTS });
+		await settle();
+		const opened = spawns(hub).length;
+		const base = desktopFolders.takes.length;
+
+		const take = held();
+		desktopFolders.hold = take.promise;
+		desktopFolders.queue = [D];
+		desktopFolders.listener?.();
+		await vi.waitFor(() => expect(desktopFolders.takes).toHaveLength(base + 1));
+		desktopFolders.queue.push(D2);
+		desktopFolders.listener?.();
+		desktopFolders.hold = null;
+		take.release();
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(opened + 2));
+		expect(desktopFolders.takes[base + 1]).not.toBe(desktopFolders.takes[base]);
+		expect(
+			spawns(hub)
+				.slice(opened)
+				.map((s) => s.cwd),
+		).toEqual([D, D2]);
+
+		// The reply of a take is lost after the desktop removed the last folder.
+		await settle();
+		const lost = desktopFolders.takes.length;
+		desktopFolders.queue = [D];
+		desktopFolders.takeRejectsOnce = true;
+		desktopFolders.listener?.();
+		await vi.waitFor(() => expect(desktopFolders.takes).toHaveLength(lost + 1));
+		await settle();
+		expect(spawns(hub)).toHaveLength(opened + 2);
+		await vi.advanceTimersByTimeAsync(2_100);
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(opened + 3));
+		expect(desktopFolders.takes[lost + 1]).toBe(desktopFolders.takes[lost]);
+		expect(spawns(hub).at(-1)).toMatchObject({ cwd: D });
+	});
+
+	it("opens a batch taken before a reload once, after it", async () => {
+		reset();
+		const { hub } = await mountWindow({ hosts: HOSTS });
+		await settle();
+		const opened = spawns(hub).length;
+		const base = desktopFolders.takes.length;
+		desktopFolders.queue = [D];
+		desktopFolders.takeRejectsOnce = true;
+		desktopFolders.listener?.();
+		await vi.waitFor(() => expect(desktopFolders.takes).toHaveLength(base + 1));
+		await settle();
+		expect(spawns(hub)).toHaveLength(opened);
+		const token = sessionStorage.getItem(OPEN_FOLDER_TOKEN_KEY);
+		expect(token).toBe(desktopFolders.takes[base]);
+
+		await unmountWindow();
+		const next = await mountWindow({
+			hosts: HOSTS,
+			channels: [{ id: "T1", hostId: HOST_A, status: "live", title: "T1", welcome: true }],
+			session: { [OPEN_FOLDER_TOKEN_KEY]: token as string },
+		});
+		await vi.waitFor(() => expect(spawns(next.hub)).toHaveLength(1));
+		await settle();
+		expect(desktopFolders.takes[base + 1]).toBe(token);
+		expect(spawns(next.hub)).toEqual([{ type: "SPAWN", hostId: HOST_A, cwd: D, localOnly: true }]);
+		expect(tabs().map((t) => t.label)).not.toContain("T1");
+	});
+
+	it("keeps a folder's directory across a reload, for Retry", async () => {
+		reset();
+		const { hub } = await mountWindow({ hosts: HOSTS });
+		await settle();
+		hub.answersSpawns = false;
+		desktopFolders.queue = [D];
+		desktopFolders.listener?.();
+		await vi.waitFor(() => expect(spawns(hub).filter((s) => s.cwd === D)).toHaveLength(1));
+		await settle();
+		const storage: Record<string, string> = {};
+		for (const key of ["lasterm:layout", PENDING_KEY]) {
+			const value = localStorage.getItem(key);
+			if (value !== null) storage[key] = value;
+		}
+
+		await unmountWindow();
+		reset();
+		const next = await mountWindow({ hosts: HOSTS, storage });
+		await settle();
+		expect(spawns(next.hub)).toEqual([]);
+		const retry = await vi.waitFor(() => {
+			const found = [...document.querySelectorAll<HTMLElement>(".terminal-error__box button")].find(
+				(b) => b.textContent?.trim() === "Retry",
+			);
+			if (found === undefined) throw new Error("no Retry");
+			return found;
+		});
+		retry.click();
+		await vi.waitFor(() => expect(spawns(next.hub)).toHaveLength(1));
+		expect(spawns(next.hub)[0]).toEqual({ type: "SPAWN", hostId: HOST_A, cwd: D, localOnly: true });
+	});
+
+	it("a folder's pending tab does not send its folder to a host that is no longer local", async () => {
+		reset();
+		const pendingId = "01ARZ3NDEKTSV4RRFFQ69G5FPD";
+		const { hub } = await mountWindow({
+			hosts: [{ id: HOST_A, label: "alpha", type: "ssh", connected: true }],
+			layout: {
+				tabs: [{ id: "TAB1", root: { type: "terminal", channelId: pendingId, paneId: "P1" } }],
+			},
+			storage: {
+				[PENDING_KEY]: JSON.stringify({ [pendingId]: { hostId: HOST_A, sent: false, cwd: D } }),
+			},
+		});
+		await settle();
+		const start = await vi.waitFor(() => {
+			const found = [...document.querySelectorAll<HTMLElement>(".terminal-error__box button")].find(
+				(b) => b.textContent?.trim() === "Start",
+			);
+			if (found === undefined) throw new Error("no Start");
+			return found;
+		});
+		start.click();
+		await vi.waitFor(() =>
+			expect(document.querySelector(".terminal-error__box")?.textContent).toContain(
+				"This folder can only open on this computer's local host.",
+			),
+		);
+		expect(spawns(hub)).toEqual([]);
+		expect(JSON.parse(localStorage.getItem(PENDING_KEY) as string)[pendingId]).toMatchObject({
+			sent: false,
+			cwd: D,
+		});
 	});
 });

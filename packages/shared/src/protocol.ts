@@ -622,6 +622,15 @@ export interface UiSpawnMessage {
 	 * nothing.
 	 */
 	automatic?: boolean;
+	/**
+	 * A folder opened from File Explorer (#1236): this computer's path. The hub
+	 * refuses the SPAWN with INVALID_INPUT, before any session is acquired, when
+	 * the host does not exist or its stored type is not `local`. The connection
+	 * the SPAWN then uses is not checked: one still open under a host converted
+	 * to `local` meanwhile can receive the path (accepted in #1236). Absent:
+	 * false.
+	 */
+	localOnly?: boolean;
 }
 
 /** Hub → UI: channel spawned successfully */

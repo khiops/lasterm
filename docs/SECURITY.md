@@ -460,6 +460,20 @@ A daemon that holds one refuses it, and so does a daemon that means to refuse ev
 `auth.json` missing beside a `meta.db`, unreadable or malformed: its expected token matches nothing,
 not even an empty one. Before #127 no hub sent an empty token, and that marker matched one.
 
+### 3.7 The desktop's raise endpoint and folders from File Explorer (#1236)
+
+A second start of the desktop reaches the running one on its raise endpoint: on Windows the pipe
+`\\.\pipe\<channel>-desktop-raise-<user>`, created with a DACL of one ACE allowing its owner
+(`D:(A;;GA;;;OW)`), on Unix a socket in the user's own runtime directory. Besides `raise-v1` it
+carries `open-v1 <path>`, a folder File Explorer asked to open. The trust runs both ways. The owner
+DACL keeps other accounts from connecting to the primary. In the other direction, before writing a
+folder, the second start opens the pipe at `SECURITY_IDENTIFICATION` and requires the process named
+by `GetNamedPipeServerProcessId` to run as its own user, so a pipe squatted by another account
+receives no path. The primary trusts nothing in the message: it reads at most 783 bytes, and checks
+the folder itself (a drive-letter path of at most 258 UTF-16 units, an existing directory, no `${`
+or `\\`) before it queues it; the hub then refuses the folder's SPAWN for a host that is not local.
+EXPLORER-OPEN-IN in `docs/decisions.md` holds the whole contract.
+
 ## 4. Data Protection
 
 ### 4.1 At Rest

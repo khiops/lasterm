@@ -1,0 +1,46 @@
+[package]
+name = "lasterm-explorer-command"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+repository = "https://github.com/khiops/lasterm"
+description = "File Explorer's Open in lasterm command (IExplorerCommand), loaded by the package's COM surrogate"
+publish = false
+
+[lib]
+# The cdylib is what the MSIX package registers as its COM server; the rlib
+# gives the desktop the shared path rule (`rule`) and the tests the crate.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["com"]
+# The COM class and its exports. The desktop takes this crate without it, for
+# `rule` alone.
+com = ["dep:windows", "dep:windows-core"]
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+] }
+# `#[implement]` generates paths through `windows_core`.
+windows-core = { version = "=0.62.2", optional = true }
+
+[dev-dependencies]
+roxmltree = "0.21.2"
+
+# tests/com.rs implements a fake selection (IShellItemArray needs
+# PropertiesSystem) and calls the built DLL.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "=0.62.2", features = ["Win32_UI_Shell_PropertiesSystem"] }
+windows-core = "=0.62.2"
+
+[[example]]
+# Stands in for the desktop in tests/com.rs: records how it was started.
+name = "fake-desktop"

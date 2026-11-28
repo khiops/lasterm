@@ -1190,7 +1190,8 @@ smaller than that scroll rather than scaling the text.
   elevated?: boolean, // default: the launch profile's; ignored on an SSH host
   group_id?: string,  // optional channel group to place new channel in
   reuse_channel_id?: string,  // bring this ended terminal back under its own id (Restart)
-  automatic?: boolean  // nobody asked for it: "When a terminal ends", or its host's return (#648)
+  automatic?: boolean,  // nobody asked for it: "When a terminal ends", or its host's return (#648)
+  local_only?: boolean  // a folder from File Explorer (#1236): refused unless the host is local; default false
 }
 
 // Hub → UI
@@ -1220,6 +1221,11 @@ the same. An environment the request names applies to that start only. A termina
 or whose profile was deleted, gets no profile's environment, and keeps its mode and elevation all
 the same; it starts the host's default profile only when neither the request nor the terminal names
 a shell.
+
+A SPAWN with `local_only: true` carries this computer's path, a folder File Explorer asked to
+open (#1236): the hub refuses it with `INVALID_INPUT` ("This folder can only open on this
+computer's local host."), under its `request_id`, when the host is not of type `local` or does not
+exist, before any session is acquired or agent reached. Absent or false, it changes nothing.
 
 A SPAWN that names itself with `request_id` gets it back in the SPAWN_OK and in every ERROR that
 answers it, the refusal of a field it carries included, and in nothing else (#777). A window's

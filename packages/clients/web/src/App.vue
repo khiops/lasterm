@@ -1342,12 +1342,18 @@ let folderStartup: 'none' | 'pending' | 'folder' = folderRequestsAvailable() ? '
 let deferredStartupOpening: (() => void) | null = null;
 let folderWaitToast: number | null = null;
 let stopFolderEvents: (() => void) | null = null;
-// A folder or a held batch waits at startup: the opener is told once the startup has loaded the
-// preferences and tried the host list, so a folder never opens before `tabs.scope` is known.
-let folderExpected = false;
+// What the desktop answered at mount when asked whether a folder waits, null when it could not
+// tell: handed to the opener once the startup has tried the host list.
+let folderStartupAnswer: boolean | null = false;
+
+/** A host list received, whose last load did not fail. */
+function hostsUsable(): boolean {
+	return hostsStore.hostListsLoaded > 0 && hostsStore.error === null;
+}
 
 const folderOpener = createFolderOpener({
-	hostsUsable: () => hostsStore.hostListsLoaded > 0 && hostsStore.error === null,
+	// Without the preferences, `tabs.scope` is unknown: which host the folder's tab brings into view.
+	ready: () => hostsUsable() && configStore.uiConfigLoaded,
 	waiting: () => hasOpenFolderRequests(),
 	take: (token) => takeOpenFolderRequests(token),
 	process: (folders) => {
@@ -1376,7 +1382,10 @@ const folderOpener = createFolderOpener({
 		}
 		folderStartup = nonEmpty ? 'folder' : 'none';
 	},
-	rereadHosts: () => hostsStore.hubChanged('hosts'),
+	reload: () => {
+		if (!hostsUsable()) hostsStore.hubChanged('hosts');
+		if (!configStore.uiConfigLoaded) void configStore.loadUiConfig();
+	},
 	showWaitNotice: (onUserDismiss) => {
 		folderWaitToast = toastStore.show(
 			'info',
@@ -1395,9 +1404,20 @@ const folderOpener = createFolderOpener({
 	},
 });
 
-/** Takes and opens the folders File Explorer sent, once the desktop says some wait. */
+/**
+ * Takes and opens the folders File Explorer sent, once the desktop says some wait. During the
+ * startup, the opener only remembers the call, for `startFolders`.
+ */
 function drainFolders(): void {
 	void folderOpener.drain();
+}
+
+/**
+ * The startup has tried the host list, or failed before it could: folders from File Explorer may
+ * open from now on, once the preferences have loaded (#1236). Only the first call counts.
+ */
+function startFolders(): void {
+	if (folderRequestsAvailable()) folderOpener.start(folderStartupAnswer);
 }
 
 /** Listens for folders from File Explorer, and learns whether one waits at startup. */
@@ -1410,15 +1430,13 @@ async function startFolderRequests(): Promise<void> {
 		const interval = setInterval(drainFolders, 2000);
 		stopFolderEvents = () => clearInterval(interval);
 	}
-	let waiting: boolean;
 	try {
-		waiting = await hasOpenFolderRequests();
+		folderStartupAnswer = await hasOpenFolderRequests();
 	} catch (error) {
 		console.warn('[desktop] cannot tell whether a folder from File Explorer waits:', error);
-		waiting = true;
+		folderStartupAnswer = null;
 	}
-	if (waiting || folderOpener.holdingBatch()) folderExpected = true;
-	else startupWithoutFolder();
+	if (folderStartupAnswer === false && !folderOpener.holdingBatch()) startupWithoutFolder();
 }
 
 /** No folder waits at startup: the local host's own tabs open, if its first run deferred them. */
@@ -1434,6 +1452,12 @@ watch(
 	() => hostsStore.hostListsLoaded,
 	() => {
 		if (folderRequestsAvailable()) drainFolders();
+	},
+);
+watch(
+	() => configStore.uiConfigLoaded,
+	(loaded) => {
+		if (loaded && folderRequestsAvailable()) drainFolders();
 	},
 );
 
@@ -1526,6 +1550,8 @@ onMounted(async () => {
 			// it applies the OS-preferred theme. Otherwise the saved theme.
 			await themeStore.reloadAppearance();
 			await hostsStore.fetchHosts();
+			// Folders from File Explorer (#1236): the host list has been tried.
+			startFolders();
 			await profilesStore.fetchProfiles();
 			// Apply channel/host theme override if an active channel exists
 			if (channelsStore.selectedChannelId) {
@@ -1535,7 +1561,9 @@ onMounted(async () => {
 			console.error('[App] startup connect failed:', err);
 		}
 	}
-	if (folderExpected) folderOpener.expect();
+	// A step before the host list failed, or there is no token: the folders' wait starts all the
+	// same (a no-op once started).
+	startFolders();
 	appReady.value = true;
 });
 

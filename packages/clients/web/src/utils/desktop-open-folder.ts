@@ -9,7 +9,14 @@
  * folders. After a reload, the next page replays the stored token and gets a batch taken but not
  * processed, while `sessionStorage` kept the token and no other token reached the desktop first
  * (it keeps only its last token's batch). A token whose removal the storage refused replays a
- * processed batch: its folders open twice (accepted in #1236).
+ * processed batch at each reload while the desktop keeps that batch: each reload can open its
+ * folders again (accepted in #1236).
+ *
+ * The page takes nothing during its startup: a request meanwhile (an event, the 2 s interval, a
+ * host list published) is only remembered, and `start` consumes it once the startup has tried the
+ * host list. From then on the page takes only while `ready` holds: a usable host list, and the UI
+ * preferences, which say which host a folder's tab brings into view. While it does not, a folder
+ * known to wait keeps a notice up and has what is missing asked for again every 5 s.
  */
 
 import { isTauriRuntime } from "./tauri-runtime.js";
@@ -20,8 +27,11 @@ export const OPEN_FOLDER_TOKEN_KEY = "lasterm_open_folder_token";
 /** How long after a failed take the page takes again, with the same token. */
 export const TAKE_RETRY_MS = 2000;
 
-/** How long after asking for the host list the page asks again while a folder waits. */
-export const HOSTS_REREAD_MS = 5000;
+/**
+ * How long after asking for what it lacks (the host list, the preferences) the page asks again
+ * while a folder waits.
+ */
+export const REREAD_MS = 5000;
 
 /** Whether this page runs in the desktop app, where folders from File Explorer arrive. */
 export function folderRequestsAvailable(): boolean {
@@ -74,8 +84,11 @@ function storeToken(token: string | null): void {
 }
 
 export interface FolderOpenerDeps {
-	/** A host list has been received and the last load did not fail. */
-	hostsUsable: () => boolean;
+	/**
+	 * Whether a folder can open now: a host list received whose last load did not fail, and the UI
+	 * preferences received, which say which host the folder's tab brings into view.
+	 */
+	ready: () => boolean;
 	/** Whether folders wait in the desktop's queue. */
 	waiting: () => Promise<boolean>;
 	take: (token: string) => Promise<string[]>;
@@ -83,22 +96,27 @@ export interface FolderOpenerDeps {
 	process: (folders: string[]) => void;
 	/** Called once, after the first batch is processed, saying whether it held folders. */
 	firstBatch: (nonEmpty: boolean) => void;
-	/** The hosts store's protected re-read. */
-	rereadHosts: () => void;
+	/** Asks again for what `ready` lacks: the hosts store's protected re-read, the preferences. */
+	reload: () => void;
 	/** Shows that a folder waits for the hub; `onUserDismiss` runs if the user closes the notice. */
 	showWaitNotice: (onUserDismiss: () => void) => void;
 	hideWaitNotice: () => void;
 }
 
 export interface FolderOpener {
-	/** Takes and opens what waits; serialised, a call during a pass makes another pass. */
+	/**
+	 * Takes and opens what waits; serialised, a call during a pass makes another pass. Before
+	 * `start`, it only remembers that it was called.
+	 */
 	drain: () => Promise<void>;
 	/**
-	 * A folder or a held batch waits at startup, once the startup has loaded its preferences and
-	 * tried the host list: takes it now if the list is usable, else shows the notice and re-reads
-	 * the list every 5 s until it is, with no event needed and whatever `waiting` answers.
+	 * The startup has tried the host list, or failed before it could; `waiting` is what the desktop
+	 * answered at mount, null when it could not tell. Opens the gate, once. A folder known to wait
+	 * (`waiting` true, or a held batch) is taken now if `ready`, else the notice shows and what is
+	 * missing is asked for every 5 s until it is, with no event needed and whatever `waiting`
+	 * answers later. An unknown answer, or a call of `drain` during the startup, makes one pass.
 	 */
-	expect: () => void;
+	start: (waiting: boolean | null) => void;
 	/** Whether a batch was taken and not processed yet (its token is held). */
 	holdingBatch: () => boolean;
 	stop: () => void;
@@ -112,7 +130,10 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 	let retryTimer: ReturnType<typeof setTimeout> | null = null;
 	let rereadTimer: ReturnType<typeof setTimeout> | null = null;
 	let noticeShown = false;
-	// Folders known to wait since startup (`expect`), until a batch is processed.
+	// The startup gate: closed until `start`; a `drain` meanwhile is remembered in `asked`.
+	let started = false;
+	let asked = false;
+	// Folders known to wait since startup (`start`), until a batch is processed.
 	let expected = false;
 	// Once stopped (the page is going), nothing is taken or opened; a batch taken meanwhile is
 	// replayed by the next page from the stored token.
@@ -135,28 +156,29 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 		if (rereadTimer !== null) return;
 		rereadTimer = setTimeout(() => {
 			rereadTimer = null;
-			if (!deps.hostsUsable()) deps.rereadHosts();
+			if (!deps.ready()) deps.reload();
 			// Still waiting after this read: the next pass asks again 5 s later.
 			void drain();
-		}, HOSTS_REREAD_MS);
+		}, REREAD_MS);
 	};
 
 	async function pass(): Promise<void> {
 		if (stopped) return;
-		if (!deps.hostsUsable()) {
-			let waits = token !== null || expected;
-			if (!waits) {
+		if (!deps.ready()) {
+			// Known to wait: a held batch, or a folder the startup was told of. Otherwise asked;
+			// null when the desktop cannot tell.
+			let waits: boolean | null = token !== null || expected ? true : null;
+			if (waits === null) {
 				try {
 					waits = await deps.waiting();
 				} catch {
-					waits = false;
+					waits = null;
 				}
 			}
 			if (stopped) return;
-			if (waits) {
-				scheduleReread();
-				showNotice();
-			}
+			// Unknown: asked again after the next re-read, without saying that a folder waits.
+			if (waits !== false) scheduleReread();
+			if (waits === true) showNotice();
 			return;
 		}
 		if (token === null) {
@@ -181,8 +203,8 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 			clearTimeout(retryTimer);
 			retryTimer = null;
 		}
-		// The list became unusable during the call: keep the batch and its token.
-		if (!deps.hostsUsable()) {
+		// The page stopped being ready during the call: keep the batch and its token.
+		if (!deps.ready()) {
 			scheduleReread();
 			showNotice();
 			return;
@@ -205,6 +227,10 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 	}
 
 	async function drain(): Promise<void> {
+		if (!started) {
+			asked = true;
+			return;
+		}
 		if (running) {
 			again = true;
 			return;
@@ -222,10 +248,12 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 
 	return {
 		drain,
-		expect: () => {
-			if (stopped) return;
-			expected = true;
-			void drain();
+		start: (waiting) => {
+			if (started || stopped) return;
+			started = true;
+			if (waiting === true || token !== null) expected = true;
+			if (expected || waiting === null || asked) void drain();
+			asked = false;
 		},
 		holdingBatch: () => token !== null,
 		stop: () => {

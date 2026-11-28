@@ -1884,6 +1884,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "getrandom 0.4.3",
+ "lasterm-explorer-command",
  "lasterm-process-lock",
  "lasterm-protected-fs",
  "libc",
@@ -1905,6 +1906,10 @@ dependencies = [
  "windows",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "lasterm-explorer-command"
+version = "0.1.0"
 
 [[package]]
 name = "lasterm-process-lock"

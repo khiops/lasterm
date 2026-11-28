@@ -6,6 +6,7 @@ mod build_channel;
 mod channel;
 mod downloads;
 pub mod hub_log;
+mod open_folder;
 mod store_updates;
 pub mod tls_identity;
 mod uploads;
@@ -146,6 +147,24 @@ fn quit_after_hub_exit(app: tauri::AppHandle) -> Result<(), String> {
     }
     app.exit(0);
     Ok(())
+}
+
+/// The folders File Explorer asked to open (#1236), for the page to start one
+/// local terminal each: removed as they are returned, except that the token of
+/// the previous call returns that call's batch again (a call repeated after a
+/// lost reply, or after a reload).
+#[tauri::command]
+fn take_open_folder_requests(
+    token: String,
+    queue: tauri::State<'_, open_folder::OpenFolderQueue>,
+) -> Vec<String> {
+    queue.take(&token)
+}
+
+/// Whether folders from File Explorer wait, without taking them (#1236).
+#[tauri::command]
+fn has_open_folder_requests(queue: tauri::State<'_, open_folder::OpenFolderQueue>) -> bool {
+    queue.has()
 }
 
 /// Launch a new hub after the one this desktop launched died (#143). The agent
@@ -1000,13 +1019,48 @@ fn validate_runtime_dir(path: &Path, metadata: &std::fs::Metadata) -> Result<(),
     Ok(())
 }
 
-fn acquire_desktop_instance() -> Result<DesktopInstanceStartup, String> {
+fn acquire_desktop_instance(folder: Option<&str>) -> Result<DesktopInstanceStartup, String> {
     let lock_path = desktop_instance_lock_path()?;
     let endpoint = desktop_raise_endpoint(&lock_path)?;
     if started_by_restart() {
         wait_for_desktop_instance_lock(&lock_path);
     }
-    acquire_desktop_instance_at(&lock_path, &endpoint)
+    match folder {
+        None => acquire_desktop_instance_at(&lock_path, &endpoint),
+        Some(folder) => acquire_desktop_instance_for_folder(&lock_path, &endpoint, folder),
+    }
+}
+
+/// A start with a folder (#1236): the primary when the lock is free, else the
+/// folder handed to the running instance.
+fn acquire_desktop_instance_for_folder(
+    lock_path: &Path,
+    endpoint: &DesktopRaiseEndpoint,
+    folder: &str,
+) -> Result<DesktopInstanceStartup, String> {
+    let try_lock = || {
+        ProcessLock::try_acquire(lock_path).map_err(|error| {
+            format!(
+                "cannot acquire desktop lock {}: {error}",
+                lock_path.display()
+            )
+        })
+    };
+    #[cfg(windows)]
+    let endpoint_name = endpoint.pipe_name.clone();
+    #[cfg(unix)]
+    let endpoint_name = endpoint.path.display().to_string();
+    let send = |wait| open_folder::send_open_request(&endpoint_name, folder, wait);
+    match open_folder::hand_off_open(try_lock, send, &open_folder::SystemClock)? {
+        open_folder::OpenHandoff::Primary(lock) => {
+            Ok(DesktopInstanceStartup::Primary(DesktopInstance {
+                _lock: lock,
+                endpoint: endpoint.clone(),
+                raise_listener: None,
+            }))
+        }
+        open_folder::OpenHandoff::Delivered => Ok(DesktopInstanceStartup::Secondary),
+    }
 }
 
 /// Whether this process is the one a restart started, asked once: a child of
@@ -1646,10 +1700,17 @@ fn raise_main_window(app: tauri::AppHandle) -> Result<(), String> {
     )
 }
 
-fn read_delimited_raise_message<S: Read>(stream: &mut S) -> std::io::Result<Option<Vec<u8>>> {
-    let mut message = Vec::with_capacity(INSTANCE_RAISE_MAX_BYTES);
+/// One `\n`-terminated message of at most `limit` bytes; `None` when the
+/// stream ends first or the limit is reached without `\n`. No byte past the
+/// limit is read: the listener reads a request with `INSTANCE_OPEN_MAX_BYTES`,
+/// a second start a reply with `INSTANCE_RAISE_MAX_BYTES`.
+fn read_delimited_raise_message<S: Read>(
+    stream: &mut S,
+    limit: usize,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut message = Vec::with_capacity(limit.min(INSTANCE_RAISE_MAX_BYTES));
     let mut byte = [0_u8; 1];
-    while message.len() < INSTANCE_RAISE_MAX_BYTES {
+    while message.len() < limit {
         match stream.read(&mut byte) {
             Ok(0) => return Ok(None),
             Ok(_) => {
@@ -1664,25 +1725,104 @@ fn read_delimited_raise_message<S: Read>(stream: &mut S) -> std::io::Result<Opti
     Ok(None)
 }
 
-fn handle_desktop_raise_connection<S, Raise>(stream: &mut S, raise: Raise)
+/// One connection to the raise endpoint: `raise-v1` or `open-v1 <path>`
+/// (#1236), answered `ok` or `error` as `act` decides; anything else gets no
+/// reply and no action.
+fn handle_desktop_raise_connection<S, Act>(stream: &mut S, act: Act)
 where
     S: Read + Write,
-    Raise: FnOnce() -> Result<(), String>,
+    Act: FnOnce(open_folder::InstanceRequest) -> bool,
 {
-    let Ok(Some(request)) = read_delimited_raise_message(stream) else {
+    let Ok(Some(message)) =
+        read_delimited_raise_message(stream, open_folder::INSTANCE_OPEN_MAX_BYTES)
+    else {
         return;
     };
-    if request != INSTANCE_RAISE_REQUEST {
+    let Some(request) = open_folder::parse_instance_request(&message, INSTANCE_RAISE_REQUEST)
+    else {
         return;
-    }
-    let reply = match raise() {
-        Ok(()) => INSTANCE_RAISE_SUCCESS,
-        Err(error) => {
-            eprintln!("[lasterm] desktop raise failed: {error}");
-            INSTANCE_RAISE_FAILURE
-        }
+    };
+    let reply = if act(request) {
+        INSTANCE_RAISE_SUCCESS
+    } else {
+        INSTANCE_RAISE_FAILURE
     };
     let _ = stream.write_all(reply);
+}
+
+/// The primary's answer to a request on its endpoint.
+fn respond_to_instance_request(
+    app: &tauri::AppHandle,
+    request: open_folder::InstanceRequest,
+) -> bool {
+    match request {
+        open_folder::InstanceRequest::Raise => match raise_main_window(app.clone()) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[lasterm] desktop raise failed: {error}");
+                false
+            }
+        },
+        open_folder::InstanceRequest::Open(None) => false,
+        open_folder::InstanceRequest::Open(Some(folder)) => {
+            let queue = app.state::<open_folder::OpenFolderQueue>();
+            open_folder::accept_open_folder(
+                &folder,
+                &queue,
+                folder_admission_open,
+                || raise_main_window_on_screen(app.clone()),
+                || tell_page_folders_wait(app),
+            )
+        }
+    }
+}
+
+/// Whether the primary still takes folders: not once a quit or restart is
+/// decided, until it is abandoned with the app running (#1236, C4).
+fn folder_admission_open() -> bool {
+    !QUIT_DECIDED.load(Ordering::SeqCst)
+        && quit_coordinator()
+            .lock()
+            .map(|coordinator| coordinator.admits_folders())
+            .unwrap_or(false)
+}
+
+/// Tells the page folders wait, now and every 2 s while they do.
+fn tell_page_folders_wait(app: &tauri::AppHandle) {
+    let emit = |app: &tauri::AppHandle| {
+        if let Err(error) = app.emit_to("main", open_folder::OPEN_FOLDER_EVENT, ()) {
+            eprintln!("[lasterm] cannot tell the page a folder waits: {error}");
+        }
+    };
+    emit(app);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let queue = app.state::<open_folder::OpenFolderQueue>();
+        open_folder::reemit_while_queued(&queue, || emit(&app), std::thread::sleep);
+    });
+}
+
+/// The raise, for a folder: it counts only when the window ends visible and
+/// not minimized (#1236).
+fn raise_main_window_on_screen(app: tauri::AppHandle) -> Result<(), String> {
+    let main_thread_app = app.clone();
+    run_after_main_thread_action(
+        move |action| {
+            app.run_on_main_thread(action)
+                .map_err(|error| format!("cannot schedule the main-window raise: {error}"))
+        },
+        move || {
+            let window = main_thread_app
+                .get_webview_window("main")
+                .ok_or_else(|| "the main window is unavailable".to_string())?;
+            run_window_raise_actions(&window)?;
+            if window.on_screen()? {
+                Ok(())
+            } else {
+                Err("the main window is not on screen after the raise".to_string())
+            }
+        },
+    )
 }
 
 #[cfg(unix)]
@@ -1702,7 +1842,7 @@ fn request_desktop_raise(endpoint: &DesktopRaiseEndpoint) -> RaiseRequestResult 
     {
         return RaiseRequestResult::Unanswered;
     }
-    match read_delimited_raise_message(&mut stream) {
+    match read_delimited_raise_message(&mut stream, INSTANCE_RAISE_MAX_BYTES) {
         Ok(Some(reply)) if reply == INSTANCE_RAISE_SUCCESS => RaiseRequestResult::Raised,
         Ok(Some(reply)) if reply == INSTANCE_RAISE_FAILURE => RaiseRequestResult::Failed,
         _ => RaiseRequestResult::Unanswered,
@@ -1752,9 +1892,9 @@ fn start_desktop_raise_listener(
                     Ok((mut stream, _)) => {
                         let _ = stream.set_read_timeout(Some(INSTANCE_RAISE_TIMEOUT));
                         let _ = stream.set_write_timeout(Some(INSTANCE_RAISE_TIMEOUT));
-                        let raise_app = app.clone();
-                        handle_desktop_raise_connection(&mut stream, move || {
-                            raise_main_window(raise_app)
+                        let request_app = app.clone();
+                        handle_desktop_raise_connection(&mut stream, move |request| {
+                            respond_to_instance_request(&request_app, request)
                         });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1826,8 +1966,9 @@ fn create_desktop_raise_pipe(name: &str) -> std::io::Result<std::fs::File> {
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             PIPE_UNLIMITED_INSTANCES,
-            INSTANCE_RAISE_MAX_BYTES as u32,
-            INSTANCE_RAISE_MAX_BYTES as u32,
+            // Room for a whole `open-v1` request (#1236).
+            open_folder::INSTANCE_OPEN_MAX_BYTES as u32,
+            open_folder::INSTANCE_OPEN_MAX_BYTES as u32,
             0,
             &attributes,
         )
@@ -1902,7 +2043,7 @@ fn read_windows_pipe_message(stream: &std::fs::File) -> Result<Option<Vec<u8>>, 
         stream,
         deadline: Instant::now() + INSTANCE_RAISE_TIMEOUT,
     };
-    read_delimited_raise_message(&mut reader)
+    read_delimited_raise_message(&mut reader, INSTANCE_RAISE_MAX_BYTES)
 }
 
 #[cfg(windows)]
@@ -1976,13 +2117,15 @@ fn start_desktop_raise_listener(
             {
                 continue;
             }
-            let raise_app = app.clone();
+            let request_app = app.clone();
             std::thread::spawn(move || {
                 let mut stream = WindowsPipeReader {
                     stream: &stream,
                     deadline: Instant::now() + INSTANCE_RAISE_TIMEOUT,
                 };
-                handle_desktop_raise_connection(&mut stream, move || raise_main_window(raise_app));
+                handle_desktop_raise_connection(&mut stream, move |request| {
+                    respond_to_instance_request(&request_app, request)
+                });
             });
         }
     });
@@ -2042,6 +2185,9 @@ struct QuitAttempt {
 struct QuitCoordinator {
     next_id: u64,
     active: Option<QuitAttempt>,
+    /// Set once an attempt ends in leaving (the final dialog may still be
+    /// open); never cleared: the app is on its way out.
+    exit_decided: bool,
 }
 
 enum QuitStart {
@@ -2084,6 +2230,12 @@ impl QuitCoordinator {
     /// A quit is under way: the hub was asked, or its answer is being acted on.
     fn in_progress(&self) -> bool {
         self.active.is_some()
+    }
+
+    /// Whether a folder from File Explorer may still be accepted (#1236): no
+    /// quit under way, and none that has decided to leave.
+    fn admits_folders(&self) -> bool {
+        self.active.is_none() && !self.exit_decided
     }
 
     fn begin(&mut self) -> QuitStart {
@@ -2176,6 +2328,7 @@ impl QuitCoordinator {
             return QuitAction::Ignore;
         }
         self.active = None;
+        self.exit_decided = true;
         match observed {
             Ok(()) => diagnostic.map_or(QuitAction::Exit, QuitAction::ExitWithDiagnostic),
             // The hub took the quit, or may have: its agent and terminals are
@@ -2193,7 +2346,11 @@ impl QuitCoordinator {
     // Under `tauri dev` no sidecar is launched, so no hub exit is ever seen.
     #[cfg_attr(dev, allow(dead_code))]
     fn hub_exited(&mut self) -> QuitAction {
-        match self.active.take().map(|attempt| attempt.state) {
+        let state = self.active.take().map(|attempt| attempt.state);
+        if state.is_some() {
+            self.exit_decided = true;
+        }
+        match state {
             None => QuitAction::Ignore,
             Some(QuitAttemptState::ConfirmingHubGone {
                 diagnostic: Some(diagnostic),
@@ -6688,11 +6845,14 @@ fn launch_hub(app: &tauri::AppHandle) -> Result<u16, String> {
 
 /// In release builds, spawn the hub sidecar and wait for it to become ready.
 /// In dev builds, the hub is already running externally — just show the window.
-fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+fn setup_app(
+    app: &mut tauri::App,
+    folder: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // This is deliberately first: no second desktop may spawn a sidecar, initialise
     // a tray, or show a window. The managed guard keeps its non-inheritable handle
     // alive until this desktop process exits.
-    let mut instance = match acquire_desktop_instance() {
+    let mut instance = match acquire_desktop_instance(folder.as_deref()) {
         Ok(DesktopInstanceStartup::Primary(instance)) => instance,
         Ok(DesktopInstanceStartup::Secondary) => {
             // The primary acknowledged after `show()` and `set_focus()` completed.
@@ -6705,6 +6865,10 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
     };
+
+    // The folders File Explorer asked to open (#1236), this start's own first:
+    // there before the page that takes them can exist.
+    app.manage(open_folder::OpenFolderQueue::with_initial(folder));
 
     // `create: false` keeps the main window config in tauri.conf.json while
     // letting us install the builder-only new-window boundary. Construct it
@@ -6913,6 +7077,13 @@ pub fn run() {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--reset-hub-pin")) {
         std::process::exit(report_reset_hub_pin_result(reset_loopback_hub_pin()));
     }
+    // A folder from File Explorer (#1236): a refused one opens nothing at all.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let folder = match open_folder::startup_decision(&args) {
+        open_folder::StartupDecision::Normal => None,
+        open_folder::StartupDecision::Open(folder) => Some(folder),
+        open_folder::StartupDecision::Exit(code) => std::process::exit(code),
+    };
     tauri::Builder::default()
         // Install the navigation boundary before setup_app constructs the main
         // window from its configuration. It then also applies to every later
@@ -6983,7 +7154,9 @@ pub fn run() {
                 pick_download_target,
                 download_hub_file_to,
                 cancel_hub_download,
-                reveal_downloaded
+                reveal_downloaded,
+                take_open_folder_requests,
+                has_open_folder_requests
             ],
         ))
         .on_window_event(|window, event| {
@@ -7000,7 +7173,7 @@ pub fn run() {
                 }
             }
         })
-        .setup(setup_app)
+        .setup(move |app| setup_app(app, folder))
         .build(app_context())
         .expect("error while running lasterm")
         .run(|_app, _event| {});
@@ -9240,12 +9413,15 @@ mod tests {
         let (queued_tx, queued_rx) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            handle_desktop_raise_connection(&mut stream, move || {
-                run_after_main_thread_action(
-                    move |action| queued_tx.send(action).map_err(|error| error.to_string()),
-                    || Ok(()),
-                )
-            });
+            handle_desktop_raise_connection(
+                &mut stream,
+                raise_only(move || {
+                    run_after_main_thread_action(
+                        move |action| queued_tx.send(action).map_err(|error| error.to_string()),
+                        || Ok(()),
+                    )
+                }),
+            );
         });
         let (reply_tx, reply_rx) = mpsc::channel();
         let client = std::thread::spawn(move || {
@@ -9280,7 +9456,10 @@ mod tests {
         let holder = ProcessLock::try_acquire(&lock_path).unwrap().unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            handle_desktop_raise_connection(&mut stream, || Err("window unavailable".to_string()));
+            handle_desktop_raise_connection(
+                &mut stream,
+                raise_only(|| Err("window unavailable".to_string())),
+            );
         });
 
         let error = match acquire_desktop_instance_at(&lock_path, &endpoint) {
@@ -9353,22 +9532,138 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// The handler's action for a raise test: `raise` for `raise-v1`, and a
+    /// refusal for anything else.
+    #[cfg(unix)]
+    fn raise_only(
+        raise: impl FnOnce() -> Result<(), String>,
+    ) -> impl FnOnce(open_folder::InstanceRequest) -> bool {
+        move |request| matches!(request, open_folder::InstanceRequest::Raise) && raise().is_ok()
+    }
+
+    /// A stream that fails the test on any read past `budget` bytes, and keeps
+    /// what is written to it.
+    struct BudgetedStream {
+        input: Vec<u8>,
+        position: usize,
+        budget: usize,
+        written: Vec<u8>,
+    }
+
+    impl Read for BudgetedStream {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if buffer.is_empty() || self.position == self.input.len() {
+                return Ok(0);
+            }
+            assert!(
+                self.position < self.budget,
+                "read past the budget of {} bytes",
+                self.budget
+            );
+            buffer[0] = self.input[self.position];
+            self.position += 1;
+            Ok(1)
+        }
+    }
+
+    impl Write for BudgetedStream {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.written.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// Kills the P4 mutation that accepts an arbitrary local socket payload as
-    /// a raise request. Invalid bytes receive no response and never invoke UI.
+    /// a raise request. Invalid bytes receive no response and never invoke UI;
+    /// the listener reads no byte past its budget (#1236).
     #[test]
     fn unknown_or_oversized_raise_request_is_rejected_without_action() {
-        let oversized = vec![b'x'; INSTANCE_RAISE_MAX_BYTES];
-        for request in [b"unknown\n".as_slice(), oversized.as_slice()] {
-            let mut stream = std::io::Cursor::new(request.to_vec());
+        let mut over_long = open_folder::OPEN_REQUEST_PREFIX.to_vec();
+        over_long.resize(open_folder::INSTANCE_OPEN_MAX_BYTES + 32, b'a');
+        let mut complete_over_long = open_folder::OPEN_REQUEST_PREFIX.to_vec();
+        complete_over_long.resize(open_folder::INSTANCE_OPEN_MAX_BYTES, b'a');
+        complete_over_long.push(b'\n');
+        for request in [
+            b"unknown\n".to_vec(),
+            b"open-v1C:\\x\n".to_vec(),
+            over_long,
+            complete_over_long,
+        ] {
+            let mut stream = BudgetedStream {
+                input: request.clone(),
+                position: 0,
+                budget: open_folder::INSTANCE_OPEN_MAX_BYTES,
+                written: Vec::new(),
+            };
             let invoked = Arc::new(AtomicBool::new(false));
             let action_invoked = invoked.clone();
-            handle_desktop_raise_connection(&mut stream, move || {
+            handle_desktop_raise_connection(&mut stream, move |_| {
                 action_invoked.store(true, Ordering::Relaxed);
-                Ok(())
+                true
             });
             assert!(!invoked.load(Ordering::Relaxed));
-            assert_eq!(stream.into_inner(), request);
+            assert!(stream.written.is_empty(), "no reply");
+            assert!(stream.position <= open_folder::INSTANCE_OPEN_MAX_BYTES);
         }
+        // A reply read stops at its own, smaller cap.
+        let mut long_reply = BudgetedStream {
+            input: vec![b'x'; 200],
+            position: 0,
+            budget: INSTANCE_RAISE_MAX_BYTES,
+            written: Vec::new(),
+        };
+        assert_eq!(
+            read_delimited_raise_message(&mut long_reply, INSTANCE_RAISE_MAX_BYTES).unwrap(),
+            None
+        );
+        assert_eq!(long_reply.position, INSTANCE_RAISE_MAX_BYTES);
+    }
+
+    /// `open-v1` reaches the action with its folder; a body that is not UTF-8
+    /// is refused with `error`; `raise-v1` is unchanged (#1236).
+    #[test]
+    fn open_requests_reach_the_action_and_are_answered() {
+        let respond = |request: &[u8], answer: bool| {
+            let mut stream = std::io::Cursor::new(request.to_vec());
+            let seen = Arc::new(Mutex::new(None));
+            let record = seen.clone();
+            handle_desktop_raise_connection(&mut stream, move |request| {
+                *record.lock().unwrap() = Some(request);
+                answer
+            });
+            let reply = stream.into_inner()[request.len()..].to_vec();
+            let seen = seen.lock().unwrap().take();
+            (seen, reply)
+        };
+        let folder = format!("C:\\{}", "é".repeat(60));
+        let mut frame = open_folder::OPEN_REQUEST_PREFIX.to_vec();
+        frame.extend_from_slice(folder.as_bytes());
+        frame.push(b'\n');
+        assert!(frame.len() > INSTANCE_RAISE_MAX_BYTES);
+        assert_eq!(
+            respond(&frame, true),
+            (
+                Some(open_folder::InstanceRequest::Open(Some(folder))),
+                INSTANCE_RAISE_SUCCESS.to_vec()
+            )
+        );
+        assert_eq!(
+            respond(b"open-v1 \xff\n", false),
+            (
+                Some(open_folder::InstanceRequest::Open(None)),
+                INSTANCE_RAISE_FAILURE.to_vec()
+            )
+        );
+        assert_eq!(
+            respond(INSTANCE_RAISE_REQUEST, true),
+            (
+                Some(open_folder::InstanceRequest::Raise),
+                INSTANCE_RAISE_SUCCESS.to_vec()
+            )
+        );
     }
 
     #[test]
@@ -9376,7 +9671,7 @@ mod tests {
         let mut reader = FragmentedReader::new([b"raise-".to_vec(), b"v1\n".to_vec()]);
 
         assert_eq!(
-            read_delimited_raise_message(&mut reader).unwrap(),
+            read_delimited_raise_message(&mut reader, INSTANCE_RAISE_MAX_BYTES).unwrap(),
             Some(INSTANCE_RAISE_REQUEST.to_vec())
         );
     }
@@ -9385,7 +9680,45 @@ mod tests {
     fn unterminated_raise_message_at_the_byte_cap_is_refused() {
         let mut reader = FragmentedReader::new([vec![b'x'; INSTANCE_RAISE_MAX_BYTES]]);
 
-        assert_eq!(read_delimited_raise_message(&mut reader).unwrap(), None);
+        assert_eq!(
+            read_delimited_raise_message(&mut reader, INSTANCE_RAISE_MAX_BYTES).unwrap(),
+            None
+        );
+    }
+
+    /// A quit decided closes the admission of folders, also once its attempt
+    /// has ended in leaving; an abandoned quit leaves it open (#1236).
+    #[test]
+    fn a_decided_quit_closes_the_admission_of_folders() {
+        let mut coordinator = QuitCoordinator::default();
+        assert!(coordinator.admits_folders());
+        let QuitStart::Started(id) = coordinator.begin() else {
+            panic!("a quit starts");
+        };
+        assert!(!coordinator.admits_folders(), "while the quit runs");
+        assert!(matches!(
+            coordinator.request_finished(id, false, QuitRequestResult::Conflict(Some(1))),
+            QuitAction::AskNative { .. }
+        ));
+        let _ = coordinator.resolve_native_consent(false);
+        assert!(coordinator.admits_folders(), "the quit was abandoned");
+
+        let QuitStart::Started(id) = coordinator.begin() else {
+            panic!("a second quit starts");
+        };
+        let _ = coordinator.request_finished(
+            id,
+            false,
+            QuitRequestResult::Unobserved(HubQuitTarget {
+                pid: 1,
+                instance_id: "hub".to_string(),
+            }),
+        );
+        let _ = coordinator.observation_finished(id, Err("not confirmed".to_string()), None);
+        assert!(
+            !coordinator.admits_folders(),
+            "an exit decided, its dialog still open"
+        );
     }
 
     /// The complete first-use anchor written by the hub: the child-owned stdout

@@ -675,6 +675,23 @@ describe("an empty pane's host, and a new tab", () => {
 		]);
 	});
 
+	// Closed before its host's list arrives, the new tab leaves the tab of another host in front,
+	// which the bar does not show: the welcome tab is the one to show, not that one again.
+	it("shows the welcome terminal's tab when the palette's new tab was closed before the list", async () => {
+		const hub = await bravoInView();
+		await railTo("alpha");
+		await click("Close W1");
+		await railTo("bravo");
+		const arrive = holdNextList(hub, HOST_A);
+		await runPaletteRow("alpha");
+		expect(tabs()).toEqual([{ label: "Terminal", selected: true }]);
+
+		await click("Close Terminal");
+		await arrive();
+
+		expect(tabs()).toEqual([{ label: "W1", selected: true }]);
+	});
+
 	it("brings the welcome terminal's tab to the front when the rail brings its host into view", async () => {
 		await bravoInView();
 		await runPaletteRow("alpha");
@@ -689,8 +706,11 @@ describe("an empty pane's host, and a new tab", () => {
 		]);
 	});
 
-	/** Hold the next list of terminals the window asks for; the answer it returns delivers it. */
-	function holdNextList(hub: FakeHub): () => void {
+	/**
+	 * Hold the next list of terminals the window asks for, which is `hostId`'s; what it returns
+	 * delivers the list, as the hub answers it then.
+	 */
+	function holdNextList(hub: FakeHub, hostId: string): () => Promise<void> {
 		let arrive: (list: Response) => void = () => {};
 		hub.answers.set("GET /api/channels", () => {
 			hub.answers.delete("GET /api/channels");
@@ -698,7 +718,10 @@ describe("an empty pane's host, and a new tab", () => {
 				arrive = resolve;
 			});
 		});
-		return () => arrive(json([]));
+		return async () => {
+			arrive(await hub.fetch(`/api/channels?host_id=${hostId}`));
+			await settle();
+		};
 	}
 
 	/** Alpha in view over its welcome tab and a tab still starting, the second in front. */
@@ -721,14 +744,13 @@ describe("an empty pane's host, and a new tab", () => {
 	// acted on the list in view all the same: it opened that host's welcome tab in front (#1239).
 	it("leaves the tab in front alone when the list of a host no longer in view arrives", async () => {
 		const hub = await startingInFrontOnAlpha();
-		const arrive = holdNextList(hub);
+		const arrive = holdNextList(hub, HOST_B);
 		document.querySelector<HTMLElement>('.host-rail [aria-label="bravo"]')?.click();
 		await settle();
 		await railTo("alpha");
 		await showSecondTab();
 
-		arrive();
-		await settle();
+		await arrive();
 
 		expect(tabs()).toEqual([
 			{ label: "W1", selected: false },
@@ -739,15 +761,14 @@ describe("an empty pane's host, and a new tab", () => {
 	it("leaves the tab in front alone when an earlier list of the host in view arrives", async () => {
 		const hub = await startingInFrontOnAlpha();
 		await railTo("bravo");
-		const arrive = holdNextList(hub);
+		const arrive = holdNextList(hub, HOST_A);
 		document.querySelector<HTMLElement>('.host-rail [aria-label="alpha"]')?.click();
 		await settle();
 		await railTo("bravo");
 		await railTo("alpha");
 		await showSecondTab();
 
-		arrive();
-		await settle();
+		await arrive();
 
 		expect(tabs()).toEqual([
 			{ label: "W1", selected: false },

@@ -1534,10 +1534,13 @@ watch(
 		const welcomeCh = channelsStore.channels.find((c) => c.isWelcome && c.status !== 'dead');
 		if (welcomeCh && configStore.uiConfig.startup?.autoOpenWelcome !== false) {
 			// The tab that brought this host into view is the one the user just
-			// opened: the welcome tab opens behind it (#1239).
-			const front = cameWithTab ? layout.activeTab.value?.id : undefined;
+			// opened: the welcome tab opens behind it (#1239). Closed meanwhile, it
+			// may have left a tab the bar does not show in front, and the welcome
+			// tab takes the front as it does for any other selection.
+			const front = cameWithTab ? layout.activeTab.value : null;
+			const staysInFront = front !== null && (inView === null || inView.has(front.id));
 			layout.openTab(welcomeCh.id);
-			if (front !== undefined) layout.setActiveTab(layout.tabs.value.findIndex((t) => t.id === front));
+			if (staysInFront) layout.setActiveTab(layout.tabs.value.findIndex((t) => t.id === front.id));
 		}
 
 		// Auto-spawn only for local hosts with no live channels and no tabs open.

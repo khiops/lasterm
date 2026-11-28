@@ -329,4 +329,27 @@ describe("createFolderOpener", () => {
 		await vi.advanceTimersByTimeAsync(11_000);
 		expect(state.rereads).toBe(rereads);
 	});
+	it("keeps an empty first batch, silently, while the startup's tabs wait for a usable list", async () => {
+		const { state, deps } = fakeDeps();
+		const opener = createFolderOpener(deps);
+		state.duringTake = () => {
+			state.usable = false;
+		};
+		// The startup could not tell; the list goes while the first take is in flight.
+		opener.start(null);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(state.takes).toHaveLength(1);
+		expect(state.firstBatches).toEqual([]);
+		expect(state.shown).toBe(0);
+		expect(opener.holdingBatch()).toBe(true);
+
+		state.duringTake = null;
+		state.usable = true;
+		await vi.advanceTimersByTimeAsync(5_100);
+		expect(state.takes).toHaveLength(2);
+		expect(state.takes[1]).toBe(state.takes[0]);
+		expect(state.firstBatches).toEqual([false]);
+		expect(state.shown).toBe(0);
+		expect(opener.holdingBatch()).toBe(false);
+	});
 });

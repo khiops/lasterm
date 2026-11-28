@@ -136,7 +136,8 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 	// Folders known to wait since startup (`start`), until a batch is processed.
 	let expected = false;
 	// The startup's tabs wait for the first batch (a folder known or possibly waiting at `start`):
-	// what `ready` lacks is asked for again, silently, until that batch is taken.
+	// what `ready` lacks is asked for again until that batch is processed, even when no folder is
+	// confirmed to wait. Only a folder known to wait shows the notice.
 	let firstAwaited = false;
 	// Once stopped (the page is going), nothing is taken or opened; a batch taken meanwhile is
 	// replayed by the next page from the stored token.
@@ -206,11 +207,12 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 			clearTimeout(retryTimer);
 			retryTimer = null;
 		}
-		// The page stopped being ready during the call: keep the batch and its token. An empty
-		// batch has nothing to keep: it is processed now, and nothing is said to wait.
-		if (!deps.ready() && folders.length > 0) {
+		// The page stopped being ready during the call: keep the batch and its token, and say a
+		// folder waits if one does. An empty batch the startup's tabs wait for is kept too, silently,
+		// so they open on a usable list; any other empty batch is processed now.
+		if (!deps.ready() && (folders.length > 0 || firstAwaited)) {
 			scheduleReread();
-			showNotice();
+			if (folders.length > 0) showNotice();
 			return;
 		}
 		if (rereadTimer !== null) {

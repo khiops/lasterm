@@ -252,6 +252,8 @@ describe("saveUiSettings", () => {
 	});
 
 	it("reads back what the hub holds when it refuses the write", async () => {
+		// A paired client: the read-back goes only with a token.
+		useAuthStore().setToken("a".repeat(64));
 		mocks.hubFetch.mockResolvedValueOnce(new Response("{}", { status: 400 })).mockResolvedValueOnce(
 			new Response(JSON.stringify({ onChannelDead: "readonly", keyboard: { keyHints: false } }), {
 				status: 200,

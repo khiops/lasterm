@@ -1336,7 +1336,9 @@ function openPendingTab(hostId: string, opts?: { cwd?: string }): void {
 // neither its welcome tab nor its default tab: the folder's tab is the one. While
 // whether one waits is unknown ('pending'), that run defers its opening, which
 // runs once if the first batch turns out empty. The state never outlives startup.
-let folderStartup: 'none' | 'pending' | 'folder' = 'none';
+// Pending from the start in the desktop app: the host list may load before the desktop has said
+// whether a folder waits.
+let folderStartup: 'none' | 'pending' | 'folder' = folderRequestsAvailable() ? 'pending' : 'none';
 let deferredStartupOpening: (() => void) | null = null;
 let folderWaitToast: number | null = null;
 let stopFolderEvents: (() => void) | null = null;
@@ -1407,7 +1409,16 @@ async function startFolderRequests(): Promise<void> {
 		console.warn('[desktop] cannot tell whether a folder from File Explorer waits:', error);
 		waiting = true;
 	}
-	if (waiting || folderOpener.holdingBatch()) folderStartup = 'pending';
+	if (!waiting && !folderOpener.holdingBatch()) startupWithoutFolder();
+}
+
+/** No folder waits at startup: the local host's own tabs open, if its first run deferred them. */
+function startupWithoutFolder(): void {
+	if (folderStartup !== 'pending') return;
+	folderStartup = 'none';
+	const deferred = deferredStartupOpening;
+	deferredStartupOpening = null;
+	deferred?.();
 }
 
 watch(

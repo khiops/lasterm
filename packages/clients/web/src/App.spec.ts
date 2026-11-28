@@ -35,6 +35,7 @@ const desktopFolders = vi.hoisted(() => ({
 	takeRejectsOnce: false,
 	listenRejects: false,
 	hold: null as Promise<void> | null,
+	hasHold: null as Promise<void> | null,
 	listener: null as (() => void) | null,
 }));
 vi.mock("./utils/desktop-open-folder.js", async (importOriginal) => {
@@ -43,6 +44,7 @@ vi.mock("./utils/desktop-open-folder.js", async (importOriginal) => {
 		...actual,
 		folderRequestsAvailable: () => desktopFolders.available,
 		hasOpenFolderRequests: async () => {
+			if (desktopFolders.hasHold !== null) await desktopFolders.hasHold;
 			if (desktopFolders.hasRejectsOnce) {
 				desktopFolders.hasRejectsOnce = false;
 				throw new Error("IPC failed");
@@ -3106,6 +3108,7 @@ describe("folders from File Explorer", () => {
 		desktopFolders.takeRejectsOnce = false;
 		desktopFolders.listenRejects = false;
 		desktopFolders.hold = null;
+		desktopFolders.hasHold = null;
 		desktopFolders.listener = null;
 	}
 

@@ -1980,7 +1980,7 @@ describe("SessionManager", () => {
 
 		// A folder from File Explorer goes to the local host's agent only (#1236).
 		it("a local-only SPAWN is refused for a host that is not local", async () => {
-			const received: unknown[] = [];
+			const received: ProtocolMessage[] = [];
 			sm.addClient(makeClient("c-local-only", received));
 			const requestId = "01ARZ3NDEKTSV4RRFFQ69G5FAX";
 			const folder = "C:\\Users\\me\\sub\\..\\dossier é 漢 x";

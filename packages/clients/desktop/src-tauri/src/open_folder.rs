@@ -31,6 +31,10 @@ pub(crate) const INSTANCE_OPEN_HANDOFF_TIMEOUT: Duration = Duration::from_secs(2
 
 /// How long the second start waits for the reply once the request is written:
 /// the primary may be checking a slow drive.
+#[cfg_attr(
+    not(any(windows, test)),
+    allow(dead_code, reason = "only the Windows send path uses it")
+)]
 pub(crate) const INSTANCE_OPEN_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The longest single wait for the pipe within one attempt.
@@ -323,9 +327,17 @@ pub(crate) enum OpenOutcome {
     /// Not written in full: another attempt may follow.
     NotDelivered,
     /// Written in full: the request is never sent again.
+    #[cfg_attr(
+        not(any(windows, test)),
+        allow(dead_code, reason = "only the Windows send path writes")
+    )]
     Written(OpenReply),
 }
 
+#[cfg_attr(
+    not(any(windows, test)),
+    allow(dead_code, reason = "only the Windows send path uses it")
+)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum OpenReply {
     Ok,
@@ -335,6 +347,10 @@ pub(crate) enum OpenReply {
 }
 
 /// A connected endpoint, as the send path uses it.
+#[cfg_attr(
+    not(any(windows, test)),
+    allow(dead_code, reason = "only the Windows send path uses it")
+)]
 pub(crate) trait OpenStream {
     fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()>;
     fn flush(&mut self) -> std::io::Result<()>;
@@ -344,6 +360,10 @@ pub(crate) trait OpenStream {
 }
 
 /// The request for `folder`.
+#[cfg_attr(
+    not(any(windows, test)),
+    allow(dead_code, reason = "only the Windows send path uses it")
+)]
 pub(crate) fn open_request(folder: &str) -> Vec<u8> {
     let mut frame = OPEN_REQUEST_PREFIX.to_vec();
     frame.extend_from_slice(folder.as_bytes());
@@ -356,6 +376,10 @@ pub(crate) fn open_request(folder: &str) -> Vec<u8> {
 /// after it. A flush that fails after it, or a reply that only comes once the
 /// deadline has passed (a reader resumed late, finding it waiting), is no
 /// confirmation.
+#[cfg_attr(
+    not(any(windows, test)),
+    allow(dead_code, reason = "only the Windows send path uses it")
+)]
 pub(crate) fn deliver_open<S: OpenStream>(
     check_server: impl FnOnce() -> Result<(), String>,
     stream: &mut S,
@@ -646,6 +670,14 @@ pub(crate) fn send_open_request(_endpoint: &str, _folder: &str, _wait: Duration)
 #[expect(
     clippy::disallowed_methods,
     reason = "the tests build their fixtures by pathname, in temporary directories of their own"
+)]
+#[cfg_attr(
+    not(windows),
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "the send path and the queue's acceptance are tested on Windows only"
+    )
 )]
 mod tests {
     use super::*;

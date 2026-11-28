@@ -31,9 +31,10 @@ type GetClassObject =
     unsafe extern "system" fn(*const GUID, *const GUID, *mut *mut c_void) -> HRESULT;
 type CanUnloadNow = unsafe extern "system" fn() -> HRESULT;
 
-/// A selection of the given items, as Explorer passes one.
+/// A selection of the given items, as Explorer passes one; with `true`, one
+/// whose count cannot be read.
 #[implement(IShellItemArray)]
-struct Selection(Vec<IShellItem>);
+struct Selection(Vec<IShellItem>, bool);
 
 impl IShellItemArray_Impl for Selection_Impl {
     fn BindToHandler(
@@ -65,6 +66,9 @@ impl IShellItemArray_Impl for Selection_Impl {
         Err(E_NOTIMPL.into())
     }
     fn GetCount(&self) -> windows_core::Result<u32> {
+        if self.1 {
+            return Err(E_NOTIMPL.into());
+        }
         Ok(self.0.len() as u32)
     }
     fn GetItemAt(&self, index: u32) -> windows_core::Result<IShellItem> {
@@ -185,7 +189,7 @@ fn item(path: &Path) -> IShellItem {
 }
 
 fn selection(items: &[&Path]) -> IShellItemArray {
-    Selection(items.iter().map(|path| item(path)).collect()).into()
+    Selection(items.iter().map(|path| item(path)).collect(), false).into()
 }
 
 fn take_string(text: windows_core::PWSTR) -> String {
@@ -227,10 +231,9 @@ fn invoke_within_deadline(command: &IExplorerCommand, call: Call) -> windows_cor
                 let site: IServiceProvider = Site(item(folder)).into();
                 with_site.SetSite(&site).expect("SetSite");
             }
-            let items: Option<IShellItemArray> = call
-                .items
-                .as_ref()
-                .map(|paths| Selection(paths.iter().map(|path| item(path)).collect()).into());
+            let items: Option<IShellItemArray> = call.items.as_ref().map(|paths| {
+                Selection(paths.iter().map(|path| item(path)).collect(), false).into()
+            });
             let result = command
                 .Invoke(items.as_ref(), None::<&IBindCtx>)
                 .map_err(|error| error.code());
@@ -346,8 +349,10 @@ fn the_built_dll_serves_the_explorer_command() {
     // What the fake records, and when the test lets it end.
     let record = scratch.0.join("record.txt");
     let release = scratch.0.join("release");
+    let launches = scratch.0.join("launches.txt");
     std::env::set_var("LASTERM_FAKE_DESKTOP_RECORD", &record);
     std::env::set_var("LASTERM_FAKE_DESKTOP_RELEASE", &release);
+    std::env::set_var("LASTERM_FAKE_DESKTOP_LAUNCHES", &launches);
     let recorded = |record: &Path| -> Vec<String> {
         std::fs::read_to_string(record)
             .unwrap()
@@ -360,6 +365,7 @@ fn the_built_dll_serves_the_explorer_command() {
         std::thread::sleep(Duration::from_millis(200));
         let _ = std::fs::remove_file(record);
         let _ = std::fs::remove_file(release);
+        let _ = std::fs::remove_file(record.with_file_name("launches.txt"));
     };
 
     let paths = |paths: &[&Path]| Call {
@@ -392,10 +398,19 @@ fn the_built_dll_serves_the_explorer_command() {
     );
     reset(&record, &release);
 
-    // Several folders: the first one.
+    // Several folders: the first one, once.
     invoke_within_deadline(&command, paths(&[&dir_a, &dir_b])).unwrap();
     assert!(wait_for(&record, Duration::from_secs(10)));
     assert_eq!(recorded(&record)[1], dir_a.display().to_string());
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        std::fs::read_to_string(&launches).unwrap(),
+        format!(
+            "{}
+",
+            dir_a.display()
+        )
+    );
     reset(&record, &release);
 
     // A background click: no selection, or an empty one, and the site's folder.
@@ -404,6 +419,9 @@ fn the_built_dll_serves_the_explorer_command() {
     unsafe { with_site.SetSite(&site) }.unwrap();
     assert_eq!(state(None), ECS_ENABLED.0 as u32);
     assert_eq!(state(Some(&selection(&[]))), ECS_ENABLED.0 as u32);
+    // A selection whose count cannot be read is not the view's folder.
+    let unreadable: IShellItemArray = Selection(vec![item(&dir_a)], true).into();
+    assert_eq!(state(Some(&unreadable)), ECS_HIDDEN.0 as u32);
     unsafe { with_site.SetSite(None) }.unwrap();
     for items in [None, Some(Vec::new())] {
         invoke_within_deadline(

@@ -91,12 +91,15 @@ struct OpenInLasterm {
 impl OpenInLasterm {
     /// The item the entry acts on: the first of a non-null, non-empty
     /// selection; else the folder the view shows (a background click); else
-    /// none.
+    /// none. A selection whose count cannot be read is none: the view's folder
+    /// may not be what the user chose.
     fn location(&self, items: Option<&IShellItemArray>) -> Option<IShellItem> {
         if let Some(items) = items {
             // SAFETY: plain COM calls on a live array.
-            if unsafe { items.GetCount() }.is_ok_and(|count| count > 0) {
-                return unsafe { items.GetItemAt(0) }.ok();
+            match unsafe { items.GetCount() } {
+                Ok(0) => {}
+                Ok(_) => return unsafe { items.GetItemAt(0) }.ok(),
+                Err(_) => return None,
             }
         }
         let site = self.site.lock().ok()?.clone()?;

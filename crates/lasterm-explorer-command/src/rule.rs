@@ -19,10 +19,11 @@ pub const SFGAO_FOLDER: u32 = 0x2000_0000;
 pub const SFGAO_STREAM: u32 = 0x0040_0000;
 
 /// Whether `path` has the form a folder opened from File Explorer may have: a
-/// drive letter, a colon and a backslash first; no control character; at most
-/// [`MAX_FOLDER_UNITS`] UTF-16 units; and neither `${` nor `\\`, which the
-/// agent expands or collapses in a working directory, so such a path would
-/// reach the shell changed. The string is parsed here, never through
+/// drive letter, a colon and a backslash first; no character from U+0000 to
+/// U+001F nor U+007F; at most [`MAX_FOLDER_UNITS`] UTF-16 units; and neither
+/// `${` nor `\\`, which the agent may expand or collapse in a working
+/// directory: refusing both forms keeps every accepted path literal on its way
+/// to the shell. The string is parsed here, never through
 /// `std::path`, so the rule is the same on every platform.
 pub fn lexically_acceptable(path: &str) -> bool {
     let mut chars = path.chars();

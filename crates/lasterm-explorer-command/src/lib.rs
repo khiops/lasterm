@@ -11,6 +11,9 @@
 
 pub mod rule;
 
+#[cfg(test)]
+mod package_name;
+
 #[cfg(all(windows, feature = "com"))]
 mod com;
 

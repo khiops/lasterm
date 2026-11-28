@@ -10,6 +10,7 @@
 				role="dialog"
 				aria-label="Command Palette"
 				aria-modal="true"
+				data-own-shortcut="palette.open"
 			>
 				<!-- Search input -->
 				<div class="palette-search">

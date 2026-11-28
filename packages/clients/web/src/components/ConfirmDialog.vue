@@ -66,8 +66,8 @@ const emit = defineEmits<{
 
 // A modal alertdialog (#1189): the keyboard goes onto Cancel, the harmless answer; Esc cancels;
 // Tab stays inside; and the keyboard goes back to where it was, or to `fallbackFocus` when that is
-// gone (a menu entry that opened the question). The window's keys that move the keyboard (tabs,
-// panes, zones) pause behind a modal dialog.
+// gone (a menu entry that opened the question). The window's shortcuts wait behind a modal dialog
+// (#637, #1220).
 const dialogEl = ref<HTMLElement | null>(null);
 const { onKeydown } = useModalFocus({
 	open: () => props.visible,

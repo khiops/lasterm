@@ -16,6 +16,7 @@
 						role="dialog"
 						aria-label="Settings"
 						aria-modal="true"
+						data-own-shortcut="settings.open"
 						tabindex="-1"
 						@keydown="onPanelKeydown"
 					>

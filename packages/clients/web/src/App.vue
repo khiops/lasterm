@@ -523,10 +523,10 @@ import { hubFetch } from './utils/hub-fetch.js';
 import { type ReplaceAgentResponse, replaceAgentQuestion, replaceAgentWithConsent } from './utils/replace-agent.js';
 import {
 	type AppActionId,
-	movesKeyboard,
 	type PaneDirection,
 	paneMoveOf,
 	readSwitchesFrom,
+	runsInModalDialog,
 	tabNumberOf,
 	windowShortcutOf,
 } from './utils/app-shortcuts.js';
@@ -1651,13 +1651,16 @@ function isPtyFocused(): boolean {
  * handler keeps those chords from its PTY, since xterm ignores preventDefault. A chord
  * for outside a terminal (F6) is left to the terminal when the keyboard is in one.
  * Intercepts Ctrl+Shift+1..9 to spawn profile N (INV-13: only when PTY is NOT focused).
+ * A modal dialog that has the keyboard keeps all of those from what it covers (#637, #1220).
  */
 function onGlobalKeydown(event: KeyboardEvent): void {
+	const dialog = modalDialogOf(event.target);
 	const shortcut = windowShortcutOf(event);
 	if (shortcut !== null) {
 		event.preventDefault();
-		// A modal dialog keeps the keyboard: nothing takes it behind the dialog (#637).
-		if (movesKeyboard(shortcut) && isInModalDialog(event.target)) return;
+		// The dialog's own chord closes it; the others wait until it is gone.
+		if (dialog !== null && !runsInModalDialog(shortcut, dialog.getAttribute('data-own-shortcut')))
+			return;
 		runAppAction(shortcut);
 		return;
 	}
@@ -1703,7 +1706,7 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 	// Ctrl+Shift+1..9 — spawn profile N (INV-13: skip when PTY has focus)
 	if (event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey) {
 		const digit = parseInt(event.key, 10);
-		if (digit >= 1 && digit <= 9 && !isPtyFocused()) {
+		if (digit >= 1 && digit <= 9 && !isPtyFocused() && dialog === null) {
 			// The Nth profile of this host's menu, as the dropdown lists it — not
 			// the Nth of every profile, which on Windows launched a Linux shell.
 			event.preventDefault();
@@ -1805,8 +1808,13 @@ function runAppAction(action: AppActionId): void {
 
 // ─── Keyboard: tabs, panes and focus zones (#637) ────────────────────────────
 
+/** The modal dialog the keyboard is in, if it is in one. */
+function modalDialogOf(target: EventTarget | null): Element | null {
+	return target instanceof Element ? target.closest('[aria-modal="true"]') : null;
+}
+
 function isInModalDialog(target: EventTarget | null): boolean {
-	return target instanceof Element && target.closest('[aria-modal="true"]') !== null;
+	return modalDialogOf(target) !== null;
 }
 
 /** An element that takes Esc itself, to cancel what it asks. */

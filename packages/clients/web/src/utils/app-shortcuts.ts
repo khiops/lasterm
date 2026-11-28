@@ -246,19 +246,13 @@ export function paneMoveOf(
 }
 
 /**
- * Whether an action takes the keyboard somewhere else: to another tab, pane or zone. Those do
- * nothing while a modal dialog has the keyboard, which would otherwise be left behind it.
+ * Whether an action runs while a modal dialog has the keyboard. Two do: the dialog's own, whose
+ * chord closes it from inside (`own`: the palette's, Settings'), and the shortcuts overlay, which
+ * opens over the dialog and runs nothing. Any other would act on what the dialog covers: close a
+ * pane, open a tab, or take the keyboard behind it (#637, #1220).
  */
-export function movesKeyboard(id: AppActionId): boolean {
-	return (
-		id === "tab.next" ||
-		id === "tab.previous" ||
-		tabNumberOf(id) !== null ||
-		paneMoveOf(id)?.move === "focus" ||
-		id === "zone.next" ||
-		id === "zone.previous" ||
-		id === "files.toggle"
-	);
+export function runsInModalDialog(id: AppActionId, own: string | null): boolean {
+	return id === own || id === "help.shortcuts";
 }
 
 function capsOf(chord: Chord): string[] {

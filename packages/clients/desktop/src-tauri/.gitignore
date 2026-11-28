@@ -8,3 +8,5 @@
 # cargo-mutants writes its per-run output and the previous run's copy here.
 /mutants.out/
 /mutants.out.old/
+# File Explorer's command, placed by the build beside the sidecars (#1236).
+/lasterm_explorer_command.dll

@@ -679,6 +679,17 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         run: node scripts/pe-imports.ts packages/clients/desktop/src-tauri/target/release/lasterm-desktop.exe
+      # File Explorer's "Open in lasterm" command (#1236): the x64 COM server the
+      # package registers, built here, checked for the Visual C++ runtime import
+      # as every Windows binary is (#924), and placed where pack-msix.ps1 takes it.
+      - name: Build File Explorer's command
+        if: matrix.triple == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          .\scripts\build-explorer-command.ps1
+          node scripts/pe-imports.ts dist/sea/lasterm_explorer_command.dll
+          if ($LASTEXITCODE -ne 0) { throw "lasterm_explorer_command.dll imports the Visual C++ runtime" }
+          Copy-Item dist\sea\lasterm_explorer_command.dll packages\clients\desktop\src-tauri\lasterm_explorer_command.dll -Force
       # Uses the real Partner Center identity when the repository variables are
       # set, so the packaged identity is exercised before a tagged release;
       # falls back to the manifest placeholders otherwise — except on a release,

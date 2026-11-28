@@ -31,10 +31,24 @@ afterEach(async () => {
  * `resources` (a file in src-tauri → its bytes) as tauri.conf.json's
  * bundle.resources mapping each to `targets`' entry.
  */
+/**
+ * The headers of a PE file for `machine` (0x8664 is x64), all the staging's check
+ * reads: "MZ", the offset of "PE\0\0" at 0x3C, then the machine field.
+ */
+function peHeader(machine: number): Buffer {
+	const bytes = Buffer.alloc(0x46);
+	bytes.write("MZ", 0, "latin1");
+	bytes.writeInt32LE(0x40, 0x3c);
+	bytes.write("PE\0\0", 0x40, "latin1");
+	bytes.writeUInt16LE(machine, 0x44);
+	return bytes;
+}
+
 function fixture(
 	resources: Record<string, Buffer>,
 	targets: Record<string, string>,
 	binaries: { desktop?: string; hub?: string } = {},
+	explorer: { command?: Buffer | null; besideDesktop?: Buffer } = {},
 ): string {
 	// The long form of the path, which the script's messages carry.
 	const root = realpathSync.native(makeTempDir("lasterm-pack-msix-"));
@@ -53,6 +67,15 @@ function fixture(
 	);
 	file("src-tauri/lasterm-hub-x86_64-pc-windows-msvc.exe", binaries.hub ?? "hub");
 	file("src-tauri/lasterm-agent-x86_64-pc-windows-msvc.exe", "agent");
+	// File Explorer's command (#1236): a valid x64 header unless the test says otherwise.
+	const command = explorer.command === undefined ? peHeader(0x8664) : explorer.command;
+	if (command !== null) file("src-tauri/lasterm_explorer_command.dll", command);
+	if (explorer.besideDesktop !== undefined) {
+		file(
+			"src-tauri/target/x86_64-pc-windows-msvc/release/lasterm_explorer_command.dll",
+			explorer.besideDesktop,
+		);
+	}
 	for (const [source, bytes] of Object.entries(resources)) file(`src-tauri/${source}`, bytes);
 	file(
 		"src-tauri/tauri.conf.json",
@@ -121,9 +144,45 @@ describe.skipIf(process.platform !== "win32")("pack-msix.ps1 -StageOnly", () => 
 			expect(readFileSync(join(staged, "AppxManifest.xml"), "utf8")).toBe("<Package />");
 			expect(readFileSync(join(staged, "lasterm_hub_lock.node"))).toEqual(hubLock);
 			expect(readFileSync(join(staged, "lasterm_tls_identity.node"))).toEqual(tlsIdentity);
+			expect(readFileSync(join(staged, "lasterm_explorer_command.dll"))).toEqual(peHeader(0x8664));
 		},
 		TIMEOUT_MS,
 	);
+
+	it(
+		"stages File Explorer's command from src-tauri even when a file of its name sits beside the desktop",
+		() => {
+			const command = Buffer.concat([peHeader(0x8664), Buffer.from("the command")]);
+			const root = fixture({}, {}, {}, { command, besideDesktop: Buffer.from("another dll") });
+
+			const run = stage(root);
+
+			expect(run.status, run.output).toBe(0);
+			expect(
+				readFileSync(join(root, "msix", "out", "stage", "lasterm_explorer_command.dll")),
+			).toEqual(command);
+		},
+		TIMEOUT_MS,
+	);
+
+	for (const [what, command, message] of [
+		["missing", null, "Required file not found:"],
+		["empty", Buffer.alloc(0), "is empty. Build it with scripts\\build-explorer-command.ps1"],
+		["not x64", peHeader(0xaa64), "expected x64/AMD64 0x8664"],
+	] as const) {
+		it(
+			`refuses File Explorer's command when it is ${what}`,
+			() => {
+				const root = fixture({}, {}, {}, { command });
+
+				const run = stage(root);
+
+				expect(run.output).toContain(message);
+				expect(run.status).toBe(1);
+			},
+			TIMEOUT_MS,
+		);
+	}
 
 	it(
 		"refuses an empty resource, the placeholder a lint build leaves",

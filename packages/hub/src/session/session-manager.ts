@@ -337,6 +337,9 @@ export type StopKeepingAgentOutcome =
 			downloads?: number;
 	  };
 
+/** The refusal of a `localOnly` SPAWN for a host that is not local (#1236). */
+export const LOCAL_ONLY_REFUSAL = "This folder can only open on this computer's local host.";
+
 export class SessionManager {
 	// ─── Shared runtime state ─────────────────────────────────────────────────
 	private readonly ctx: SharedSessionContext;
@@ -1188,6 +1191,16 @@ export class SessionManager {
 		}
 
 		const hostId = await this.agentMgr.resolveHostId(msg.hostId);
+		// A folder from File Explorer is this computer's path: it goes to the
+		// local host's agent only, and nothing is reached for any other (#1236).
+		if (msg.localOnly === true && this.ctx.metaDal.getHost(hostId)?.type !== "local") {
+			client.send({
+				type: "ERROR",
+				code: "INVALID_INPUT",
+				message: LOCAL_ONLY_REFUSAL,
+			} satisfies ErrorMessage);
+			return null;
+		}
 		// A terminal being brought back names itself. Only a dead channel of this
 		// very host qualifies: anything else would have this spawn take over a
 		// terminal that is someone's, or one that is still running.

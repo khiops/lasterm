@@ -734,6 +734,21 @@ describe("ws-handler SPAWN: answered under its request id", () => {
 		expect(away.sent()[0]).toMatchObject({ code: "HOST_UNREACHABLE", requestId: REQUEST });
 	});
 
+	// The session manager decides a local-only SPAWN (#1236): the field reaches it.
+	it("passes localOnly through to the session manager", () => {
+		const { handleSpawn } = spawn({
+			hostId: HOST,
+			requestId: REQUEST,
+			cwd: "C:\\x",
+			localOnly: true,
+		});
+
+		expect(handleSpawn).toHaveBeenCalledWith(
+			"client-1",
+			expect.objectContaining({ localOnly: true, cwd: "C:\\x" }),
+		);
+	});
+
 	it("refuses a request id that is not a ULID, without echoing it", () => {
 		const { sent, handleSpawn } = spawn({ hostId: HOST, requestId: "x".repeat(4096) });
 

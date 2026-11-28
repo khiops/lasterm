@@ -622,6 +622,13 @@ export interface UiSpawnMessage {
 	 * nothing.
 	 */
 	automatic?: boolean;
+	/**
+	 * A folder opened from File Explorer (#1236): this computer's path, which
+	 * the hub sends only to the host's local agent. A host that is not of type
+	 * `local` (or does not exist) refuses the SPAWN with INVALID_INPUT, before
+	 * any session is acquired. Absent: false.
+	 */
+	localOnly?: boolean;
 }
 
 /** Hub → UI: channel spawned successfully */

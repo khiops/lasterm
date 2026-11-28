@@ -35,6 +35,7 @@ import {
 	focusPane,
 	HOST_A,
 	HOST_B,
+	type LayoutSetup,
 	mountWindow,
 	mouseDown,
 	type PaneNode,
@@ -596,6 +597,183 @@ describe("an empty pane's host, and a new tab", () => {
 		await runPaletteRow("bravo");
 
 		await vi.waitFor(() => expect(hostInView()).toBe("bravo"));
+	});
+
+	/** Click a host on the rail. */
+	async function railTo(label: string): Promise<void> {
+		document.querySelector<HTMLElement>(`.host-rail [aria-label="${label}"]`)?.click();
+		await vi.waitFor(() => expect(hostInView()).toBe(label));
+		await settle();
+	}
+
+	/**
+	 * The bar showing one host's tabs, bravo in view over `tabsOnBravo`, and alpha holding a
+	 * welcome terminal W1 whose tab opened with the window.
+	 */
+	async function bravoInView(
+		tabsOnBravo: LayoutSetup["tabs"] = [{ id: "TAB1", root: term("B1", "P1") }],
+	): Promise<FakeHub> {
+		const { hub } = await mountWindow({
+			hosts: [ALPHA, BRAVO],
+			channels: [{ ...live("W1"), welcome: true }, live("B1", HOST_B)],
+			ui: { tabs: { scope: "perHost" } },
+			layout: { tabs: tabsOnBravo },
+		});
+		await vi.waitFor(() => expect(tabs().map((tab) => tab.label)).toContain("W1"));
+		await railTo("bravo");
+		hub.answersSpawns = false;
+		return hub;
+	}
+
+	// The host coming into view opened its welcome terminal's tab in front, over the tab that
+	// brought it there (#1239).
+	it("leaves the palette's new tab in front when its host comes into view", async () => {
+		await bravoInView();
+
+		await runPaletteRow("alpha");
+
+		await vi.waitFor(() => expect(hostInView()).toBe("alpha"));
+		await settle();
+		expect(tabs()).toEqual([
+			{ label: "W1", selected: false },
+			{ label: "Terminal", selected: true },
+		]);
+	});
+
+	it("leaves the tab an empty pane's picker filled in front when its host comes into view", async () => {
+		await bravoInView([
+			{ id: "TAB1", root: term("B1", "P1") },
+			{ id: "TAB2", root: vacant("V1") },
+		]);
+		document.querySelectorAll<HTMLElement>('.tab-bar [role="tab"]')[1]?.click();
+		await settle();
+
+		await pickHost("alpha");
+
+		await vi.waitFor(() => expect(hostInView()).toBe("alpha"));
+		await settle();
+		expect(tabs()).toEqual([
+			{ label: "Terminal", selected: true },
+			{ label: "W1", selected: false },
+		]);
+	});
+
+	it("opens the welcome terminal's tab behind the palette's new tab when it had none", async () => {
+		await bravoInView();
+		await railTo("alpha");
+		await click("Close W1");
+		expect(tabs()).toEqual([]);
+		await railTo("bravo");
+
+		await runPaletteRow("alpha");
+
+		await vi.waitFor(() => expect(tabs()).toHaveLength(2));
+		await settle();
+		expect(tabs()).toEqual([
+			{ label: "Terminal", selected: true },
+			{ label: "W1", selected: false },
+		]);
+	});
+
+	// Closed before its host's list arrives, the new tab leaves the tab of another host in front,
+	// which the bar does not show: the welcome tab is the one to show, not that one again.
+	it("shows the welcome terminal's tab when the palette's new tab was closed before the list", async () => {
+		const hub = await bravoInView();
+		await railTo("alpha");
+		await click("Close W1");
+		await railTo("bravo");
+		const arrive = holdNextList(hub, HOST_A);
+		await runPaletteRow("alpha");
+		expect(tabs()).toEqual([{ label: "Terminal", selected: true }]);
+
+		await click("Close Terminal");
+		await arrive();
+
+		expect(tabs()).toEqual([{ label: "W1", selected: true }]);
+	});
+
+	it("brings the welcome terminal's tab to the front when the rail brings its host into view", async () => {
+		await bravoInView();
+		await runPaletteRow("alpha");
+		await vi.waitFor(() => expect(hostInView()).toBe("alpha"));
+		await railTo("bravo");
+
+		await railTo("alpha");
+
+		expect(tabs()).toEqual([
+			{ label: "W1", selected: true },
+			{ label: "Terminal", selected: false },
+		]);
+	});
+
+	/**
+	 * Hold the next list of terminals the window asks for, which is `hostId`'s; what it returns
+	 * delivers the list, as the hub answers it then.
+	 */
+	function holdNextList(hub: FakeHub, hostId: string): () => Promise<void> {
+		let arrive: (list: Response) => void = () => {};
+		hub.answers.set("GET /api/channels", () => {
+			hub.answers.delete("GET /api/channels");
+			return new Promise<Response>((resolve) => {
+				arrive = resolve;
+			});
+		});
+		return async () => {
+			arrive(await hub.fetch(`/api/channels?host_id=${hostId}`));
+			await settle();
+		};
+	}
+
+	/** Alpha in view over its welcome tab and a tab still starting, the second in front. */
+	async function startingInFrontOnAlpha(): Promise<FakeHub> {
+		const hub = await bravoInView();
+		await railTo("alpha");
+		await runPaletteRow("alpha");
+		expect(tabs()[1]).toEqual({ label: "Terminal", selected: true });
+		return hub;
+	}
+
+	/** Come to the second tab, as a click on it does. */
+	async function showSecondTab(): Promise<void> {
+		document.querySelectorAll<HTMLElement>('.tab-bar [role="tab"]')[1]?.click();
+		await settle();
+		expect(tabs()[1]).toEqual({ label: "Terminal", selected: true });
+	}
+
+	// A host's list that arrives after another selection is not published, and what followed it
+	// acted on the list in view all the same: it opened that host's welcome tab in front (#1239).
+	it("leaves the tab in front alone when the list of a host no longer in view arrives", async () => {
+		const hub = await startingInFrontOnAlpha();
+		const arrive = holdNextList(hub, HOST_B);
+		document.querySelector<HTMLElement>('.host-rail [aria-label="bravo"]')?.click();
+		await settle();
+		await railTo("alpha");
+		await showSecondTab();
+
+		await arrive();
+
+		expect(tabs()).toEqual([
+			{ label: "W1", selected: false },
+			{ label: "Terminal", selected: true },
+		]);
+	});
+
+	it("leaves the tab in front alone when an earlier list of the host in view arrives", async () => {
+		const hub = await startingInFrontOnAlpha();
+		await railTo("bravo");
+		const arrive = holdNextList(hub, HOST_A);
+		document.querySelector<HTMLElement>('.host-rail [aria-label="alpha"]')?.click();
+		await settle();
+		await railTo("bravo");
+		await railTo("alpha");
+		await showSecondTab();
+
+		await arrive();
+
+		expect(tabs()).toEqual([
+			{ label: "W1", selected: false },
+			{ label: "Terminal", selected: true },
+		]);
 	});
 });
 

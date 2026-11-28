@@ -1056,8 +1056,20 @@ commandPalette.onExternalAction.value = (actionId: string) => {
 // the bar showing one host's tabs, that host comes into view with it.
 commandPalette.onOpenHost.value = (hostId: string) => {
 	openPendingTab(hostId);
-	if (configStore.uiConfig.tabs?.scope === 'perHost') hostsStore.selectHost(hostId);
+	if (configStore.uiConfig.tabs?.scope === 'perHost') bringIntoViewWithTab(hostId);
 };
+/**
+ * The host the tab in front brings into view with it, until the selected-host
+ * watcher reads it for that selection: its welcome tab opens behind (#1239).
+ */
+let hostComingWithTab: string | null = null;
+/** Bring into view the host of the terminal the tab in front just took. */
+function bringIntoViewWithTab(hostId: string): void {
+	hostComingWithTab = hostId;
+	hostsStore.selectHost(hostId);
+}
+/** How many times a host was selected: what tells a selection's run it is still the last. */
+let hostSelections = 0;
 const hostContextMenu = ref<{
 	hostId: string;
 	x: number;
@@ -1472,8 +1484,16 @@ async function syncShutdownCallerClientId(clientId: string | null): Promise<void
 watch(
 	() => hostsStore.selectedHostId,
 	async (hostId) => {
+		const selection = ++hostSelections;
+		// Whichever selection this is, the mark was for it or is out of date.
+		const cameWithTab = hostComingWithTab === hostId;
+		hostComingWithTab = null;
 		if (hostId === null) return;
 		await channelsStore.fetchChannels(hostId);
+		// Another selection was made meanwhile. This one's list was not published,
+		// and what follows would act on the list in view as if it were its own:
+		// it opened that host's welcome tab over the tab in front (#1239).
+		if (selection !== hostSelections) return;
 		// Tabs are global: some of them front terminals on other hosts. One
 		// unfiltered listing is what lets those tabs keep their name and say
 		// which host they are on.
@@ -1513,7 +1533,14 @@ watch(
 		// the tab whatever it said.
 		const welcomeCh = channelsStore.channels.find((c) => c.isWelcome && c.status !== 'dead');
 		if (welcomeCh && configStore.uiConfig.startup?.autoOpenWelcome !== false) {
+			// The tab that brought this host into view is the one the user just
+			// opened: the welcome tab opens behind it (#1239). Closed meanwhile, it
+			// may have left a tab the bar does not show in front, and the welcome
+			// tab takes the front as it does for any other selection.
+			const front = cameWithTab ? layout.activeTab.value : null;
+			const staysInFront = front !== null && (inView === null || inView.has(front.id));
 			layout.openTab(welcomeCh.id);
+			if (staysInFront) layout.setActiveTab(layout.tabs.value.findIndex((t) => t.id === front.id));
 		}
 
 		// Auto-spawn only for local hosts with no live channels and no tabs open.
@@ -2565,7 +2592,7 @@ function followFilledPane(tabId: string | null, channelId: string, hostId: strin
 		hostInView: channelsStore.activeHostId,
 		otherTerminalHosts: others.map((id) => channelsStore.channelHostMap.get(id)),
 	});
-	if (host !== null) hostsStore.selectHost(host);
+	if (host !== null) bringIntoViewWithTab(host);
 }
 
 /** "Add a host" in an empty pane's picker. */

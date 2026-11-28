@@ -102,6 +102,9 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 	let retryTimer: ReturnType<typeof setTimeout> | null = null;
 	let rereadTimer: ReturnType<typeof setTimeout> | null = null;
 	let noticeShown = false;
+	// Once stopped (the page is going), nothing is taken or opened; a batch taken meanwhile is
+	// replayed by the next page from the stored token.
+	let stopped = false;
 
 	const showNotice = (): void => {
 		if (noticeShown) return;
@@ -124,6 +127,7 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 	};
 
 	async function pass(): Promise<void> {
+		if (stopped) return;
 		if (!deps.hostsUsable()) {
 			let waits = token !== null;
 			if (!waits) {
@@ -156,6 +160,7 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 			}
 			return;
 		}
+		if (stopped) return;
 		if (retryTimer !== null) {
 			clearTimeout(retryTimer);
 			retryTimer = null;
@@ -196,6 +201,7 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 		drain,
 		holdingBatch: () => token !== null,
 		stop: () => {
+			stopped = true;
 			if (retryTimer !== null) clearTimeout(retryTimer);
 			if (rereadTimer !== null) clearTimeout(rereadTimer);
 			retryTimer = null;

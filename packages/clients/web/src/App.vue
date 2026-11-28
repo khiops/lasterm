@@ -2492,11 +2492,15 @@ function onSplit(existingChannelId: string, direction: 'horizontal' | 'vertical'
 /**
  * Called by PaneLayout when a TerminalPane completes a deferred spawn.
  * Patches the layout tree to replace the temp ID with the real channel ID,
- * then selects the new channel in the sidebar.
+ * then selects the new channel in the sidebar when its tab is the one in front.
  */
 function onChannelSpawned(tempId: string, realId: string): void {
+	// Selecting a terminal brings its tab to the front. A terminal that took its
+	// time to start would take the front back from a tab opened since (#1238):
+	// it is selected when the user comes to its tab.
+	const inFront = layout.findTabForChannel(tempId) === layout.activeTab.value?.id;
 	layout.replaceChannelId(tempId, realId);
-	channelsStore.selectChannel(realId);
+	if (inFront) channelsStore.selectChannel(realId);
 	// Refresh channel list so the new channel (after respawn) appears in the sidebar.
 	if (channelsStore.activeHostId) {
 		void channelsStore.fetchChannels(channelsStore.activeHostId);

@@ -96,6 +96,15 @@ function listed(channelId: string): boolean {
 	return document.querySelector(`.channel-sidebar [data-channel-id="${channelId}"]`) !== null;
 }
 
+/** Answer a SPAWN the hub has not answered with a new terminal. */
+function accept(hub: FakeHub, spawn: Record<string, unknown> | undefined, channelId: string): void {
+	hub.channels = [
+		...hub.channels,
+		{ id: channelId, hostId: spawn?.hostId as string, status: "live", title: channelId },
+	];
+	hub.hear({ type: "SPAWN_OK", channelId, hostId: spawn?.hostId, requestId: spawn?.requestId });
+}
+
 /** The ended terminal's card in a pane, once the hub said it ended. */
 async function cardIn(paneId: string): Promise<HTMLElement> {
 	await vi.waitFor(() => {
@@ -583,6 +592,59 @@ describe("an empty pane's host, and a new tab", () => {
 		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(1));
 		expect(hub.frames("SPAWN")[0]).toMatchObject({ hostId: HOST_B });
 		expect(hostInView()).toBe("alpha");
+	});
+
+	/** Two terminals asked of alpha from the palette, one after the other, neither started yet. */
+	async function twoStarting(): Promise<FakeHub> {
+		const { hub } = await mountWindow({
+			channels: [live("T1")],
+			layout: { tabs: [{ id: "TAB1", root: term("T1", "P1") }] },
+		});
+		hub.answersSpawns = false;
+		await runPaletteRow("alpha");
+		await runPaletteRow("alpha");
+		await vi.waitFor(() => expect(hub.frames("SPAWN")).toHaveLength(2));
+		expect(tabs().map((tab) => tab.selected)).toEqual([false, false, true]);
+		return hub;
+	}
+
+	/** The terminal the sidebar marks as the one in front. */
+	function selectedInSidebar(): string | null {
+		return (
+			document.querySelector(".channel-item--selected")?.getAttribute("data-channel-id") ?? null
+		);
+	}
+
+	// A terminal that started brought its tab to the front, over a tab opened since (#1238).
+	it("leaves the tab opened since in front when a terminal still starting starts", async () => {
+		const hub = await twoStarting();
+
+		accept(hub, hub.frames("SPAWN")[0], "A1");
+
+		await vi.waitFor(() => expect(tabs()[1]?.label).toBe("A1"));
+		await settle();
+		expect(tabs().map((tab) => tab.selected)).toEqual([false, false, true]);
+		expect(selectedInSidebar()).not.toBe("A1");
+	});
+
+	it("selects a terminal that starts in the tab in front", async () => {
+		const hub = await twoStarting();
+
+		accept(hub, hub.frames("SPAWN")[1], "A2");
+
+		await vi.waitFor(() => expect(selectedInSidebar()).toBe("A2"));
+		expect(tabs()[2]).toEqual({ label: "A2", selected: true });
+	});
+
+	it("selects a terminal on coming to its tab, started while another was in front", async () => {
+		const hub = await twoStarting();
+		accept(hub, hub.frames("SPAWN")[0], "A1");
+		await vi.waitFor(() => expect(tabs()[1]?.label).toBe("A1"));
+
+		document.querySelectorAll<HTMLElement>('.tab-bar [role="tab"]')[1]?.click();
+
+		await vi.waitFor(() => expect(selectedInSidebar()).toBe("A1"));
+		expect(tabs().map((tab) => tab.selected)).toEqual([false, true, false]);
 	});
 
 	it("brings the palette's host into view with it where the bar shows one host's tabs", async () => {
@@ -1867,19 +1929,6 @@ describe("a new terminal's pane after a reload", () => {
 			hostId: spawn?.hostId,
 			requestId: spawn?.requestId,
 		});
-	}
-
-	/** Answer a SPAWN the hub has not answered with a new terminal. */
-	function accept(
-		hub: FakeHub,
-		spawn: Record<string, unknown> | undefined,
-		channelId: string,
-	): void {
-		hub.channels = [
-			...hub.channels,
-			{ id: channelId, hostId: spawn?.hostId as string, status: "live", title: channelId },
-		];
-		hub.hear({ type: "SPAWN_OK", channelId, hostId: spawn?.hostId, requestId: spawn?.requestId });
 	}
 
 	/**

@@ -64,6 +64,9 @@ describe("createFolderOpener", () => {
 			shown: 0,
 			hidden: 0,
 			closeNotice: null as (() => void) | null,
+			firstBatches: [] as boolean[],
+			/** Runs while a take is in flight, before it answers. */
+			duringTake: null as (() => void) | null,
 		};
 		const deps: FolderOpenerDeps = {
 			ready: () => state.usable,
@@ -74,6 +77,7 @@ describe("createFolderOpener", () => {
 			},
 			take: async (token) => {
 				state.takes.push(token);
+				state.duringTake?.();
 				if (state.last?.token === token) return [...state.last.batch];
 				const batch = state.queue.splice(0);
 				state.last = { token, batch };
@@ -86,7 +90,9 @@ describe("createFolderOpener", () => {
 				}
 				state.processed.push(folders);
 			},
-			firstBatch: () => {},
+			firstBatch: (nonEmpty) => {
+				state.firstBatches.push(nonEmpty);
+			},
 			reload: () => {
 				state.rereads += 1;
 			},
@@ -208,15 +214,18 @@ describe("createFolderOpener", () => {
 		state.usable = false;
 		state.waiting = false;
 		createFolderOpener(deps).start(null);
+		// No folder waits: nothing is said, and what is missing is asked for again, for the
+		// startup's first batch.
 		await vi.advanceTimersByTimeAsync(6_000);
-		expect(state.waitingAsked).toBe(1);
+		expect(state.waitingAsked).toBe(2);
 		expect(state.shown).toBe(0);
-		expect(state.rereads).toBe(0);
+		expect(state.rereads).toBe(1);
 
 		state.waiting = true;
+		const asked = state.waitingAsked;
 		createFolderOpener(deps).start(null);
 		await vi.advanceTimersByTimeAsync(0);
-		expect(state.waitingAsked).toBe(2);
+		expect(state.waitingAsked).toBe(asked + 1);
 		expect(state.shown).toBe(1);
 	});
 
@@ -282,5 +291,42 @@ describe("createFolderOpener", () => {
 		later.stop();
 		await pass;
 		expect(state.shown).toBe(1);
+	});
+	it("says nothing waits when the batch taken as the list became unusable is empty", async () => {
+		const { state, deps } = fakeDeps();
+		const opener = createFolderOpener(deps);
+		opener.start(false);
+		state.duringTake = () => {
+			state.usable = false;
+		};
+		await opener.drain();
+		expect(state.takes).toHaveLength(1);
+		expect(state.shown).toBe(0);
+		expect(opener.holdingBatch()).toBe(false);
+		expect(state.firstBatches).toEqual([false]);
+	});
+
+	it("keeps asking, silently, for what it lacks until the first batch the startup waits for", async () => {
+		const { state, deps } = fakeDeps();
+		const opener = createFolderOpener(deps);
+		// The startup could not tell; the preferences are refused; no folder waits.
+		state.usable = false;
+		state.waiting = false;
+		opener.start(null);
+		await vi.advanceTimersByTimeAsync(5_100);
+		expect(state.rereads).toBe(1);
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(state.rereads).toBe(2);
+		expect(state.shown).toBe(0);
+
+		state.usable = true;
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(state.takes).toHaveLength(1);
+		expect(state.firstBatches).toEqual([false]);
+		const rereads = state.rereads;
+		state.usable = false;
+		await opener.drain();
+		await vi.advanceTimersByTimeAsync(11_000);
+		expect(state.rereads).toBe(rereads);
 	});
 });

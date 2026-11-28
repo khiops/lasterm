@@ -156,6 +156,46 @@ describe("injectFontFaces, on the desktop (#194)", () => {
 	});
 });
 
+describe("loadUiConfig", () => {
+	let kept: string | null = null;
+	beforeEach(() => {
+		kept = localStorage.getItem("lasterm_token");
+		localStorage.removeItem("lasterm_token");
+		setActivePinia(createPinia());
+		mocks.hubFetch.mockReset();
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		if (kept === null) localStorage.removeItem("lasterm_token");
+		else localStorage.setItem("lasterm_token", kept);
+	});
+
+	it("asks the hub nothing before the client is paired", async () => {
+		const store = useConfigStore();
+		await store.loadUiConfig();
+		expect(mocks.hubFetch).not.toHaveBeenCalled();
+		expect(store.uiConfigLoaded).toBe(false);
+	});
+
+	it("counts the preferences loaded only when the hub sent them", async () => {
+		useAuthStore().setToken("a".repeat(64));
+		const store = useConfigStore();
+		mocks.hubFetch.mockResolvedValueOnce(new Response("busy", { status: 503 }));
+		await store.loadUiConfig();
+		expect(store.uiConfigLoaded).toBe(false);
+		mocks.hubFetch.mockResolvedValueOnce(
+			new Response(JSON.stringify({ onChannelDead: "readonly", tabs: { scope: "perHost" } }), {
+				status: 200,
+			}),
+		);
+		await store.loadUiConfig();
+		expect(store.uiConfigLoaded).toBe(true);
+		expect(store.uiConfig.tabs).toEqual({ scope: "perHost" });
+	});
+});
+
 // The old "don't ask again" about deleting an ended terminal is carried
 // over to the UI config (#574).
 describe("saveUiSettings", () => {

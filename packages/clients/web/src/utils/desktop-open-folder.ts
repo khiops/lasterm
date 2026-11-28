@@ -14,7 +14,7 @@
  *
  * The page takes nothing during its startup: a request meanwhile (an event, the 2 s interval, a
  * host list published) is only remembered, and `start` consumes it once the startup has tried the
- * host list. From then on the page takes only while `ready` holds: a usable host list, and the UI
+ * host list, or ended before it could. From then on the page takes only while `ready` holds: a usable host list, and the UI
  * preferences, which say which host a folder's tab brings into view. While it does not, a folder
  * known to wait keeps a notice up and has what is missing asked for again every 5 s.
  */
@@ -135,6 +135,9 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 	let asked = false;
 	// Folders known to wait since startup (`start`), until a batch is processed.
 	let expected = false;
+	// The startup's tabs wait for the first batch (a folder known or possibly waiting at `start`):
+	// what `ready` lacks is asked for again, silently, until that batch is taken.
+	let firstAwaited = false;
 	// Once stopped (the page is going), nothing is taken or opened; a batch taken meanwhile is
 	// replayed by the next page from the stored token.
 	let stopped = false;
@@ -177,7 +180,7 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 			}
 			if (stopped) return;
 			// Unknown: asked again after the next re-read, without saying that a folder waits.
-			if (waits !== false) scheduleReread();
+			if (waits !== false || firstAwaited) scheduleReread();
 			if (waits === true) showNotice();
 			return;
 		}
@@ -203,8 +206,9 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 			clearTimeout(retryTimer);
 			retryTimer = null;
 		}
-		// The page stopped being ready during the call: keep the batch and its token.
-		if (!deps.ready()) {
+		// The page stopped being ready during the call: keep the batch and its token. An empty
+		// batch has nothing to keep: it is processed now, and nothing is said to wait.
+		if (!deps.ready() && folders.length > 0) {
 			scheduleReread();
 			showNotice();
 			return;
@@ -222,6 +226,7 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 		expected = false;
 		if (!firstSeen) {
 			firstSeen = true;
+			firstAwaited = false;
 			deps.firstBatch(folders.length > 0);
 		}
 	}
@@ -252,6 +257,7 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 			if (started || stopped) return;
 			started = true;
 			if (waiting === true || token !== null) expected = true;
+			firstAwaited = waiting !== false || token !== null;
 			if (expected || waiting === null || asked) void drain();
 			asked = false;
 		},

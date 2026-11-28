@@ -3550,6 +3550,39 @@ describe("folders from File Explorer", () => {
 		await vi.waitFor(() => expect(useHostsStore().selectedHostId).toBe(HOST_A));
 	});
 
+	it("asks for the preferences once at a time while a slow read of them runs", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		reset();
+		desktopFolders.queue = [D];
+		const slow = held();
+		onTestFinished(() => slow.release());
+		let asked = 0;
+		const { hub } = await mountWindow({
+			hosts: HOSTS,
+			answers: {
+				"GET /api/config/ui": async () => {
+					asked += 1;
+					if (asked === 1) return json({ error: { code: "UNAVAILABLE", message: "busy" } }, 503);
+					await slow.promise;
+					return undefined;
+				},
+			},
+		});
+		await settle();
+		expect(asked).toBe(1);
+		// The re-read 5 s later asks again; that read does not answer, and later re-reads wait for it.
+		await vi.advanceTimersByTimeAsync(16_000);
+		expect(asked).toBe(2);
+		expect(spawns(hub)).toEqual([]);
+
+		slow.release();
+		await vi.waitFor(() => expect(spawns(hub)).toHaveLength(1));
+		expect(spawns(hub)[0]).toMatchObject({ hostId: HOST_A, cwd: D });
+	});
+
 	it("keeps a startup folder when the startup failed before the preferences, and opens it once they load", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
 		onTestFinished(() => {

@@ -1345,6 +1345,8 @@ let stopFolderEvents: (() => void) | null = null;
 // What the desktop answered at mount when asked whether a folder waits, null when it could not
 // tell: handed to the opener once the startup has tried the host list.
 let folderStartupAnswer: boolean | null = false;
+// The preferences' read the folder opener asked for, while it runs.
+let folderPrefsRead: Promise<void> | null = null;
 
 /** A host list received, whose last load did not fail. */
 function hostsUsable(): boolean {
@@ -1384,7 +1386,12 @@ const folderOpener = createFolderOpener({
 	},
 	reload: () => {
 		if (!hostsUsable()) hostsStore.hubChanged('hosts');
-		if (!configStore.uiConfigLoaded) void configStore.loadUiConfig();
+		// One read of the preferences at a time: a slow one is not stacked with more.
+		if (!configStore.uiConfigLoaded && folderPrefsRead === null) {
+			folderPrefsRead = configStore.loadUiConfig().finally(() => {
+				folderPrefsRead = null;
+			});
+		}
 	},
 	showWaitNotice: (onUserDismiss) => {
 		folderWaitToast = toastStore.show(

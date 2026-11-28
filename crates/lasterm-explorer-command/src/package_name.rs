@@ -6,6 +6,8 @@
 /// blanks and a quoted value, whatever follows the closing quote (a comment).
 /// Any other form of the line is not read.
 fn package_name(text: &str) -> Option<String> {
+    // A byte order mark, which PowerShell's Get-Content drops too.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut in_package = false;
     for line in text.lines() {
         let line = line.trim();
@@ -55,6 +57,10 @@ mod tests {
         assert_eq!(
             read("[lib]\nname = \"lib\"\n[package]\nversion = \"1\"\nname = \"app\"\n").as_deref(),
             Some("app")
+        );
+        assert_eq!(
+            read("\u{feff}[package]\nname = \"bom\"\n").as_deref(),
+            Some("bom")
         );
         assert_eq!(read("[package]\nname = app\n"), None);
         assert_eq!(read("[package]\nname = \"\"\n"), None);

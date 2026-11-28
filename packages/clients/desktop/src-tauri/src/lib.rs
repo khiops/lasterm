@@ -1825,18 +1825,18 @@ fn tell_page_folders_wait(app: &tauri::AppHandle) {
             eprintln!("[lasterm] cannot tell the page a folder waits: {error}");
         }
     };
-    emit(app);
-    if !app
-        .state::<open_folder::OpenFolderQueue>()
-        .start_reemitting()
-    {
-        return;
-    }
-    let app = app.clone();
-    std::thread::spawn(move || {
-        let queue = app.state::<open_folder::OpenFolderQueue>();
-        open_folder::reemit_while_queued(&queue, || emit(&app), std::thread::sleep);
-    });
+    let queue = app.state::<open_folder::OpenFolderQueue>();
+    open_folder::tell_folders_wait(
+        &queue,
+        || emit(app),
+        || {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let queue = app.state::<open_folder::OpenFolderQueue>();
+                open_folder::reemit_while_queued(&queue, || emit(&app), std::thread::sleep);
+            });
+        },
+    );
 }
 
 /// The raise, for a folder: it counts only when the window ends visible and
@@ -9727,6 +9727,27 @@ mod tests {
                 INSTANCE_RAISE_SUCCESS.to_vec()
             )
         );
+
+        // C3's bound, 783 bytes (8 + 3 x 258 + 1, more than the longest folder
+        // the rule accepts needs), written out: a request of that size is read
+        // whole; one byte more is not.
+        let longest = format!("C:\\{}", "漢".repeat(257));
+        let mut frame = b"open-v1 ".to_vec();
+        frame.extend_from_slice(longest.as_bytes());
+        frame.push(b'\n');
+        assert_eq!(frame.len(), 783);
+        assert_eq!(
+            respond(&frame, true),
+            (
+                Some(open_folder::InstanceRequest::Open(Some(longest.clone()))),
+                INSTANCE_RAISE_SUCCESS.to_vec()
+            )
+        );
+        let mut over = b"open-v1 ".to_vec();
+        over.extend_from_slice(format!("{longest}x").as_bytes());
+        over.push(b'\n');
+        assert_eq!(over.len(), 784);
+        assert_eq!(respond(&over, true), (None, Vec::new()));
     }
 
     #[test]
@@ -9854,6 +9875,25 @@ mod tests {
                 [open_folder::InstanceRequest::Open(Some(folder))]
             );
         }
+
+        // Without a folder: `raise-v1`, as before.
+        let dir = instance_test_dir("open-folder-handoff-raise");
+        let lock_path = dir.join("desktop.lock");
+        let endpoint = desktop_raise_endpoint(&lock_path).unwrap();
+        let _holder = ProcessLock::try_acquire(&lock_path).unwrap().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let _listener = serve_desktop_endpoint(&endpoint, {
+            let seen = seen.clone();
+            move |request| {
+                seen.lock().unwrap().push(request);
+                true
+            }
+        });
+        assert!(matches!(
+            acquire_desktop_instance_with(&lock_path, &endpoint, None),
+            Ok(DesktopInstanceStartup::Secondary)
+        ));
+        assert_eq!(*seen.lock().unwrap(), [open_folder::InstanceRequest::Raise]);
     }
 
     /// The complete first-use anchor written by the hub: the child-owned stdout

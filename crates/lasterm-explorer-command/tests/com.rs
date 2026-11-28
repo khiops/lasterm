@@ -178,6 +178,11 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
+        // A fake desktop still waiting (a failed assertion skipped its
+        // release) holds its directory: release it first.
+        if std::fs::write(self.0.join("release"), b"").is_ok() {
+            std::thread::sleep(Duration::from_millis(300));
+        }
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }

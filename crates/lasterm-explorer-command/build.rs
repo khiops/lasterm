@@ -1,6 +1,7 @@
 //! The name of the executable `Invoke` starts: the desktop crate's package
 //! name, which `pack-msix.ps1` also stages the desktop under. Both read it from
-//! the line `name = "…"` of `[package]` the same way (src/package_name.rs).
+//! the line `name = "…"` of `[package]` the same way, case-sensitively
+//! (src/package_name.rs).
 
 use std::path::Path;
 

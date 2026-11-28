@@ -241,6 +241,19 @@ impl OpenFolderQueue {
     }
 }
 
+/// Tells the page now that folders wait, and starts the re-emitting loop with
+/// `start_loop` unless one already runs.
+pub(crate) fn tell_folders_wait(
+    queue: &OpenFolderQueue,
+    emit: impl Fn(),
+    start_loop: impl FnOnce(),
+) {
+    emit();
+    if queue.start_reemitting() {
+        start_loop();
+    }
+}
+
 /// Tells the page every `OPEN_REEMIT_INTERVAL` that folders wait, for as long
 /// as they do, so an event lost on the way is told again. Run only by the
 /// caller `start_reemitting` answered true. `sleep` is the interval's wait (a
@@ -453,13 +466,10 @@ impl OpenStream for PipeStream {
         Write::write_all(&mut self.0, bytes)
     }
 
+    /// Nothing to wait for: the frame went to the pipe with the write, and
+    /// `FlushFileBuffers` would wait, with no deadline, for the server to read
+    /// it. The reply, read with its deadline, is the confirmation.
     fn flush(&mut self) -> std::io::Result<()> {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
-        // SAFETY: the handle is the open pipe this value owns.
-        if unsafe { FlushFileBuffers(self.0.as_raw_handle()) } == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
         Ok(())
     }
 
@@ -949,6 +959,26 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_accepted_tells_the_page_and_starts_one_loop() {
+        let queue = OpenFolderQueue::with_initial(Some("D".to_string()));
+        let emitted = Cell::new(0u32);
+        let loops = Cell::new(0u32);
+        tell_folders_wait(
+            &queue,
+            || emitted.set(emitted.get() + 1),
+            || loops.set(loops.get() + 1),
+        );
+        assert_eq!((emitted.get(), loops.get()), (1, 1));
+        // A second folder while the loop runs: told again, no second loop.
+        tell_folders_wait(
+            &queue,
+            || emitted.set(emitted.get() + 1),
+            || loops.set(loops.get() + 1),
+        );
+        assert_eq!((emitted.get(), loops.get()), (2, 1));
+    }
+
+    #[test]
     fn the_open_folder_event_repeats_while_the_queue_holds_an_entry() {
         let queue = OpenFolderQueue::with_initial(Some("D".to_string()));
         let emitted = Cell::new(0u32);
@@ -1191,10 +1221,7 @@ mod tests {
             let _late = Advance(self.clock, returns_after);
             match self.reply.take() {
                 Some((reply, after)) if self.clock.now() + after <= deadline => {
-                    if reply.len() > crate::INSTANCE_RAISE_MAX_BYTES {
-                        return Ok(None);
-                    }
-                    Ok(Some(reply))
+                    read_open_reply(&mut std::io::Cursor::new(reply))
                 }
                 Some(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
                 None => Ok(None),

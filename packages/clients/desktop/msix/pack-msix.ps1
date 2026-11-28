@@ -163,11 +163,12 @@ function Get-CargoPackageName([string]$CargoTomlPath) {
   $inPackage = $false
   foreach ($line in Get-Content -LiteralPath $CargoTomlPath) {
     $trimmed = $line.Trim()
-    if ($trimmed -match '^\[(.+)\]$') {
-      $inPackage = ($matches[1] -eq "package")
+    # Case-sensitive, as TOML keys are and as build.rs of lasterm-explorer-command reads them.
+    if ($trimmed -cmatch '^\[(.+)\]$') {
+      $inPackage = ($matches[1] -ceq "package")
       continue
     }
-    if ($inPackage -and $trimmed -match '^name\s*=\s*"([^"]+)"') {
+    if ($inPackage -and $trimmed -cmatch '^name\s*=\s*"([^"]+)"') {
       return $matches[1]
     }
   }

@@ -121,6 +121,26 @@ function stage(root: string, flags = ""): { status: number | null; output: strin
 
 describe.skipIf(process.platform !== "win32")("pack-msix.ps1 -StageOnly", () => {
 	it(
+		"reads the desktop's package name case-sensitively, as File Explorer's command does",
+		() => {
+			const root = fixture({}, {});
+			// A TOML key is case-sensitive: `NAME` is not the package's name.
+			writeFileSync(
+				join(root, "src-tauri", "Cargo.toml"),
+				'[package]\nNAME = "other"\nname = "fixture-desktop"\n',
+			);
+
+			const run = stage(root);
+
+			expect(run.output).toMatch(/^staged$/m);
+			expect(run.status, run.output).toBe(0);
+			const staged = join(root, "msix", "out", "stage", "fixture-desktop.exe");
+			expect(readFileSync(staged, "utf8")).toBe("desktop");
+		},
+		TIMEOUT_MS,
+	);
+
+	it(
 		"stages the executables, the manifest and each of bundle.resources at its target, with their bytes",
 		() => {
 			const hubLock = Buffer.from("the hub lock addon");

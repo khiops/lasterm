@@ -26,7 +26,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem};
@@ -145,6 +145,7 @@ fn quit_after_hub_exit(app: tauri::AppHandle) -> Result<(), String> {
     if !matches!(hub_state(), HubState::Exited(_)) {
         return Err("the hub is still running; quit through the close gesture".to_string());
     }
+    QUIT_DECIDED.store(true, Ordering::SeqCst);
     app.exit(0);
     Ok(())
 }
@@ -1025,9 +1026,19 @@ fn acquire_desktop_instance(folder: Option<&str>) -> Result<DesktopInstanceStart
     if started_by_restart() {
         wait_for_desktop_instance_lock(&lock_path);
     }
+    acquire_desktop_instance_with(&lock_path, &endpoint, folder)
+}
+
+/// A start without a folder raises the running instance; one with a folder
+/// hands it the folder (#1236).
+fn acquire_desktop_instance_with(
+    lock_path: &Path,
+    endpoint: &DesktopRaiseEndpoint,
+    folder: Option<&str>,
+) -> Result<DesktopInstanceStartup, String> {
     match folder {
-        None => acquire_desktop_instance_at(&lock_path, &endpoint),
-        Some(folder) => acquire_desktop_instance_for_folder(&lock_path, &endpoint, folder),
+        None => acquire_desktop_instance_at(lock_path, endpoint),
+        Some(folder) => acquire_desktop_instance_for_folder(lock_path, endpoint, folder),
     }
 }
 
@@ -1763,11 +1774,10 @@ fn respond_to_instance_request(
                 false
             }
         },
-        open_folder::InstanceRequest::Open(None) => false,
-        open_folder::InstanceRequest::Open(Some(folder)) => {
+        open_folder::InstanceRequest::Open(folder) => {
             let queue = app.state::<open_folder::OpenFolderQueue>();
-            open_folder::accept_open_folder(
-                &folder,
+            open_folder::answer_open(
+                folder.as_deref(),
                 &queue,
                 folder_admission_open,
                 || raise_main_window_on_screen(app.clone()),
@@ -1778,14 +1788,35 @@ fn respond_to_instance_request(
 }
 
 /// Whether the primary still takes folders: not once a quit or restart is
-/// decided, until it is abandoned with the app running (#1236, C4).
+/// decided, until it is abandoned with the app running (#1236, C4). A quit or
+/// restart the uploads defer ("when finished") counts as decided while it
+/// waits, and until the coordinator has taken it over.
 fn folder_admission_open() -> bool {
-    !QUIT_DECIDED.load(Ordering::SeqCst)
-        && quit_coordinator()
-            .lock()
-            .map(|coordinator| coordinator.admits_folders())
-            .unwrap_or(false)
+    let uploads_ending = uploads_shell().gate.pending().is_some()
+        || UPLOADS_ENDINGS_IN_FLIGHT.load(Ordering::SeqCst) > 0;
+    quit_coordinator()
+        .lock()
+        .map(|coordinator| {
+            folder_admission(
+                QUIT_DECIDED.load(Ordering::SeqCst),
+                uploads_ending,
+                &coordinator,
+            )
+        })
+        .unwrap_or(false)
 }
+
+fn folder_admission(
+    quit_decided: bool,
+    uploads_ending: bool,
+    coordinator: &QuitCoordinator,
+) -> bool {
+    !quit_decided && !uploads_ending && coordinator.admits_folders()
+}
+
+/// Endings the uploads gave up and that are still being handed to the quit
+/// coordinator (or to the restart): folders stay refused across the handover.
+static UPLOADS_ENDINGS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 /// Tells the page folders wait, now and every 2 s while they do.
 fn tell_page_folders_wait(app: &tauri::AppHandle) {
@@ -1795,6 +1826,12 @@ fn tell_page_folders_wait(app: &tauri::AppHandle) {
         }
     };
     emit(app);
+    if !app
+        .state::<open_folder::OpenFolderQueue>()
+        .start_reemitting()
+    {
+        return;
+    }
     let app = app.clone();
     std::thread::spawn(move || {
         let queue = app.state::<open_folder::OpenFolderQueue>();
@@ -1815,14 +1852,23 @@ fn raise_main_window_on_screen(app: tauri::AppHandle) -> Result<(), String> {
             let window = main_thread_app
                 .get_webview_window("main")
                 .ok_or_else(|| "the main window is unavailable".to_string())?;
-            run_window_raise_actions(&window)?;
-            if window.on_screen()? {
-                Ok(())
-            } else {
-                Err("the main window is not on screen after the raise".to_string())
-            }
+            raise_window_on_screen(&window, || window.on_screen())
         },
     )
+}
+
+/// Raises `window`, and counts it raised only once it is visible and not
+/// minimized: a `show` that succeeds on a window left minimized is a failure.
+fn raise_window_on_screen(
+    window: &impl WindowRaiseTarget,
+    on_screen: impl FnOnce() -> Result<bool, String>,
+) -> Result<(), String> {
+    run_window_raise_actions(window)?;
+    if on_screen()? {
+        Ok(())
+    } else {
+        Err("the main window is not on screen after the raise".to_string())
+    }
 }
 
 #[cfg(unix)]
@@ -2094,6 +2140,18 @@ fn start_desktop_raise_listener(
     app: tauri::AppHandle,
     endpoint: &DesktopRaiseEndpoint,
 ) -> Result<DesktopRaiseListener, String> {
+    Ok(serve_desktop_endpoint(endpoint, move |request| {
+        respond_to_instance_request(&app, request)
+    }))
+}
+
+/// Answers each connection to the endpoint's pipe, on a thread of its own, as
+/// `act` decides.
+#[cfg(windows)]
+fn serve_desktop_endpoint<Act>(endpoint: &DesktopRaiseEndpoint, act: Act) -> DesktopRaiseListener
+where
+    Act: Fn(open_folder::InstanceRequest) -> bool + Clone + Send + 'static,
+{
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = stop.clone();
     let pipe_name = endpoint.pipe_name.clone();
@@ -2117,19 +2175,17 @@ fn start_desktop_raise_listener(
             {
                 continue;
             }
-            let request_app = app.clone();
+            let act = act.clone();
             std::thread::spawn(move || {
                 let mut stream = WindowsPipeReader {
                     stream: &stream,
                     deadline: Instant::now() + INSTANCE_RAISE_TIMEOUT,
                 };
-                handle_desktop_raise_connection(&mut stream, move |request| {
-                    respond_to_instance_request(&request_app, request)
-                });
+                handle_desktop_raise_connection(&mut stream, act);
             });
         }
     });
-    Ok(DesktopRaiseListener { stop })
+    DesktopRaiseListener { stop }
 }
 
 #[cfg(dev)]
@@ -5858,6 +5914,9 @@ fn update_uploads(
         let mut shell = uploads_shell();
         let before = shell.gate.pending();
         let step = change(&mut shell.gate);
+        if matches!(step, Step::End(_)) {
+            UPLOADS_ENDINGS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        }
         (before, step, shell.gate.pending())
     };
     let pending_changed = before != after;
@@ -5868,7 +5927,11 @@ fn update_uploads(
         );
     }
     refresh_uploads_tray(app, pending_changed);
+    let ends = matches!(step, Step::End(_));
     carry_out_uploads_step(app, step);
+    if ends {
+        UPLOADS_ENDINGS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
     after
 }
 
@@ -9719,6 +9782,78 @@ mod tests {
             !coordinator.admits_folders(),
             "an exit decided, its dialog still open"
         );
+
+        // What the admission reads besides the coordinator.
+        let idle = QuitCoordinator::default();
+        assert!(folder_admission(false, false, &idle));
+        assert!(
+            !folder_admission(true, false, &idle),
+            "leaving decided: a restart, a quit after the hub died, a quit carried out"
+        );
+        assert!(
+            !folder_admission(false, true, &idle),
+            "a quit or restart the uploads defer"
+        );
+        let mut running = QuitCoordinator::default();
+        let _ = running.begin();
+        assert!(!folder_admission(false, false, &running));
+    }
+
+    /// The raise for a folder counts only a window left on screen (#1236).
+    #[test]
+    fn a_raise_for_a_folder_must_leave_the_window_on_screen() {
+        let window = TestWindowRaiseTarget::new(Ok(()), Ok(()), Ok(()));
+        assert_eq!(raise_window_on_screen(&window, || Ok(true)), Ok(()));
+        assert_eq!(window.attempts(), ["unminimize", "show", "focus"]);
+
+        let shown_but_minimized = TestWindowRaiseTarget::new(Ok(()), Ok(()), Ok(()));
+        assert!(raise_window_on_screen(&shown_but_minimized, || Ok(false)).is_err());
+
+        let unreadable = TestWindowRaiseTarget::new(Ok(()), Ok(()), Ok(()));
+        assert!(raise_window_on_screen(&unreadable, || Err("no state".to_string())).is_err());
+
+        let not_shown = TestWindowRaiseTarget::new(Ok(()), Err("hidden".to_string()), Ok(()));
+        assert!(raise_window_on_screen(&not_shown, || panic!("not asked")).is_err());
+    }
+
+    /// A start with a folder, the lock held by a running instance: `open-v1`
+    /// with the folder reaches that instance's endpoint, through a real pipe,
+    /// and its answer decides (#1236).
+    #[cfg(windows)]
+    #[test]
+    fn a_second_start_with_a_folder_sends_it_to_the_running_instance() {
+        for (answer, expected) in [
+            (true, None),
+            (
+                false,
+                Some("The running Lasterm instance could not open the folder."),
+            ),
+        ] {
+            let dir = instance_test_dir("open-folder-handoff");
+            let lock_path = dir.join("desktop.lock");
+            let endpoint = desktop_raise_endpoint(&lock_path).unwrap();
+            let _holder = ProcessLock::try_acquire(&lock_path).unwrap().unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let _listener = serve_desktop_endpoint(&endpoint, {
+                let seen = seen.clone();
+                move |request| {
+                    seen.lock().unwrap().push(request);
+                    answer
+                }
+            });
+            let folder = dir.display().to_string();
+
+            let result = acquire_desktop_instance_with(&lock_path, &endpoint, Some(&folder));
+
+            match expected {
+                None => assert!(matches!(result, Ok(DesktopInstanceStartup::Secondary))),
+                Some(message) => assert_eq!(result.err().as_deref(), Some(message)),
+            }
+            assert_eq!(
+                *seen.lock().unwrap(),
+                [open_folder::InstanceRequest::Open(Some(folder))]
+            );
+        }
     }
 
     /// The complete first-use anchor written by the hub: the child-owned stdout

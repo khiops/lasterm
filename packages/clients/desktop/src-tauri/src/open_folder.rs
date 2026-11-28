@@ -9,6 +9,8 @@
 
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
+#[cfg(any(windows, test))]
+use std::io::Read;
 #[cfg(windows)]
 use std::io::Write;
 use std::sync::Mutex;
@@ -221,8 +223,8 @@ impl OpenFolderQueue {
         !self.lock().entries.is_empty()
     }
 
-    /// Marks the re-emitting loop as started; false when one already runs.
-    fn start_reemitting(&self) -> bool {
+    /// Claims the re-emitting loop; false when one already runs.
+    pub(crate) fn start_reemitting(&self) -> bool {
         let mut state = self.lock();
         !std::mem::replace(&mut state.reemitting, true)
     }
@@ -240,16 +242,14 @@ impl OpenFolderQueue {
 }
 
 /// Tells the page every `OPEN_REEMIT_INTERVAL` that folders wait, for as long
-/// as they do, so an event lost on the way is told again. `sleep` is the
-/// interval's wait (a test passes one of its own).
+/// as they do, so an event lost on the way is told again. Run only by the
+/// caller `start_reemitting` answered true. `sleep` is the interval's wait (a
+/// test passes one of its own).
 pub(crate) fn reemit_while_queued(
     queue: &OpenFolderQueue,
     emit: impl Fn(),
     sleep: impl Fn(Duration),
 ) {
-    if !queue.start_reemitting() {
-        return;
-    }
     loop {
         sleep(OPEN_REEMIT_INTERVAL);
         if !queue.keep_reemitting() {
@@ -289,6 +289,21 @@ pub(crate) fn accept_open_folder(
     true
 }
 
+/// The primary's answer to `open-v1`, its body decoded or not: a body that is
+/// not UTF-8 is refused without any action.
+pub(crate) fn answer_open(
+    folder: Option<&str>,
+    queue: &OpenFolderQueue,
+    admission_open: impl Fn() -> bool,
+    raise_on_screen: impl FnOnce() -> Result<(), String>,
+    told: impl FnOnce(),
+) -> bool {
+    match folder {
+        None => false,
+        Some(folder) => accept_open_folder(folder, queue, admission_open, raise_on_screen, told),
+    }
+}
+
 /// What became of a request a second start sent.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum OpenOutcome {
@@ -325,7 +340,9 @@ pub(crate) fn open_request(folder: &str) -> Vec<u8> {
 
 /// Sends `frame` once the endpoint's server is known to be this user's: the
 /// whole frame written is the point of no return; the reply is read until 10 s
-/// after it.
+/// after it. A flush that fails after it, or a reply that only comes once the
+/// deadline has passed (a reader resumed late, finding it waiting), is no
+/// confirmation.
 pub(crate) fn deliver_open<S: OpenStream>(
     check_server: impl FnOnce() -> Result<(), String>,
     stream: &mut S,
@@ -342,8 +359,14 @@ pub(crate) fn deliver_open<S: OpenStream>(
         return OpenOutcome::NotDelivered;
     }
     let deadline = now() + INSTANCE_OPEN_REPLY_TIMEOUT;
-    let _ = stream.flush();
-    OpenOutcome::Written(match stream.read_reply(deadline) {
+    if stream.flush().is_err() {
+        return OpenOutcome::Written(OpenReply::None);
+    }
+    let reply = stream.read_reply(deadline);
+    if now() > deadline {
+        return OpenOutcome::Written(OpenReply::None);
+    }
+    OpenOutcome::Written(match reply {
         Ok(Some(reply)) if reply == ok => OpenReply::Ok,
         Ok(Some(reply)) if reply == error => OpenReply::Error,
         _ => OpenReply::None,
@@ -406,7 +429,17 @@ pub(crate) fn hand_off_open<L>(
             return Err(OPEN_NOT_ANSWERED.to_string());
         }
         clock.sleep(left.min(OPEN_RETRY_INTERVAL));
+        if clock.now() >= deadline {
+            return Err(OPEN_NOT_ANSWERED.to_string());
+        }
     }
+}
+
+/// One reply line, `\n` included: no byte past `INSTANCE_RAISE_MAX_BYTES` is
+/// read, and a reply that reaches it without `\n` is none.
+#[cfg(any(windows, test))]
+pub(crate) fn read_open_reply<R: Read>(reader: &mut R) -> std::io::Result<Option<Vec<u8>>> {
+    crate::read_delimited_raise_message(reader, crate::INSTANCE_RAISE_MAX_BYTES)
 }
 
 /// A Windows pipe as the send path uses it, the reply read byte by byte until
@@ -435,7 +468,7 @@ impl OpenStream for PipeStream {
             stream: &self.0,
             deadline,
         };
-        crate::read_delimited_raise_message(&mut reader, crate::INSTANCE_RAISE_MAX_BYTES)
+        read_open_reply(&mut reader)
     }
 }
 
@@ -613,7 +646,36 @@ mod tests {
         values.iter().map(OsString::from).collect()
     }
 
-    fn scratch(name: &str) -> std::path::PathBuf {
+    /// The spec's values, written out rather than read from the constants
+    /// under test.
+    const CAPACITY: usize = 16;
+    const REEMIT_EVERY: Duration = Duration::from_secs(2);
+    const HANDOFF_BUDGET: Duration = Duration::from_secs(20);
+    const ATTEMPT_WAIT_MAX: Duration = Duration::from_secs(2);
+    const REPLY_DEADLINE: Duration = Duration::from_secs(10);
+    const REFUSED: &str = "The running Lasterm instance could not open the folder.";
+    const UNCONFIRMED: &str = "The running Lasterm instance did not confirm that it will open the folder. If an older Lasterm is running, close it and try again.";
+    const NOT_ANSWERED: &str =
+        "A running Lasterm instance did not answer the request to open the folder.";
+
+    /// A temporary directory of the test's own, removed when it goes, a failed
+    /// assertion included.
+    struct Scratch(std::path::PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!(
             "lasterm-open-folder-{name}-{}-{}",
             std::process::id(),
@@ -623,7 +685,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     #[test]
@@ -671,7 +733,6 @@ mod tests {
             validate_open_folder(OsStr::new(&folder)),
             Some(folder.clone())
         );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -699,7 +760,6 @@ mod tests {
         }
         #[cfg(not(windows))]
         assert_eq!(validate_open_folder(root.as_os_str()), None);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -725,7 +785,6 @@ mod tests {
             StartupDecision::Exit(2)
         );
         assert_eq!(startup_decision(&args(&["exe"])), StartupDecision::Normal);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -748,12 +807,12 @@ mod tests {
     #[test]
     fn open_request_beyond_the_queue_capacity_is_refused() {
         let queue = OpenFolderQueue::default();
-        for index in 0..OPEN_QUEUE_CAPACITY {
+        for index in 0..CAPACITY {
             let slot = queue.reserve(|| true).unwrap();
             assert!(queue.commit(slot, format!("F{index}"), || true));
         }
         assert!(queue.reserve(|| true).is_none());
-        let expected: Vec<String> = (0..OPEN_QUEUE_CAPACITY).map(|i| format!("F{i}")).collect();
+        let expected: Vec<String> = (0..CAPACITY).map(|i| format!("F{i}")).collect();
         assert_eq!(queue.take("t"), expected);
     }
 
@@ -793,7 +852,6 @@ mod tests {
         assert!(effects.told.load(Ordering::SeqCst));
         assert_eq!(effects.queued_when_told.load(Ordering::SeqCst), 1);
         assert_eq!(queue.take("t"), [folder]);
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(windows)]
@@ -814,10 +872,9 @@ mod tests {
         assert!(!told.load(Ordering::SeqCst));
         assert!(!queue.has());
         // The released place is free again.
-        for _ in 0..OPEN_QUEUE_CAPACITY {
+        for _ in 0..CAPACITY {
             let _ = queue.reserve(|| true).expect("a free place");
         }
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(windows)]
@@ -865,7 +922,6 @@ mod tests {
             || {}
         ));
         assert!(queue.has());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -881,7 +937,15 @@ mod tests {
             || panic!("told")
         ));
         assert!(!queue.has());
-        let _ = std::fs::remove_dir_all(root);
+        // `open-v1` whose body is not UTF-8.
+        assert!(!answer_open(
+            None,
+            &queue,
+            || true,
+            || panic!("raised"),
+            || panic!("told")
+        ));
+        assert!(!queue.has());
     }
 
     #[test]
@@ -889,11 +953,13 @@ mod tests {
         let queue = OpenFolderQueue::with_initial(Some("D".to_string()));
         let emitted = Cell::new(0u32);
         let slept = Cell::new(0u32);
+        assert!(queue.start_reemitting());
+        assert!(!queue.start_reemitting(), "one loop at a time");
         reemit_while_queued(
             &queue,
             || emitted.set(emitted.get() + 1),
             |interval| {
-                assert_eq!(interval, OPEN_REEMIT_INTERVAL);
+                assert_eq!(interval, REEMIT_EVERY);
                 slept.set(slept.get() + 1);
                 if slept.get() == 3 {
                     // The page takes the folder before the third tick.
@@ -907,6 +973,10 @@ mod tests {
         let slot = queue.reserve(|| true).unwrap();
         assert!(queue.commit(slot, "E".to_string(), || true));
         let again = Cell::new(0u32);
+        assert!(
+            queue.start_reemitting(),
+            "the ended loop let go of its claim"
+        );
         reemit_while_queued(
             &queue,
             || {},
@@ -949,8 +1019,8 @@ mod tests {
     fn second_start_with_a_folder_asks_to_open_it() {
         for (reply, expected) in [
             (OpenReply::Ok, Ok(())),
-            (OpenReply::Error, Err(OPEN_REFUSED)),
-            (OpenReply::None, Err(OPEN_UNCONFIRMED)),
+            (OpenReply::Error, Err(REFUSED)),
+            (OpenReply::None, Err(UNCONFIRMED)),
         ] {
             let clock = FakeClock::new();
             let mut reply = Some(reply);
@@ -986,7 +1056,7 @@ mod tests {
             },
             &clock,
         );
-        assert_eq!(result.unwrap_err(), OPEN_UNCONFIRMED);
+        assert_eq!(result.unwrap_err(), UNCONFIRMED);
         assert_eq!(sends.get(), 3);
     }
 
@@ -1017,25 +1087,25 @@ mod tests {
         let result = hand_off_open::<()>(
             || Ok(None),
             |wait| {
-                assert!(clock.now() - start < INSTANCE_OPEN_HANDOFF_TIMEOUT);
+                assert!(clock.now() - start < HANDOFF_BUDGET);
                 waits.borrow_mut().push((clock.now() - start, wait));
                 clock.advance(wait);
                 OpenOutcome::NotDelivered
             },
             &clock,
         );
-        assert_eq!(result.unwrap_err(), OPEN_NOT_ANSWERED);
+        assert_eq!(result.unwrap_err(), NOT_ANSWERED);
         let ended = clock.now() - start;
         assert!(
             ended >= Duration::from_millis(19_900) && ended <= Duration::from_millis(20_200),
             "{ended:?}"
         );
         for (at, wait) in waits.borrow().iter() {
-            assert!(*wait <= OPEN_ATTEMPT_WAIT);
-            assert!(*at + *wait <= INSTANCE_OPEN_HANDOFF_TIMEOUT);
+            assert!(*wait <= ATTEMPT_WAIT_MAX);
+            assert!(*at + *wait <= HANDOFF_BUDGET);
         }
         assert!(
-            waits.borrow().last().unwrap().1 < OPEN_ATTEMPT_WAIT,
+            waits.borrow().last().unwrap().1 < ATTEMPT_WAIT_MAX,
             "the last wait is the time left"
         );
 
@@ -1051,6 +1121,21 @@ mod tests {
             &clock,
         );
         assert!(matches!(result, Ok(OpenHandoff::Primary("lock"))));
+
+        // The lock freeing during the last pause, at the deadline: no attempt
+        // starts after it, the lock's included.
+        let clock = FakeClock::new();
+        let start = clock.now();
+        let result = hand_off_open(
+            || Ok((clock.now() - start >= Duration::from_secs(20)).then_some("lock")),
+            |wait| {
+                let left = Duration::from_millis(19_950).saturating_sub(clock.now() - start);
+                clock.advance(wait.min(left));
+                OpenOutcome::NotDelivered
+            },
+            &clock,
+        );
+        assert_eq!(result.unwrap_err(), NOT_ANSWERED);
     }
 
     /// A stream whose writes, flush and reply a test decides, on a fake clock.
@@ -1063,6 +1148,8 @@ mod tests {
         delay_before_read: Duration,
         /// The reply, and how long after the read starts it arrives.
         reply: Option<(Vec<u8>, Duration)>,
+        /// Time that passes after the reply was found, before the read returns.
+        read_returns_after: Duration,
         deadline_seen: Option<Instant>,
     }
 
@@ -1075,6 +1162,7 @@ mod tests {
                 flush_fails: false,
                 delay_before_read: Duration::ZERO,
                 reply: None,
+                read_returns_after: Duration::ZERO,
                 deadline_seen: None,
             }
         }
@@ -1099,6 +1187,8 @@ mod tests {
         }
         fn read_reply(&mut self, deadline: Instant) -> std::io::Result<Option<Vec<u8>>> {
             self.deadline_seen = Some(deadline);
+            let returns_after = self.read_returns_after;
+            let _late = Advance(self.clock, returns_after);
             match self.reply.take() {
                 Some((reply, after)) if self.clock.now() + after <= deadline => {
                     if reply.len() > crate::INSTANCE_RAISE_MAX_BYTES {
@@ -1109,6 +1199,15 @@ mod tests {
                 Some(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
                 None => Ok(None),
             }
+        }
+    }
+
+    /// Moves the clock when dropped: after the read has chosen its answer.
+    struct Advance<'a>(&'a FakeClock, Duration);
+
+    impl Drop for Advance<'_> {
+        fn drop(&mut self) {
+            self.0.advance(self.1);
         }
     }
 
@@ -1159,6 +1258,7 @@ mod tests {
 
         let mut flush_fails = FakeStream::new(&clock);
         flush_fails.flush_fails = true;
+        flush_fails.reply = Some((b"ok\n".to_vec(), Duration::ZERO));
         assert_eq!(
             deliver(&mut flush_fails, Ok(()), &frame),
             OpenOutcome::Written(OpenReply::None)
@@ -1195,12 +1295,43 @@ mod tests {
             deliver(&mut late, Ok(()), &frame),
             OpenOutcome::Written(OpenReply::None)
         );
-        assert_eq!(
-            late.deadline_seen,
-            Some(written_at + INSTANCE_OPEN_REPLY_TIMEOUT)
-        );
+        assert_eq!(late.deadline_seen, Some(written_at + REPLY_DEADLINE));
         assert_eq!(late.written, frame, "not sent again");
-        let _ = std::fs::remove_dir_all(root);
+
+        // `ok` found waiting by a reader that resumed after the deadline.
+        let mut resumed_late = FakeStream::new(&clock);
+        resumed_late.reply = Some((b"ok\n".to_vec(), Duration::ZERO));
+        resumed_late.read_returns_after = Duration::from_secs(11);
+        assert_eq!(
+            deliver(&mut resumed_late, Ok(()), &frame),
+            OpenOutcome::Written(OpenReply::None)
+        );
+    }
+
+    /// A reader of `x` bytes that fails the test on a read past `budget`.
+    struct BoundedReader {
+        budget: usize,
+        read: usize,
+    }
+
+    impl Read for BoundedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            assert!(self.read < self.budget, "read past the reply's 64 bytes");
+            let n = buffer.len().min(self.budget - self.read);
+            buffer[..n].fill(b'x');
+            self.read += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn the_reply_read_stops_at_64_bytes() {
+        let mut reader = BoundedReader {
+            budget: 64,
+            read: 0,
+        };
+        assert_eq!(read_open_reply(&mut reader).unwrap(), None);
+        assert_eq!(reader.read, 64);
     }
 
     #[cfg(windows)]

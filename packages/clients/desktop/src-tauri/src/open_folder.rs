@@ -361,8 +361,8 @@ pub(crate) trait OpenStream {
 
 /// The request for `folder`.
 #[cfg_attr(
-    not(any(windows, test)),
-    allow(dead_code, reason = "only the Windows send path uses it")
+    not(windows),
+    allow(dead_code, reason = "only the Windows send path and its tests use it")
 )]
 pub(crate) fn open_request(folder: &str) -> Vec<u8> {
     let mut frame = OPEN_REQUEST_PREFIX.to_vec();

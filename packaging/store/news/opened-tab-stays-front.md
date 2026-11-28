@@ -1,0 +1,2 @@
+en: With the tab bar showing one host's tabs, a terminal opened on another host from the palette or an empty pane keeps its tab in front: the host's welcome tab no longer takes its place.
+fr: Quand la barre d'onglets montre les onglets d'un seul hôte, un terminal ouvert sur un autre hôte depuis la palette ou un volet vide garde son onglet au premier plan : l'onglet d'accueil de l'hôte ne prend plus sa place.

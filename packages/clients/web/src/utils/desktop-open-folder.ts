@@ -139,6 +139,8 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 	// what `ready` lacks is asked for again until that batch is processed, even when no folder is
 	// confirmed to wait. Only a folder known to wait shows the notice.
 	let firstAwaited = false;
+	// The held token's batch is known to be empty: it says nothing waits.
+	let heldEmpty = false;
 	// Once stopped (the page is going), nothing is taken or opened; a batch taken meanwhile is
 	// replayed by the next page from the stored token.
 	let stopped = false;
@@ -171,7 +173,7 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 		if (!deps.ready()) {
 			// Known to wait: a held batch, or a folder the startup was told of. Otherwise asked;
 			// null when the desktop cannot tell.
-			let waits: boolean | null = token !== null || expected ? true : null;
+			let waits: boolean | null = (token !== null && !heldEmpty) || expected ? true : null;
 			if (waits === null) {
 				try {
 					waits = await deps.waiting();
@@ -211,6 +213,11 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 		// folder waits if one does. An empty batch the startup's tabs wait for is kept too, silently,
 		// so they open on a usable list; any other empty batch is processed now.
 		if (!deps.ready() && (folders.length > 0 || firstAwaited)) {
+			if (folders.length === 0) {
+				// Nothing waits behind this token; a folder sent meanwhile is asked about.
+				heldEmpty = true;
+				expected = false;
+			}
 			scheduleReread();
 			if (folders.length > 0) showNotice();
 			return;
@@ -226,6 +233,7 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 		token = null;
 		storeToken(null);
 		expected = false;
+		heldEmpty = false;
 		if (!firstSeen) {
 			firstSeen = true;
 			firstAwaited = false;

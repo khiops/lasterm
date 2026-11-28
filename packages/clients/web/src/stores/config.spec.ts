@@ -1,6 +1,6 @@
 import { type FontFamily, planProfileWrite } from "@lasterm/shared";
 import { createPinia, setActivePinia } from "pinia";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { AlwaysChoice } from "../utils/exit-action.js";
 
 const mocks = vi.hoisted(() => ({
@@ -253,6 +253,11 @@ describe("saveUiSettings", () => {
 
 	it("reads back what the hub holds when it refuses the write", async () => {
 		// A paired client: the read-back goes only with a token.
+		const kept = localStorage.getItem("lasterm_token");
+		onTestFinished(() => {
+			if (kept === null) localStorage.removeItem("lasterm_token");
+			else localStorage.setItem("lasterm_token", kept);
+		});
 		useAuthStore().setToken("a".repeat(64));
 		mocks.hubFetch.mockResolvedValueOnce(new Response("{}", { status: 400 })).mockResolvedValueOnce(
 			new Response(JSON.stringify({ onChannelDead: "readonly", keyboard: { keyHints: false } }), {

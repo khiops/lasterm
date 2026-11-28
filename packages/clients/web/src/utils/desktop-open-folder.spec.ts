@@ -343,13 +343,23 @@ describe("createFolderOpener", () => {
 		expect(state.shown).toBe(0);
 		expect(opener.holdingBatch()).toBe(true);
 
+		// Still unusable at the next re-read: the empty batch says nothing waits.
 		state.duringTake = null;
+		state.waiting = false;
+		await vi.advanceTimersByTimeAsync(5_100);
+		expect(state.shown).toBe(0);
+		// A folder sent meanwhile does.
+		state.waiting = true;
+		await vi.advanceTimersByTimeAsync(5_000);
+		expect(state.shown).toBe(1);
+
+		state.waiting = false;
 		state.usable = true;
 		await vi.advanceTimersByTimeAsync(5_100);
 		expect(state.takes).toHaveLength(2);
 		expect(state.takes[1]).toBe(state.takes[0]);
 		expect(state.firstBatches).toEqual([false]);
-		expect(state.shown).toBe(0);
+		expect(state.hidden).toBe(1);
 		expect(opener.holdingBatch()).toBe(false);
 	});
 });

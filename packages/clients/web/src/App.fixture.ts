@@ -67,6 +67,8 @@ export interface WindowSetup {
 	layout?: LayoutSetup;
 	/** What this browser kept from before, in `localStorage`. */
 	storage?: Record<string, string>;
+	/** What this tab kept from before, in `sessionStorage`. */
+	session?: Record<string, string>;
 	/** Answers the hub gives from the start, by "METHOD /path" (`FakeHub.answers`). */
 	answers?: Record<string, Answer>;
 }
@@ -119,6 +121,8 @@ export async function mountWindow(setup: WindowSetup = {}): Promise<MountedWindo
 		);
 	}
 	for (const [key, value] of Object.entries(setup.storage ?? {})) localStorage.setItem(key, value);
+	for (const [key, value] of Object.entries(setup.session ?? {}))
+		sessionStorage.setItem(key, value);
 	localStorage.setItem("lasterm_token", "a".repeat(64));
 
 	const pinia = createPinia();

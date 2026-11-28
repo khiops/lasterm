@@ -155,6 +155,13 @@ export const useHostsStore = defineStore("hosts", () => {
 	 */
 	const sortedHosts = computed(() => hosts.value);
 
+	/**
+	 * How many host lists this window has published from a response: what a
+	 * folder from File Explorer waits for before it looks for the local host
+	 * (#1236).
+	 */
+	const hostListsLoaded = ref(0);
+
 	/** A list read that is worth showing whenever it arrives. */
 	const always = (): boolean => true;
 
@@ -228,6 +235,7 @@ export const useHostsStore = defineStore("hosts", () => {
 			if (!current()) return;
 			hosts.value = data;
 			error.value = null;
+			hostListsLoaded.value++;
 			// Nothing selected yet: the host this tab showed before it reloaded, if
 			// the hub still has it, else the first one. The same when the host
 			// selected is gone, deleted from another window (#783); one still
@@ -883,6 +891,7 @@ export const useHostsStore = defineStore("hosts", () => {
 		hosts,
 		hostGroups,
 		sortedHosts,
+		hostListsLoaded,
 		selectedHostId,
 		loading,
 		error,

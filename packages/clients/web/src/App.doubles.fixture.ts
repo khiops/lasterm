@@ -62,8 +62,11 @@ export interface HostGroupRow {
 	name: string;
 }
 
-/** What the hub answers to one request, by "METHOD /path": a refusal, or an answer it holds back. */
-export type Answer = () => Response | Promise<Response>;
+/**
+ * What the hub answers to one request, by "METHOD /path": a refusal, or an answer it holds back;
+ * `undefined` lets the hub answer as usual.
+ */
+export type Answer = () => Response | undefined | Promise<Response | undefined>;
 
 type Listener = (msg: Frame) => void;
 
@@ -238,7 +241,10 @@ export class FakeHub {
 			typeof init?.body === "string" && init.body !== "" ? JSON.parse(init.body) : undefined;
 		this.rest.push({ method, path: url.pathname, query: url.searchParams, body });
 		const answer = this.answers.get(`${method} ${url.pathname}`);
-		if (answer !== undefined) return answer();
+		if (answer !== undefined) {
+			const answered = await answer();
+			if (answered !== undefined) return answered;
+		}
 		return this.serve(method, url.pathname, url.searchParams, body);
 	};
 

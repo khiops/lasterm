@@ -1191,8 +1191,9 @@ export class SessionManager {
 		}
 
 		const hostId = await this.agentMgr.resolveHostId(msg.hostId);
-		// A folder from File Explorer is this computer's path: it goes to the
-		// local host's agent only, and nothing is reached for any other (#1236).
+		// A folder from File Explorer is this computer's path: refused, before
+		// any session is acquired, unless the host's stored type is `local`. The
+		// connection used next is not checked again (accepted in #1236).
 		if (msg.localOnly === true && this.ctx.metaDal.getHost(hostId)?.type !== "local") {
 			client.send({
 				type: "ERROR",

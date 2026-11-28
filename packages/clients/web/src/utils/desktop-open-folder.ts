@@ -5,8 +5,10 @@
  * `open-folder-requested`, again every 2 s while folders wait. The page takes the queue with a
  * token: the desktop removes what it returns, except that the token of its previous call returns
  * that call's batch again. The page keeps its token, in memory and in `sessionStorage`, until it
- * has processed the batch, so a call repeated after a lost reply, a failed call, or a reload gets
- * the same folders and opens them once.
+ * has processed the batch, so a call repeated after a lost reply or a failed call gets the same
+ * folders and opens them once. After a reload, the next page replays the stored token: that holds
+ * while `sessionStorage` kept the token and no other token reached the desktop first, which keeps
+ * only its last token's batch.
  */
 
 import { isTauriRuntime } from "./tauri-runtime.js";
@@ -82,13 +84,19 @@ export interface FolderOpenerDeps {
 	firstBatch: (nonEmpty: boolean) => void;
 	/** The hosts store's protected re-read. */
 	rereadHosts: () => void;
-	showWaitNotice: () => void;
+	/** Shows that a folder waits for the hub; `onUserDismiss` runs if the user closes the notice. */
+	showWaitNotice: (onUserDismiss: () => void) => void;
 	hideWaitNotice: () => void;
 }
 
 export interface FolderOpener {
 	/** Takes and opens what waits; serialised, a call during a pass makes another pass. */
 	drain: () => Promise<void>;
+	/**
+	 * A folder or a held batch waits at startup: unless the host list has made it usable by
+	 * then, the page re-reads it 5 s later and takes what waits, with no event needed.
+	 */
+	expect: () => void;
 	/** Whether a batch was taken and not processed yet (its token is held). */
 	holdingBatch: () => boolean;
 	stop: () => void;
@@ -109,7 +117,10 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 	const showNotice = (): void => {
 		if (noticeShown) return;
 		noticeShown = true;
-		deps.showWaitNotice();
+		// Closed by the user: the next folder that waits shows it again.
+		deps.showWaitNotice(() => {
+			noticeShown = false;
+		});
 	};
 	const hideNotice = (): void => {
 		if (!noticeShown) return;
@@ -137,6 +148,7 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 					waits = false;
 				}
 			}
+			if (stopped) return;
 			if (waits) {
 				scheduleReread();
 				showNotice();
@@ -171,10 +183,15 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 			showNotice();
 			return;
 		}
-		token = null;
-		storeToken(null);
+		if (rereadTimer !== null) {
+			clearTimeout(rereadTimer);
+			rereadTimer = null;
+		}
 		hideNotice();
 		deps.process(folders);
+		// Processed: the token goes only now, so a batch whose processing failed is taken again.
+		token = null;
+		storeToken(null);
 		if (!firstSeen) {
 			firstSeen = true;
 			deps.firstBatch(folders.length > 0);
@@ -199,6 +216,9 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 
 	return {
 		drain,
+		expect: () => {
+			if (!stopped) scheduleReread();
+		},
 		holdingBatch: () => token !== null,
 		stop: () => {
 			stopped = true;
@@ -206,6 +226,7 @@ export function createFolderOpener(deps: FolderOpenerDeps): FolderOpener {
 			if (rereadTimer !== null) clearTimeout(rereadTimer);
 			retryTimer = null;
 			rereadTimer = null;
+			hideNotice();
 		},
 	};
 }

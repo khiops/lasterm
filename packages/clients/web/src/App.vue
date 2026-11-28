@@ -1374,11 +1374,16 @@ const folderOpener = createFolderOpener({
 		folderStartup = nonEmpty ? 'folder' : 'none';
 	},
 	rereadHosts: () => hostsStore.hubChanged('hosts'),
-	showWaitNotice: () => {
+	showWaitNotice: (onUserDismiss) => {
 		folderWaitToast = toastStore.show(
 			'info',
 			'Lasterm is waiting for its hub to open a folder from File Explorer.',
 			null,
+			undefined,
+			() => {
+				folderWaitToast = null;
+				onUserDismiss();
+			},
 		);
 	},
 	hideWaitNotice: () => {
@@ -1409,7 +1414,8 @@ async function startFolderRequests(): Promise<void> {
 		console.warn('[desktop] cannot tell whether a folder from File Explorer waits:', error);
 		waiting = true;
 	}
-	if (!waiting && !folderOpener.holdingBatch()) startupWithoutFolder();
+	if (waiting || folderOpener.holdingBatch()) folderOpener.expect();
+	else startupWithoutFolder();
 }
 
 /** No folder waits at startup: the local host's own tabs open, if its first run deferred them. */
